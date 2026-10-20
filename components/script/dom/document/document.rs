@@ -2994,11 +2994,8 @@ impl Document {
         self.asap_in_order_scripts_list.clear();
         self.deferred_scripts.clear();
 
-        let global = self.window.as_global_scope();
-        let loads_cancelled = global.fetch_group_mut().terminate(global);
-        let event_sources_canceled = global.close_event_sources();
-
-        if loads_cancelled || event_sources_canceled {
+        let unsalvageable = self.window.as_global_scope().tear_down();
+        if unsalvageable {
             // If any loads were canceled.
             self.salvageable.set(false);
         };
