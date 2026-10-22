@@ -18,6 +18,7 @@ int browser_ui_ask(const char *title, const char *message);
 const char *browser_ui_prompt(const char *message, const char *value);
 const char *browser_ui_password(const char *message);
 int browser_ui_color(unsigned char *red, unsigned char *green, unsigned char *blue);
+void browser_ui_copy_image(const uint8_t *pixels, int width, int height);
 void browser_ui_copy(const char *text);
 const char *browser_ui_paste();
 const char *browser_ui_primary_selection();

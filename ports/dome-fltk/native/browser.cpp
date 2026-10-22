@@ -13,6 +13,7 @@
 #include <FL/Fl_Menu_Button.H>
 #include <FL/Fl_Native_File_Chooser.H>
 #include <FL/Fl_Color_Chooser.H>
+#include <FL/Fl_Copy_Surface.H>
 #include <FL/fl_draw.H>
 #include <algorithm>
 #include <cstring>
@@ -138,6 +139,7 @@ public:
     };
     command("File/New Tab",FL_CTRL+'t',5);
     command("File/Close Tab",FL_CTRL+'w',6);
+    command("File/Save Page",FL_CTRL+'s',41);
     command("File/Save Session",FL_CTRL+FL_SHIFT+'s',30);
     command("File/Restore Saved Session",FL_CTRL+FL_SHIFT+'r',31);
     command("File/Quit",FL_CTRL+'q',8);
@@ -241,6 +243,14 @@ extern "C" int browser_ui_ask(const char *title,const char *message){fl_message_
 extern "C" const char *browser_ui_prompt(const char *message,const char *value){fl_message_title("Dome Browser");const char *answer=fl_input("%s",value,message);if(!answer)return nullptr;returned=answer;return returned.c_str();}
 extern "C" const char *browser_ui_password(const char *message){fl_message_title("Dome Browser");const char *answer=fl_password("%s","",message);if(!answer)return nullptr;returned=answer;return returned.c_str();}
 extern "C" int browser_ui_color(unsigned char *red,unsigned char *green,unsigned char *blue){return fl_color_chooser("Choose a color",*red,*green,*blue);}
+extern "C" void browser_ui_copy_image(const uint8_t *pixels,int width,int height){
+  if(!pixels || width<=0 || height<=0)return;
+  Fl_Copy_Surface surface(width,height);
+  Fl_Surface_Device::push_current(&surface);
+  fl_color(FL_WHITE);fl_rectf(0,0,width,height);
+  Fl_RGB_Image image(pixels,width,height,4);image.draw(0,0);
+  Fl_Surface_Device::pop_current();
+}
 extern "C" void browser_ui_copy(const char *text){Fl::copy(text,strlen(text),1);}
 extern "C" void browser_ui_copy_primary(const char *text){Fl::copy(text,strlen(text),0);}
 static const char *selection_text(int source){

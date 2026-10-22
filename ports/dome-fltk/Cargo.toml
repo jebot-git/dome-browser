@@ -6,7 +6,8 @@ license = "GPL-3.0-or-later"
 publish = false
 
 [dependencies]
-servo = { workspace = true, features = ["baked-in-resources", "js_jit", "webxr", "clipboard"] }
+servo = { workspace = true, features = ["baked-in-resources", "js_jit", "webxr", "clipboard", "webcrypto"] }
+image = { workspace = true }
 webxr = { workspace = true }
 webxr-api = { workspace = true }
 surfman = { workspace = true }

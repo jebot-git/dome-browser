@@ -50,6 +50,7 @@ unsafe extern "C" {
     pub fn browser_ui_prompt(message: *const c_char, value: *const c_char) -> *const c_char;
     pub fn browser_ui_password(message: *const c_char) -> *const c_char;
     pub fn browser_ui_color(red: *mut u8, green: *mut u8, blue: *mut u8) -> i32;
+    pub fn browser_ui_copy_image(pixels: *const u8, width: i32, height: i32);
     pub fn browser_ui_copy(text: *const c_char);
     pub fn browser_ui_copy_primary(text: *const c_char);
     pub fn browser_ui_primary_selection() -> *const c_char;

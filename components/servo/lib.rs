@@ -112,7 +112,7 @@ pub use crate::gamepad_delegate::{
     GamepadDelegate, GamepadHapticEffectRequest, GamepadHapticEffectRequestType,
 };
 pub use crate::geolocation_delegate::{GeolocationDelegate, PositionRequest, PositionWatch};
-pub use crate::network_manager::{CacheEntry, NetworkManager};
+pub use crate::network_manager::{CacheEntry, NetworkManager, ResourceDownloadEvent};
 #[cfg(feature = "multiprocess")]
 pub use crate::servo::run_content_process;
 pub use crate::servo::{Servo, ServoBuilder};

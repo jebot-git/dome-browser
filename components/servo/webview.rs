@@ -736,6 +736,17 @@ impl WebView {
         self.inner().user_content_manager.clone()
     }
 
+    /// Fetch a resource for an explicit native save/copy action, using this
+    /// browser's network session. See [`crate::NetworkManager::download_resource`].
+    pub fn download_resource(
+        &self,
+        url: url::Url,
+        callback: impl FnMut(crate::ResourceDownloadEvent) -> bool + Send + 'static,
+    ) -> Result<(), String> {
+        let source = self.url().ok_or("The page has no URL")?;
+        self.servo().network_manager().download_resource(self.id(), url, source, callback)
+    }
+
     /// Evaluate the specified string of JavaScript code. Once execution is complete or an error
     /// occurs, Servo will call `callback`.
     pub fn evaluate_javascript<T: ToString>(

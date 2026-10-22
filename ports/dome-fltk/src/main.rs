@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 mod adblocking;
+mod downloads;
 mod wallet;
 mod storage;
 mod ui;
@@ -72,6 +73,7 @@ struct Services {
     blocker: RefCell<adblocking::Blocker>,
     wallet: RefCell<wallet::Wallet>,
     active: Cell<usize>,
+    downloads: downloads::Downloads,
 }
 impl servo::ServoDelegate for Services {
     fn load_web_resource(&self, load: servo::WebResourceLoad) { self.blocker.borrow_mut().intercept(load, None); }
@@ -292,7 +294,7 @@ impl WebViewDelegate for PageState {
                 }
             },
             EmbedderControl::ContextMenu(menu) => {
-                let choices: Vec<_> = menu
+                let mut choices: Vec<_> = menu
                     .items()
                     .iter()
                     .filter_map(|item| {
@@ -302,12 +304,21 @@ impl WebViewDelegate for PageState {
                             enabled: true,
                         } = item
                         {
-                            Some((label.clone(), *action))
+                            Some((label.clone(), Some(*action)))
                         } else {
                             None
                         }
                     })
                     .collect();
+                let info = menu.element_info();
+                let mut extra = Vec::new();
+                if let Some(url) = &info.link_url { extra.push(("Save Link", url.clone(), false)); }
+                if let Some(url) = &info.image_url {
+                    extra.push(("Save Image", url.clone(), false));
+                    extra.push(("Copy Image", url.clone(), true));
+                }
+                let native_start = choices.len();
+                choices.extend(extra.iter().map(|(label, _, _)| ((*label).to_owned(), None)));
                 let labels: Vec<_> = choices.iter().map(|x| &x.0).collect();
                 let rect = menu.position();
                 let selected = unsafe {
@@ -317,10 +328,19 @@ impl WebViewDelegate for PageState {
                         rect.min.y,
                     )
                 };
+                if std::env::var_os("DOME_BROWSER_TRACE").is_some() {
+                    eprintln!("CONTEXT_MENU selected={selected} labels={labels:?}");
+                }
                 if let Some((_, action)) =
                     usize::try_from(selected).ok().and_then(|i| choices.get(i))
                 {
-                    menu.select(*action)
+                    if let Some(action) = action { menu.select(*action); }
+                    else {
+                        let (_, url, copy) = &extra[selected as usize - native_start];
+                        self.services.downloads.start(&view, url.clone(), *copy);
+                        ui::status(if *copy { "Copying image…" } else { "Saving file…" });
+                        menu.dismiss();
+                    }
                 } else {
                     menu.dismiss()
                 }
@@ -624,7 +644,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else { None };
     let services=Rc::new(Services { blocker:RefCell::new(adblocking::Blocker::load(&profile)?),
-        wallet:RefCell::new(wallet::Wallet::new(&profile)?),active:Cell::new(0) });
+        wallet:RefCell::new(wallet::Wallet::new(&profile)?),active:Cell::new(0),downloads:downloads::Downloads::new() });
     let mut history_writable = screenshot.is_none();
     let mut history = match storage::History::load(&profile.join("hs.txt")) {
         Ok(history) => history,
@@ -636,6 +656,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let initial = context(software)?;
     let mut prefs = servo::Preferences::default();
     prefs.dom_notification_enabled = true;
+    // GitHub's component runtime requires these implemented Servo APIs.
+    prefs.dom_intersection_observer_enabled = true;
+    prefs.dom_adoptedstylesheet_enabled = true;
     prefs.dom_webxr_glwindow_enabled = false;
     prefs.dom_webxr_openxr_enabled = false;
     prefs.dom_webxr_hands_enabled = false;
@@ -685,6 +708,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut running = true;
     let mut filter_update: Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>> = None;
     while running {
+        while let Ok(result) = services.downloads.receiver.try_recv() {
+            match result {
+                downloads::Completion::Saved(path) => ui::status(&format!("Saved to {}", path.display())),
+                downloads::Completion::Image(image) => {
+                    let (width, height) = image.dimensions();
+                    unsafe { ui::browser_ui_copy_image(image.as_ptr(), width as i32, height as i32); }
+                    ui::status("Image copied to clipboard");
+                },
+                downloads::Completion::Error(error) => { ui::status(&format!("Save/copy failed: {error}")); eprintln!("DOWNLOAD_ERROR {error}"); },
+            }
+        }
         unsafe {
             ui::browser_ui_wait(if wake.load(Ordering::Acquire) {
                 0.0
@@ -706,6 +740,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
             match event.kind {
+                41 => if let Some(url) = tabs[active].view.url() {
+                    services.downloads.start(&tabs[active].view, url, false);
+                    ui::status("Saving file…");
+                },
                 1 => match parse_url(&event.text()) {
                     Ok(url) => { *tabs[active].state.url.borrow_mut() = url.to_string(); tabs[active].view.load(url) },
                     Err(e) => ui::status(&e.to_string()),

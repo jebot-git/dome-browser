@@ -2271,6 +2271,7 @@ dependencies = [
  "dpi",
  "euclid",
  "glow",
+ "image",
  "libc",
  "rustls",
  "serde",
