@@ -10,7 +10,7 @@ class DesktopMenuBar : public Fl_Menu_Bar {
   bool external = false;
   int localHeight;
   void draw() override {
-    if (!external) Fl_Menu_Bar::draw();
+    if (!external && h() > 0) Fl_Menu_Bar::draw();
   }
 public:
   DesktopMenuBar(int x, int y, int w, int h)
@@ -25,7 +25,7 @@ public:
     if (window()) window()->redraw();
   }
   int handle(int event) override {
-    if (external) {
+    if (external || h() == 0) {
       if (event == FL_SHORTCUT) return test_shortcut() != nullptr;
       return 0;
     }

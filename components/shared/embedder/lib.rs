@@ -305,6 +305,21 @@ pub struct AuthenticationResponse {
     pub password: String,
 }
 
+/// Trusted login-form data supplied by the DOM, never by page messages.
+#[derive(Deserialize, Serialize)]
+pub struct LoginFormDetails {
+    pub origin: String,
+    pub action: String,
+    pub username: String,
+    pub password: Option<String>,
+}
+impl std::fmt::Debug for LoginFormDetails {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginFormDetails").field("origin", &self.origin)
+            .field("submission", &self.password.is_some()).finish_non_exhaustive()
+    }
+}
+
 /// A response to a request to allow or deny an action.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub enum AllowOrDeny {
@@ -491,8 +506,12 @@ pub enum EmbedderMsg {
     AllowUnload(WebViewId, GenericSender<AllowOrDeny>),
     /// Inform embedder to clear the clipboard
     ClearClipboard(WebViewId),
+    ManageLogin(WebViewId, LoginFormDetails, GenericCallback<Option<AuthenticationResponse>>),
     /// Gets system clipboard contents
     GetClipboardText(WebViewId, GenericCallback<Result<String, String>>),
+    /// Primary selection is separate from the explicit-copy clipboard.
+    GetPrimarySelection(WebViewId, GenericCallback<Result<String, String>>),
+    SetPrimarySelection(WebViewId, String),
     /// Sets system clipboard contents
     SetClipboardText(WebViewId, String),
     /// Changes the cursor.
@@ -702,6 +721,8 @@ pub struct WebResourceRequest {
     pub url: ServoUrl,
     pub destination: Destination,
     pub referrer_url: Option<ServoUrl>,
+    /// Trusted initiator origin, independent of Referrer-Policy.
+    pub initiator_origin: Option<String>,
     pub is_for_main_frame: bool,
     pub is_redirect: bool,
 }

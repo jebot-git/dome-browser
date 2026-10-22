@@ -193,6 +193,7 @@ impl BluetoothDeviceSelectionRequest {
 pub struct AuthenticationRequest {
     pub(crate) url: Url,
     pub(crate) for_proxy: bool,
+    pub(crate) challenge: String,
     pub(crate) responder: AutomaticResponder<Option<AuthenticationResponse>>,
     pub(crate) error_sender: ServoErrorSender,
 }
@@ -201,12 +202,14 @@ impl AuthenticationRequest {
     pub(crate) fn new(
         url: Url,
         for_proxy: bool,
+        challenge: String,
         response_sender: Sender<Option<AuthenticationResponse>>,
         error_sender: ServoErrorSender,
     ) -> Self {
         Self {
             url,
             for_proxy,
+            challenge,
             responder: AutomaticResponder::new_same_process(
                 Box::new(OneshotSender::from(response_sender)),
                 None,
@@ -220,6 +223,8 @@ impl AuthenticationRequest {
         &self.url
     }
     /// Whether or not this authentication request is associated with a proxy server authentication.
+    pub fn challenge(&self) -> &str { &self.challenge }
+
     pub fn for_proxy(&self) -> bool {
         self.for_proxy
     }
@@ -1066,6 +1071,11 @@ pub trait WebViewDelegate {
     /// will call [`crate::ServoDelegate::load_web_resource`].
     fn load_web_resource(&self, _webview: WebView, _load: WebResourceLoad) {}
 
+    /// Trusted, top-level login form request. Return credentials only after user approval.
+    fn manage_login(&self, _webview: WebView, _details: embedder_traits::LoginFormDetails)
+        -> Option<embedder_traits::AuthenticationResponse> { None }
+
+
     /// Request to display a notification.
     fn show_notification(&self, _webview: WebView, _notification: Notification) {}
 
@@ -1169,7 +1179,7 @@ mod test {
         // Explicit response yields that response and nothing else
         let errors = ServoErrorChannel::default();
         let (sender, mut receiver) = tokio::sync::oneshot::channel();
-        let request = AuthenticationRequest::new(url.clone(), false, sender, errors.sender());
+        let request = AuthenticationRequest::new(url.clone(), false, "Basic realm=\"test\"".into(), sender, errors.sender());
         request.authenticate("diffie".to_owned(), "hunter2".to_owned());
         assert_eq!(
             receiver.try_recv().ok(),
@@ -1184,7 +1194,7 @@ mod test {
         // No response yields None response and nothing else
         let errors = ServoErrorChannel::default();
         let (sender, mut receiver) = tokio::sync::oneshot::channel();
-        let request = AuthenticationRequest::new(url.clone(), false, sender, errors.sender());
+        let request = AuthenticationRequest::new(url.clone(), false, "Basic realm=\"test\"".into(), sender, errors.sender());
         drop(request);
         assert_eq!(receiver.try_recv().ok(), Some(None));
         assert_eq!(receiver.try_recv().ok(), None);
@@ -1193,7 +1203,7 @@ mod test {
         // Explicit response when receiver disconnected yields error
         let errors = ServoErrorChannel::default();
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        let request = AuthenticationRequest::new(url.clone(), false, sender, errors.sender());
+        let request = AuthenticationRequest::new(url.clone(), false, "Basic realm=\"test\"".into(), sender, errors.sender());
         drop(receiver);
         request.authenticate("diffie".to_owned(), "hunter2".to_owned());
         assert!(errors.try_recv().is_some());
@@ -1201,7 +1211,7 @@ mod test {
         // No response when receiver disconnected yields no error
         let errors = ServoErrorChannel::default();
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        let request = AuthenticationRequest::new(url.clone(), false, sender, errors.sender());
+        let request = AuthenticationRequest::new(url.clone(), false, "Basic realm=\"test\"".into(), sender, errors.sender());
         drop(receiver);
         drop(request);
         assert!(errors.try_recv().is_none());

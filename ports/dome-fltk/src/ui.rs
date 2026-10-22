@@ -39,6 +39,9 @@ unsafe extern "C" {
     pub fn browser_ui_close();
     pub fn browser_ui_frame(pixels: *const u8, width: u32, height: u32);
     pub fn browser_ui_title(title: *const c_char, url: *const c_char, back: i32, forward: i32);
+    pub fn browser_ui_wallet(json: *const c_char) -> *const c_char;
+    pub fn browser_ui_wallet_clear();
+    pub fn browser_ui_history(json: *const c_char);
     pub fn browser_ui_tabs(json: *const c_char, active: i32);
     pub fn browser_ui_status(text: *const c_char);
     pub fn browser_ui_cursor(cursor: i32);
@@ -48,6 +51,8 @@ unsafe extern "C" {
     pub fn browser_ui_password(message: *const c_char) -> *const c_char;
     pub fn browser_ui_color(red: *mut u8, green: *mut u8, blue: *mut u8) -> i32;
     pub fn browser_ui_copy(text: *const c_char);
+    pub fn browser_ui_copy_primary(text: *const c_char);
+    pub fn browser_ui_primary_selection() -> *const c_char;
     pub fn browser_ui_paste() -> *const c_char;
     pub fn browser_ui_file(multiple: i32) -> *const c_char;
     pub fn browser_ui_select(json: *const c_char, x: i32, y: i32) -> i32;

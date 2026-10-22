@@ -2166,6 +2166,9 @@ impl HTMLInputElement {
                 .embedder_controls()
                 .hide_embedder_control(self.upcast());
         } else if *event_type == *"focus" {
+            if self.Type().str() == "password" && self.Value().is_empty() {
+                if let Some(form) = self.form_owner() { form.manage_login(cx, None); }
+            }
             let input_type = &*self.input_type();
             let Ok(input_method_type) = input_type.try_into() else {
                 return;

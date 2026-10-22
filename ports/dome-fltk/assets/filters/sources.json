@@ -1,0 +1,18 @@
+{
+  "retrieved": "2026-10-22",
+  "attribution": "The EasyList authors (https://easylist.to/)",
+  "license": "GPL-3.0-or-later (chosen from dual GPL-3.0-or-later / CC-BY-SA-3.0-or-later licensing)",
+  "license_url": "https://easylist.to/pages/licence.html",
+  "lists": [
+    {
+      "file": "easylist.txt",
+      "source": "https://easylist.to/easylist/easylist.txt",
+      "sha256": "0bc6829e8a400aa661d207035689f1206ff683fced0e764ac290391e5d995d91"
+    },
+    {
+      "file": "easyprivacy.txt",
+      "source": "https://easylist.to/easylist/easyprivacy.txt",
+      "sha256": "1626582486e2932f844db3cfa7c76c5848541dae2b619abc3a17a4f64083495b"
+    }
+  ]
+}

@@ -204,10 +204,10 @@ fn create_http_states(
     embedder_proxy: GenericEmbedderProxy<NetToEmbedderMsg>,
 ) -> (Arc<HttpState>, Arc<HttpState>) {
     let mut hsts_list = HstsList::default();
-    let mut auth_cache = AuthCache::default();
+    // Authentication persistence belongs in the embedder's encrypted wallet.
+    let auth_cache = AuthCache::default();
     let mut cookie_jar = CookieStorage::new(150);
     if let Some(config_dir) = config_dir {
-        servo_base::read_json_from_file(&mut auth_cache, config_dir, "auth_cache.json");
         servo_base::read_json_from_file(&mut hsts_list, config_dir, "hsts_list.json");
         servo_base::read_json_from_file(&mut cookie_jar, config_dir, "cookie_jar.json");
     }
@@ -662,8 +662,6 @@ impl ResourceChannelManager {
             },
             CoreResourceMsg::Exit(sender) => {
                 if let Some(ref config_dir) = self.config_dir {
-                    let auth_cache = http_state.auth_cache.read();
-                    servo_base::write_json_to_file(&*auth_cache, config_dir, "auth_cache.json");
                     let jar = http_state.cookie_jar.read();
                     servo_base::write_json_to_file(&*jar, config_dir, "cookie_jar.json");
                     let hsts = http_state.hsts_list.read();

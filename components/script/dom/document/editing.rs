@@ -113,10 +113,14 @@ impl Document {
         editing_context: &EditingContext,
         action: ClipboardAction,
     ) -> InputEventResult {
+        let primary = action == ClipboardAction::PastePrimary;
+        if primary && (!editing_context.pasting_enabled() || !editing_context.has_selection_or_cursor()) {
+            return InputEventResult::empty();
+        }
         let clipboard_event_type = match action {
             ClipboardAction::Copy => ClipboardEventType::Copy,
             ClipboardAction::Cut => ClipboardEventType::Cut,
-            ClipboardAction::Paste => ClipboardEventType::Paste,
+            ClipboardAction::Paste | ClipboardAction::PastePrimary => ClipboardEventType::Paste,
         };
 
         // The script_triggered flag is set if the action runs because of a script, e.g. document.execCommand()
@@ -134,7 +138,7 @@ impl Document {
 
         // Step 2. Fire a clipboard event
         let event_target = editing_context.event_target();
-        let clipboard_event = self.fire_clipboard_event(cx, &event_target, clipboard_event_type);
+        let clipboard_event = self.fire_clipboard_event_from_source(cx, &event_target, clipboard_event_type, primary);
 
         let event = clipboard_event.upcast::<Event>();
         if !event.DefaultPrevented() {
@@ -261,6 +265,12 @@ impl Document {
         target: &EventTarget,
         clipboard_event_type: ClipboardEventType,
     ) -> DomRoot<ClipboardEvent> {
+        self.fire_clipboard_event_from_source(cx, target, clipboard_event_type, false)
+    }
+    fn fire_clipboard_event_from_source(
+        &self, cx: &mut JSContext, target: &EventTarget,
+        clipboard_event_type: ClipboardEventType, primary: bool,
+    ) -> DomRoot<ClipboardEvent> {
         let clipboard_event = ClipboardEvent::new(
             cx,
             self.window(),
@@ -291,7 +301,9 @@ impl Document {
             ClipboardEventType::Paste => {
                 let (callback, receiver) =
                     GenericCallback::new_blocking().expect("Could not create callback");
-                self.send_to_embedder(EmbedderMsg::GetClipboardText(self.webview_id(), callback));
+                self.send_to_embedder(if primary {
+                    EmbedderMsg::GetPrimarySelection(self.webview_id(), callback)
+                } else { EmbedderMsg::GetClipboardText(self.webview_id(), callback) });
                 let text_contents = receiver
                     .recv()
                     .map(Result::unwrap_or_default)

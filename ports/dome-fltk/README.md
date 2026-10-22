@@ -49,6 +49,102 @@ The default profile is `$XDG_DATA_HOME/dome-browser`, or
 instance per session bus. Run under a separate `dbus-run-session` for isolated
 tests.
 
+## Sessions and bookmarks
+
+With no URL argument, startup restores the last tab set from the profile's
+`session.json`: tab order, selected tab and each tab's zoom. Changes are saved
+at most twice per second and again on normal exit, including closing the final
+tab. `--no-restore` starts fresh. An explicit URL starts with that URL instead.
+`--smoke-test` neither restores nor saves sessions. Restore reloads the URLs;
+back/forward history, scroll position, form contents and XR permissions are not
+serialized. Restoring an XR page does not enter immersive mode automatically.
+
+**File → Save Session** (Ctrl+Shift+S) writes a separate `saved-session.json`.
+**File → Restore Saved Session** (Ctrl+Shift+R) replaces the open tabs with that
+snapshot. Automatic saving does not overwrite this manual snapshot. A corrupt
+or unsupported automatic session is preserved and autosaving is disabled for
+that run; use `--no-restore` or move the damaged file aside to start fresh.
+Session files use atomic replacement, mode 0600, a versioned schema and bounded
+input. Profiles are locked against concurrent writers in other session buses.
+URLs containing embedded usernames/passwords are not persisted.
+
+**Bookmarks → Bookmark This Page** (Ctrl+D) prompts for a title and section.
+**Open Bookmark** (Ctrl+Shift+O) selects a saved URL in a native FLTK menu;
+**Remove Bookmark** removes a selected entry. All commands also appear in
+DomeD's universal menu. The profile's `bm.txt` is directly editable and uses
+Dillo's format, with UTF-8 titles and sections:
+
+```text
+:s0: Unclassified
+:s1: News
+s0 https://servo.org/ Servo
+s1 https://news.ycombinator.com/ Hacker News
+```
+
+**Import bm.txt** merges a selected Dillo file by section name and URL, retaining
+the original file. It never silently modifies `~/.dillo/bm.txt`. Empty imported
+sections are retained. Section IDs are normalized when saving, as in Dillo.
+Native files are re-read before modifications so manual edits remain visible.
+Malformed files produce an error instead of being replaced with an empty list.
+The format supports HTTP(S), file URLs and `about:blank`; other URL schemes
+are rejected. To export, copy the profile's `bm.txt`.
+
+The profile's `hs.txt` stores recently completed page URLs, one URL per line,
+most recent first. It keeps up to 2,000 unique URLs within the profile-file size
+limit and excludes `about:blank` and URLs with embedded credentials. There are
+no timestamps or form contents in this file. **History → Open History** (Ctrl+H)
+uses the native picker, and **Clear History** removes the list and completions
+after confirmation. The address bar offers inline completion from this history
+while typing, selecting the suggested suffix so continued typing replaces it.
+It supports both full URLs and host/path prefixes without a scheme, preserving
+the original URL's scheme when the suggestion is accepted. An exact known URL
+wins over a longer prefix match. Backspace/Delete remain normal editing keys.
+`hs.txt` uses the same private atomic writes as session/bookmark files. Invalid
+history files are preserved, and automatic history writes are disabled for that
+run until the user explicitly clears history.
+
+## Ad blocking, passwords and mouse input
+
+Network filtering uses `adblock-rust` with bundled EasyList and EasyPrivacy,
+including block/allow exceptions, resource types and third-party rules. Trusted
+request origins remain available when referrer policy omits the referrer, and
+redirect targets are checked before fetching. Privacy menu commands toggle
+blocking, allow the current site, reload rules, update the official HTTPS lists,
+and show status. Updates download off the UI thread and replace the cache only
+after successful validation. Add custom network rules to `adblock.txt` in the
+profile; exceptions use `adblock-allowlist.txt`. Cosmetic hiding, scriptlets and
+redirect resource substitutions are not implemented.
+
+Bundled filter sources, retrieval metadata and license notices are in
+`assets/filters`. EasyList/EasyPrivacy are distributed under their GPL-3.0-or-later
+option; adblock-rust is MPL-2.0. These notices are also installed with the browser
+documentation.
+
+KWallet support uses GIO D-Bus with `org.kde.kwalletd6`; it does not add a Qt
+frontend. Saving requires native confirmation and filling requires selecting an
+account. Wallet unlock and access permissions remain under KWallet's control.
+Each profile has a separate wallet folder. The Privacy menu can disable wallet
+integration or forget the current site's saved accounts. Missing or unavailable
+wallets leave manual entry available; there is no plaintext password fallback.
+HTTP authentication credentials are scoped by origin and challenge (including
+realm); proxy credentials are never saved. Servo's HTTP authentication cache is
+kept in memory and is no longer loaded from or written to `auth_cache.json`.
+
+HTML login support uses trusted Servo form hooks, rather than injected scripts.
+It handles top-level same-origin forms with one password control and a preceding
+username field, including forms whose submit event is handled by JavaScript.
+It respects autocomplete restrictions and excludes registration/new-password
+forms and frames. Autofill requires user interaction and checks the current
+origin again before applying credentials. HTTPS is required, with HTTP loopback
+allowed for local applications. Arbitrary script-only login flows and forms with
+multiple password fields are outside this initial support.
+
+Middle-click and Shift+Insert paste PRIMARY mouse selection into editable web
+controls. Mouse selections publish PRIMARY, while Ctrl+C/Ctrl+V continue to use
+the separate CLIPBOARD. Password selections are not exported. The native address
+field also accepts PRIMARY paste. Wheel down scrolls down and wheel up scrolls
+up, following standard desktop direction.
+
 ## DomeD integration
 
 | Interface | Implementation |
@@ -134,15 +230,26 @@ Its isolated DomeD protocol fixture validates XR consent, real WebGL stereo
 pixels, reference spaces and lease cleanup. It never contacts a live headset.
 Logs and images are written to `../artifacts/servo-browser-tests`.
 
-On 2026-10-22 the build passed 26 browser integration checks and both XR input
-validation unit tests. A separate smoke run in the real DomeD Wayland session
+Additional security/input integration checks use a private session bus, an
+in-memory mock KWallet, local HTTP fixtures and independent X11 selection
+owners. They never access your real wallet:
+
+```sh
+uv run --no-project --with python-xlib --with pillow --with dbus-next \
+  python ports/dome-fltk/tests/security.py
+```
+
+Results are written to `../artifacts/browser-security-tests`.
+
+On 2026-10-22 the build passed 41 browser integration checks and nine unit
+tests covering persistence, filtering, wallet origin policy and XR input. A separate smoke run in the real DomeD Wayland session
 loaded and rendered <https://servo.org>, with its native controls and universal
 menu. The preserved WPE facade regression also passed. No live DomeD WebXR
 socket was available during validation, so none of these results claim a
 physical-headset test.
 
 This is a browser prototype. The initial build uses Servo's dummy media backend;
-audio/video playback, download management, persistent browser settings and a
+audio/video playback, download management, complete browser settings and a
 complete accessibility adapter remain work. Servo's Linux OpenXR backend is
 not used; the DomeD bridge is the only immersive device exposed by this port.
 

@@ -107,6 +107,7 @@ pub enum ModifySelection {
 /// Which type of clipboard operation should be performed for an [`EditingAction::Clipboard`].
 #[derive(Clone, Copy, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]
 pub enum ClipboardAction {
+    PastePrimary,
     Copy,
     Cut,
     Paste,

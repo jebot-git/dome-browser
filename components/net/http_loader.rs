@@ -173,6 +173,8 @@ impl HttpState {
                 webview_id,
                 request.url(),
                 for_proxy,
+                response.headers.get(if for_proxy { http::header::PROXY_AUTHENTICATE } else { WWW_AUTHENTICATE })
+                    .and_then(|v| v.to_str().ok()).unwrap_or_default().to_owned(),
                 sender,
             ));
         receiver.await.ok()?

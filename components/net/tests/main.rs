@@ -95,7 +95,7 @@ fn receive_credential_prompt_msgs(
         loop {
             let embedder_msg = embedder_receiver.recv().unwrap();
             match embedder_msg {
-                NetToEmbedderMsg::RequestAuthentication(_, _, _, response_sender) => {
+                NetToEmbedderMsg::RequestAuthentication(_, _, _, _, response_sender) => {
                     let _ = response_sender.send(response);
                     break;
                 },

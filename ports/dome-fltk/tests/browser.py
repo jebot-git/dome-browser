@@ -178,11 +178,18 @@ with tempfile.TemporaryDirectory(prefix='servo-browser-test-') as temporary:
         return x.screen().root.query_tree().children
     def window(title):
         return wait(lambda: next((w for w in windows() if title in str(w.get_wm_name() or '')), None))
-    def key(w, name, control=False, alt=False):
+    def browser_window():
+        def mapped():
+            candidates=[w for w in windows() if w.get_attributes().map_state==X.IsViewable and w.get_geometry().width>=640]
+            return max(candidates,key=lambda w:w.get_geometry().width*w.get_geometry().height) if candidates else None
+        return wait(mapped)
+
+    def key(w, name, control=False, alt=False, shift=False):
         w.set_input_focus(X.RevertToParent,X.CurrentTime)
         modifiers = []
         if control: modifiers.append('Control_L')
         if alt: modifiers.append('Alt_L')
+        if shift: modifiers.append('Shift_L')
         for m in modifiers: xtest.fake_input(x,X.KeyPress,x.keysym_to_keycode(XK.string_to_keysym(m)))
         code = x.keysym_to_keycode(XK.string_to_keysym(name))
         xtest.fake_input(x,X.KeyPress,code)
@@ -259,6 +266,11 @@ with tempfile.TemporaryDirectory(prefix='servo-browser-test-') as temporary:
         check(hosted.crop((0,0,500,100)).tobytes()!=initial.crop((0,0,500,100)).tobytes(),'DomeD universal-menu registration removes the local menu bar')
         key(main,'t',control=True);time.sleep(.6);key(main,'w',control=True);wait(lambda:'Servo FLTK integration test' in str(main.get_wm_name()))
         check(app.poll() is None,'browser shortcuts remain active while the local menu is collapsed')
+        key(main,'F11');time.sleep(.5);main=browser_window()
+        key(main,'F11');time.sleep(.5);main=browser_window()
+        wait(lambda:received('RESIZE') and received('RESIZE')['data']['height']==742)
+        check(True,'fullscreen transitions leave no empty local-menu strip under the DomeD host')
+
         appearance.write_text(json.dumps({'font':'DungGeunMo / Regular','font_size':16,'light':True,'accent':'#ba5151'}))
         wait(lambda:received('THEME') and received('THEME')['data']['light'])
         check(True,'live DomeD appearance updates the page color-scheme preference')
@@ -307,6 +319,69 @@ with tempfile.TemporaryDirectory(prefix='servo-browser-test-') as temporary:
         check(xr.token is None,'closing the XR tab and final window releases the browser lease')
         check(app.returncode==0,'the browser and engine shut down cleanly')
         check(not xr.errors,'all XR protocol messages and payloads are valid')
+        profile=root/'data/dome-browser'
+        saved=json.loads((profile/'session.json').read_text())
+        check(len(saved['tabs'])==1 and saved['tabs'][0]['url']==origin+'/', 'closing the last tab saves its page for the next launch')
+        session={'version':1,'active':1,'tabs':[{'url':origin+'/','zoom':1.0},{'url':origin+'/second.html','zoom':1.25}]}
+        (profile/'session.json').write_text(json.dumps(session))
+        service=subprocess.Popen([sys.executable,__file__,'--services',str(notification_file)],env=env,stdout=subprocess.PIPE,stderr=log,text=True)
+        processes.append(service);assert service.stdout.readline().strip()=='ready'
+        outside={**env,'XDG_CURRENT_DESKTOP':'GNOME'}
+        app=subprocess.Popen([str(binary)],env=outside,stdout=log,stderr=log);processes.append(app)
+        main=window('Second page')
+        wait(lambda:json.loads((profile/'session.json').read_text())==session)
+        check(True,'restart restores tab order, active tab and zoom')
+        def local_menu_visible(name):
+            image=shot(main,name)
+            return sum(1 for r,g,b in image.crop((8,7,350,23)).getdata() if min(r,g,b)>180)>80
+        check(local_menu_visible('outside-domed-menu'),'outside DomeD the reserved menu row contains visible commands even with an external host')
+        key(main,'F11');time.sleep(.5);main=browser_window()
+        key(main,'F11');time.sleep(.5);main=browser_window()
+        check(local_menu_visible('outside-domed-fullscreen-restored'),'leaving fullscreen restores the populated local menu')
+        key(main,'s',control=True,shift=True)
+        wait(lambda:(profile/'saved-session.json').exists())
+        check(json.loads((profile/'saved-session.json').read_text())==session,'Save Session stores all tabs and their zoom')
+        navigate(main,origin+'/');wait(lambda:'Servo FLTK integration test' in str(main.get_wm_name()))
+        key(main,'r',control=True,shift=True);wait(lambda:'Second page' in str(main.get_wm_name()))
+        check(True,'Restore Saved Session replaces the current tab set with the saved one')
+        key(main,'d',control=True)
+        def input_dialog():
+            return wait(lambda:next((w for w in windows() if w.id!=main.id and str(w.get_wm_name() or '')=='Dome Browser' and w.get_attributes().map_state==X.IsViewable),None))
+        dialog=input_dialog();key(dialog,'a',control=True);type_text('Dillo & Servo');key(dialog,'Return')
+        dialog=input_dialog();key(dialog,'a',control=True);type_text('Tests & docs');key(dialog,'Return')
+        wait(lambda:(profile/'bm.txt').exists())
+        bookmarks=(profile/'bm.txt').read_text()
+        check(':s1: Tests & docs' in bookmarks and 's1 '+origin+'/second.html Dillo & Servo' in bookmarks,'Ctrl+D writes native bookmarks in Dillo bm.txt syntax')
+        navigate(main,origin+'/');wait(lambda:'Servo FLTK integration test' in str(main.get_wm_name()))
+        key(main,'o',control=True,shift=True);time.sleep(.3);key(main,'Down');key(main,'Return')
+        wait(lambda:'Second page' in str(main.get_wm_name()))
+        check(True,'the native bookmark picker opens its bookmarked URL')
+        history_file=profile/'hs.txt'
+        wait(lambda:history_file.exists() and origin+'/second.html' in history_file.read_text().splitlines())
+        check(origin+'/' in history_file.read_text().splitlines(),'hs.txt records visited URLs as plain text')
+        navigate(main,origin+'/');wait(lambda:'Servo FLTK integration test' in str(main.get_wm_name()))
+        key(main,'l',control=True);type_text(origin+'/sec');key(main,'Return')
+        wait(lambda:'Second page' in str(main.get_wm_name()))
+        check(True,'the address bar completes a known URL prefix from hs.txt')
+        navigate(main,origin+'/');wait(lambda:'Servo FLTK integration test' in str(main.get_wm_name()))
+        key(main,'l',control=True);type_text(origin.removeprefix('http://')+'/sec');key(main,'Return')
+        wait(lambda:'Second page' in str(main.get_wm_name()))
+        check(True,'host-and-port completion preserves the original HTTP scheme')
+
+
+        wait(lambda:json.loads((profile/'session.json').read_text())['tabs'][1]['url']==origin+'/second.html')
+        app.kill();app.wait(timeout=10)
+        app=subprocess.Popen([str(binary)],env=outside,stdout=log,stderr=log);processes.append(app)
+        main=window('Second page');key(main,'q',control=True);wait(lambda:app.poll() is not None)
+        check(app.returncode==0,'autosaved tabs recover after abrupt process termination')
+        (profile/'session.json').write_text('{broken')
+        app=subprocess.Popen([str(binary)],env=outside,stdout=log,stderr=log);processes.append(app)
+        main=window('Dome Browser');time.sleep(2);key(main,'q',control=True);wait(lambda:app.poll() is not None)
+        check((profile/'session.json').read_text()=='{broken','corrupt session files are preserved instead of silently overwritten')
+        app=subprocess.Popen([str(binary),'--no-restore'],env=outside,stdout=log,stderr=log);processes.append(app)
+        main=window('Dome Browser');time.sleep(1);key(main,'q',control=True);wait(lambda:app.poll() is not None)
+        check(json.loads((profile/'session.json').read_text())['tabs'][0]['url']=='about:blank','--no-restore starts a fresh session explicitly')
+
     finally:
         with contextlib.suppress(Exception): shot(main,'final-state')
         for process in reversed(processes):

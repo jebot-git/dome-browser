@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+mod adblocking;
+mod wallet;
+mod storage;
 mod ui;
 mod xr;
 use servo::{
@@ -24,6 +27,15 @@ use url::Url;
 struct Waker(Arc<AtomicBool>);
 struct Clipboard;
 impl servo::ClipboardDelegate for Clipboard {
+    fn set_primary_selection(&self, _: WebView, text: String) {
+        unsafe { ui::browser_ui_copy_primary(ui::c(&text).as_ptr()); }
+    }
+    fn get_primary_selection(&self, _: WebView, request: servo::StringRequest) {
+        match ui::string(unsafe { ui::browser_ui_primary_selection() }) {
+            Some(text) => request.success(text),
+            None => request.failure("The mouse selection has no text".into()),
+        }
+    }
     fn clear(&self, _: WebView) {
         if std::env::var_os("DOME_BROWSER_TRACE").is_some() {
             eprintln!("CLIPBOARD_CLEAR");
@@ -56,6 +68,14 @@ impl servo::EventLoopWaker for Waker {
         unsafe { ui::browser_ui_wake() }
     }
 }
+struct Services {
+    blocker: RefCell<adblocking::Blocker>,
+    wallet: RefCell<wallet::Wallet>,
+    active: Cell<usize>,
+}
+impl servo::ServoDelegate for Services {
+    fn load_web_resource(&self, load: servo::WebResourceLoad) { self.blocker.borrow_mut().intercept(load, None); }
+}
 struct PageState {
     dirty: Cell<bool>,
     title: RefCell<String>,
@@ -63,12 +83,22 @@ struct PageState {
     history: Cell<(usize, usize)>,
     changed: Cell<bool>,
     loaded: Cell<bool>,
+    history_recorded: RefCell<String>,
     closed: Cell<bool>,
     pending: RefCell<Vec<servo::CreateNewWebViewRequest>>,
     tab: usize,
+    services: Rc<Services>,
     permissions: Rc<RefCell<std::collections::HashSet<String>>>,
 }
 impl WebViewDelegate for PageState {
+    fn load_web_resource(&self, view: WebView, load: servo::WebResourceLoad) {
+        let origin=view.url().map(|u|u.origin().ascii_serialization());
+        self.services.blocker.borrow_mut().intercept(load, origin.as_deref());
+    }
+    fn manage_login(&self, view: WebView, details: servo::LoginFormDetails) -> Option<servo::AuthenticationResponse> {
+        if self.services.active.get()!=self.tab || view.url()?.origin().ascii_serialization()!=details.origin {return None}
+        self.services.wallet.borrow().manage_form(details)
+    }
     fn notify_new_frame_ready(&self, _: WebView) {
         self.dirty.set(true)
     }
@@ -147,9 +177,16 @@ impl WebViewDelegate for PageState {
     }
     fn request_authentication(&self, _: WebView, request: servo::AuthenticationRequest) {
         let site = request.url().origin().ascii_serialization();
+        let proxy=request.for_proxy();
+        let scope=request.challenge().to_owned();
+        if !proxy && !scope.is_empty() {
+            if let Some(saved)=self.services.wallet.borrow().choose("http",&site,&scope,"") {
+                request.authenticate(saved.username,saved.password);return;
+            }
+        }
         let username = ui::string(unsafe {
             ui::browser_ui_prompt(
-                ui::c(&format!("{site}\nHTTP authentication: username")).as_ptr(),
+                ui::c(&format!("{site}\n{scope}\nHTTP authentication: username")).as_ptr(),
                 ui::c("").as_ptr(),
             )
         });
@@ -158,10 +195,11 @@ impl WebViewDelegate for PageState {
         };
         let password = ui::string(unsafe {
             ui::browser_ui_password(
-                ui::c(&format!("{site}\nHTTP authentication: password")).as_ptr(),
+                ui::c(&format!("{site}\n{scope}\nHTTP authentication: password")).as_ptr(),
             )
         });
         if let Some(password) = password {
+            if !proxy && !scope.is_empty() {self.services.wallet.borrow().save("http",&site,&scope,&username,&password);}
             request.authenticate(username, password);
         }
     }
@@ -336,7 +374,7 @@ fn context(software: bool) -> Result<Rc<dyn RenderingContext>, Box<dyn std::erro
         .map_err(|e| format!("Cannot make context current: {e:?}"))?;
     Ok(context)
 }
-fn state(id: usize, permissions: Rc<RefCell<std::collections::HashSet<String>>>) -> Rc<PageState> {
+fn state(id: usize, permissions: Rc<RefCell<std::collections::HashSet<String>>>, services: Rc<Services>) -> Rc<PageState> {
     Rc::new(PageState {
         dirty: Cell::new(true),
         title: RefCell::new("New tab".into()),
@@ -344,9 +382,11 @@ fn state(id: usize, permissions: Rc<RefCell<std::collections::HashSet<String>>>)
         history: Cell::new((0, 0)),
         changed: Cell::new(true),
         loaded: Cell::new(false),
+        history_recorded: RefCell::new(String::new()),
         closed: Cell::new(false),
         pending: RefCell::new(Vec::new()),
         tab: id,
+        services,
         permissions,
     })
 }
@@ -369,6 +409,7 @@ fn parse_url(text: &str) -> Result<Url, url::ParseError> {
     Ok(url)
 }
 fn activate(tabs: &[Tab], index: usize) {
+    tabs[index].state.services.active.set(tabs[index].state.tab);
     for (i, tab) in tabs.iter().enumerate() {
         if i == index {
             tab.view.show();
@@ -455,11 +496,74 @@ fn key(event: &ui::Event) -> InputEvent {
         false,
     ))
 }
+fn session(tabs: &[Tab], active: usize) -> storage::Session {
+    storage::Session {
+        version: 1,
+        tabs: tabs.iter().map(|t| {
+            let url = t.state.url.borrow().clone();
+            storage::SavedTab { url: if storage::restorable(&url) { url } else { "about:blank".into() }, zoom: t.zoom }
+        }).collect(),
+        active,
+    }
+}
+fn restore(servo: &servo::Servo, saved: &storage::Session, software: bool,
+           permissions: Rc<RefCell<std::collections::HashSet<String>>>, services: Rc<Services>, next_id: &mut usize)
+    -> Result<Vec<Tab>, Box<dyn std::error::Error>> {
+    let mut tabs = Vec::new();
+    for item in &saved.tabs {
+        let ctx = context(software)?;
+        let state = state(*next_id, permissions.clone(), services.clone());
+        *next_id += 1;
+        *state.url.borrow_mut() = item.url.clone();
+        let view = WebViewBuilder::new(servo, ctx.clone())
+            .clipboard_delegate(Rc::new(Clipboard)).url(Url::parse(&item.url)?)
+            .delegate(state.clone()).build();
+        view.set_page_zoom(item.zoom);
+        tabs.push(Tab { view, context: ctx, state, zoom: item.zoom });
+    }
+    Ok(tabs)
+}
+fn prompt(message: &str, value: &str) -> Option<String> {
+    ui::string(unsafe { ui::browser_ui_prompt(ui::c(message).as_ptr(), ui::c(value).as_ptr()) })
+}
+fn bookmark_action(kind: i32, profile: &std::path::Path, tab: &Tab) -> Result<Option<Url>, Box<dyn std::error::Error>> {
+    let path = profile.join("bm.txt");
+    if kind == 32 {
+        let Some(title) = prompt("Bookmark title", &tab.state.title.borrow()) else { return Ok(None) };
+        let Some(section) = prompt("Bookmark section", "Unclassified") else { return Ok(None) };
+        let mut bookmarks = storage::Bookmarks::load(&path)?;
+        bookmarks.add(&section, &tab.state.url.borrow(), &title)?;
+        bookmarks.save(&path)?;
+        ui::status("Bookmark saved to bm.txt");
+    } else if kind == 34 {
+        if let Some(files) = ui::string(unsafe { ui::browser_ui_file(0) }) {
+            let files: Vec<String> = serde_json::from_str(&files)?;
+            if let Some(source) = files.first() {
+                let imported = storage::Bookmarks::parse(&storage::read(std::path::Path::new(source))?)?;
+                let mut bookmarks = storage::Bookmarks::load(&path)?;
+                bookmarks.merge(imported)?;
+                bookmarks.save(&path)?;
+                ui::status("Bookmarks imported; the source file was preserved");
+            }
+        }
+    } else {
+        let mut bookmarks = storage::Bookmarks::load(&path)?;
+        if bookmarks.entries.is_empty() { ui::status("No bookmarks yet (Ctrl+D to add one)"); return Ok(None); }
+        let labels: Vec<_> = bookmarks.entries.iter().map(|b| format!("{} — {}",bookmarks.sections[b.section],b.title)).collect();
+        let selected = unsafe { ui::browser_ui_select(ui::c(&serde_json::to_string(&labels)?).as_ptr(),8,80) };
+        if let Some(index) = usize::try_from(selected).ok().filter(|i| *i < bookmarks.entries.len()) {
+            if kind == 35 {
+                bookmarks.entries.remove(index); bookmarks.save(&path)?; ui::status("Bookmark removed");
+            } else { return Ok(Some(Url::parse(&bookmarks.entries[index].url)?)); }
+        }
+    }
+    Ok(None)
+}
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help") {
         println!(
-            "dome-browser [--software] [--profile DIRECTORY] [URL]\n  --smoke-test FILE.ppm  Capture after load and exit\n  --xr-probe            Query DomeD's XR endpoint without acquiring a session\n  --version             Show engine and toolkit versions"
+            "dome-browser [--software] [--profile DIRECTORY] [URL]\n  --smoke-test FILE.ppm  Capture after load and exit\n  --xr-probe            Query DomeD's XR endpoint without acquiring a session\n  --no-restore          Start fresh instead of restoring last tabs\n  --version             Show engine and toolkit versions"
         );
         return Ok(());
     }
@@ -473,12 +577,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let software = args.iter().any(|a| a == "--software");
     let mut target = "about:blank".to_string();
+    let mut explicit_url = false;
+    let no_restore = args.iter().any(|a| a == "--no-restore");
     let mut screenshot = None;
     let mut profile = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--software" => {},
+            "--software" | "--no-restore" => {},
             "--smoke-test" => {
                 i += 1;
                 screenshot = Some(args.get(i).ok_or("--smoke-test needs a path")?.clone());
@@ -488,14 +594,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 profile = Some(PathBuf::from(args.get(i).ok_or("--profile needs a path")?));
             },
             s if s.starts_with('-') => return Err(format!("Unknown option: {s}").into()),
-            s => target = s.into(),
+            s => { target = s.into(); explicit_url = true; },
         }
         i += 1;
     }
+    let profile = profile.or_else(|| {
+        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+            .map(|d| d.join("dome-browser"))
+    }).ok_or("Set HOME or use --profile")?;
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     if unsafe { ui::browser_ui_open(ui::c(parse_url(&target)?.as_str()).as_ptr()) } == 0 {
         return Ok(());
     }
+    std::fs::create_dir_all(&profile)?;
+    // Different session buses must not write the same profile concurrently.
+    use std::{os::fd::AsRawFd, os::unix::fs::OpenOptionsExt};
+    let _profile_lock = std::fs::OpenOptions::new().read(true).write(true).create(true)
+        .truncate(false).mode(0o600).open(profile.join("browser.lock"))?;
+    if unsafe { libc::flock(_profile_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err("This profile is already in use by another browser session".into());
+    }
+    let mut autosave = screenshot.is_none();
+    let restored = if !explicit_url && !no_restore && screenshot.is_none() {
+        match storage::Session::load(&profile.join("session.json")) {
+            Ok(saved) => Some(saved),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => { eprintln!("SESSION: {e}; preserving unreadable session.json (autosave disabled)"); autosave = false; None }
+        }
+    } else { None };
+    let services=Rc::new(Services { blocker:RefCell::new(adblocking::Blocker::load(&profile)?),
+        wallet:RefCell::new(wallet::Wallet::new(&profile)?),active:Cell::new(0) });
+    let mut history_writable = screenshot.is_none();
+    let mut history = match storage::History::load(&profile.join("hs.txt")) {
+        Ok(history) => history,
+        Err(e) => { eprintln!("HISTORY: {e}; preserving hs.txt"); history_writable = false; storage::History::default() },
+    };
+    let mut history_dirty = false;
+    let mut last_history_save = Instant::now();
+    unsafe { ui::browser_ui_history(ui::c(&serde_json::to_string(&history.urls)?).as_ptr()); }
     let initial = context(software)?;
     let mut prefs = servo::Preferences::default();
     prefs.dom_notification_enabled = true;
@@ -506,12 +643,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     prefs.dom_webxr_unsafe_assume_user_intent = false;
     prefs.dom_webgl2_enabled = true;
     let mut opts = servo::Opts::default();
-    opts.config_dir = profile.or_else(|| {
-        std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-            .map(|d| d.join("dome-browser"))
-    });
+    opts.config_dir = Some(profile.clone());
     opts.multiprocess = false;
     if let Some(directory) = &opts.config_dir {
         std::fs::create_dir_all(directory)?;
@@ -523,9 +655,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .event_loop_waker(Box::new(Waker(wake.clone())))
         .build();
     servo.setup_logging();
+    servo.set_delegate(services.clone());
     servo.register_webxr_registry(Box::new(xr::Registry::new(initial.connection())));
     let permissions = Rc::new(RefCell::new(std::collections::HashSet::new()));
-    let first = state(0, permissions.clone());
+    let first = state(0, permissions.clone(), services.clone());
+    *first.url.borrow_mut() = parse_url(&target)?.to_string();
     let view = WebViewBuilder::new(&servo, initial.clone())
         .clipboard_delegate(Rc::new(Clipboard))
         .url(parse_url(&target)?)
@@ -539,10 +673,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }];
     let mut active = 0;
     let mut next_id = 1;
+    if let Some(saved) = restored {
+        tabs = restore(&servo, &saved, software, permissions.clone(), services.clone(), &mut next_id)?;
+        active = saved.active;
+    }
+    let mut last_session = None;
+    let mut last_save = Instant::now() - Duration::from_secs(1);
     activate(&tabs, active);
     let start = Instant::now();
     let mut captures = 0;
     let mut running = true;
+    let mut filter_update: Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>> = None;
     while running {
         unsafe {
             ui::browser_ui_wait(if wake.load(Ordering::Acquire) {
@@ -566,7 +707,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             match event.kind {
                 1 => match parse_url(&event.text()) {
-                    Ok(url) => tabs[active].view.load(url),
+                    Ok(url) => { *tabs[active].state.url.borrow_mut() = url.to_string(); tabs[active].view.load(url) },
                     Err(e) => ui::status(&e.to_string()),
                 },
                 2 => {
@@ -578,7 +719,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 4 => tabs[active].view.reload(),
                 5 => {
                     let ctx = context(software)?;
-                    let s = state(next_id, permissions.clone());
+                    let s = state(next_id, permissions.clone(), services.clone());
+                    *s.url.borrow_mut() = parse_url(&event.text())?.to_string();
                     next_id += 1;
                     let view = WebViewBuilder::new(&servo, ctx.clone())
                         .clipboard_delegate(Rc::new(Clipboard))
@@ -595,6 +737,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     activate(&tabs, active);
                 },
                 6 => {
+                    if tabs.len() == 1 { running = false; break; }
                     tabs.remove(active);
                     if tabs.is_empty() {
                         running = false;
@@ -638,6 +781,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             button,
                             servo::DevicePoint::new(event.c as f32, event.d as f32).into(),
                         )));
+                    if event.b == 2 && event.a == 0 {
+                        tabs[active].view.notify_input_event(InputEvent::EditingAction(servo::ClipboardAction::PastePrimary));
+                    }
                 },
                 12 => {
                     tabs[active].view.notify_input_event(InputEvent::MouseMove(
@@ -651,8 +797,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .view
                         .notify_input_event(InputEvent::Wheel(WheelEvent::new(
                             WheelDelta {
-                                x: event.a as f64 * 48.,
-                                y: event.b as f64 * 48.,
+                                x: -(event.a as f64) * 48.,
+                                y: -(event.b as f64) * 48.,
                                 z: 0.,
                                 mode: WheelMode::DeltaPixel,
                             },
@@ -716,11 +862,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         activate(&tabs, active);
                     }
                 },
+                30 => {
+                    match session(&tabs, active).save(&profile.join("saved-session.json")) {
+                        Ok(()) => { ui::status("Session saved"); },
+                        Err(e) => ui::status(&format!("Cannot save session: {e}")),
+                    }
+                },
+                31 => {
+                    match storage::Session::load(&profile.join("saved-session.json")) {
+                        Ok(saved) => {
+                            match restore(&servo, &saved, software, permissions.clone(), services.clone(), &mut next_id) {
+                                Ok(restored) => { tabs = restored; active = saved.active; activate(&tabs, active); },
+                                Err(e) => ui::status(&format!("Cannot restore session: {e}")),
+                            }
+                        },
+                        Err(e) => ui::status(&format!("Cannot restore session: {e}")),
+                    }
+                },
+                32..=35 => match bookmark_action(event.kind, &profile, &tabs[active]) {
+                    Ok(Some(url)) => { *tabs[active].state.url.borrow_mut() = url.to_string(); tabs[active].view.load(url); },
+                    Ok(None) => {},
+                    Err(e) => ui::status(&format!("Bookmarks: {e}")),
+                },
+                36 => {
+                    if history.urls.is_empty() { ui::status("History is empty"); }
+                    else {
+                        let index = unsafe { ui::browser_ui_select(ui::c(&serde_json::to_string(&history.urls)?).as_ptr(),8,80) };
+                        if let Some(url) = usize::try_from(index).ok().and_then(|i| history.urls.get(i)) {
+                            *tabs[active].state.url.borrow_mut() = url.clone();
+                            tabs[active].view.load(Url::parse(url)?);
+                        }
+                    }
+                },
+                37 => {
+                    if ui::ask("Clear History", "Clear this profile's visited URLs and address completions?") {
+                        history.urls.clear(); history_dirty = true; history_writable = true;
+                        unsafe { ui::browser_ui_history(ui::c("[]").as_ptr()); }
+                    }
+                },
+                40 => {tabs[active].view.notify_input_event(InputEvent::EditingAction(servo::ClipboardAction::PastePrimary));},
+                50 => match services.blocker.borrow_mut().toggle() {Ok(())=>ui::status("Ad-blocking setting changed"),Err(e)=>ui::status(&e.to_string())},
+                51 => {
+                    if let Some(url)=tabs[active].view.url().filter(|u|matches!(u.scheme(),"http"|"https")) {
+                        let origin=url.origin().ascii_serialization();
+                        match services.blocker.borrow_mut().allow_site(&origin) {Ok(())=>ui::status("Site exception changed; reload the page to apply"),Err(e)=>ui::status(&e.to_string())}
+                    }
+                },
+                52 => match adblocking::Blocker::load(&profile) {
+                    Ok(mut blocker)=>{blocker.blocked=services.blocker.borrow().blocked;*services.blocker.borrow_mut()=blocker;ui::status("Filter lists reloaded");},
+                    Err(e)=>ui::status(&format!("Cannot reload filters: {e}")),
+                },
+                53 => if filter_update.is_none() {
+                    let (tx,rx)=std::sync::mpsc::channel();filter_update=Some(rx);
+                    std::thread::spawn(move || {let _=tx.send(adblocking::download());});ui::status("Updating official filter lists…");
+                },
+                54 => {
+                    let blocker=services.blocker.borrow();
+                    let allowed=tabs[active].view.url().is_some_and(|u|blocker.allowed(&u.origin().ascii_serialization()));
+                    ui::status(&format!("Ad blocking: {}. Requests blocked: {}. Site exception: {}",if blocker.enabled{"on"}else{"off"},blocker.blocked,allowed));
+                },
+                60 => match services.wallet.borrow_mut().toggle() {Ok(())=>ui::status("Password-manager setting changed"),Err(e)=>ui::status(&e.to_string())},
+                61 => if let Some(url)=tabs[active].view.url() {services.wallet.borrow().forget_site(&url.origin().ascii_serialization());},
                 _ => {},
             }
         }
         if !running {
             break;
+        }
+        if let Some(result)=filter_update.as_ref().and_then(|rx|rx.try_recv().ok()) {
+            filter_update=None;
+            match result.and_then(|lists|serde_json::to_string(&lists).map_err(|_|"Invalid filter lists".into()))
+                .and_then(|text|storage::write(&profile.join("filterlists.json"),&text).map_err(|e|e.to_string()))
+                .and_then(|_|adblocking::Blocker::load(&profile).map_err(|e|e.to_string())) {
+                Ok(mut blocker)=>{blocker.blocked=services.blocker.borrow().blocked;*services.blocker.borrow_mut()=blocker;ui::status("Official filter lists updated");},
+                Err(e)=>ui::status(&e),
+            }
         }
         tabs[active]
             .context
@@ -743,7 +959,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let requests: Vec<_> = tabs.iter().flat_map(|t| t.state.pending.take()).collect();
         for request in requests {
             let ctx = context(software)?;
-            let s = state(next_id, permissions.clone());
+            let s = state(next_id, permissions.clone(), services.clone());
             next_id += 1;
             let view = request
                 .builder(ctx.clone())
@@ -758,6 +974,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
             active = tabs.len() - 1;
             activate(&tabs, active);
+        }
+        let mut history_changed = false;
+        for tab in &tabs {
+            let url = tab.state.url.borrow();
+            if tab.state.loaded.get() && *tab.state.history_recorded.borrow() != *url {
+                *tab.state.history_recorded.borrow_mut() = url.clone();
+                history_changed |= history.visit(&url);
+            }
+        }
+        if history_changed {
+            history_dirty = true;
+            unsafe { ui::browser_ui_history(ui::c(&serde_json::to_string(&history.urls)?).as_ptr()); }
+        }
+        if history_dirty && history_writable && last_history_save.elapsed() >= Duration::from_millis(500) {
+                match history.save(&profile.join("hs.txt")) {
+                    Ok(()) => { history_dirty = false; last_history_save = Instant::now(); },
+                    Err(e) => { ui::status(&format!("History save failed: {e}")); history_writable = false; history_dirty = false; },
+                }
         }
         if tabs.iter().any(|t| t.state.changed.replace(false)) {
             let tab = &tabs[active];
@@ -780,6 +1014,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     active as i32,
                 );
             }
+        }
+        if autosave && last_save.elapsed() >= Duration::from_millis(500) {
+            let snapshot = session(&tabs, active);
+            if last_session.as_ref() != Some(&snapshot) {
+                match snapshot.save(&profile.join("session.json")) {
+                    Ok(()) => last_session = Some(snapshot),
+                    Err(e) => { ui::status(&format!("Session autosave failed: {e}")); autosave = false; },
+                }
+            }
+            last_save = Instant::now();
         }
         if tabs[active].state.dirty.replace(false) {
             let tab = &tabs[active];
@@ -815,6 +1059,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if start.elapsed() > Duration::from_secs(60) {
                 return Err("Page smoke test timed out".into());
             }
+        }
+    }
+    if history_writable {
+        if let Err(e) = history.save(&profile.join("hs.txt")) { eprintln!("HISTORY: final save failed: {e}"); }
+    }
+    if autosave && !tabs.is_empty() {
+        if let Err(e) = session(&tabs, active).save(&profile.join("session.json")) {
+            eprintln!("SESSION: final save failed: {e}");
         }
     }
     drop(tabs);

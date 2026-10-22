@@ -721,6 +721,56 @@ impl HTMLFormElement {
     }
 
     /// [Form submission](https://html.spec.whatwg.org/multipage/#concept-form-submit)
+    /// Only real DOM controls in a secure, active top-level document may use
+    /// the password manager. No webpage JS bridge carries credential values.
+    pub(crate) fn manage_login(&self, cx: &mut JSContext, submitted_action: Option<&servo_url::ServoUrl>) {
+        let doc = self.owner_document();
+        let window = doc.window();
+        if !window.is_top_level() || !window.has_transient_activation() ||
+            !window.as_global_scope().is_secure_context() || self.Autocomplete().str() == "off" {
+            return;
+        }
+        let url = doc.url();
+        if !matches!(url.scheme(), "http" | "https") || url.origin().ascii_serialization()=="null" { return; }
+        let action = match submitted_action.cloned().or_else(|| doc.encoding_parse_a_url(&self.Action().str()).ok()) {
+            Some(action) => action,
+            None => return,
+        };
+        if action.origin() != url.origin() || !action.username().is_empty() || action.password().is_some() { return; }
+        let controls: Vec<DomRoot<HTMLInputElement>> = self.controls.borrow().iter()
+            .filter_map(|control| control.downcast::<HTMLInputElement>().map(DomRoot::from_ref))
+            .filter(|input| !input.Disabled() && !input.ReadOnly()).collect();
+        let passwords: Vec<_> = controls.iter().filter(|input| input.Type().str() == "password").collect();
+        if passwords.len() != 1 { return; }
+        let password = passwords[0];
+        let autocomplete = password.upcast::<Element>().get_attribute_string_value(&local_name!("autocomplete"));
+        if autocomplete.as_ref().is_some_and(|v| v.split_whitespace().any(|w| matches!(w, "off" | "new-password" | "one-time-code"))) { return; }
+        let username = controls.iter().take_while(|input| !std::ptr::eq(&***input, &**password))
+            .filter(|input| matches!(&*input.Type().str(), "text" | "email")).last();
+        let Some(username) = username else { return; };
+        let value = password.Value();
+        if submitted_action.is_some() && value.is_empty() { return; }
+        if username.Value().to_string().len() > 4096 || value.to_string().len() > 16384 { return; }
+        let details = embedder_traits::LoginFormDetails {
+            origin: url.origin().ascii_serialization().into_owned(),
+            action: format!("{}{}", action.origin().ascii_serialization(), action.path()),
+            username: username.Value().to_string(),
+            password: submitted_action.is_some().then(|| value.to_string()),
+        };
+        let (reply, receiver) = match servo_base::generic_channel::GenericCallback::new_blocking() { Ok(pair) => pair, Err(_) => return };
+        window.send_to_embedder(embedder_traits::EmbedderMsg::ManageLogin(window.webview_id(), details, reply));
+        if let Ok(Some(credentials)) = receiver.recv() {
+            // The callback blocks this script task, but validate again before applying.
+            if !self.upcast::<Node>().is_connected() || self.owner_document().url().origin() != url.origin() { return; }
+            let _ = username.SetValue(cx, DOMString::from(credentials.username));
+            let _ = password.SetValue(cx, DOMString::from(credentials.password));
+            for input in [username, password] {
+                input.upcast::<EventTarget>().fire_bubbling_event(cx, atom!("input"));
+                input.upcast::<EventTarget>().fire_bubbling_event(cx, atom!("change"));
+            }
+        }
+    }
+
     pub(crate) fn submit(
         &self,
         cx: &mut JSContext,
@@ -792,6 +842,11 @@ impl HTMLFormElement {
             self.firing_submission_events.set(false);
             // Step 6.7
             if event.DefaultPrevented() {
+                // AJAX forms may cancel navigation while still submitting a login.
+                // The native consent prompt and origin/activation checks still apply.
+                if let Ok(action) = doc.encoding_parse_a_url(&submitter.action().str()) {
+                    self.manage_login(cx, Some(&action));
+                }
                 return;
             }
             // Step 6.8
@@ -832,6 +887,7 @@ impl HTMLFormElement {
             // Step 15. If parsed action is failure, then return.
             Err(_) => return,
         };
+        if matches!(method, FormMethod::Post) { self.manage_login(cx, Some(&action_components)); }
         // Step 16. Let scheme be the scheme of parsed action.
         let scheme = action_components.scheme().to_owned();
         // Step 17. Let enctype be the submitter element's enctype.

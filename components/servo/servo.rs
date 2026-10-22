@@ -503,12 +503,14 @@ impl ServoInner {
                 webview_id,
                 url,
                 for_proxy,
+                challenge,
                 response_sender,
             ) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
                     let authentication_request = AuthenticationRequest::new(
                         url.into_url(),
                         for_proxy,
+                        challenge,
                         response_sender,
                         self.servo_errors.sender(),
                     );
@@ -621,6 +623,10 @@ impl ServoInner {
                     }
                 }
             },
+            EmbedderMsg::ManageLogin(id, details, reply) => {
+                let result = self.get_webview_handle(id).and_then(|view| view.delegate().manage_login(view, details));
+                let _ = reply.send(result);
+            },
             EmbedderMsg::ClearClipboard(webview_id) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
                     webview.clipboard_delegate().clear(webview);
@@ -632,6 +638,14 @@ impl ServoInner {
                         .clipboard_delegate()
                         .get_text(webview, StringRequest::from(result_sender));
                 }
+            },
+            EmbedderMsg::GetPrimarySelection(webview_id, sender) => {
+                if let Some(webview) = self.get_webview_handle(webview_id) {
+                    webview.clipboard_delegate().get_primary_selection(webview, StringRequest::from(sender));
+                }
+            },
+            EmbedderMsg::SetPrimarySelection(id, text) => {
+                if let Some(view) = self.get_webview_handle(id) {view.clipboard_delegate().set_primary_selection(view,text);}
             },
             EmbedderMsg::SetClipboardText(webview_id, string) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {

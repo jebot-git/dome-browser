@@ -59,10 +59,6 @@ fn main() {
             "cairo",
         ],
     );
-    let mut c = cc::Build::new();
-    c.file(out.join("appmenu-protocol.c"))
-        .include(&out)
-        .compile("dome_appmenu_protocol");
     let mut cpp = cc::Build::new();
     cpp.cpp(true)
         .std("c++17")
@@ -75,6 +71,12 @@ fn main() {
         cpp.flag(flag);
     }
     cpp.compile("dome_fltk_ui");
+    // GNU ld resolves archives from left to right. The UI references protocol
+    // symbols, so emit their archive after the UI (lld also accepts this order).
+    let mut c = cc::Build::new();
+    c.file(out.join("appmenu-protocol.c"))
+        .include(&out)
+        .compile("dome_appmenu_protocol");
     println!(
         "cargo:rustc-link-search=native={}",
         prefix.join("lib").display()

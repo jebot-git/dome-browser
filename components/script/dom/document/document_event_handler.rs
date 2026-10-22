@@ -348,7 +348,18 @@ impl DocumentEventHandler {
                 .set(event.active_keyboard_modifiers);
             let result = match event.event.event {
                 InputEvent::MouseButton(mouse_button_event) => {
+                    let publish=mouse_button_event.action==MouseButtonAction::Up && mouse_button_event.button==MouseButton::Primary;
                     self.handle_native_mouse_button_event(cx, mouse_button_event, &event);
+                    if publish {
+                        let document=self.window.Document();
+                        let focused=document.focus_handler().focused_area().dom_anchor(&document);
+                        let context=document.editing_context(cx.no_gc(),&focused);
+                        if context.copying_enabled() {
+                            if let Some(text)=context.selection_content(cx).filter(|text|!text.is_empty()) {
+                                document.send_to_embedder(EmbedderMsg::SetPrimarySelection(document.webview_id(),text));
+                            }
+                        }
+                    }
                     InputEventResult::default()
                 },
                 InputEvent::MouseMove(_) => {

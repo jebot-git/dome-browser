@@ -19,6 +19,10 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 rustls = { workspace = true, features = ["aws_lc_rs"] }
 
+adblock = "=0.13.3"
+sha2 = { workspace = true }
+uuid = { workspace = true }
+
 [build-dependencies]
 cc = { workspace = true }
 

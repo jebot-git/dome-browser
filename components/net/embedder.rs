@@ -33,6 +33,7 @@ pub enum NetToEmbedderMsg {
         WebViewId,
         ServoUrl,
         bool, /* for proxy */
+        String, /* authentication challenge, including realm */
         TokioOneshotSender<Option<AuthenticationResponse>>,
     ),
     /// Response to an asynchronous request from SiteDataManager with cookies result.

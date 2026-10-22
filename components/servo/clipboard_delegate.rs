@@ -55,6 +55,13 @@ pub trait ClipboardDelegate {
     /// [`StringRequest::failure`] with a failure message.
     fn get_text(&self, _webview: WebView, _request: StringRequest) {}
 
+    /// Retrieve the mouse primary selection without accessing the clipboard.
+    fn get_primary_selection(&self, _webview: WebView, request: StringRequest) {
+        request.failure("Primary selection is unavailable".into());
+    }
+
+    fn set_primary_selection(&self, _webview: WebView, _text: String) {}
+
     /// A request to set the text contents of the system clipboard to `new_contents`.
     fn set_text(&self, _webview: WebView, _new_contents: String) {}
 }

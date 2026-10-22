@@ -20,11 +20,16 @@ const char *browser_ui_password(const char *message);
 int browser_ui_color(unsigned char *red, unsigned char *green, unsigned char *blue);
 void browser_ui_copy(const char *text);
 const char *browser_ui_paste();
+const char *browser_ui_primary_selection();
+void browser_ui_copy_primary(const char *text);
 const char *browser_ui_file(int multiple);
 int browser_ui_select(const char *json, int x, int y);
 void browser_ui_notification(const char *json);
 int browser_ui_width();
 int browser_ui_height();
 int browser_ui_light();
+const char *browser_ui_wallet(const char *json);
+void browser_ui_wallet_clear();
+void browser_ui_history(const char *json);
 int browser_ui_screenshot(const char *path);
 }
