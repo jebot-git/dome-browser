@@ -145,6 +145,40 @@ the separate CLIPBOARD. Password selections are not exported. The native address
 field also accepts PRIMARY paste. Wheel down scrolls down and wheel up scrolls
 up, following standard desktop direction.
 
+## Import a local Vivaldi profile
+
+Close Dome Browser, then run from this checkout:
+
+```sh
+python3 ports/dome-fltk/migrate-vivaldi.py --passwords
+```
+
+The optional password step requires Python PyGObject/GIO, `cryptography`, and
+access to the existing KWallet encryption key. `--source` selects a Vivaldi
+profile directory; `--target` selects a Dome profile. The defaults are
+`~/.config/vivaldi/Default` and Dome's normal profile. Omit `--passwords` to
+import only bookmarks and history.
+
+Folder paths become bookmark sections. Trash and unsupported URLs are excluded;
+existing Dome bookmarks are retained. The most recent history is merged within
+Dome's 2,000-entry limit. A private `migration-backups` directory keeps the
+previous profile files, a full eligible Vivaldi history archive, and counts.
+The script locks the target profile, snapshots SQLite input without modifying
+Vivaldi, validates it, and writes profile files atomically with mode 0600.
+
+Supported Linux v10/v11 passwords go directly from memory to the profile's
+encrypted KWallet folder and are verified there. Existing wallet entries are
+preserved; rerunning safely skips them. No plaintext password export or password
+report is created. Imports retain Dome's exact origin/form-action policy and
+skip non-web logins, insecure origins and cross-origin form actions. Importing
+does not expand the login forms that Dome's password manager can fill.
+
+Synthetic migration fixtures can be checked without accessing a real wallet:
+
+```sh
+python3 ports/dome-fltk/tests/migration.py
+```
+
 ## DomeD integration
 
 | Interface | Implementation |
