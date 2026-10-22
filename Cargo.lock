@@ -2228,6 +2228,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dome-browser"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "dpi",
+ "euclid",
+ "glow",
+ "libc",
+ "rustls",
+ "serde",
+ "serde_json",
+ "servo",
+ "servo-webxr",
+ "servo-webxr-api",
+ "surfman",
+ "url",
+]
+
+[[package]]
 name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

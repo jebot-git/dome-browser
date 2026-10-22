@@ -2485,6 +2485,8 @@ impl Window {
     }
 
     pub(crate) fn clear_js_runtime(&self) {
+        #[cfg(feature = "webxr")]
+        self.end_xr_sessions_for_document_deactivation();
         self.stop_geolocation_watches();
         self.as_global_scope()
             .remove_web_messaging_and_dedicated_workers_infra();
@@ -3557,6 +3559,8 @@ impl Window {
     }
 
     pub(crate) fn suspend(&self, cx: &mut JSContext) {
+        #[cfg(feature = "webxr")]
+        self.end_xr_sessions_for_document_deactivation();
         // Suspend timer events.
         self.as_global_scope().suspend();
 
@@ -3570,6 +3574,15 @@ impl Window {
         // or unattached DOM nodes. Attached DOM nodes can't be GCd yet,
         // as the document might be reactivated later.
         self.gc(cx);
+    }
+
+    #[cfg(feature = "webxr")]
+    fn end_xr_sessions_for_document_deactivation(&self) {
+        if let Some(navigator) = self.navigator.get() {
+            if let Some(xr) = navigator.xr() {
+                xr.end_sessions_for_document_deactivation();
+            }
+        }
     }
 
     pub(crate) fn resume(&self, cx: &mut JSContext) {

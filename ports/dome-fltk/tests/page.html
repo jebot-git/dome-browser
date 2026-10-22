@@ -1,0 +1,49 @@
+<!doctype html><meta charset="utf-8"><title>Servo FLTK integration test</title>
+<style>
+body { font:16px sans-serif; background:#f2f5f8;color:#203541;margin:24px }
+button,input { position:absolute;left:24px;width:280px;height:40px;font:16px sans-serif;box-sizing:border-box }
+#click {top:72px} #typing {top:128px} #notice {top:184px} #xr {top:240px}
+canvas {position:absolute;left:400px;top:72px;width:320px;height:180px}
+@media(prefers-color-scheme:dark){body{background:#16222c;color:#d5e8f4}}
+</style>
+<h1>Servo inside FLTK</h1>
+<button id="click">Click test</button><input id="typing" placeholder="Type here">
+<button id="notice">Desktop notification</button><button id="xr">Enter WebXR</button>
+<canvas id="canvas" width="320" height="180"></canvas>
+<script>
+function report(name,data={}){console.log(name,JSON.stringify(data));fetch('/event',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,data})}).catch(()=>{})}
+document.getElementById('click').onclick=()=>report('CLICK');
+let inputChange=0;
+document.getElementById('typing').oninput=e=>report('INPUT',{value:e.target.value,change:++inputChange});
+document.getElementById('notice').onclick=async()=>{let result=await Notification.requestPermission();report('NOTIFICATION_PERMISSION',{result});if(result==='granted')new Notification('Servo desktop notification',{body:'Delivered through DomeD',tag:'servo-test'})};
+let session=null,gl=document.getElementById('canvas').getContext('webgl');
+if(gl){gl.clearColor(.1,.4,.8,1);gl.clear(gl.COLOR_BUFFER_BIT);report('WEBGL',{version:gl.getParameter(gl.VERSION)});}else report('NO_WEBGL');
+document.getElementById('xr').onclick=async()=>{
+ if(session){await session.end();return;}
+ try{
+  session=await navigator.xr.requestSession('immersive-vr',{requiredFeatures:['local-floor']});
+  session.addEventListener('end',()=>{session=null;report('XR_ENDED')});
+  await gl.makeXRCompatible();
+  session.updateRenderState({baseLayer:new XRWebGLLayer(session,gl)});
+  const local=await session.requestReferenceSpace('local');
+  const floor=await session.requestReferenceSpace('local-floor');
+  let count=0;
+  function frame(time,xrFrame){
+   if(!session)return;
+   const pose=xrFrame.getViewerPose(local),floorPose=xrFrame.getViewerPose(floor),layer=session.renderState.baseLayer;
+   if(pose){
+    gl.bindFramebuffer(gl.FRAMEBUFFER,layer.framebuffer);gl.enable(gl.SCISSOR_TEST);
+    for(const view of pose.views){const vp=layer.getViewport(view);gl.viewport(vp.x,vp.y,vp.width,vp.height);gl.scissor(vp.x,vp.y,vp.width,vp.height);gl.clearColor(view.eye==='left'?1:0,view.eye==='right'?1:0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);}
+    gl.disable(gl.SCISSOR_TEST);
+    if(count++===3)report('XR_POSE',{time,local:pose.transform.position.toJSON(),floor:floorPose?.transform.position.toJSON(),eyes:pose.views.map(v=>({eye:v.eye,x:v.transform.position.x}))});
+   }
+   session.requestAnimationFrame(frame);
+  }
+  session.requestAnimationFrame(frame);report('XR_ENTERED');
+ }catch(error){session=null;report('XR_DENIED',{name:error.name,message:error.message})}
+};
+const scheme=matchMedia('(prefers-color-scheme:light)');scheme.addEventListener('change',e=>report('THEME',{light:e.matches}));
+addEventListener('resize',()=>report('RESIZE',{width:innerWidth,height:innerHeight}));
+if(navigator.xr)navigator.xr.isSessionSupported('immersive-vr').then(supported=>report('XR_SUPPORTED',{supported}));
+report('READY',{xr:!!navigator.xr});
+</script>

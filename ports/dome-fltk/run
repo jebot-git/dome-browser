@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+import os
+import signal
+from pathlib import Path
+import sys
+signal.pthread_sigmask(signal.SIG_SETMASK, [])
+source = Path(__file__).resolve().parents[2]
+binary = source / 'target/debug/dome-browser'
+if not binary.is_file():
+    raise SystemExit('Build first: python3 ports/dome-fltk/build.py')
+os.execv(str(binary), [str(binary), *sys.argv[1:]])

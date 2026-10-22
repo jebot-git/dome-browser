@@ -31,6 +31,8 @@ pub enum SessionMode {
 /// <https://immersive-web.github.io/webxr/#dictdef-xrsessioninit>
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionInit {
+    /// The requesting document origin, for embedder consent UI.
+    pub origin: String,
     pub required_features: Vec<String>,
     pub optional_features: Vec<String>,
     /// Secondary views are enabled with the `secondary-view` feature
@@ -94,6 +96,7 @@ enum SessionMsg {
     UpdateClipPlanes(/* near */ f32, /* far */ f32),
     StartRenderLoop,
     RenderAnimationFrame,
+    Abort,
     RequestHitTest(HitTestSource),
     CancelHitTest(HitTestId),
     UpdateFrameRate(f32, ProfileGenericCallback<f32>),
@@ -213,6 +216,12 @@ impl Session {
 
     pub fn end_session(&mut self) {
         let _ = self.sender.send(SessionMsg::Quit);
+    }
+
+    /// Stop a device when its document is no longer active. Unlike an orderly
+    /// end(), this cannot wait for a frame callback in a suspended script realm.
+    pub fn abort_session(&mut self) {
+        let _ = self.sender.send(SessionMsg::Abort);
     }
 
     pub fn apply_event(&mut self, event: FrameUpdateEvent) {
@@ -399,6 +408,10 @@ where
                 } else {
                     self.render_state = RenderState::PendingQuit;
                 }
+            },
+            SessionMsg::Abort => {
+                self.quit();
+                return false;
             },
             SessionMsg::GetBoundsGeometry(sender) => {
                 let bounds = self.device.reference_space_bounds();

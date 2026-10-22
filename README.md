@@ -1,3 +1,22 @@
+# Dome Browser — Servo with native FLTK controls
+
+This fork builds a Linux browser with native DomeD menus, appearance, shortcuts,
+tray integration, clipboard and notifications. Its Linux WebXR device backend
+uses Surfman/EGL/OpenGL and DomeD's existing authenticated session bridge. It
+does not depend on D3D11 or a Windows OpenXR graphics backend.
+
+```sh
+python3 ports/dome-fltk/build.py
+ports/dome-fltk/run https://servo.org
+```
+
+The build requires the patched DomeD FLTK toolkit. See the
+[port documentation](ports/dome-fltk/README.md) for dependencies, configuration,
+tests, the upstream source revision and current limitations. This is an
+experimental browser; hardware XR validation and media support remain work.
+
+The upstream Servo README is retained below.
+
 # The Servo Parallel Browser Engine Project
 
 Servo is a prototype web browser engine written in the

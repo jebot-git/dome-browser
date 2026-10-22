@@ -881,6 +881,11 @@ impl Notification {
             }
         }
 
+        // Text-only notifications have no resource callbacks to trigger show().
+        if pending_requests.is_empty() {
+            self.show();
+            return;
+        }
         for (request, resource_type) in pending_requests {
             self.fetch_and_show_when_ready(request, resource_type);
         }

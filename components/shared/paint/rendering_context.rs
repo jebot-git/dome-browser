@@ -300,8 +300,25 @@ impl SoftwareRenderingContext {
             return Err(Error::Failed);
         }
 
+        Self::new_offscreen(size, true)
+    }
+
+    /// An offscreen surface on the preferred hardware adapter. Embedders can
+    /// composite the resulting image into a toolkit-owned native window.
+    pub fn new_accelerated(size: PhysicalSize<u32>) -> Result<Self, Error> {
+        if size.width == 0 || size.height == 0 {
+            return Err(Error::Failed);
+        }
+        Self::new_offscreen(size, false)
+    }
+
+    fn new_offscreen(size: PhysicalSize<u32>, software: bool) -> Result<Self, Error> {
         let connection = Connection::new()?;
-        let adapter = connection.create_software_adapter()?;
+        let adapter = if software {
+            connection.create_software_adapter()?
+        } else {
+            connection.create_adapter()?
+        };
         let surfman_rendering_info = SurfmanRenderingContext::new(&connection, &adapter, None)?;
 
         let surfman_size = Size2D::new(size.width as i32, size.height as i32);

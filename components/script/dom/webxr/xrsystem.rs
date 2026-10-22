@@ -45,6 +45,15 @@ pub(crate) struct XRSystem {
 }
 
 impl XRSystem {
+    pub(crate) fn end_sessions_for_document_deactivation(&self) {
+        if let Some(session) = self.active_immersive_session.get() {
+            session.end_for_document_deactivation();
+        }
+        for session in self.active_inline_sessions.borrow().iter() {
+            session.end_for_document_deactivation();
+        }
+    }
+
     fn new_inherited(pipeline: PipelineId) -> XRSystem {
         XRSystem {
             eventtarget: EventTarget::new_inherited(),
@@ -220,6 +229,7 @@ impl XRSystemMethods<crate::DomTypeHolder> for XRSystem {
         }
 
         let init = SessionInit {
+            origin: global.origin().immutable().ascii_serialization().into_owned(),
             required_features,
             optional_features,
             first_person_observer_view: pref!(dom_webxr_first_person_observer_view),

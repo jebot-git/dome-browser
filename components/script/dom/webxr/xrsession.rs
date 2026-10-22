@@ -115,6 +115,14 @@ pub(crate) struct XRSession {
 }
 
 impl XRSession {
+    /// A document leaving the active browsing context must release its device,
+    /// including when the document remains alive in session history.
+    pub(crate) fn end_for_document_deactivation(&self) {
+        if !self.ended.replace(true) {
+            self.session.borrow_mut().abort_session();
+        }
+    }
+
     fn new_inherited(
         session: Session,
         render_state: &XRRenderState,
