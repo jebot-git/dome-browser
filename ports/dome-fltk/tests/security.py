@@ -171,7 +171,8 @@ with tempfile.TemporaryDirectory(prefix='browser-security-') as temporary:
         finally:bus.disconnect()
     try:
         service=subprocess.Popen([sys.executable,__file__,'--wallet',str(walletlog)],env=env,stdout=subprocess.PIPE,stderr=log,text=True);processes.append(service);assert service.stdout.readline().strip()=='ready'
-        app=subprocess.Popen([str(source/'target/release/dome-browser'),'--profile',str(profile),origin+'/security.html'],env=env,stdout=log,stderr=log);processes.append(app)
+        binary=Path(os.environ.get('DOME_BROWSER_BINARY', source/'target/debug/dome-browser'))
+        app=subprocess.Popen([str(binary),'--profile',str(profile),origin+'/security.html'],env=env,stdout=log,stderr=log);processes.append(app)
         main=window('Browser security fixture');ready=wait(lambda:latest('READY'));print('FILTER RESULTS',ready['data'],flush=True)
         check(ready['data']=={'blocked':False,'allowed':True,'cross':False,'redirected':False,'xhr':False},'adblock-rust blocks scripts, images, XHR and redirected targets while honoring exceptions')
         check('/cross.js' not in hits,'third-party filtering works when Referrer-Policy removes the referrer')

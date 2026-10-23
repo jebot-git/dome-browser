@@ -170,7 +170,7 @@ with tempfile.TemporaryDirectory(prefix='servo-browser-test-') as temporary:
     appearance = root/'config/dome/appearance.json'
     appearance.parent.mkdir(parents=True)
     appearance.write_text(json.dumps({'font':'DungGeunMo / Regular','font_size':16,'light':False,'accent':'#6babff'}))
-    binary = source/'target/debug/dome-browser'
+    binary = Path(os.environ.get('DOME_BROWSER_BINARY', source/'target/debug/dome-browser'))
     origin = 'http://127.0.0.1:' + str(http.server_port)
     log = (artifacts/'browser.log').open('w')
 

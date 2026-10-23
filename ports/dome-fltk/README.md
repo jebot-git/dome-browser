@@ -7,7 +7,9 @@ into its page widget. It does not launch servoshell or embed a second browser
 window.
 
 The source baseline is Servo `2190554aaa6990416dd92851fcd8240ac63ee750`, fetched
-from <https://github.com/servo/servo> on 2026-10-22. The port is in
+from <https://github.com/servo/servo> on 2026-10-22. Upstream `main` through
+`61065f91128` was merged on 2026-10-23, including its WebGL, document state,
+JavaScript binding and audio updates. The port is in
 `ports/dome-fltk`; the remaining source changes expose an accelerated offscreen
 constructor and carry the requesting document's origin into the WebXR device
 interface for consent. A further engine fix delivers text-only notifications
@@ -263,6 +265,10 @@ navigation, activation, menu transitions, appearance and notification delivery.
 Its isolated DomeD protocol fixture validates XR consent, real WebGL stereo
 pixels, reference spaces and lease cleanup. It never contacts a live headset.
 Logs and images are written to `../artifacts/servo-browser-tests`.
+
+The integration scripts default to `target/debug/dome-browser`. Set
+`DOME_BROWSER_BINARY` to test a release, staged or installed binary with the
+same fixtures, for example `DOME_BROWSER_BINARY="$PWD/target/release/dome-browser"`.
 
 Additional security/input integration checks use a private session bus, an
 in-memory mock KWallet, local HTTP fixtures and independent X11 selection

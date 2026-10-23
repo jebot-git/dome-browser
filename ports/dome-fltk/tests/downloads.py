@@ -69,7 +69,8 @@ with tempfile.TemporaryDirectory(prefix='dome-download-') as temporary:
     env.pop('WAYLAND_DISPLAY',None)
     env.pop('WAYLAND_SOCKET',None)
     log = (artifacts/'browser.log').open('w')
-    app = subprocess.Popen([str(source/'target/release/dome-browser'),'--software','--profile',str(root/'profile'),f'http://127.0.0.1:{server.server_port}/'],env=env,stdout=log,stderr=log)
+    binary = Path(os.environ.get('DOME_BROWSER_BINARY', source/'target/debug/dome-browser'))
+    app = subprocess.Popen([str(binary),'--software','--profile',str(root/'profile'),f'http://127.0.0.1:{server.server_port}/'],env=env,stdout=log,stderr=log)
     def windows(): return x.screen().root.query_tree().children
     def key(name, control=False):
         code = x.keysym_to_keycode(XK.string_to_keysym(name))
