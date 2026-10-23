@@ -184,8 +184,8 @@ with tempfile.TemporaryDirectory(prefix='servo-browser-test-') as temporary:
             return max(candidates,key=lambda w:w.get_geometry().width*w.get_geometry().height) if candidates else None
         return wait(mapped)
 
-    def key(w, name, control=False, alt=False, shift=False):
-        w.set_input_focus(X.RevertToParent,X.CurrentTime)
+    def key(w, name, control=False, alt=False, shift=False, focus=True):
+        if focus:w.set_input_focus(X.RevertToParent,X.CurrentTime)
         modifiers = []
         if control: modifiers.append('Control_L')
         if alt: modifiers.append('Alt_L')
@@ -353,7 +353,18 @@ with tempfile.TemporaryDirectory(prefix='servo-browser-test-') as temporary:
         bookmarks=(profile/'bm.txt').read_text()
         check(':s1: Tests & docs' in bookmarks and 's1 '+origin+'/second.html Dillo & Servo' in bookmarks,'Ctrl+D writes native bookmarks in Dillo bm.txt syntax')
         navigate(main,origin+'/');wait(lambda:'Servo FLTK integration test' in str(main.get_wm_name()))
-        key(main,'o',control=True,shift=True);time.sleep(.3);key(main,'Down');key(main,'Return')
+        mapped={w.id for w in windows() if w.get_attributes().map_state==X.IsViewable}
+        key(main,'o',control=True,shift=True)
+        # Keep FLTK's native popup keyboard grab. Refocusing the main window
+        # between keys dismisses the menu before Return can select its item.
+        def bookmark_popup():
+            for candidate in windows():
+                if candidate.id in mapped:continue
+                attributes=candidate.get_attributes();geometry=candidate.get_geometry()
+                if (attributes.map_state==X.IsViewable and attributes.override_redirect
+                    and 120<geometry.width<600 and 10<geometry.height<60):return candidate
+        wait(bookmark_popup)
+        key(main,'Down',focus=False);key(main,'Return',focus=False)
         wait(lambda:'Second page' in str(main.get_wm_name()))
         check(True,'the native bookmark picker opens its bookmarked URL')
         history_file=profile/'hs.txt'
