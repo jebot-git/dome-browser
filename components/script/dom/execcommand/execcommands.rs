@@ -275,6 +275,10 @@ impl DocumentExecCommandSupport for Document {
         let Some((command, mut selection)) = self.check_support_and_enabled(cx, &command_id) else {
             return false;
         };
+        // Keyboard insertion in contenteditable hosts also uses this path.
+        // Controlled editors cancel beforeinput and insert its data into their
+        // own model, so omitting the text silently drops the typed character.
+        let input_data = matches!(command, CommandName::InsertText).then(|| value.clone());
         // Step 4. If command is not in the Miscellaneous commands section:
         let affected_editing_host = if !is_command_listed_in_miscellaneous_section(command) {
             // Step 4.1. Let affected editing host be the editing host that is an inclusive ancestor
@@ -290,7 +294,7 @@ impl DocumentExecCommandSupport for Document {
             };
 
             // Step 4.2. Fire an event named "beforeinput" at affected editing host using InputEvent,
-            // with its bubbles and cancelable attributes initialized to true, and its data attribute initialized to null
+            // with its bubbles and cancelable attributes initialized to true.
             let event = InputEvent::new(
                 cx,
                 window,
@@ -300,7 +304,7 @@ impl DocumentExecCommandSupport for Document {
                 true,
                 Some(window),
                 0,
-                None,
+                input_data.clone(),
                 false,
                 mapped_value_of_command(command),
             );
@@ -342,7 +346,8 @@ impl DocumentExecCommandSupport for Document {
         }
         // Step 7. If the action modified DOM tree, then fire an event named "input" at affected editing
         // host using InputEvent, with its isTrusted and bubbles attributes initialized to true,
-        // inputType attribute initialized to the mapped value of command, and its data attribute initialized to null.
+        // inputType attribute initialized to the mapped value of command. Text
+        // insertion carries the inserted data; other commands carry null.
         if let Some(affected_editing_host) = affected_editing_host {
             let event = InputEvent::new(
                 cx,
@@ -353,7 +358,7 @@ impl DocumentExecCommandSupport for Document {
                 false,
                 Some(window),
                 0,
-                None,
+                input_data,
                 false,
                 mapped_value_of_command(command),
             );

@@ -8859,6 +8859,7 @@ dependencies = [
  "stylo",
  "stylo_atoms",
  "stylo_traits",
+ "svgtypes",
  "taffy",
  "tracing",
  "unicode-bidi",

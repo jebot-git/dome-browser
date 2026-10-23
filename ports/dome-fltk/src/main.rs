@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 mod adblocking;
+mod compatibility;
 mod downloads;
 mod wallet;
 mod storage;
@@ -536,6 +537,7 @@ fn restore(servo: &servo::Servo, saved: &storage::Session, software: bool,
         *next_id += 1;
         *state.url.borrow_mut() = item.url.clone();
         let view = WebViewBuilder::new(servo, ctx.clone())
+            .user_content_manager(compatibility::manager(servo))
             .clipboard_delegate(Rc::new(Clipboard)).url(Url::parse(&item.url)?)
             .delegate(state.clone()).build();
         view.set_page_zoom(item.zoom);
@@ -659,6 +661,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // GitHub's component runtime requires these implemented Servo APIs.
     prefs.dom_intersection_observer_enabled = true;
     prefs.dom_adoptedstylesheet_enabled = true;
+    // The compiled storage implementation is needed by modern web clients,
+    // including Discord's libdiscore loader. Data stays in the locked profile.
+    prefs.dom_indexeddb_enabled = true;
+    // Keyboard editing in contenteditable hosts is gated with execCommand.
+    prefs.dom_exec_command_enabled = true;
     prefs.dom_webxr_glwindow_enabled = false;
     prefs.dom_webxr_openxr_enabled = false;
     prefs.dom_webxr_hands_enabled = false;
@@ -684,6 +691,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let first = state(0, permissions.clone(), services.clone());
     *first.url.borrow_mut() = parse_url(&target)?.to_string();
     let view = WebViewBuilder::new(&servo, initial.clone())
+        .user_content_manager(compatibility::manager(&servo))
         .clipboard_delegate(Rc::new(Clipboard))
         .url(parse_url(&target)?)
         .delegate(first.clone())
@@ -761,6 +769,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     *s.url.borrow_mut() = parse_url(&event.text())?.to_string();
                     next_id += 1;
                     let view = WebViewBuilder::new(&servo, ctx.clone())
+                        .user_content_manager(compatibility::manager(&servo))
                         .clipboard_delegate(Rc::new(Clipboard))
                         .delegate(s.clone())
                         .url(parse_url(&event.text())?)
@@ -1001,6 +1010,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             next_id += 1;
             let view = request
                 .builder(ctx.clone())
+                .user_content_manager(compatibility::manager(&servo))
                 .clipboard_delegate(Rc::new(Clipboard))
                 .delegate(s.clone())
                 .build();

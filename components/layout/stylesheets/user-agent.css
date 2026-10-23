@@ -1,4 +1,10 @@
 @namespace url(http://www.w3.org/1999/xhtml);
+@namespace svg url(http://www.w3.org/2000/svg);
+
+/* SVG viewports and foreignObject layout islands clip overflow by default. */
+svg|svg:not(:root), svg|foreignObject {
+  overflow: hidden;
+}
 
 /* https://html.spec.whatwg.org/multipage#hidden-elements */
 area, base, basefont, datalist, head, link, meta, noembed,

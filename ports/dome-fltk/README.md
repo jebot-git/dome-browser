@@ -188,11 +188,62 @@ python3 ports/dome-fltk/tests/migration.py
 | Universal menu | Exports the real FLTK commands through DBusMenu and associates them with the window through KDE's Wayland appmenu protocol or X11 properties. The local menu collapses only while a DomeD menu host exists. Shortcuts remain active, and losing the host restores the local menu. |
 | Appearance | Applies DomeD's palette, accent, BDF family and native strike to controls and native dialogs. Web content receives the current color-scheme preference while retaining its own CSS fonts. The Fontconfig export permits web fonts alongside the native BDF faces. |
 | Keybindings | Ctrl+L location, Ctrl+T new tab, Ctrl+W close tab, Ctrl+Q quit, Ctrl+R reload, Alt+Left/Right history, Ctrl+Tab next tab, Ctrl+plus/minus/0 zoom and F11 fullscreen. Page input is forwarded to Servo. |
-| Tray | Publishes a StatusNotifierItem with a themed globe pixmap, the page title and the same command menu. Activation raises the browser. |
+| Tray | The browser does not register a tray item. Use its window/task entry and universal menu. |
 | Notifications | Uses the session's `org.freedesktop.Notifications` service after native, origin-specific site consent. Returned IDs and notification actions are scoped to the service owner; activation focuses the originating tab. |
 | Activation | Exposes `org.freedesktop.Application` on `org.domed.Browser`. Subsequent launches open their URLs in the existing instance. |
 | Dialogs | Uses FLTK file, select, color, JavaScript and HTTP authentication dialogs. Unsupported device permissions are denied. |
 | WebXR | Uses DomeD protocol v1 to share the compositor's existing XR session, described below. |
+
+## Web editing compatibility
+
+Contenteditable keyboard editing is enabled for all sites. Servo's text
+insertion path now supplies the inserted text in `beforeinput` and `input`,
+allowing controlled rich-text editors to update their own document models.
+Native `keypress` events also expose character values through `charCode` and
+`which`. These changes apply to the engine, including pages outside Discord.
+They do not implement full IME integration or all contenteditable navigation.
+
+## Embedded HTML in SVG
+
+Inline SVG `foreignObject` content participates in native CSS layout, painting,
+hit testing, DOM geometry, focus and input on every site. SVG viewBox scaling,
+alignment, numeric/percentage dimension attributes and SVG transform attributes
+on `g`, `a` and `foreignObject` are supported. Descendant SVG mutations invalidate
+the enclosing viewport's layout and image caches. Embedded controls receive trusted
+events through the engine; no script forwards or fabricates clicks.
+
+This remains partial SVG support: other SVG graphics are rasterized behind
+the HTML islands. Nested SVG viewports, `use` instances, SVG masks and full
+vector-shape DOM hit testing are not implemented by this path.
+
+## Experimental Discord compatibility
+
+IndexedDB is enabled, with persistent storage inside the browser profile.
+Discord HTTPS documents also receive a timer-based `requestIdleCallback`
+fallback when Servo lacks that API. It approximates an idle deadline and
+supports cancellation; it is not native idle scheduling.
+
+Discord's WASM loader also assumes CacheStorage exists. Servo's current Cache
+implementation exposes only `keys()`. On Discord HTTPS documents, an absent
+CacheStorage receives an empty-cache fallback: lookups always miss and assets
+still download using normal fetch and CSP checks. This provides no offline or
+persistent asset cache. Existing native APIs are preserved. Other origins are
+unaffected by these script fallbacks.
+
+The public Discord login form renders with these fallbacks (tested 2026-10-23)
+and the browser exits cleanly afterward. The user also confirmed successful
+login and viewing direct messages. Server switching and editor interaction
+fixes are tested with isolated native input fixtures; they still need validation
+in an authenticated Discord session. Microphone/camera permission
+support is not implemented in this port, so voice/video calls are unsupported;
+screen sharing is also outside this compatibility experiment.
+
+```sh
+python3 ports/dome-fltk/tests/compatibility.py
+uv run --no-project --with python-xlib python ports/dome-fltk/tests/rich-text.py
+uv run --no-project --with python-xlib python ports/dome-fltk/tests/rich-text.py --compat
+uv run --no-project --with python-xlib python ports/dome-fltk/tests/rich-text.py --native-svg
+```
 
 ## WebXR through DomeD
 

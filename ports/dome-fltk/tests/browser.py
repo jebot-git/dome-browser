@@ -37,9 +37,20 @@ if '--services' in sys.argv:
                 f.write(json.dumps({'app': app, 'title': title, 'body': body, 'actions': actions}) + '\n')
             return 1
 
+    class Watcher(ServiceInterface):
+        def __init__(self):
+            super().__init__('org.kde.StatusNotifierWatcher')
+
+        @method()
+        def RegisterStatusNotifierItem(self, service: 's'):
+            with Path(sys.argv[-1] + '.tray').open('a') as f:
+                f.write(service + '\n')
+
     async def services():
         bus = await MessageBus().connect()
         bus.export('/org/freedesktop/Notifications', Notifications())
+        bus.export('/StatusNotifierWatcher', Watcher())
+        await bus.request_name('org.kde.StatusNotifierWatcher')
         await bus.request_name('org.freedesktop.Notifications')
         await bus.request_name('com.canonical.AppMenu.Registrar')
         print('ready', flush=True)
@@ -262,6 +273,7 @@ with tempfile.TemporaryDirectory(prefix='servo-browser-test-') as temporary:
         service=subprocess.Popen([sys.executable,__file__,'--services',str(notification_file)],env=env,stdout=subprocess.PIPE,stderr=log,text=True)
         processes.append(service);assert service.stdout.readline().strip()=='ready'
         time.sleep(.7)
+        check(not Path(str(notification_file)+'.tray').exists(),'browser does not register a tray icon when the watcher appears')
         hosted=shot(main,'universal-menu')
         check(hosted.crop((0,0,500,100)).tobytes()!=initial.crop((0,0,500,100)).tobytes(),'DomeD universal-menu registration removes the local menu bar')
         key(main,'t',control=True);time.sleep(.6);key(main,'w',control=True);wait(lambda:'Servo FLTK integration test' in str(main.get_wm_name()))
@@ -392,6 +404,7 @@ with tempfile.TemporaryDirectory(prefix='servo-browser-test-') as temporary:
         app=subprocess.Popen([str(binary),'--no-restore'],env=outside,stdout=log,stderr=log);processes.append(app)
         main=window('Dome Browser');time.sleep(1);key(main,'q',control=True);wait(lambda:app.poll() is not None)
         check(json.loads((profile/'session.json').read_text())['tabs'][0]['url']=='about:blank','--no-restore starts a fresh session explicitly')
+        check(not Path(str(notification_file)+'.tray').exists(),'browser restarts and shutdown never register a tray icon')
 
     finally:
         with contextlib.suppress(Exception): shot(main,'final-state')

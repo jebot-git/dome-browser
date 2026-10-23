@@ -1,0 +1,87 @@
+<style>
+svg.case{position:absolute}
+foreignObject:hover{opacity:.85}
+.fill{width:100%;height:100%;box-sizing:border-box;margin:0;border:0}
+#pan,#pass,#move,#group{position:absolute;left:1050px;width:120px;height:40px}#pan{top:40px}#move{top:100px}#group{top:160px}#pass{top:380px}
+#add,#remove{position:absolute;left:1050px;top:640px;width:120px;height:40px}#remove{top:690px}
+</style>
+<svg id="scaled" class="case" style="left:760px;top:30px" width="240" height="120" viewBox="10 20 120 60">
+ <rect x="10" y="20" width="120" height="60" fill="#224466"/>
+ <g transform="translate(4 3)"><foreignObject x="16" y="24" width="50" height="24">
+  <button xmlns="http://www.w3.org/1999/xhtml" id="scaledButton" class="fill">Scaled</button>
+ </foreignObject></g>
+</svg>
+<button id="pan">Change viewBox</button>
+<button id="move">Move object</button>
+<button id="group">Move group</button>
+<svg class="case" style="left:760px;top:180px" width="240" height="160">
+ <foreignObject x="20" y="10" width="180" height="130">
+  <div xmlns="http://www.w3.org/1999/xhtml" style="position:relative;width:100%;height:100%">
+   <input id="svgInput" style="position:absolute;left:10px;top:10px;width:140px;height:30px;box-sizing:border-box">
+   <button disabled id="svgDisabled" style="position:absolute;left:10px;top:60px;width:140px;height:30px">Disabled</button>
+   <div id="svgCapture" style="position:absolute;left:10px;top:100px;width:140px;height:20px;background:#ddc">Capture pointer</div>
+  </div>
+ </foreignObject>
+</svg>
+<svg class="case" style="left:760px;top:370px" width="240" height="100">
+ <foreignObject x="10" y="10" width="150" height="70"><div xmlns="http://www.w3.org/1999/xhtml" id="svgBottom" class="fill" style="background:#acd">Bottom</div></foreignObject>
+ <foreignObject id="topObject" x="50" y="25" width="140" height="50"><div xmlns="http://www.w3.org/1999/xhtml" id="svgTop" class="fill" style="background:#dca">Top</div></foreignObject>
+</svg>
+<button id="pass">Pass through top</button>
+<svg class="case" style="left:760px;top:520px" width="220" height="90">
+ <foreignObject x="10" y="10" width="70" height="40"><div xmlns="http://www.w3.org/1999/xhtml" id="svgClipped" style="width:180px;height:40px;background:#ada">Clipped child</div></foreignObject>
+</svg>
+<svg class="case" style="left:1010px;top:520px" width="100" height="90">
+ <foreignObject width="0" height="80"><div xmlns="http://www.w3.org/1999/xhtml" id="svgZero" style="width:100px;height:80px;background:red">Zero</div></foreignObject>
+</svg>
+<svg class="case" style="left:1140px;top:520px" width="100" height="90">
+ <defs><foreignObject width="100" height="80"><div xmlns="http://www.w3.org/1999/xhtml" id="svgDefinition" style="width:100px;height:80px;background:red">Definition</div></foreignObject></defs>
+</svg>
+<svg class="case" style="left:760px;top:640px" width="200" height="100">
+ <g transform="translate(120 10) rotate(90)"><foreignObject width="60" height="40"><button xmlns="http://www.w3.org/1999/xhtml" id="svgRotated" class="fill">Rotated</button></foreignObject></g>
+</svg>
+<svg class="case" style="left:24px;top:520px" width="300" height="100"><g id="dynamicGroup"></g></svg>
+<button id="add">Add object</button><button id="remove">Remove object</button>
+<script>
+for(const id of ['scaledButton','svgDisabled','svgTop','svgBottom','svgClipped','svgZero','svgDefinition','svgRotated']){
+ document.getElementById(id).onclick=e=>report('SVG_CLICK',{id,trusted:e.isTrusted});
+}
+document.getElementById('svgInput').oninput=e=>report('SVG_INPUT',{value:e.target.value,trusted:e.isTrusted});
+document.getElementById('svgCapture').onpointerdown=e=>{
+ e.target.setPointerCapture(e.pointerId);report('CAPTURE_DOWN',{trusted:e.isTrusted});
+};
+document.getElementById('svgCapture').onpointerup=e=>report('CAPTURE_UP',{trusted:e.isTrusted});
+document.getElementById('pass').onclick=()=>{
+ document.getElementById('topObject').style.pointerEvents='none';
+ report('TOP_DISABLED',{value:getComputedStyle(document.getElementById('topObject')).pointerEvents});
+};
+document.getElementById('pan').onclick=()=>{
+ document.getElementById('scaled').setAttribute('viewBox','0 0 120 60');
+ requestAnimationFrame(()=>report('PAN_READY',{rect:document.getElementById('scaledButton').getBoundingClientRect().toJSON()}));
+};
+document.getElementById('move').onclick=()=>{
+ const root=document.getElementById('scaled');
+ const object=root.querySelector('foreignObject');
+ object.setAttribute('x','26');object.setAttribute('width','60');
+ requestAnimationFrame(()=>report('MOVE_READY',{rect:document.getElementById('scaledButton').getBoundingClientRect().toJSON()}));
+};
+document.getElementById('group').onclick=()=>{
+ document.getElementById('scaled').querySelector('g').setAttribute('transform','translate(8 6)');
+ requestAnimationFrame(()=>report('GROUP_READY',{rect:document.getElementById('scaledButton').getBoundingClientRect().toJSON()}));
+};
+document.getElementById('add').onclick=()=>{
+ const object=document.createElementNS('http://www.w3.org/2000/svg','foreignObject');
+ for(const [k,v] of Object.entries({x:10,y:10,width:120,height:40}))object.setAttribute(k,v);
+ const button=document.createElementNS('http://www.w3.org/1999/xhtml','button');
+ button.id='svgDynamic';button.className='fill';button.textContent='Dynamic';
+ button.onclick=e=>report('SVG_CLICK',{id:button.id,trusted:e.isTrusted});
+ object.append(button);document.getElementById('dynamicGroup').append(object);
+ requestAnimationFrame(()=>report('ADDED',{rect:button.getBoundingClientRect().toJSON()}));
+};
+document.getElementById('remove').onclick=()=>{
+ document.getElementById('dynamicGroup').replaceChildren();
+ requestAnimationFrame(()=>report('REMOVED',{hit:!!document.elementFromPoint(60,550)?.closest('#svgDynamic')}));
+};
+report('SVG_READY',{rect:document.getElementById('scaledButton').getBoundingClientRect().toJSON(),
+ boxes:['server','svgBottom','svgTop','svgClipped'].map(id=>{const e=document.getElementById(id),s=getComputedStyle(e);return {id,rect:e.getBoundingClientRect().toJSON(),display:s.display,width:s.width,height:s.height,parentDisplay:getComputedStyle(e.parentElement).display}})});
+</script>

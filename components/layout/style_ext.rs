@@ -537,19 +537,22 @@ impl ComputedValuesExt for ComputedValues {
     }
 
     fn is_inline_box(&self, fragment_flags: FragmentFlags) -> bool {
-        (self.get_box().display.is_inline_flow() &&
-            !fragment_flags.intersects(
-                FragmentFlags::IS_REPLACED |
-                    FragmentFlags::IS_WIDGET |
-                    FragmentFlags::IS_FLEX_OR_GRID_ITEM,
-            )) ||
-            matches!(self.pseudo(), Some(PseudoElement::FirstLetter))
+        (self.get_box().display.is_inline_flow()
+            && !fragment_flags.intersects(
+                FragmentFlags::IS_REPLACED
+                    | FragmentFlags::IS_SVG_FOREIGN_OBJECT
+                    | FragmentFlags::IS_WIDGET
+                    | FragmentFlags::IS_FLEX_OR_GRID_ITEM,
+            ))
+            || matches!(self.pseudo(), Some(PseudoElement::FirstLetter))
     }
 
     fn is_atomic_inline_level(&self, fragment_flags: FragmentFlags) -> bool {
-        self.get_box().display.outside() == stylo::DisplayOutside::Inline &&
-            !self.is_inline_box(fragment_flags) &&
-            !fragment_flags.intersects(FragmentFlags::IS_FLEX_OR_GRID_ITEM)
+        self.get_box().display.outside() == stylo::DisplayOutside::Inline
+            && !self.is_inline_box(fragment_flags)
+            && !fragment_flags.intersects(
+                FragmentFlags::IS_FLEX_OR_GRID_ITEM | FragmentFlags::IS_SVG_FOREIGN_OBJECT,
+            )
     }
 
     /// Returns true if this is a transformable element.
@@ -768,6 +771,10 @@ impl ComputedValuesExt for ComputedValues {
 
     /// Returns true if this fragment establishes a new stacking context and false otherwise.
     fn establishes_stacking_context(&self, fragment_flags: FragmentFlags) -> bool {
+        // SVG foreignObject always paints its CSS island atomically.
+        if fragment_flags.contains(FragmentFlags::IS_SVG_FOREIGN_OBJECT) {
+            return true;
+        }
         // From <https://www.w3.org/TR/css-will-change/#valdef-will-change-custom-ident>:
         // > If any non-initial value of a property would create a stacking context on the element,
         // > specifying that property in will-change must create a stacking context on the element.
@@ -917,6 +924,9 @@ impl ComputedValuesExt for ComputedValues {
         &self,
         fragment_flags: FragmentFlags,
     ) -> bool {
+        if fragment_flags.contains(FragmentFlags::IS_SVG_FOREIGN_OBJECT) {
+            return true;
+        }
         // From <https://www.w3.org/TR/css-will-change/#valdef-will-change-custom-ident>:
         // > If any non-initial value of a property would cause the element to generate a
         // > containing block for fixed positioned elements, specifying that property in will-change

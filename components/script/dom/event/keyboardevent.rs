@@ -79,7 +79,17 @@ impl KeyboardEvent {
         keyboard_event: &keyboard_types::KeyboardEvent,
     ) -> DomRoot<KeyboardEvent> {
         let keycode = legacy_keycode_for_keyboard_event(keyboard_event);
-        Self::new_with_proto(
+        let is_keypress = event_type == atom!("keypress");
+        let charcode = if is_keypress {
+            match &keyboard_event.key {
+                Key::Character(text) => text.chars().next().map(u32::from).unwrap_or(0),
+                Key::Named(NamedKey::Enter) => 13,
+                _ => 0,
+            }
+        } else {
+            0
+        };
+        let event = Self::new_with_proto(
             cx,
             window,
             None,
@@ -95,9 +105,13 @@ impl KeyboardEvent {
             keyboard_event.repeat,
             keyboard_event.is_composing,
             keyboard_event.modifiers,
-            0, /* char_code */
+            charcode,
             keycode,
-        )
+        );
+        if is_keypress {
+            event.uievent.set_which(charcode);
+        }
+        event
     }
 
     #[expect(clippy::too_many_arguments)]

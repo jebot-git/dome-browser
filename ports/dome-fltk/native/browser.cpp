@@ -2,7 +2,6 @@
 #include "browser.h"
 #include "appearance.h"
 #include "desktop-menu.h"
-#include "status-icon.h"
 #include "notifications.h"
 #include "wallet.h"
 #include <FL/Fl_Double_Window.H>
@@ -128,7 +127,6 @@ public:
   Fl_Box *status;
   Page *page;
   std::unique_ptr<DesktopMenu> exported;
-  std::unique_ptr<StatusIcon> tray;
   std::unique_ptr<DesktopNotifications> notifications;
   bool fullscreenMode=false;
   Browser():Fl_Double_Window(1280,860,"Dome Browser") {
@@ -174,7 +172,6 @@ public:
     callback([](Fl_Widget *,void *){emit(8);});
     menu->layoutChanged=[this]{layout();};
     exported=std::make_unique<DesktopMenu>(*this,*menu);
-    tray=std::make_unique<StatusIcon>(*exported);tray->setTitle("Dome Browser");tray->activate=[this]{show();page->take_focus();};
     notifications=std::make_unique<DesktopNotifications>([this](const Json &n,const std::string &){show();emit(22,n.value("tab",0));},[](const Json &){});
     dx::style(this);
   }
@@ -234,7 +231,7 @@ extern "C" int browser_ui_poll(BrowserEvent *e) {if(events.empty())return 0;*e=e
 extern "C" void browser_ui_wake(){Fl::awake();}
 extern "C" void browser_ui_close(){browser.reset();if(applicationBus){if(applicationObject)g_dbus_connection_unregister_object(applicationBus,applicationObject);g_object_unref(applicationBus);applicationBus=nullptr;}if(applicationInfo){g_dbus_node_info_unref(applicationInfo);applicationInfo=nullptr;}}
 extern "C" void browser_ui_frame(const uint8_t *p,unsigned w,unsigned h){browser->page->frame(p,w,h);}
-extern "C" void browser_ui_title(const char *title,const char *url,int back,int forward){browser->copy_label((std::string(title)+" — Dome Browser").c_str());if(Fl::focus()!=browser->address)browser->address->setUrl(url);if(back)browser->back->activate();else browser->back->deactivate();if(forward)browser->forward->activate();else browser->forward->deactivate();browser->tray->setTitle(title);}
+extern "C" void browser_ui_title(const char *title,const char *url,int back,int forward){browser->copy_label((std::string(title)+" — Dome Browser").c_str());if(Fl::focus()!=browser->address)browser->address->setUrl(url);if(back)browser->back->activate();else browser->back->deactivate();if(forward)browser->forward->activate();else browser->forward->deactivate();}
 extern "C" void browser_ui_tabs(const char *text,int active){try{auto data=Json::parse(text);browser->tabs->clear();int index=0;for(const auto &t:data){auto label=menuLabel(std::to_string(++index)+". "+t.get<std::string>());browser->tabs->add(label.c_str(),0,nullptr);}browser->tabs->value(active);}catch(...){} }
 extern "C" void browser_ui_status(const char *text){browser->status->copy_label(text);}
 extern "C" void browser_ui_cursor(int cursor){browser->cursor(cursor==1?FL_CURSOR_HAND:cursor==2?FL_CURSOR_INSERT:FL_CURSOR_DEFAULT);}

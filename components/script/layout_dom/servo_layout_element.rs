@@ -226,6 +226,10 @@ impl<'dom> LayoutElement<'dom> for ServoLayoutElement<'dom> {
         self.element.local_name()
     }
 
+    fn namespace(&self) -> &Namespace {
+        self.element.namespace()
+    }
+
     fn attribute(&self, namespace: &Namespace, name: &LocalName) -> Option<&AttrValue> {
         self.element.get_attr_for_layout(namespace, name)
     }

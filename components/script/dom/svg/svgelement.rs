@@ -31,7 +31,7 @@ use crate::dom::element::attributes::storage::AttrRef;
 use crate::dom::element::{AttributeMutation, Element};
 use crate::dom::node::focus::FocusTrigger;
 use crate::dom::node::virtualmethods::VirtualMethods;
-use crate::dom::node::{Node, NodeTraits};
+use crate::dom::node::{ChildrenMutation, Node, NodeTraits};
 use crate::dom::svg::svgcircleelement::SVGCircleElement;
 use crate::dom::svg::svgellipseelement::SVGEllipseElement;
 use crate::dom::svg::svgimageelement::SVGImageElement;
@@ -85,6 +85,18 @@ impl SVGElement {
     fn as_element(&self) -> &Element {
         self.upcast::<Element>()
     }
+
+    fn invalidate_enclosing_svg_viewports(&self, cx: &mut JSContext) {
+        let node = self.upcast::<Node>();
+        if !node.is_connected() {
+            return;
+        }
+        for ancestor in node.ancestors() {
+            if let Some(svg) = ancestor.downcast::<SVGSVGElement>() {
+                svg.invalidate_cached_serialized_subtree_and_rasterization_result(cx.no_gc());
+            }
+        }
+    }
 }
 
 impl VirtualMethods for SVGElement {
@@ -101,6 +113,10 @@ impl VirtualMethods for SVGElement {
         self.super_type()
             .unwrap()
             .attribute_mutated(cx, attr, mutation);
+        // SVG geometry and vector-image caches belong to the enclosing SVG
+        // viewport. A mutation on a descendant must rebuild that viewport too,
+        // even when the attribute does not affect its computed CSS style.
+        self.invalidate_enclosing_svg_viewports(cx);
         let element = self.as_element();
         if let (&local_name!("nonce"), mutation) = (attr.local_name(), mutation) {
             match mutation {
@@ -113,6 +129,11 @@ impl VirtualMethods for SVGElement {
                 },
             }
         }
+    }
+
+    fn children_changed(&self, cx: &mut JSContext, mutation: &ChildrenMutation) {
+        self.super_type().unwrap().children_changed(cx, mutation);
+        self.invalidate_enclosing_svg_viewports(cx);
     }
 
     fn attribute_affects_presentational_hints(&self, attr: AttrRef<'_>) -> bool {

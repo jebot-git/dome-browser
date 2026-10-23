@@ -161,6 +161,7 @@ pub(crate) enum ReplacedContentKind {
     SVGElement {
         vector_image: Option<VectorImage>,
         has_viewbox: bool,
+        foreign_objects: crate::svg_foreign_object::ForeignObjects,
     },
     Audio,
 }
@@ -333,6 +334,9 @@ impl ReplacedContents {
             ReplacedContentKind::SVGElement {
                 vector_image,
                 has_viewbox: svg_data.view_box.is_some(),
+                foreign_objects: crate::svg_foreign_object::ForeignObjects::construct(
+                    node, context,
+                ),
             },
             natural_size,
         )
@@ -626,9 +630,10 @@ impl ReplacedContents {
             ReplacedContentKind::SVGElement {
                 vector_image,
                 has_viewbox,
+                foreign_objects,
             } => {
                 let Some(vector_image) = vector_image else {
-                    return vec![];
+                    return foreign_objects.fragments(layout_context, rect);
                 };
 
                 if !has_viewbox {
@@ -657,7 +662,7 @@ impl ReplacedContents {
                 );
 
                 let tag = self.base_fragment_info.tag.unwrap();
-                layout_context
+                let mut fragments: Vec<Fragment> = layout_context
                     .image_resolver
                     .rasterize_vector_image(
                         vector_image.id,
@@ -682,7 +687,9 @@ impl ReplacedContents {
                         }))
                     })
                     .into_iter()
-                    .collect()
+                    .collect();
+                fragments.extend(foreign_objects.fragments(layout_context, rect));
+                fragments
             },
             ReplacedContentKind::Audio => vec![],
         }
@@ -789,6 +796,24 @@ impl ReplacedContents {
             depends_on_block_constraints: true,
             fragments: self.make_fragments(layout_context, &base.style, size),
             specific_layout_info: None,
+        }
+    }
+
+    pub(crate) fn subtree_size(&self) -> usize {
+        match &self.kind {
+            ReplacedContentKind::SVGElement {
+                foreign_objects, ..
+            } => foreign_objects.subtree_size(),
+            _ => 0,
+        }
+    }
+
+    pub(crate) fn attached_to_tree(&self, parent: crate::dom::WeakLayoutBox) {
+        if let ReplacedContentKind::SVGElement {
+            foreign_objects, ..
+        } = &self.kind
+        {
+            foreign_objects.attached_to_tree(parent);
         }
     }
 

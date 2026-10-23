@@ -67,9 +67,12 @@ pub(crate) enum IndependentFormattingContextContents {
 impl IndependentFormattingContextContents {
     fn subtree_size(&self) -> usize {
         match self {
-            IndependentFormattingContextContents::Replaced(_, widget) => widget
-                .as_ref()
-                .map_or(0, |widget| widget.borrow().subtree_size()),
+            IndependentFormattingContextContents::Replaced(replaced, widget) => {
+                replaced.subtree_size()
+                    + widget
+                        .as_ref()
+                        .map_or(0, |widget| widget.borrow().subtree_size())
+            },
             IndependentFormattingContextContents::Flow(block_formatting_context) => {
                 block_formatting_context.contents.subtree_size()
             },
@@ -631,7 +634,8 @@ impl IndependentFormattingContext {
 
     pub(crate) fn attached_to_tree(&self, layout_box: WeakLayoutBox) {
         match &self.contents {
-            IndependentFormattingContextContents::Replaced(_, widget) => {
+            IndependentFormattingContextContents::Replaced(replaced, widget) => {
+                replaced.attached_to_tree(layout_box.clone());
                 if let Some(widget) = widget {
                     widget.borrow_mut().base.parent_box.replace(layout_box);
                 }
