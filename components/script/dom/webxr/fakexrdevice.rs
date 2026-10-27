@@ -10,6 +10,7 @@ use js::context::JSContext;
 use js::realm::CurrentRealm;
 use profile_traits::generic_callback::GenericCallback as ProfileGenericCallback;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
+use script_bindings::cell::DomRefCell;
 use servo_base::generic_channel::GenericSender;
 use webxr_api::{
     EntityType, Handedness, InputId, InputSource, MockDeviceMsg, MockInputInit, MockRegion,
@@ -30,7 +31,7 @@ use crate::dom::bindings::codegen::Bindings::XRInputSourceBinding::{
 use crate::dom::bindings::codegen::Bindings::XRSessionBinding::XRVisibilityState;
 use crate::dom::bindings::codegen::Bindings::XRViewBinding::XREye;
 use crate::dom::bindings::error::{Error, Fallible};
-use crate::dom::bindings::refcounted::TrustedPromise;
+use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::fakexrinputcontroller::{FakeXRInputController, init_to_mock_buttons};
@@ -44,6 +45,10 @@ pub(crate) struct FakeXRDevice {
     sender: GenericSender<MockDeviceMsg>,
     #[no_trace]
     next_input_id: Cell<InputId>,
+    disconnect_pending: Cell<bool>,
+    disconnected: Cell<bool>,
+    #[no_trace]
+    disconnect_callbacks: DomRefCell<Vec<ProfileGenericCallback<()>>>,
 }
 
 impl FakeXRDevice {
@@ -52,6 +57,9 @@ impl FakeXRDevice {
             reflector: Reflector::new(),
             sender,
             next_input_id: Cell::new(InputId(0)),
+            disconnect_pending: Cell::new(false),
+            disconnected: Cell::new(false),
+            disconnect_callbacks: DomRefCell::new(vec![]),
         }
     }
 
@@ -64,7 +72,43 @@ impl FakeXRDevice {
     }
 
     pub(crate) fn disconnect(&self, sender: ProfileGenericCallback<()>) {
-        let _ = self.sender.send(MockDeviceMsg::Disconnect(sender));
+        if self.disconnected.get() {
+            let _ = sender.send(());
+            return;
+        }
+        self.disconnect_callbacks.borrow_mut().push(sender);
+        if self.disconnect_pending.replace(true) {
+            return;
+        }
+        let device = Trusted::new(self);
+        let tasks = self
+            .global()
+            .task_manager()
+            .dom_manipulation_task_source()
+            .to_sendable();
+        let callback = ProfileGenericCallback::new(move |_| {
+            let device = device.clone();
+            tasks.queue(task!(finish_mock_disconnect: move |_cx| {
+                device.root().finish_disconnect();
+            }));
+        });
+        if callback.is_err()
+            || self
+                .sender
+                .send(MockDeviceMsg::Disconnect(callback.unwrap()))
+                .is_err()
+        {
+            self.finish_disconnect();
+        }
+    }
+
+    fn finish_disconnect(&self) {
+        self.disconnected.set(true);
+        self.disconnect_pending.set(false);
+        let callbacks = std::mem::take(&mut *self.disconnect_callbacks.borrow_mut());
+        for callback in callbacks {
+            let _ = callback.send(());
+        }
     }
 }
 

@@ -3877,6 +3877,10 @@ impl ScriptThread {
         //   navigation start time set to navigationParams's response's timing
         //   info's start time.
         document.set_navigation_start(incomplete.navigation_start);
+        document.initialize_permissions_policy(
+            incomplete.target_snapshot_params.container_permissions_policy.clone(),
+            metadata.headers.as_deref(),
+        );
         document.set_container_embedder_policy(
             incomplete.target_snapshot_params.container_embedder_policy,
         );
@@ -4344,7 +4348,7 @@ impl ScriptThread {
             incomplete.load_data.url.clone(),
             incomplete.load_data.creation_sandboxing_flag_set,
             incomplete.parent_info,
-            incomplete.target_snapshot_params,
+            incomplete.target_snapshot_params.clone(),
             source_origin,
         );
         self.incomplete_parser_contexts
@@ -4579,7 +4583,7 @@ impl ScriptThread {
             incomplete.load_data.url.clone(),
             incomplete.load_data.creation_sandboxing_flag_set,
             incomplete.parent_info,
-            incomplete.target_snapshot_params,
+            incomplete.target_snapshot_params.clone(),
             source_origin,
         );
 
@@ -4631,7 +4635,7 @@ impl ScriptThread {
         let pipeline_id = incomplete.pipeline_id;
         let parent_info = incomplete.parent_info;
         let about_base_url = incomplete.load_data.about_base_url.clone();
-        let target_snapshot_params = incomplete.target_snapshot_params;
+        let target_snapshot_params = incomplete.target_snapshot_params.clone();
         self.incomplete_loads.borrow_mut().push(incomplete);
 
         let mut context = ParserContext::new(

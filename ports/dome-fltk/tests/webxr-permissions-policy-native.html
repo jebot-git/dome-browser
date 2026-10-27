@@ -1,0 +1,30 @@
+<!doctype html><meta charset=utf-8><title>Native XR document policy</title>
+<style>body{background:#11334c;color:white;font:18px monospace}button{padding:18px}</style>
+<button id=start>Validate document policy</button>
+<script>
+let order=0,count=0;const post=(type,data)=>fetch('/event',{method:'POST',body:JSON.stringify({order:++order,type,data})});
+const check=(passed,name)=>{count++;post('check',{passed:!!passed,name})};
+async function rejects(fn,name){try{await fn();return false}catch(error){return error.name===name}}
+requestAnimationFrame(()=>post('ready',{ratio:devicePixelRatio,viewport:[innerWidth,innerHeight],start:start.getBoundingClientRect().toJSON()}));
+start.onclick=async()=>{start.disabled=true;try{
+ const immersive=navigator.xr.requestSession('immersive-vr').then(()=>null,error=>error.name);
+ check(document.permissionsPolicy.allowsFeature('xr-spatial-tracking')===false,'Response policy disables spatial tracking');
+ check(await navigator.xr.isSessionSupported('inline')===true,'Inline support remains true under policy restriction');
+ check(await rejects(()=>navigator.xr.isSessionSupported('immersive-vr'),'SecurityError'),'Immersive VR support follows document policy');
+ check(await rejects(()=>navigator.xr.isSessionSupported('immersive-ar'),'SecurityError'),'Immersive AR support follows document policy');
+ check(await immersive==='NotSupportedError','Trusted immersive request rejects required spatial features');
+ for(const feature of ['local','local-floor','bounded-floor','unbounded'])check(await rejects(()=>navigator.xr.requestSession('inline',{requiredFeatures:[feature]}),'NotSupportedError'),'Required '+feature+' follows policy');
+ const viewer=await navigator.xr.requestSession('inline',{optionalFeatures:['local','local-floor','bounded-floor','unbounded']});
+ check(viewer.enabledFeatures.length===1&&viewer.enabledFeatures[0]==='viewer','Viewer session filters optional spatial features');await viewer.end();
+ for(const version of ['webgl','webgl2']){
+  const canvas=document.createElement('canvas');canvas.width=16;canvas.height=16;document.body.append(canvas);const gl=canvas.getContext(version,{xrCompatible:true});
+  check(!!gl,version+': ordinary graphics remain available');
+  check(gl.getContextAttributes().xrCompatible===false,version+': context creation ignores denied XR attribute');
+  let lost=0;canvas.addEventListener('webglcontextlost',event=>{lost++;event.preventDefault()});
+  await gl.makeXRCompatible();check(gl.getContextAttributes().xrCompatible===false,version+': compatibility resolves without granting access');
+  gl.clearColor(0,1,0,1);gl.clear(gl.COLOR_BUFFER_BIT);const pixel=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
+  check(pixel.join(',')==='0,255,0,255'&&gl.getError()===0&&!gl.isContextLost()&&lost===0,version+': policy no-op preserves the live GL context');
+ }
+ post('done',{count,versions:['webgl','webgl2'],noHost:false});
+ }catch(error){post('error',{name:error.name,message:error.message,stack:error.stack})}};
+</script>

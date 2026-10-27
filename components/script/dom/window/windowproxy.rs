@@ -405,6 +405,7 @@ impl WindowProxy {
             viewport_details: window.viewport_details(),
             user_content_manager_id: response.user_content_manager_id,
             target_snapshot_params: TargetSnapshotParams {
+                container_permissions_policy: None,
                 container_embedder_policy: Default::default(),
                 sandboxing_flags: sandboxing_flag_set,
                 iframe_element_referrer_policy: ReferrerPolicy::EmptyString,

@@ -89,6 +89,7 @@ pub(crate) struct HTMLIFrameElement {
     #[no_trace]
     about_blank_pipeline_id: Cell<Option<PipelineId>>,
     sandbox: MutNullableDom<DOMTokenList>,
+    permissions_policy_object: MutNullableDom<crate::dom::permissionspolicy::DOMPermissionsPolicy>,
     #[no_trace]
     sandboxing_flag_set: Cell<Option<SandboxingFlagSet>>,
     load_blocker: DomRefCell<Option<LoadBlocker>>,
@@ -153,8 +154,12 @@ impl HTMLIFrameElement {
         load_data: LoadData,
         history_handling: NavigationHistoryBehavior,
         mode: ProcessingMode,
-        target_snapshot_params: TargetSnapshotParams,
+        mut target_snapshot_params: TargetSnapshotParams,
     ) {
+        // A child self-navigation may carry a snapshot captured in a different
+        // script process. The parent owns the current container attributes.
+        target_snapshot_params.container_permissions_policy =
+            Some(std::sync::Arc::new(self.permissions_policy_snapshot()));
         self.start_new_pipeline(
             cx,
             load_data,
@@ -262,7 +267,7 @@ impl HTMLIFrameElement {
             is_private: false, // FIXME
             inherited_secure_context: load_data.inherited_secure_context,
             history_handling,
-            target_snapshot_params,
+            target_snapshot_params: target_snapshot_params.clone(),
             name: self.frozen_name.borrow().clone(),
         };
 
@@ -667,6 +672,7 @@ impl HTMLIFrameElement {
             pending_pipeline_id: Cell::new(None),
             about_blank_pipeline_id: Cell::new(None),
             sandbox: Default::default(),
+            permissions_policy_object: Default::default(),
             sandboxing_flag_set: Cell::new(None),
             load_blocker: DomRefCell::new(None),
             script_window_proxies: ScriptThread::window_proxies(),
@@ -707,6 +713,67 @@ impl HTMLIFrameElement {
     #[inline]
     pub(crate) fn webview_id(&self) -> Option<WebViewId> {
         self.webview_id.get()
+    }
+
+    pub(crate) fn permissions_policy_declared_origin(&self) -> servo_url::OriginSnapshot {
+        let element = self.upcast::<Element>();
+        let document = self.owner_document();
+        let sandbox = element.get_string_attribute(&local_name!("sandbox"));
+        let opaque = document
+            .active_sandboxing_flag_set()
+            .contains(SandboxingFlagSet::SANDBOXED_ORIGIN_BROWSING_CONTEXT_FLAG)
+            || (element.has_attribute(&local_name!("sandbox"))
+                && !sandbox
+                    .str()
+                    .split_ascii_whitespace()
+                    .any(|token| token.eq_ignore_ascii_case("allow-same-origin")));
+        let origin = if opaque {
+            servo_url::ImmutableOrigin::new_opaque()
+        } else if element.has_attribute(&local_name!("srcdoc")) {
+            document.origin().immutable().clone()
+        } else if element.has_attribute(&local_name!("src")) {
+            document
+                .base_url()
+                .join(&element.get_string_attribute(&local_name!("src")).str())
+                .map(|url| url.origin())
+                .unwrap_or_else(|_| document.origin().immutable().clone())
+        } else {
+            document.origin().immutable().clone()
+        };
+        if origin == *document.origin().immutable() {
+            document.origin().snapshot()
+        } else {
+            servo_url::MutableOrigin::new(origin).snapshot()
+        }
+    }
+
+    pub(crate) fn update_target_policy_snapshot(&self) {
+        let Some(id) = self.browsing_context_id() else {
+            return;
+        };
+        let _ = self
+            .owner_window()
+            .as_global_scope()
+            .script_to_constellation_chan()
+            .send(ScriptToConstellationMessage::UpdateIFrameTargetSnapshot(
+                id,
+                snapshot_self(self),
+            ));
+    }
+
+    pub(crate) fn permissions_policy_snapshot(
+        &self,
+    ) -> net_traits::permissions_policy::ContainerPolicy {
+        let document = self.owner_document();
+        net_traits::permissions_policy::ContainerPolicy::new(
+            document.permissions_policy(),
+            document.origin().snapshot(),
+            self.permissions_policy_declared_origin(),
+            &self
+                .upcast::<Element>()
+                .get_string_attribute(&local_name!("allow"))
+                .str(),
+        )
     }
 
     #[inline]
@@ -932,6 +999,17 @@ impl LayoutDom<'_, HTMLIFrameElement> {
 }
 
 impl HTMLIFrameElementMethods<crate::DomTypeHolder> for HTMLIFrameElement {
+    make_getter!(Allow, "allow");
+    make_setter!(SetAllow, "allow");
+
+    fn PermissionsPolicy(
+        &self,
+        cx: &mut JSContext,
+    ) -> DomRoot<crate::dom::permissionspolicy::DOMPermissionsPolicy> {
+        self.permissions_policy_object
+            .or_init(|| crate::dom::permissionspolicy::DOMPermissionsPolicy::new(cx, self.upcast()))
+    }
+
     // https://html.spec.whatwg.org/multipage/#dom-iframe-src
     make_url_getter!(Src, "src");
 
@@ -1170,6 +1248,9 @@ impl VirtualMethods for HTMLIFrameElement {
             },
             _ => {},
         }
+        if matches!(*attr.local_name(), local_name!("allow") | local_name!("sandbox") | local_name!("src") | local_name!("srcdoc") | local_name!("referrerpolicy")) {
+            self.update_target_policy_snapshot();
+        }
     }
 
     fn attribute_affects_presentational_hints(&self, attr: AttrRef<'_>) -> bool {
@@ -1274,6 +1355,7 @@ impl ResourceTimingListener for IframeContext {
 fn snapshot_self(iframe: &HTMLIFrameElement) -> TargetSnapshotParams {
     let child_navigable = iframe.GetContentWindow();
     TargetSnapshotParams {
+        container_permissions_policy: Some(std::sync::Arc::new(iframe.permissions_policy_snapshot())),
         container_embedder_policy: iframe
             .owner_document()
             .policy_container()

@@ -45,6 +45,8 @@ use malloc_size_of::MallocSizeOfOps;
 use metrics::{InteractiveFlag, InteractiveWindow, ProgressiveWebMetrics};
 use net_traits::CoreResourceMsg::{GetCookieStringForUrl, SetCookiesForUrl};
 use net_traits::image_cache::ImageCache;
+use net_traits::permissions_policy::{ContainerPolicy, PermissionsPolicy, PolicyFeature};
+use crate::dom::permissionspolicy::DOMPermissionsPolicy;
 use net_traits::policy_container::{EmbedderPolicyValue, PolicyContainer};
 use net_traits::pub_domains::is_pub_domain;
 use net_traits::request::{
@@ -563,6 +565,12 @@ pub(crate) struct Document {
     policy_container: DomRefCell<StdArc<PolicyContainer>>,
     #[no_trace]
     container_embedder_policy: Cell<EmbedderPolicyValue>,
+    #[no_trace]
+    permissions_policy: DomRefCell<PermissionsPolicy>,
+    #[no_trace]
+    #[conditional_malloc_size_of]
+    container_permissions_policy: DomRefCell<Option<StdArc<ContainerPolicy>>>,
+    permissions_policy_object: MutNullableDom<DOMPermissionsPolicy>,
     /// <https://html.spec.whatwg.org/multipage/#map-of-preloaded-resources>
     #[no_trace]
     preloaded_resources: DomRefCell<PreloadedResources>,
@@ -1262,6 +1270,7 @@ impl Document {
 
     pub(crate) fn set_url(&self, url: ServoUrl) {
         *self.url.borrow_mut() = url;
+        self.refresh_iframe_policy_snapshots();
         self.queue_cosmetic_filter_reset();
     }
 
@@ -1271,6 +1280,7 @@ impl Document {
 
     pub(crate) fn set_about_base_url(&self, about_base_url: Option<ServoUrl>) {
         *self.about_base_url.borrow_mut() = about_base_url;
+        self.refresh_iframe_policy_snapshots();
     }
 
     /// <https://html.spec.whatwg.org/multipage/#fallback-base-url>
@@ -1377,6 +1387,7 @@ impl Document {
             .next();
         self.target_base_element
             .set(new_target_base_element.as_deref());
+        self.refresh_iframe_policy_snapshots();
     }
 
     pub(crate) fn quirks_mode(&self) -> QuirksMode {
@@ -2104,6 +2115,49 @@ impl Document {
 
     pub(crate) fn policy_container(&self) -> Ref<'_, StdArc<PolicyContainer>> {
         self.policy_container.borrow()
+    }
+
+    fn refresh_iframe_policy_snapshots(&self) {
+        for iframe in self
+            .upcast::<Node>()
+            .traverse_preorder(ShadowIncluding::Yes)
+            .filter_map(DomRoot::downcast::<HTMLIFrameElement>)
+        {
+            iframe.update_target_policy_snapshot();
+        }
+    }
+
+    pub(crate) fn permissions_policy(&self) -> PermissionsPolicy {
+        let mut policy = self.permissions_policy.borrow().clone();
+        policy.refresh_self_origin(&self.origin().snapshot());
+        policy
+    }
+
+    pub(crate) fn container_permissions_policy(&self) -> Option<StdArc<ContainerPolicy>> {
+        self.container_permissions_policy.borrow().clone()
+    }
+
+    pub(crate) fn initialize_permissions_policy(
+        &self,
+        container: Option<StdArc<ContainerPolicy>>,
+        headers: Option<&http::HeaderMap>,
+    ) {
+        *self.permissions_policy.borrow_mut() = PermissionsPolicy::for_document(
+            container.as_deref(),
+            &self.origin().snapshot(),
+            headers,
+        );
+        *self.container_permissions_policy.borrow_mut() = container;
+    }
+
+    pub(crate) fn allowed_to_use_policy_feature(&self, feature: PolicyFeature) -> bool {
+        self.has_browsing_context
+            && self.is_fully_active()
+            && self.permissions_policy().allows(
+                feature,
+                &self.origin().snapshot(),
+                &self.origin().snapshot(),
+            )
     }
 
     pub(crate) fn container_embedder_policy(&self) -> EmbedderPolicyValue {
@@ -3629,7 +3683,7 @@ impl Document {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#allowed-to-use>
-    pub(crate) fn allowed_to_use_feature(&self, _feature: PermissionName) -> bool {
+    pub(crate) fn allowed_to_use_feature(&self, feature: PermissionName) -> bool {
         // Step 1. If document's browsing context is null, then return false.
         if !self.has_browsing_context {
             return false;
@@ -3643,9 +3697,11 @@ impl Document {
         // Step 3. If the result of running is feature enabled in document for origin on
         // feature, document, and document's origin is "Enabled", then return true.
         // Step 4. Return false.
-        // TODO: All features are currently enabled for `Document`s because we do not
-        // implement the Permissions Policy specification.
-        true
+        match feature {
+            PermissionName::Geolocation => self.allowed_to_use_policy_feature(PolicyFeature::Geolocation),
+            PermissionName::Gamepad => self.allowed_to_use_policy_feature(PolicyFeature::Gamepad),
+            _ => true,
+        }
     }
 
     /// Add an [`IntersectionObserver`] to the [`Document`], to be processed in the [`Document`]'s event loop.
@@ -4341,6 +4397,9 @@ impl Document {
             target_element: MutNullableDom::new(None),
             policy_container: DomRefCell::new(StdArc::new(PolicyContainer::default())),
             container_embedder_policy: Cell::new(EmbedderPolicyValue::UnsafeNone),
+            permissions_policy: DomRefCell::new(PermissionsPolicy::default()),
+            container_permissions_policy: DomRefCell::new(None),
+            permissions_policy_object: MutNullableDom::new(None),
             preloaded_resources: Default::default(),
             ignore_destructive_writes_counter: Default::default(),
             ignore_opens_during_unload_counter: Default::default(),
@@ -5713,6 +5772,11 @@ impl Document {
 }
 
 impl DocumentMethods<crate::DomTypeHolder> for Document {
+    fn PermissionsPolicy(&self, cx: &mut JSContext) -> DomRoot<DOMPermissionsPolicy> {
+        self.permissions_policy_object
+            .or_init(|| DOMPermissionsPolicy::new(cx, self.upcast()))
+    }
+
     /// <https://dom.spec.whatwg.org/#dom-document-document>
     fn Constructor(
         cx: &mut JSContext,
@@ -5982,6 +6046,7 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
 
         // Step 7. Set this's origin's domain to the result of parsing the given value.
         self.origin().set_domain(host);
+        self.refresh_iframe_policy_snapshots();
 
         Ok(())
     }

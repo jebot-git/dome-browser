@@ -308,7 +308,9 @@ impl WebGLRenderingContext {
                 },
             };
             #[cfg(feature = "webxr")]
-            if attrs.xr_compatible && pref!(dom_webxr_enabled) && window.Document().is_fully_active() {
+            if attrs.xr_compatible && pref!(dom_webxr_enabled) && window.Document()
+                .allowed_to_use_policy_feature(net_traits::permissions_policy::PolicyFeature::XrSpatialTracking)
+            {
                 context.xr_compatible.set(context.check_xr_compatible_sync(window).is_ok());
             }
             context
@@ -5514,7 +5516,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             promise.reject_error(cx, Error::InvalidState(None));
             return promise;
         };
-        if !window.Document().is_fully_active() {
+        if !window.Document().allowed_to_use_policy_feature(net_traits::permissions_policy::PolicyFeature::XrSpatialTracking) {
             promise.resolve_native(cx, &());
             return promise;
         }

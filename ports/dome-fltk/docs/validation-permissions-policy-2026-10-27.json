@@ -1,0 +1,344 @@
+{
+  "completed_utc": "2026-10-27T19:00:27.328783+00:00",
+  "source_base_commit": "5e4134dd39f87e402c7b7e94d7c333707e491e9a",
+  "candidate_sha256": "5a4b853a5c64e4d64a1753581d52398f7c64f0d7c2c9e62d2b4fd5aa18bc79cb",
+  "test_embedder_sha256": "9a8f48e4ba656119c14d369404be6cf5e11404eeaef9c000fdfa64414e50d4d7",
+  "compiled_inputs_unchanged": true,
+  "source_file_sha256": {
+    "Cargo.lock": "f589b019bb0d9dfb3f9acf2d161b5a7303b6e82ef2e0f10b2829b7211d358eb0",
+    "components/constellation/constellation.rs": "6401ffa7a47605e45384b4c91bf0d2841e99d4c01c2c05a141c7bc78c4f5b408",
+    "components/constellation/tracing.rs": "ca26b95f7819eb65e29dc339df85fb268c73850dfb29328f303c0e0c78538332",
+    "components/script/dom/document/document.rs": "d9c8f10f3bbb51514537b9c9285d5dcb256e5bbaedd57b99f33d02b0a88ea0b5",
+    "components/script/dom/html/embedded_content/htmliframeelement.rs": "3032a565290302636e528d0d6a27a2f18668b379356b763d2774d0ed298a69e3",
+    "components/script/dom/permission/mod.rs": "a1e4167c7722e3e7ad005b52a4a95807ee8cc9893a56ee219acebed8d89f7ed4",
+    "components/script/dom/webgl/webglrenderingcontext.rs": "84b4ed5f8652e25b8fba8463ebc52d3a7a4771eff8634dae420a1657304ee2c3",
+    "components/script/dom/webxr/fakexrdevice.rs": "108945deefc03e714c077eb6a5d611ce8eeff02bd500286b3e4ae238fd3aa266",
+    "components/script/dom/webxr/xrsystem.rs": "62cf38bc5389e492a5861546fd34debd3908dbf28dd5da6684cdd36032001702",
+    "components/script/dom/window/windowproxy.rs": "11d976ee629eab02ae1026492fdae78276686a8a5dced99b10dc397cadfcf331",
+    "components/script/event_loop/script_thread.rs": "71b628538fb997b71a4a8be59fef7105173919518f84d0bbd92ab623cbc33882",
+    "components/script/navigation.rs": "ebde7b520d3933a8da59f72ed048f5f9db4abc4213994c48eb0e900dada52de0",
+    "components/script_bindings/codegen/Bindings.conf": "9a48ef05c9f655ed675d48c6e06bb6d887f10cc63ca46276a25adce437758e05",
+    "components/script_bindings/webidls/HTMLIFrameElement.webidl": "e72be3ca76eaedb2738618f347d22bfda0974af410864db0957d729f82dca146",
+    "components/shared/constellation/from_script_message.rs": "36b40b2d870f2c6f55dd0ffb93b78b876cd50f9f306085a4ed2f54b97f271feb",
+    "components/shared/net/Cargo.toml": "5b65b0556c7ef01c70dc7311fb3bb2fb86792a07e7f4afc6de291470bf401f45",
+    "components/shared/net/lib.rs": "644c563e3ea92441a4f4cf9543c93d431a8111cc651e905ab012c28617c54e63",
+    "ports/dome-fltk/examples/xr-native-input.rs": "c5197a2045fda339bb80a9324ec53adb59f460bc975da995d90133059ca31310",
+    "ports/dome-fltk/tests/native-pen-browser.py": "bca82ba8a594de83258b23f99185443dc8bca74fbf85a6a5a59f14b56252d8bd",
+    "ports/dome-fltk/tests/webxr-context-compatibility.py": "3d0da12ce40c888306f761226877d23cc50e2289ff69711d9ece6c1e4aa83f41",
+    "components/script/dom/permission/permissionspolicy.rs": "cacdcf5b175df59fea28706334436911ec9c05816a5e8ba1b9e774c59c33df75",
+    "components/script_bindings/webidls/PermissionsPolicy.webidl": "22cfe25e297dbd3912f445d93074ea623e21eb1867e2084b2b1b0a0de5b69b2b",
+    "components/shared/net/permissions_policy.rs": "4f599ca2d411d7be1b5c78c47d579eba1117d811bf6d250d33c983f1fb991c1c",
+    "components/shared/net/tests/permissions_policy.rs": "e40fa0e92afc4b4558d3dfe3c82d1eed84f7262a65e370dad2b36453fb4f751c",
+    "ports/dome-fltk/docs/PERMISSIONS_POLICY.md": "5e5ed4ded70b5093f3fd3d4790144e6760ba83813e46aceb7e3316b5ad214756",
+    "ports/dome-fltk/tests/webxr-permissions-policy-native.html": "c0a931addeffa930ca3ca05002c47e1dd2c37992aea84848ca21a11ba66a0812",
+    "ports/dome-fltk/tests/webxr-permissions-policy-probe.js": "277c779ea6d40057c8d5df19892dba9a7aeae6cf4cc83659fecd9af4f7a72f49",
+    "ports/dome-fltk/tests/webxr-permissions-policy.html": "ab715e7a967234c3a4fc6f28a38cbc0c3d291db798960ebe94cf01f7c093b97a",
+    "ports/dome-fltk/tests/webxr-permissions-policy.py": "0c6360ad4ccfebde4f416f895746b7eac9fd30dc6592d7ddd7398a16cc090a98"
+  },
+  "selected_units": 224,
+  "runtime_checks": 7383,
+  "worker_shutdown_cases": 3,
+  "upstream_passed_cases": 561,
+  "upstream_optional_unsupported": 4,
+  "regression_jobs": 41,
+  "all_required_passed": true,
+  "initial_regression_failures": [
+    {
+      "job": "native-pen",
+      "exit": 0,
+      "report": "/home/blux/de-xr/artifacts/servo-rendering-goal/webxr-permissions-policy-v1/r2-native-pen-synchronized/report.json",
+      "report_sha256": "048fff2726b5dd8404a743e177d9064e0d2e55665da7fb32fdac64be1f709f5e",
+      "initial_report": "r2-native-pen/report.json",
+      "explanation": "Test observation now waits for the new pointermove report before evaluating the unchanged assertions. All 87 checks pass.",
+      "synchronization_audit": "native-pen-driver-synchronization.json"
+    }
+  ],
+  "additional_pen_confirmations": 174,
+  "all_original_upstream_assertions_passed": false,
+  "upstream_obsolete_expectation_cases": 1,
+  "compiled_input_count": 46,
+  "units": [
+    {
+      "name": "permissions-policy",
+      "passed": 15,
+      "log_sha256": "384e66d481e9b837ee697747eba90f403579971f6755cac14ff6878a5b6fce58"
+    },
+    {
+      "name": "frontend",
+      "passed": 184,
+      "log_sha256": "baaa64005d1f7f8ca35a6d45ef0e3e06c3f5e978ef3be5c3c2fb49dffa52a1e1"
+    },
+    {
+      "name": "geometry",
+      "passed": 10,
+      "log_sha256": "88de42d24c1fb4caf2ad93a7fea86904f4301b836edf0b6d5d8d97c2ecba3900"
+    },
+    {
+      "name": "pointer-ids",
+      "passed": 2,
+      "log_sha256": "ba2831edf48220641c776c05e1aa6538df7f3cce0c511e25a5c28b045f0ae1d1"
+    },
+    {
+      "name": "pen-payload",
+      "passed": 3,
+      "log_sha256": "6a3589cb3f7511a3f933b4fdbed6e8d11174610ae941228b3b98cbf78f08b273"
+    },
+    {
+      "name": "factory",
+      "passed": 1,
+      "log_sha256": "550ba8dda635e8a0f950de98c6a9d6c3823b4ff589d8f9c90c339b7d6760c27e"
+    },
+    {
+      "name": "secondary",
+      "passed": 4,
+      "log_sha256": "dd54381cea2872c0a2b9bf16258857bdaf78136d33a2f7beff8da876bc678288"
+    },
+    {
+      "name": "renderer",
+      "passed": 5,
+      "log_sha256": "29d7b079c2c9d787530fcdf084152c6a4ce76551dcf24520c2e6206af4201a0a"
+    }
+  ],
+  "suites": [
+    {
+      "name": "general-new",
+      "runtime_checks": 46,
+      "report_sha256": "90ae9fa47a09d413d31d88329faa5e9b44df0d28fe73493d31a325e823e1066a"
+    },
+    {
+      "name": "general-old",
+      "runtime_checks": 46,
+      "report_sha256": "90ae9fa47a09d413d31d88329faa5e9b44df0d28fe73493d31a325e823e1066a"
+    },
+    {
+      "name": "native-touch",
+      "runtime_checks": 22,
+      "report_sha256": "c57fa2adefec30239e4c5bb6ec1dc661b34e36aae8bee7f6f00a47e6a6901668"
+    },
+    {
+      "name": "mouse-inline",
+      "runtime_checks": 34,
+      "report_sha256": "2ddc1d8ffa894981df7e08fe088fa5d458725967c32d34e7e5a8ddab28cbf8f5"
+    },
+    {
+      "name": "controller",
+      "runtime_checks": 60,
+      "report_sha256": "3a44f9e48894a618856712ed34903329bd31afbe5cee1fb4d3078203da5c61ef"
+    },
+    {
+      "name": "mouse-immersive",
+      "runtime_checks": 38,
+      "report_sha256": "4546e23d3a520f4c78a2eef4dc8dd520ce0e1af952d40c05f23e95de690f1867"
+    },
+    {
+      "name": "reset",
+      "runtime_checks": 101,
+      "report_sha256": "a6758343ad284bb8385b352c8e8526f5817def779fea51bd9185f90087053df6"
+    },
+    {
+      "name": "engine-touch",
+      "runtime_checks": 43,
+      "report_sha256": "b536baf6055aa519c81011296e41c75f8239564f79dba8fdbba2ba4debffb092"
+    },
+    {
+      "name": "visibility",
+      "runtime_checks": 77,
+      "report_sha256": "27de8c44c71d00d4cd166be7ef1576feb5997ae49c8e907db90bd19a23f33d39"
+    },
+    {
+      "name": "frame-same",
+      "runtime_checks": 17,
+      "report_sha256": "c8206cb861c5b8ed07ed637bf0ea5aac70025aeba7b31449e1e3ecab8589d6d9"
+    },
+    {
+      "name": "frame-cross",
+      "runtime_checks": 17,
+      "report_sha256": "9dc1e73698fe52e7a1ed08e042d4ab40099f69b7f71ccf22b497c848dfa70372"
+    },
+    {
+      "name": "outcomes",
+      "runtime_checks": 9,
+      "report_sha256": "3ea178e01294ab974c3ac19b029a8e42305727f31f66155b7cfc2bf1055ec4d2"
+    },
+    {
+      "name": "native-pen",
+      "runtime_checks": 87,
+      "report_sha256": "048fff2726b5dd8404a743e177d9064e0d2e55665da7fb32fdac64be1f709f5e"
+    },
+    {
+      "name": "upstream",
+      "upstream_passed_cases": 7,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "d5802ca468f2def7cdd3169655fa219d24a6a4d20da00fc1745c6b621869d7d2"
+    },
+    {
+      "name": "layer-scaling",
+      "runtime_checks": 369,
+      "report_sha256": "75e25bad14b91ca12ec5c9e6e99fb3f2f0c5be80dfc7441386e487754f8e8aef"
+    },
+    {
+      "name": "bounded",
+      "runtime_checks": 21,
+      "report_sha256": "1b4e8da22af69372391e3f310d0007e7ae9d3cf70ab222b09f1f70ee0916c4cb"
+    },
+    {
+      "name": "layers-upstream",
+      "upstream_passed_cases": 22,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "25e447f467269582c7cc33711ad6f40c8eaf12d83843c4fec8c185c5beaee709"
+    },
+    {
+      "name": "reset-upstream",
+      "upstream_passed_cases": 4,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "c5907313c67f6e913f03fb7d79d2be10a0da5705e9211231c46f24f74e129e8c"
+    },
+    {
+      "name": "layer-attributes",
+      "runtime_checks": 1037,
+      "report_sha256": "935ef08bbee2ea29adbf0ca7acae06d247cb5e1a4a1ea012cbd2163c1638233e"
+    },
+    {
+      "name": "layer-attributes-opaque-context",
+      "runtime_checks": 1037,
+      "report_sha256": "578c77fec041d816933e3805d5322babdefe9b114a5e54765cf0a0038d551888"
+    },
+    {
+      "name": "compatibility-native",
+      "runtime_checks": 45,
+      "report_sha256": "bd717e12854d92b1acd53ebd39562ba1262672142b809a1abc6989e177d7ee90"
+    },
+    {
+      "name": "compatibility-nohost",
+      "runtime_checks": 31,
+      "report_sha256": "24ca18950fae4b22e8725a3bfa8925aa36b36f6a05fa03bc20da56c7aec0910f"
+    },
+    {
+      "name": "dynamic-upstream",
+      "upstream_passed_cases": 24,
+      "upstream_optional_unsupported": 4,
+      "report_sha256": "c7020117df9059336e473f8c90120e7a27a55019a8ecd68dfdf923581c17d090"
+    },
+    {
+      "name": "dynamic",
+      "runtime_checks": 610,
+      "report_sha256": "3542c729514a360a3172ae31d5e2be5f3ecd64793af7957838a1f73c49a603e8"
+    },
+    {
+      "name": "secondary",
+      "runtime_checks": 624,
+      "report_sha256": "c95b28ada733eb27d72d08b5dcbd4e8ef72c9b64d301b75653f6fde500d49d53"
+    },
+    {
+      "name": "secondary-upstream",
+      "upstream_passed_cases": 12,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "cf9dcd4e7606e4395bf3c0d0d90923bc1bfe96466c116e9c8ee0bf840689bdcc"
+    },
+    {
+      "name": "pdf-new",
+      "runtime_checks": 25,
+      "report_sha256": "0f8afd5a5933b02460e19f33408c9fbdcbe34cf3f2a8588bdf04396a6186a3fe"
+    },
+    {
+      "name": "pdf-old",
+      "runtime_checks": 25,
+      "report_sha256": "0f8afd5a5933b02460e19f33408c9fbdcbe34cf3f2a8588bdf04396a6186a3fe"
+    },
+    {
+      "name": "history-new",
+      "runtime_checks": 13,
+      "report_sha256": "ba4744523b3d403140db5bba0ef7e82d7c23276821c8d65c7d4eb4bbb003da15"
+    },
+    {
+      "name": "history-old",
+      "runtime_checks": 13,
+      "report_sha256": "ba4744523b3d403140db5bba0ef7e82d7c23276821c8d65c7d4eb4bbb003da15"
+    },
+    {
+      "name": "external-links",
+      "runtime_checks": 63,
+      "report_sha256": "20d1efd857f21c1fac6ef96418a30e52d52c870fb450869d515f65eacde43444"
+    },
+    {
+      "name": "wasm-streams",
+      "runtime_checks": 17,
+      "report_sha256": "e0344561fb6f2bb81debc9d1513543f3534b571b51a7189a2f141cb151ac8198"
+    },
+    {
+      "name": "downloads",
+      "runtime_checks": 18,
+      "report_sha256": "27ec34500378844c8a750bc4c2a53d85ecaaa5e96c6df06ac5dd75b71705ea49"
+    },
+    {
+      "name": "webgl-loss",
+      "runtime_checks": 280,
+      "upstream_passed_cases": 489,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "2bc0f3ecb5c8afae95c11977ae7fadabf867db80a5e73a7f6f6eac4f4e93fdd7"
+    },
+    {
+      "name": "worker-shutdown",
+      "worker_shutdown_cases": 3,
+      "report_sha256": "a5b74c98fcc426898ae0e525e06a955514364ca5fd0f457ce9a68fcd5c9298b4"
+    },
+    {
+      "name": "xr-loss",
+      "runtime_checks": 68,
+      "report_sha256": "3bee3a39c94d84d2e5b5d48b1a69bf511f7aba8f202227d25379ee6c2e3c9ab4"
+    },
+    {
+      "name": "webgl-gc",
+      "runtime_checks": 16,
+      "report_sha256": "8b7a6a0fbb1f0fc3ceef110522a7dd6e335636c6013f9a1073e30e724b9e16e8"
+    },
+    {
+      "name": "policy-mock",
+      "runtime_checks": 575,
+      "document_scenarios": 34,
+      "report_sha256": "c6929874275cb65cc99d215db0b8e4ee3160ad727ce4b39ab2258f88076f4592"
+    },
+    {
+      "name": "policy-upstream",
+      "runtime_checks": 2,
+      "upstream_passed_cases": 3,
+      "upstream_obsolete_expectation_cases": 1,
+      "all_original_upstream_assertions_passed": false,
+      "report_sha256": "97bd6dce1a71010e77efc14326202cebde71fee57dbcfb105bb7c9aaaa1e0dd8"
+    },
+    {
+      "name": "policy-history",
+      "runtime_checks": 1874,
+      "document_scenarios": 115,
+      "report_sha256": "975cd0a44d5e92c185060bf162efc2fcc3cbbc3aa1b9cf26344d47b4368c838d"
+    },
+    {
+      "name": "policy-native",
+      "runtime_checks": 23,
+      "report_sha256": "b075f0c4e668f1cbbcbad66c65e4b53da0972ec547a328999ed9cae13c514396"
+    }
+  ],
+  "initial_reports": [
+    "before/report.json",
+    "upstream-before/report.json",
+    "r1-policy-history/report.json",
+    "r1-policy-upstream-diagnostic/report.json"
+  ],
+  "remaining": [
+    "Automatic GPU-reset detection, adapter migration and capability changes",
+    "Permissions Policy reporting/report-only delivery, further feature registrations, and positive WebXR devicechange delivery",
+    "DomeD shell touch/stylus interactions beyond native client surfaces",
+    "Dynamic scaling on optional native backends",
+    "Physical device validation",
+    "Continuous stability, web adblocking/privacy and local workstation protection maintenance",
+    "Final standards-focused Discord/x.com rendering"
+  ],
+  "unadvertised_features": [
+    "OffscreenCanvas"
+  ],
+  "physical_device_validation": false,
+  "optional_windows_openxr_compiled": false,
+  "installed": false,
+  "sessions_restarted": false,
+  "artifacts_directory": "artifacts/servo-rendering-goal/webxr-permissions-policy-v1"
+}

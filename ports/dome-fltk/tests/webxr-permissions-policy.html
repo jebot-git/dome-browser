@@ -1,0 +1,97 @@
+<!doctype html><meta charset=utf-8><title>WebXR Permissions Policy</title>
+<script src="/probe.js"></script>
+<script>
+const state=window.test={ready:true,finished:false,error:null,checks:[],cases:[]};
+state.snapshot=()=>({...state,snapshot:undefined});
+function check(value,name){state.checks.push({name,passed:!!value})}
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+function resultFor(frame){return new Promise((resolve,reject)=>{
+ const timeout=setTimeout(()=>{removeEventListener('message',receive);reject(Error('Frame report timed out'))},15000);
+ function receive(event){if(event.source===frame.contentWindow&&event.data&&event.data.policyProbe){clearTimeout(timeout);removeEventListener('message',receive);resolve(event.data.policyProbe)}}
+ addEventListener('message',receive);
+})}
+function validate(result,allowed,label,{gl=false,geo=allowed,gamepad=true}={}){
+ state.cases.push({label,result});
+ check(result.policy!==null,label+': policy introspection available');
+ if(result.policy){const p=result.policy;check(p.same,label+': policy object is stable');check(p.xr===allowed,label+': effective spatial policy');check(p.geo===geo,label+': geolocation default and declaration');check(p.gamepad===gamepad,label+': gamepad wildcard default and declaration');check(p.features.includes('xr-spatial-tracking')&&!p.unknown&&!p.invalid,label+': registered features and invalid origin handling');check(p.allowed.includes('xr-spatial-tracking')===allowed,label+': allowedFeatures follows policy');check(allowed?p.allowlist.length>0:p.allowlist.length===0,label+': effective allowlist');}
+ check(gamepad?result.gamepads===true:result.gamepads?.error==='SecurityError',label+': gamepad API follows effective policy');
+ if(!geo)check(result.geolocationPermission==='denied',label+': geolocation permission query follows effective policy');
+ check(result.inline===true,label+': inline support remains available');
+ for(const mode of ['vr','ar'])check(allowed?result[mode]===(mode==='vr'):result[mode]?.error==='SecurityError',label+': '+mode+' availability follows policy');
+ check(Array.isArray(result.viewer)&&result.viewer.includes('viewer'),label+': viewer session remains usable');
+ check(allowed?Array.isArray(result.local)&&result.local.includes('local'):result.local?.error==='NotSupportedError',label+': required spatial feature negotiation');
+ check(Array.isArray(result.optional)&&(allowed||result.optional.every(feature=>feature==='viewer')),label+': optional spatial features omitted when denied');
+ if(gl)for(const item of result.gl||[])check(!item.error&&item.initial===allowed&&item.after===allowed,label+': '+item.version+' context compatibility follows policy');
+}
+async function main(){
+ const config=await(await fetch('/config.json')).json();const same=location.origin,cross=config.crossOrigin;
+ const identity=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
+ const device=await navigator.xr.test.simulateDeviceConnection({supportedModes:['inline','immersive-vr'],supportedFeatures:['viewer','local','local-floor','bounded-floor','unbounded'],viewerOrigin:{position:[0,0,0],orientation:[0,0,0,1]},views:['left','right'].map(eye=>({eye,resolution:{width:16,height:16},projectionMatrix:identity,viewOffset:{position:[0,0,0],orientation:[0,0,0,1]}}))});
+ validate(await policyProbe(true),true,'Top-level default',{gl:true});
+ async function run(label,{origin=same,allow='',header='',sandbox=null,redirect=null,selfnav=false,nested=null,srcdoc=false,data=false,gl=false,expected=true,geo=expected,gamepad=true}={}){
+  const frame=document.createElement('iframe');frame.allow=allow;if(sandbox!==null)frame.setAttribute('sandbox',sandbox);
+  const url=new URL('/frame',origin);if(header)url.searchParams.set('policy',header);if(gl)url.searchParams.set('gl','1');if(nested)url.searchParams.set('nested',JSON.stringify(nested));if(selfnav)url.searchParams.set('selfnav','1');
+  if(redirect)url.searchParams.set('redirect',redirect);
+  const html='<script src="'+same+'/probe.js"><\/script><script>policyProbe('+gl+').then(result=>parent.postMessage({policyProbe:result},"*"))<\/script>';
+  if(srcdoc)frame.srcdoc=html;else if(data)frame.src='data:text/html,'+encodeURIComponent(html);else frame.src=url;
+  const pending=resultFor(frame);document.body.append(frame);const result=await pending;
+  validate(result,expected,label,{gl,geo,gamepad});
+  const p=frame.permissionsPolicy;check(!!p&&p===frame.permissionsPolicy,label+': stable iframe introspection');
+  frame.remove();
+ }
+ await run('Same-origin default');
+ await run('Cross-origin default',{origin:cross,expected:false,geo:false});
+ await run('Cross-origin bare delegation',{origin:cross,allow:'xr-spatial-tracking',geo:false,gl:true});
+ await run('Cross-origin src delegation',{origin:cross,allow:"xr-spatial-tracking 'SRC'",geo:false});
+ await run('Cross-origin self restriction',{origin:cross,allow:"xr-spatial-tracking 'self'",expected:false,geo:false});
+ await run('Explicit origin delegation',{origin:cross,allow:'xr-spatial-tracking '+cross,geo:false});
+ await run('Same-origin none',{allow:"xr-spatial-tracking 'none'",expected:false,geo:true,gl:true});
+ await run('First attribute directive wins',{allow:"xr-spatial-tracking 'none'; xr-spatial-tracking *",expected:false,geo:true});
+ await run('Header disables all three features',{header:'xr-spatial-tracking=(), geolocation=(), gamepad=()',expected:false,geo:false,gamepad:false,gl:true});
+ await run('Header self',{header:'xr-spatial-tracking=self'});
+ await run('Header wildcard',{header:'xr-spatial-tracking=*'});
+ await run('Malformed header ignored',{header:'xr-spatial-tracking=('});
+ await run('Unknown header member ignored',{header:'not-real=(), xr-spatial-tracking=*'});
+ await run('Header denies delegation to nested frame',{header:'xr-spatial-tracking=()',expected:false,geo:false,nested:{origin:cross,allow:'xr-spatial-tracking *',header:'xr-spatial-tracking=*'}});
+ await run('Nested default cannot be reenabled',{origin:cross,expected:false,geo:false,nested:{origin:same,allow:'xr-spatial-tracking *',header:'xr-spatial-tracking=*'}});
+ await run('Header self limits nested explicit delegation',{header:'xr-spatial-tracking=self',expected:false,geo:false,nested:{origin:cross,allow:'xr-spatial-tracking *'}});
+ await run('Header with parent and target enables nested delegation',{header:'xr-spatial-tracking=(self "'+cross+'")',geo:false,nested:{origin:cross,allow:'xr-spatial-tracking *'}});
+ await run('Redirect does not expand src delegation',{allow:'xr-spatial-tracking',redirect:cross+'/frame',expected:false,geo:false});
+ await run('Wildcard follows redirect',{allow:'xr-spatial-tracking *',redirect:cross+'/frame',geo:false});
+ await run('Cross-origin self navigation keeps restriction',{origin:cross,selfnav:true,expected:false,geo:false});
+ await run('Cross-origin self navigation keeps delegation',{origin:cross,selfnav:true,allow:'xr-spatial-tracking',geo:false});
+ await run('Srcdoc inherits parent',{srcdoc:true});
+ await run('Srcdoc restriction',{srcdoc:true,allow:"xr-spatial-tracking 'none'",expected:false,geo:true});
+ await run('Sandbox opaque default',{sandbox:'allow-scripts',expected:false,geo:false});
+ await run('Sandbox explicit wildcard',{sandbox:'allow-scripts',allow:'xr-spatial-tracking *',geo:false});
+ await run('Sandbox same-origin flag',{sandbox:'allow-scripts allow-same-origin'});
+ await run('Data opaque default',{data:true,expected:false,geo:false});
+ await run('Data opaque wildcard',{data:true,allow:'xr-spatial-tracking *',geo:false});
+ // Changes affect observable iframe policy immediately, but the child effective
+ // policy only changes when it navigates. Exercise both directions.
+ const frame=document.createElement('iframe');frame.src=cross+'/frame';let pending=resultFor(frame);document.body.append(frame);validate(await pending,false,'Dynamic initial',{geo:false});
+ frame.allow='xr-spatial-tracking *';check(frame.permissionsPolicy?.allowsFeature('xr-spatial-tracking')===true,'Attribute change updates iframe observable policy');
+ pending=resultFor(frame);frame.contentWindow.postMessage({probe:true},'*');validate(await pending,false,'Dynamic existing child remains restricted',{geo:false});
+ pending=resultFor(frame);frame.contentWindow.postMessage({navigate:true},'*');validate(await pending,true,'Dynamic navigation uses updated container policy',{geo:false});
+ frame.allow="xr-spatial-tracking 'none'";pending=resultFor(frame);frame.contentWindow.postMessage({probe:true},'*');validate(await pending,true,'Dynamic existing child retains grant',{geo:false});
+ pending=resultFor(frame);frame.contentWindow.postMessage({navigate:true},'*');validate(await pending,false,'Dynamic navigation applies revocation',{geo:false});frame.remove();
+ if(config.historyEviction){
+  async function historyCycle(label,initialAllow,changedAllow,before,after){
+   const historyFrame=document.createElement('iframe');historyFrame.allow=initialAllow;const tag=encodeURIComponent(label),first=cross+'/frame?history_case='+tag;historyFrame.src=first;let pending=resultFor(historyFrame);document.body.append(historyFrame);validate(await pending,before,label+' original child',{geo:false});
+   const steps=25;for(let i=1;i<=steps;i++){
+    pending=resultFor(historyFrame);historyFrame.contentWindow.postMessage({navigateTo:cross+'/frame?history_case='+tag+'-'+i},'*');validate(await pending,before,label+' navigation '+i,{geo:false});await sleep(50)
+   }
+   historyFrame.allow=changedAllow;
+   pending=resultFor(historyFrame);historyFrame.contentWindow.postMessage({historyBack:steps},'*');validate(await pending,after,label+' discarded child restored',{geo:false});
+   const requests=await(await fetch('/history-requests')).json();check(requests.filter(path=>path==='/frame?history_case='+tag).length===2,label+': original document is fetched again after eviction');historyFrame.remove();
+  }
+  await historyCycle('History retained restriction','','',false,false);
+  await historyCycle('History updated delegation','','xr-spatial-tracking *',false,true);
+  await historyCycle('History updated restriction','xr-spatial-tracking *',"xr-spatial-tracking 'none'",true,false);
+ }
+ await Promise.all([device.disconnect(),device.disconnect()]);check(true,'Concurrent mock disconnections settle');
+ await device.disconnect();check(true,'Repeated mock disconnection settles');
+ await navigator.xr.test.disconnectAllDevices();check(true,'Cleanup after an explicit disconnection settles');state.finished=true;
+}
+addEventListener('DOMContentLoaded',()=>main().catch(error=>{state.error=error.stack||String(error);state.finished=true}));
+</script><body>Permissions Policy fixture</body>

@@ -5,6 +5,7 @@
 use std::cell::Cell;
 
 use dom_struct::dom_struct;
+use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use js::context::JSContext;
 use js::realm::CurrentRealm;
 use profile_traits::generic_callback::GenericCallback as ProfileGenericCallback;
@@ -157,6 +158,21 @@ impl XRSystemMethods<crate::DomTypeHolder> for XRSystem {
     fn IsSessionSupported(&self, cx: &mut CurrentRealm, mode: XRSessionMode) -> RootedPromise {
         // XXXManishearth this should select an XR device first
         let promise = Promise::new_in_realm(cx);
+        if mode == XRSessionMode::Inline {
+            promise.resolve_native(cx, &true);
+            return promise;
+        }
+        if !self
+            .global()
+            .as_window()
+            .Document()
+            .allowed_to_use_policy_feature(
+                net_traits::permissions_policy::PolicyFeature::XrSpatialTracking,
+            )
+        {
+            promise.reject_error(cx, Error::Security(None));
+            return promise;
+        }
         let mut trusted = Some(TrustedPromise::from(&promise));
         let global = self.global();
         let task_source = global
@@ -188,6 +204,8 @@ impl XRSystemMethods<crate::DomTypeHolder> for XRSystem {
 
         if let Some(mut r) = global.as_window().webxr_registry() {
             r.supports_session(mode.convert(), callback);
+        } else {
+            promise.resolve_native(cx, &false);
         }
 
         promise
@@ -203,6 +221,10 @@ impl XRSystemMethods<crate::DomTypeHolder> for XRSystem {
         let global = self.global();
         let window = global.as_window();
         let promise = Promise::new_in_realm(realm);
+        if !window.Document().is_fully_active() {
+            promise.reject_error(realm, Error::InvalidState(None));
+            return promise;
+        }
 
         if mode != XRSessionMode::Inline {
             if !ScriptThread::is_user_interacting() {
@@ -264,9 +286,40 @@ impl XRSystemMethods<crate::DomTypeHolder> for XRSystem {
             required_features.push("local".to_string());
         }
 
+        if !window.Document().allowed_to_use_policy_feature(
+            net_traits::permissions_policy::PolicyFeature::XrSpatialTracking,
+        ) {
+            let spatial = |feature: &str| {
+                matches!(
+                    feature,
+                    "local"
+                        | "local-floor"
+                        | "bounded-floor"
+                        | "unbounded"
+                        | "hit-test"
+                        | "anchors"
+                        | "plane-detection"
+                        | "mesh-detection"
+                        | "hand-tracking"
+                )
+            };
+            if required_features.iter().any(|feature| spatial(feature)) {
+                if mode != XRSessionMode::Inline {
+                    self.pending_immersive_session.set(false);
+                }
+                promise.reject_error(realm, Error::NotSupported(None));
+                return promise;
+            }
+            optional_features.retain(|feature| !spatial(feature));
+        }
+
         let init = SessionInit {
             webview_id: Some(global.as_window().webview_id()),
-            origin: global.origin().immutable().ascii_serialization().into_owned(),
+            origin: global
+                .origin()
+                .immutable()
+                .ascii_serialization()
+                .into_owned(),
             required_features,
             optional_features,
             first_person_observer_view: pref!(dom_webxr_first_person_observer_view),
@@ -297,6 +350,11 @@ impl XRSystemMethods<crate::DomTypeHolder> for XRSystem {
         .expect("Could not create callback");
         if let Some(mut r) = window.webxr_registry() {
             r.request_session(mode.convert(), init, callback);
+        } else {
+            if mode != XRSessionMode::Inline {
+                self.pending_immersive_session.set(false);
+            }
+            promise.reject_error(realm, Error::NotSupported(None));
         }
         promise
     }

@@ -88,6 +88,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     prefs.dom_webxr_hands_enabled = false;
     prefs.dom_webxr_layers_enabled = false;
     prefs.dom_webgl2_enabled = true;
+    if std::env::var_os("XR_INPUT_POLICY_TEST").is_some() {
+        prefs.dom_permissions_enabled = true;
+    }
     // Only this separate test embedder can expose mock devices; the browser
     // keeps its normal consent and device-discovery configuration.
     if std::env::var_os("XR_INPUT_MOCK_XR").is_some() {

@@ -445,6 +445,8 @@ pub struct Constellation<STF, SWF> {
 
     /// The set of all the browsing contexts in the browser.
     browsing_contexts: FxHashMap<BrowsingContextId, BrowsingContext>,
+    /// Current parent-owned iframe policy, independent of discarded documents.
+    iframe_target_snapshots: FxHashMap<BrowsingContextId, TargetSnapshotParams>,
 
     /// Pipeline IDs are namespaced in order to avoid name collisions,
     /// and the namespaces are allocated by the constellation.
@@ -724,6 +726,7 @@ where
                     pipelines: Default::default(),
                     worker_animation_frame_providers: Default::default(),
                     browsing_contexts: Default::default(),
+                    iframe_target_snapshots: Default::default(),
                     next_pipeline_namespace_id: Cell::new(FIRST_CONTENT_PIPELINE_NAMESPACE_ID),
                     time_profiler_chan: state.time_profiler_chan,
                     mem_profiler_chan: state.mem_profiler_chan.clone(),
@@ -1754,6 +1757,11 @@ where
             },
             ScriptToConstellationMessage::ScriptNewIFrame(load_info) => {
                 self.handle_script_new_iframe(load_info);
+            },
+            ScriptToConstellationMessage::UpdateIFrameTargetSnapshot(id, snapshot) => {
+                if self.browsing_contexts.get(&id).is_some_and(|context| context.parent_pipeline_id == Some(source_pipeline_id)) {
+                    self.iframe_target_snapshots.insert(id, snapshot);
+                }
             },
             ScriptToConstellationMessage::CreateAuxiliaryWebView(load_info) => {
                 self.handle_script_new_auxiliary(load_info);
@@ -3652,6 +3660,7 @@ where
         let browsing_context_size = browsing_context.viewport_details;
         debug_assert_eq!(browsing_context_size, load_info.viewport_details);
 
+        self.iframe_target_snapshots.insert(browsing_context_id, target_snapshot_params.clone());
         // Create the new pipeline, attached to the parent and push to pending changes
         self.new_pipeline(
             new_pipeline_id,
@@ -3689,6 +3698,7 @@ where
             browsing_context_id,
             webview_id,
             is_private,
+            target_snapshot_params,
             ..
         } = load_info.info;
 
@@ -3731,6 +3741,7 @@ where
 
         assert!(!self.pipelines.contains_key(&new_pipeline_id));
         self.pipelines.insert(new_pipeline_id, pipeline);
+        self.iframe_target_snapshots.insert(browsing_context_id, target_snapshot_params);
 
         if let Some(webview) = self.webviews.get_mut(&webview_id) {
             webview.add_pending_change(SessionHistoryChange {
@@ -4905,10 +4916,9 @@ where
                     viewport_details,
                     load_data.clone(),
                     is_private,
-                    // TODO(jdm): We need to store the original target snapshot params
-                    // with the pipeline when it's created, so we can support reloading
-                    // a discarded document properly.
-                    TargetSnapshotParams::default(),
+                    // A discarded child's new document uses the current container
+                    // configuration, including attribute changes made while away.
+                    self.iframe_target_snapshots.get(&browsing_context_id).cloned().unwrap_or_default(),
                     None,
                 );
 
@@ -6127,6 +6137,7 @@ where
         exit_mode: ExitPipelineMode,
     ) -> Option<BrowsingContext> {
         debug!("{}: Closing", browsing_context_id);
+        self.iframe_target_snapshots.remove(&browsing_context_id);
 
         self.close_browsing_context_children(
             webview_id,

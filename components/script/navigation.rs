@@ -672,7 +672,12 @@ pub(crate) fn snapshot_target_snapshot_params(navigable: &WindowProxy) -> Target
                 .map(|document| document.container_embedder_policy())
         })
         .unwrap_or_default();
+    let container_permissions_policy = container
+        .and_then(|element| element.downcast::<HTMLIFrameElement>())
+        .map(|iframe| std::sync::Arc::new(iframe.permissions_policy_snapshot()))
+        .or_else(|| navigable.currently_active().and_then(ScriptThread::find_document).and_then(|document| document.container_permissions_policy()));
     TargetSnapshotParams {
+        container_permissions_policy,
         container_embedder_policy,
         sandboxing_flags,
         iframe_element_referrer_policy,

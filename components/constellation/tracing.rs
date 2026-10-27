@@ -186,6 +186,7 @@ mod from_script {
                 Self::RemoveIFrame(..) => target!("RemoveIFrame"),
                 Self::ScriptLoadedURLInIFrame(..) => target!("ScriptLoadedURLInIFrame"),
                 Self::ScriptNewIFrame(..) => target!("ScriptNewIFrame"),
+                Self::UpdateIFrameTargetSnapshot(..) => target!("UpdateIFrameTargetSnapshot"),
                 Self::CreateAuxiliaryWebView(..) => target!("ScriptNewAuxiliary"),
                 Self::ActivateDocument => target!("ActivateDocument"),
                 Self::SetFinalUrl(..) => target!("SetFinalUrl"),

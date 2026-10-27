@@ -829,6 +829,8 @@ pub enum ScriptToConstellationMessage {
     ScriptLoadedURLInIFrame(IFrameLoadInfoWithData),
     /// A load of the initial `about:blank` has been completed in an IFrame.
     ScriptNewIFrame(IFrameLoadInfoWithData),
+    /// Parent-owned container state, kept across document eviction.
+    UpdateIFrameTargetSnapshot(BrowsingContextId, TargetSnapshotParams),
     /// Script has opened a new auxiliary browsing context.
     CreateAuxiliaryWebView(AuxiliaryWebViewCreationRequest),
     /// Mark a new document as active
@@ -894,8 +896,11 @@ impl fmt::Debug for ScriptToConstellationMessage {
 }
 
 /// <https://html.spec.whatwg.org/multipage/#target-snapshot-params>
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TargetSnapshotParams {
+    /// Container restrictions captured before navigation, including remote parents.
+    #[serde(default)]
+    pub container_permissions_policy: Option<std::sync::Arc<net_traits::permissions_policy::ContainerPolicy>>,
     /// The container document's policy, retained for child-initiated navigation.
     #[serde(default)]
     pub container_embedder_policy: net_traits::policy_container::EmbedderPolicyValue,
@@ -908,6 +913,7 @@ pub struct TargetSnapshotParams {
 impl Default for TargetSnapshotParams {
     fn default() -> Self {
         Self {
+            container_permissions_policy: None,
             container_embedder_policy: Default::default(),
             sandboxing_flags: SandboxingFlagSet::empty(),
             iframe_element_referrer_policy: ReferrerPolicy::EmptyString,

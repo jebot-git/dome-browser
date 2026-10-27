@@ -58,6 +58,7 @@ pub mod http_status;
 pub mod image_cache;
 pub mod mime_classifier;
 pub mod policy_container;
+pub mod permissions_policy;
 pub mod pub_domains;
 pub mod quality;
 pub mod request;

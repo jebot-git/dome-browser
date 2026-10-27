@@ -14,8 +14,10 @@ if os.environ.get('DOME_LAYER_SCALE_BUS')!='1':
 p=argparse.ArgumentParser(description=__doc__)
 for name in ['binary','native-fixture','compositor','output']:p.add_argument('--'+name,type=Path,required=True)
 p.add_argument('--no-xr-host',action='store_true',help='Check failure without an immersive device')
+p.add_argument('--policy-denied',action='store_true',help='Validate response policy with a live private host available')
 p.add_argument('--context-loss',action='store_true',help='Lose and recreate active immersive WebGL contexts')
 a=p.parse_args()
+if a.policy_denied and (a.context_loss or a.no_xr_host):p.error('Policy scenario uses its own live-host mode')
 if a.context_loss and a.no_xr_host:p.error('context loss requires the private XR host')
 out=a.output.resolve();out.mkdir(parents=True,exist_ok=False)
 host_timings=[];host_ops=[];availability={'enabled':True};checks=[];events=[];captures=[];errors=[];child=None;failure=None
@@ -82,7 +84,9 @@ try:
   class Site(http.server.BaseHTTPRequestHandler):
    def log_message(self,*_):pass
    def do_GET(self):
-    b=json.dumps(host_ops).encode() if self.path=='/host-ops' else Path(__file__).with_suffix('.html').read_bytes();self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(b)));self.end_headers();self.wfile.write(b)
+    b=json.dumps(host_ops).encode() if self.path=='/host-ops' else (Path(__file__).with_name('webxr-permissions-policy-native.html') if a.policy_denied else Path(__file__).with_suffix('.html')).read_bytes();self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(b)));
+    if a.policy_denied:self.send_header('Permissions-Policy','xr-spatial-tracking=()')
+    self.end_headers();self.wfile.write(b)
    def do_POST(self):
     value=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
     if self.path=='/availability':availability['enabled']=bool(value)
@@ -94,7 +98,7 @@ try:
   log=stack.enter_context((out/'browser.log').open('w'));child=subprocess.Popen([str(a.binary.resolve()),'--software','--no-restore','--profile',folder+'/profile',f'http://127.0.0.1:{site.server_port}/'+('#no-host' if a.no_xr_host else '#context-loss' if a.context_loss else '')],env=env,stdout=log,stderr=log);stack.callback(stop,child)
   ready=wait(lambda:next((e['data'] for e in events if e['type']=='ready'),None));window=wait(lambda:next((w for w in fixture.wayland.windows() if w.value()['client_pid']==child.pid),None));window.set_input_focus();g=window.get_geometry();ratio=ready['ratio'];top=g.height-ready['viewport'][1]*ratio-28;v=ready['start'];c=fixture.connection
   xtest.fake_input(c,X.MotionNotify,x=g.x+int((v['x']+v['width']/2)*ratio),y=g.y+int(top+(v['y']+v['height']/2)*ratio));xtest.fake_input(c,X.ButtonPress,1);xtest.fake_input(c,X.ButtonRelease,1);c.sync()
-  if not a.no_xr_host:
+  if not a.no_xr_host and not a.policy_denied:
    consent=wait(lambda:next((w for w in fixture.wayland.windows() if w.get_wm_name()=='Enter immersive WebXR'),None));consent.set_input_focus();code=c.keysym_to_keycode(XK.string_to_keysym('Return'));xtest.fake_input(c,X.KeyPress,code);xtest.fake_input(c,X.KeyRelease,code);c.sync()
   def completed():
    if any(e['type']=='error' for e in events):return True
@@ -104,16 +108,16 @@ try:
   check(not [e for e in events if e['type']=='error'],'Both WebGL versions complete context compatibility validation')
   done=next(e['data'] for e in events if e['type']=='done');check(done['versions']==['webgl','webgl2'] and done['noHost']==a.no_xr_host,'The requested native device mode covers both WebGL versions')
   for event in sorted([e for e in events if e['type']=='check'],key=lambda e:e['order']):check(event['data']['passed'],event['data']['name'])
-  if a.no_xr_host:
-   check(not host_ops and not captures,'No immersive host is contacted or leased when unavailable')
+  if a.no_xr_host or a.policy_denied:
+   check(not host_ops and not captures,'No immersive host is contacted or leased when policy denies tracking' if a.policy_denied else 'No immersive host is contacted or leased when unavailable')
   else:
    check(host_ops.count('begin_session')==1 and host_ops.count('end_session')==1,'Only the explicitly consented immersive session consumes a lease')
    for marker in ([70,71,78,79] if a.context_loss else [70,71]):
     capture=wait(lambda:next((v for v in reversed(captures) if v['marker']==marker),None));im=Image.open(capture['path']);h=capture['header'];check(h['layer_flags']==2 and list(im.getpixel((31,im.height//2)))==[255,0,marker,255] and list(im.getpixel((95,im.height//2)))==[0,255,marker,255],'Negotiated '+('WebGL 1' if marker in [70,78] else 'WebGL 2')+' context submits correct stereo pixels')
   check(child.poll() is None,'Browser survives context negotiation, device absence and reconnection')
-  if a.context_loss:
+  if a.context_loss or a.policy_denied:
    fixture.wayland.api('/api/action',{'op':'close','id':window.id})
-   check(child.wait(timeout=10)==0,'Browser closes cleanly after immersive context restoration')
+   check(child.wait(timeout=10)==0,'Browser closes cleanly after native XR validation')
 except BaseException as ex:failure=str(ex);raise
 finally:
- (out/'report.json').write_text(json.dumps(dict(passed=failure is None and bool(checks),failure=failure,checks=checks,events=events,captures=captures,relay_errors=errors,host_operations=host_ops,host_timings=host_timings,no_xr_host=a.no_xr_host,context_loss=a.context_loss,simulated_capabilities=caps,binary_sha256=hashlib.sha256(a.binary.read_bytes()).hexdigest(),scope='Real browser, WebGL GPU buffers and native DomeD bridge with a private synthetic XR host; no headset claim'),indent=2))
+ (out/'report.json').write_text(json.dumps(dict(passed=failure is None and bool(checks),failure=failure,checks=checks,events=events,captures=captures,relay_errors=errors,host_operations=host_ops,host_timings=host_timings,no_xr_host=a.no_xr_host,context_loss=a.context_loss,policy_denied=a.policy_denied,simulated_capabilities=caps,binary_sha256=hashlib.sha256(a.binary.read_bytes()).hexdigest(),scope='Real browser, WebGL GPU buffers and native DomeD bridge with a private synthetic XR host; no headset claim'),indent=2))

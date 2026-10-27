@@ -56,6 +56,11 @@ try:
     g=window.get_geometry();s=latest();ratio=s['ratio'];top=g.height-s['viewport'][1]*ratio-28;point=[g.x+point[0]*ratio,g.y+top+point[1]*ratio]
    fixture.command(action,slot,point,**axes)
    if not action.startswith('tablet-'):fixture.command('frame')
+  def move_reported(point,start):
+   # A compositor acknowledgement and later XR frames do not establish that
+   # the document's HTTP event snapshot has arrived. Observe this sample.
+   before=len(named('pointermove',start));send('tablet-move',point)
+   wait(lambda:len(named('pointermove',start))>before);settle()
   def key(name,mods=()):
    c=fixture.connection
    for item in (*mods,name):xtest.fake_input(c,X.KeyPress,c.keysym_to_keycode(XK.string_to_keysym(item)))
@@ -170,7 +175,7 @@ try:
   for mode in ['redirect','release-got','in-move','release-down']:
    command('capture:'+mode);send('tablet-move',[205,195]);start=mark();send('tablet-down');wait(lambda:named('pointerdown',start));settle()
    check(not named('gotpointercapture',start),mode+': capture requests stay pending after pointerdown')
-   send('tablet-move',[206,195]);settle()
+   move_reported([206,195],start)
    if mode in ['redirect','release-got']:
     check(named('pointermove',start)[-1]['target']=='other' and named('gotpointercapture',start)[0]['target']=='other',mode+': capture changes target before the next pointermove')
     boundary=[e for e in events(start) if e['name'] in ['pointerout','pointerover']]
@@ -179,7 +184,7 @@ try:
     check(named('pointermove',start)[-1]['target']=='canvas' and not [e for e in named('gotpointercapture',start) if e['target']=='other'],'Capture requested in pointermove waits for a later pointer event')
    else:
     check(not named('gotpointercapture',start),'A pointerdown listener can release pending implicit capture')
-   send('tablet-move',[207,195]);settle()
+   move_reported([207,195],start)
    target='other' if mode in ['redirect','in-move'] else 'canvas'
    check(named('pointermove',start)[-1]['target']==target,mode+': the following sample uses the current capture target')
    check(named('mousemove',start)[-1]['target']==target,mode+': compatibility mousemove follows pen capture')
