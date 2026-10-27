@@ -1,7 +1,7 @@
 # WebXR framebuffer allocation and submission
 
 Each compositor layer returns a `LayerInfo` containing its ID, allocated
-framebuffer dimensions and full-sized eye viewports. This information travels
+framebuffer dimensions, full-sized eye viewports and actual buffer attributes. This information travels
 through both the session and WebGL threads. `XRWebGLLayer` reports that
 allocation, rather than the session's unscaled recommendation.
 
@@ -35,8 +35,39 @@ between frames, when the transient texture wrappers have been removed.
 The sizing and viewport requirements follow
 [WebXR Device API, XRWebGLLayer](https://www.w3.org/TR/2026/CRD-webxr-20260609/#xrwebgllayer-interface).
 This milestone does not establish full WebXR layer conformance. Broader context
-loss/compatibility behavior, negotiated attributes and
-dynamic viewport scaling remain part of the continuing compatibility work.
+loss/compatibility behavior and dynamic viewport scaling remain part of the
+continuing compatibility work.
+
+## Buffer formats and frame initialization
+
+The Surfman/DomeD path uses single-sample images and reports `antialias=false`.
+It reports `ignoreDepthValues=true` because the compositor receives color and
+poses without depth. Inline layers use the context's actual default-buffer
+antialias setting and keep its existing canvas allocation; layer-init options
+do not change that default buffer.
+
+Layers with alpha render directly into the imported RGBA surface. A layer with
+`alpha=false` renders into an RGB texture, then copies it on the GPU into the
+native RGBA presentation surface. Readback from RGB returns alpha one; the
+DomeD submission uses an opaque blend flag. RGBA layers retain their
+premultiplied color and alpha values and use the source-alpha blend flag. The
+copy preserves read/draw framebuffer bindings, scissor state and desktop sRGB
+write state. Allocation preserves texture-unit bindings and pixel-unpack
+buffers, so a bound application upload buffer is not read during allocation.
+Depth/stencil requests use packed storage when either component is requested.
+
+Before each frame, the layer clears color to zero, depth to one and stencil to
+zero, including when the context requests `preserveDrawingBuffer`. Clearing
+restores application clear values, masks and separate front/back stencil
+masks. Cached FBO references to imported surfaces are released before Surfman
+recycles those textures. Reusing a texture name therefore cannot make the
+next frame clear an older GL object. Failed FBO creation or incomplete storage
+returns an error instead of falling back to clearing the default framebuffer.
+
+The optional Windows OpenXR adapter uses the same color-storage and copy
+helpers and single-sample imported images. This source path has not been
+compiled or exercised by the Linux validation; it does not have a new Windows
+runtime interoperability claim.
 
 ## Validation
 
@@ -69,6 +100,18 @@ uv run --no-project --with python-xlib --with pillow \
   --compositor /absolute/path/to/nested-input-fixture \
   --output /new/private/output
 ```
+
+Add `--attributes` instead of `--lifecycle` to exercise 32 immersive layer
+configurations across WebGL 1 and 2, each for three frames. This fixture reads
+the initial buffer contents, draws through cleared depth/stencil storage,
+checks RGB/RGBA pixels and native compositor blend flags, and preserves a
+non-default texture unit and a small bound WebGL 2 upload buffer. Zero write
+masks and deliberately unsuitable clear values carry across frames; an
+explicit masked clear verifies that implicit clearing restored the masks.
+Four inline cases compare layer properties with actual context attributes.
+Use `--attributes --opaque-context` for the same matrix with context alpha and
+premultiplication disabled. XR buffer formats and premultiplied submission
+remain independent of those default-buffer settings.
 
 `tests/webxr-layer-wpt.py` runs six upstream layer pages through the separate
 mock embedder. Original assertions and setup helpers are hashed and preserved.

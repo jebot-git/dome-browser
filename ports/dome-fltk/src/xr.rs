@@ -21,7 +21,7 @@ use webxr::{SurfmanGL, SurfmanLayerManager};
 use webxr_api::util::{ClipPlanes, fov_to_projection_matrix};
 use webxr_api::{
     ContextId, DeviceAPI, DiscoveryAPI, Error, Event, EventBuffer, Floor, Frame, InputSource,
-    LayerGrandManager, LayerId, LayerInfo, LayerGeometry, LayerInit, LayerManager, Native, Quitter, Session, SessionBuilder,
+    LayerGrandManager, LayerId, LayerInfo, LayerInit, LayerManager, Native, Quitter, Session, SessionBuilder,
     SessionInit, SessionMode, View, ViewerPose, Viewports, Views, Visibility,
 };
 mod input;
@@ -439,7 +439,7 @@ struct BridgeDevice {
     chains: SwapChains<LayerId, Device>,
     grand: LayerGrandManager<SurfmanGL>,
     manager: Option<LayerManager>,
-    layer_geometry: std::collections::HashMap<LayerId, LayerGeometry>,
+    layer_info: std::collections::HashMap<LayerId, LayerInfo>,
     frame: Option<HostFrame>,
     anchor: Option<RigidTransform3D<f32, Native, Native>>,
     clip: ClipPlanes,
@@ -541,7 +541,7 @@ impl BridgeDevice {
             chains: SwapChains::new(),
             grand,
             manager: None,
-            layer_geometry: std::collections::HashMap::new(),
+            layer_info: std::collections::HashMap::new(),
             reference_spaces: reference_space::Tracker::new(initial.reference_space),
             frame: Some(initial),
             anchor: Some(initial_anchor),
@@ -680,7 +680,8 @@ impl BridgeDevice {
         }
         let width = size.width as u32;
         let height = size.height as u32;
-        let geometry = self.layer_geometry.get(&layer).ok_or("XR layer has no allocation geometry")?;
+        let info = self.layer_info.get(&layer).ok_or("XR layer has no allocation information")?;
+        let geometry = &info.geometry;
         if geometry.framebuffer_size.width != size.width || geometry.framebuffer_size.height != size.height {
             return Err("XR submitted surface differs from its allocation geometry".into());
         }
@@ -690,7 +691,7 @@ impl BridgeDevice {
         })).collect();
         rpc(
             &self.path,
-            json!({"op":"end_frame","token":self.token,"frame_id":frame.frame_id,"width":width,"height":height,"transport":"rgba","layer_flags":2,"bytes":pixels.len(),"views":views}),
+            json!({"op":"end_frame","token":self.token,"frame_id":frame.frame_id,"width":width,"height":height,"transport":"rgba","layer_flags":if info.attributes.alpha { 2 } else { 0 },"bytes":pixels.len(),"views":views}),
             &pixels,
         )?;
         Ok(())
@@ -704,11 +705,11 @@ impl DeviceAPI for BridgeDevice {
     ) -> std::result::Result<LayerInfo, Error> {
         let viewports = self.hello.viewports();
         let info = self.manager()?.create_layer(context, init, viewports)?;
-        self.layer_geometry.insert(info.id, info.geometry.clone());
+        self.layer_info.insert(info.id, info.clone());
         Ok(info)
     }
     fn destroy_layer(&mut self, context: ContextId, layer: LayerId) {
-        self.layer_geometry.remove(&layer);
+        self.layer_info.remove(&layer);
         if let Ok(manager) = self.manager() {
             manager.destroy_layer(context, layer);
         }

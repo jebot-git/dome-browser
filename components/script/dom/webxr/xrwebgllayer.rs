@@ -10,7 +10,7 @@ use js::context::JSContext;
 use js::rust::HandleObject;
 use script_bindings::reflector::reflect_dom_object_with_proto;
 use servo_canvas_traits::webgl::{WebGLCommand, WebGLContextId, WebGLTextureId};
-use webxr_api::{ContextId as WebXRContextId, LayerId, LayerInit, Viewport};
+use webxr_api::{ContextId as WebXRContextId, LayerAttributes, LayerId, LayerInit, Viewport};
 
 use crate::canvas_context::CanvasContext;
 use crate::conversions::Convert;
@@ -52,9 +52,6 @@ impl Convert<LayerInit> for XRWebGLLayerInit {
 pub(crate) struct XRWebGLLayer {
     xr_layer: XRLayer,
     antialias: bool,
-    depth: bool,
-    stencil: bool,
-    alpha: bool,
     ignore_depth_values: bool,
     /// If none, this is an inline session (the composition disabled flag is true)
     framebuffer: Option<Dom<WebGLFramebuffer>>,
@@ -66,18 +63,15 @@ impl XRWebGLLayer {
     pub(crate) fn new_inherited(
         session: &XRSession,
         context: &WebGLRenderingContext,
-        init: &XRWebGLLayerInit,
+        attributes: LayerAttributes,
         framebuffer: Option<&WebGLFramebuffer>,
         layer_id: Option<LayerId>,
         viewports: Vec<Rect<i32, Viewport>>,
     ) -> XRWebGLLayer {
         XRWebGLLayer {
             xr_layer: XRLayer::new_inherited(session, context, layer_id),
-            antialias: init.antialias,
-            depth: init.depth,
-            stencil: init.stencil,
-            alpha: init.alpha,
-            ignore_depth_values: init.ignoreDepthValues,
+            antialias: attributes.antialias,
+            ignore_depth_values: attributes.ignore_depth_values,
             framebuffer: framebuffer.map(Dom::from_ref),
             viewports,
         }
@@ -90,7 +84,7 @@ impl XRWebGLLayer {
         proto: Option<HandleObject>,
         session: &XRSession,
         context: &WebGLRenderingContext,
-        init: &XRWebGLLayerInit,
+        attributes: LayerAttributes,
         framebuffer: Option<&WebGLFramebuffer>,
         layer_id: Option<LayerId>,
         viewports: Vec<Rect<i32, Viewport>>,
@@ -100,7 +94,7 @@ impl XRWebGLLayer {
             Box::new(XRWebGLLayer::new_inherited(
                 session,
                 context,
-                init,
+                attributes,
                 framebuffer,
                 layer_id,
                 viewports,
@@ -276,7 +270,7 @@ impl XRWebGLLayerMethods<crate::DomTypeHolder> for XRWebGLLayer {
         // XXXManishearth step 3: throw error if context is lost
         // XXXManishearth step 4: check XR compat flag for immersive sessions
 
-        let (framebuffer, layer_id, viewports) = if session.is_immersive() {
+        let (framebuffer, layer_id, viewports, attributes) = if session.is_immersive() {
             // The allocation result is authoritative after device/GPU clamping.
             // Its dimensions and eye rectangles must match the compositor.
             let context_id = WebXRContextId::from(context.context_id());
@@ -296,9 +290,22 @@ impl XRWebGLLayerMethods<crate::DomTypeHolder> for XRWebGLLayer {
                 Some(framebuffer),
                 Some(info.id),
                 info.geometry.viewports.viewports,
+                info.attributes,
             )
         } else {
-            (None, None, Vec::new())
+            let actual = context
+                .GetContextAttributes()
+                .ok_or(Error::InvalidState(None))?;
+            (
+                None,
+                None,
+                Vec::new(),
+                LayerAttributes {
+                    antialias: actual.antialias,
+                    alpha: actual.alpha,
+                    ignore_depth_values: true,
+                },
+            )
         };
 
         // Ensure that we finish setting up this layer before continuing.
@@ -311,7 +318,7 @@ impl XRWebGLLayerMethods<crate::DomTypeHolder> for XRWebGLLayer {
             proto,
             session,
             &context,
-            init,
+            attributes,
             framebuffer.as_deref(),
             layer_id,
             viewports,

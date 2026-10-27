@@ -147,6 +147,7 @@ try:
   send('tablet-move',[205,195]);start=mark();send('tablet-down');wait(lambda:named('selectstart',start));fixture.wayland.api('/api/action',{'op':'minimize','id':window.id});wait(lambda:latest()['lengths']==[0,0]);window.set_input_focus();settle();send('tablet-up');zero()
   check(len(named('pointercancel',start))==1 and not named('select',start),'Native minimization retires the pen before restoring the same document')
   send('tablet-move',[205,195]);start=mark();send('tablet-down');send('tablet-up');send('tablet-down');send('tablet-up');zero()
+  wait(lambda:len(named('click',start))==2 and len(named('pointerup',start))==2);settle()
   check(len(named('click',start))==2 and len(named('dblclick',start))==1 and named('dblclick',start)[0]['detail']==2,
         'Two native pen taps preserve double-click behavior and click count')
   check([e['detail'] for e in named('click',start)]==[1,2] and [e['detail'] for e in named('mousedown',start)]==[1,2],

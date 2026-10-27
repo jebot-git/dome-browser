@@ -9,7 +9,7 @@ use std::time::Duration;
 use std::{mem, thread};
 
 use euclid::{Point2D, Rect, RigidTransform3D, Rotation3D, Size2D, Transform3D, Vector3D};
-use glow::{self as gl, HasContext, PixelUnpackData};
+use glow::{self as gl, HasContext};
 use interaction_profiles::{get_profiles_from_path, get_supported_interaction_profiles};
 use log::{error, warn};
 use openxr::sys::CompositionLayerPassthroughFB;
@@ -28,14 +28,14 @@ use surfman::{
 use webxr_api::util::{self, ClipPlanes};
 use webxr_api::{
     self, BaseSpace, Capture, ContextId, DeviceAPI, DiscoveryAPI, Display, Error, Event,
-    EventBuffer, Floor, Frame, GLContexts, InputId, InputSource, LayerGrandManager, LayerId,
-    LayerInfo, LayerGeometry, LayerInit, LayerManager, LayerManagerAPI, LeftEye, Native, Quitter, RightEye, SelectKind,
-    Session as WebXrSession, SessionBuilder, SessionInit, SessionMode, SubImage, SubImages, View,
-    ViewerPose, Viewport, Viewports, Views, Visibility,
+    EventBuffer, Floor, Frame, GLContexts, InputId, InputSource, LayerAttributes, LayerGeometry,
+    LayerGrandManager, LayerId, LayerInfo, LayerInit, LayerManager, LayerManagerAPI, LeftEye,
+    Native, Quitter, RightEye, SelectKind, Session as WebXrSession, SessionBuilder, SessionInit,
+    SessionMode, SubImage, SubImages, View, ViewerPose, Viewport, Viewports, Views, Visibility,
 };
 
 use crate::SurfmanGL;
-use crate::gl_utils::GlClearer;
+use crate::gl_utils::{GlClearer, LayerColorBuffer, create_depth_stencil};
 
 mod input;
 use input::OpenXRInput;
@@ -137,10 +137,10 @@ struct ViewInfo<Eye> {
 impl<Eye> ViewInfo<Eye> {
     fn set_view(&mut self, view: openxr::View, clip_planes: ClipPlanes) {
         self.view.pose = view.pose;
-        if self.view.fov.angle_left != view.fov.angle_left ||
-            self.view.fov.angle_right != view.fov.angle_right ||
-            self.view.fov.angle_up != view.fov.angle_up ||
-            self.view.fov.angle_down != view.fov.angle_down
+        if self.view.fov.angle_left != view.fov.angle_left
+            || self.view.fov.angle_right != view.fov.angle_right
+            || self.view.fov.angle_up != view.fov.angle_up
+            || self.view.fov.angle_down != view.fov.angle_down
         {
             // It's fine if this happens occasionally, but if this happening very
             // often we should stop caching
@@ -203,9 +203,9 @@ fn create_instance(
     warn!("Available extensions:\n{:?}", supported);
     let mut supports_hands = needs_hands && supported.ext_hand_tracking;
     let supports_passthrough = needs_passthrough && supported.fb_passthrough;
-    let supports_secondary = needs_secondary &&
-        supported.msft_secondary_view_configuration &&
-        supported.msft_first_person_observer;
+    let supports_secondary = needs_secondary
+        && supported.msft_secondary_view_configuration
+        && supported.msft_first_person_observer;
     let supports_updating_framerate = supported.fb_display_refresh_rate;
 
     let app_info = ApplicationInfo {
@@ -328,9 +328,9 @@ impl DiscoveryAPI<SurfmanGL> for OpenXrDiscovery {
                 ViewConfigurationType::PRIMARY_STEREO,
             ) {
                 if mode == SessionMode::ImmersiveAR {
-                    supports = blend_modes.contains(&EnvironmentBlendMode::ADDITIVE) ||
-                        blend_modes.contains(&EnvironmentBlendMode::ALPHA_BLEND) ||
-                        instance.supports_passthrough;
+                    supports = blend_modes.contains(&EnvironmentBlendMode::ADDITIVE)
+                        || blend_modes.contains(&EnvironmentBlendMode::ALPHA_BLEND)
+                        || instance.supports_passthrough;
                 } else if mode == SessionMode::ImmersiveVR {
                     // Immersive VR sessions are not precluded by non-opaque blending
                     supports = blend_modes.len() > 0;
@@ -374,7 +374,6 @@ struct SharedData {
     secondary_blend_mode: Option<EnvironmentBlendMode>,
     frame_state: Option<FrameState>,
     space: Space,
-    swapchain_sample_count: u32,
 }
 
 struct OpenXrLayerManager {
@@ -390,6 +389,9 @@ struct OpenXrLayerManager {
 
 struct OpenXrLayer {
     swapchain: Swapchain<Backend>,
+    color_buffer: LayerColorBuffer,
+    alpha: bool,
+    presentation_texture: Option<gl::NativeTexture>,
     depth_stencil_texture: Option<gl::NativeTexture>,
     size: Size2D<i32, Viewport>,
     viewports: Viewports,
@@ -428,22 +430,25 @@ impl OpenXrLayer {
         swapchain: Swapchain<Backend>,
         depth_stencil_texture: Option<gl::NativeTexture>,
         geometry: LayerGeometry,
-    ) -> Result<OpenXrLayer, Error> {
-        let images = swapchain
-            .enumerate_images()
-            .map_err(|e| Error::BackendSpecific(format!("Session::enumerate_images {:?}", e)))?;
+        images: Vec<<Backend as Graphics>::SwapchainImage>,
+        color_buffer: LayerColorBuffer,
+        alpha: bool,
+    ) -> OpenXrLayer {
         let waited = false;
         let mut surface_textures = Vec::new();
         surface_textures.resize_with(images.len(), || None);
-        Ok(OpenXrLayer {
+        OpenXrLayer {
             swapchain,
+            color_buffer,
+            alpha,
+            presentation_texture: None,
             depth_stencil_texture,
             size: geometry.framebuffer_size,
             viewports: geometry.viewports,
             images,
             surface_textures,
             waited,
-        })
+        }
     }
 
     fn get_surface_texture(
@@ -478,19 +483,23 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
         init: LayerInit,
         viewports: Viewports,
     ) -> Result<LayerInfo, Error> {
-        let guard = self.shared_data.lock().unwrap();
-        let data = guard.as_ref().unwrap();
-
         // XXXManishearth should we be doing this, or letting Servo set the format?
         let formats = self.session.enumerate_swapchain_formats().map_err(|e| {
             Error::BackendSpecific(format!("Session::enumerate_swapchain_formats {:?}", e))
         })?;
         let format = GraphicsProvider::pick_format(&formats);
-        let gl = contexts.bindings(context_id).ok_or(Error::NoMatchingDevice)?;
-        let maximum = unsafe { gl.get_parameter_i32(gl::MAX_TEXTURE_SIZE).min(gl.get_parameter_i32(gl::MAX_RENDERBUFFER_SIZE)) };
+        let gl = contexts
+            .bindings(context_id)
+            .ok_or(Error::NoMatchingDevice)?;
+        let maximum = unsafe {
+            gl.get_parameter_i32(gl::MAX_TEXTURE_SIZE)
+                .min(gl.get_parameter_i32(gl::MAX_RENDERBUFFER_SIZE))
+        };
         let geometry = init.geometry(&viewports, Size2D::new(maximum, maximum))?;
         let texture_size = geometry.framebuffer_size;
-        let sample_count = data.swapchain_sample_count;
+        // Imported WebGL images are TEXTURE_2D. Multisampled swapchains require
+        // a separate multisample-render/resolve path before they can be exposed.
+        let sample_count = 1;
         let swapchain_create_info = SwapchainCreateInfo {
             create_flags: SwapchainCreateFlags::EMPTY,
             usage_flags: SwapchainUsageFlags::COLOR_ATTACHMENT | SwapchainUsageFlags::SAMPLED,
@@ -507,41 +516,54 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
             .create_swapchain(&swapchain_create_info)
             .map_err(|e| Error::BackendSpecific(format!("Session::create_swapchain {:?}", e)))?;
 
-        // TODO: Treat depth and stencil separately?
-        // TODO: Use the openxr API for depth/stencil swap chains?
+        let images = swapchain
+            .enumerate_images()
+            .map_err(|e| Error::BackendSpecific(format!("Session::enumerate_images {e:?}")))?;
+        let device = contexts.device(context_id).ok_or(Error::NoMatchingDevice)?;
+        let gl = contexts
+            .bindings(context_id)
+            .ok_or(Error::NoMatchingDevice)?;
         let has_depth_stencil = match init {
-            LayerInit::WebGLLayer { stencil, depth, .. } => stencil | depth,
-            LayerInit::ProjectionLayer { stencil, depth, .. } => stencil | depth,
+            LayerInit::WebGLLayer { stencil, depth, .. }
+            | LayerInit::ProjectionLayer { stencil, depth, .. } => stencil || depth,
         };
+        let color_buffer = LayerColorBuffer::new(
+            gl,
+            device.surface_gl_texture_target(),
+            (texture_size.width, texture_size.height),
+            init.alpha(),
+        )?;
         let depth_stencil_texture = if has_depth_stencil {
-            let gl = contexts
-                .bindings(context_id)
-                .ok_or(Error::NoMatchingDevice)?;
-            unsafe {
-                let depth_stencil_texture = gl.create_texture().ok();
-                gl.bind_texture(gl::TEXTURE_2D, depth_stencil_texture);
-                gl.tex_image_2d(
-                    gl::TEXTURE_2D,
-                    0,
-                    gl::DEPTH24_STENCIL8 as _,
-                    texture_size.width,
-                    texture_size.height,
-                    0,
-                    gl::DEPTH_STENCIL,
-                    gl::UNSIGNED_INT_24_8,
-                    PixelUnpackData::Slice(None),
-                );
-                depth_stencil_texture
+            match create_depth_stencil(gl, (texture_size.width, texture_size.height)) {
+                Ok(texture) => Some(texture),
+                Err(error) => {
+                    color_buffer.destroy(gl);
+                    return Err(error);
+                },
             }
         } else {
             None
         };
-
         let layer_id = LayerId::default();
-        let openxr_layer = OpenXrLayer::new(swapchain, depth_stencil_texture, geometry.clone())?;
+        let openxr_layer = OpenXrLayer::new(
+            swapchain,
+            depth_stencil_texture,
+            geometry.clone(),
+            images,
+            color_buffer,
+            init.alpha(),
+        );
         self.layers.push((context_id, layer_id));
         self.openxr_layers.insert(layer_id, openxr_layer);
-        Ok(LayerInfo { id: layer_id, geometry })
+        Ok(LayerInfo {
+            id: layer_id,
+            geometry,
+            attributes: LayerAttributes {
+                alpha: init.alpha(),
+                antialias: false,
+                ignore_depth_values: true,
+            },
+        })
     }
 
     fn destroy_layer(
@@ -553,6 +575,9 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
         self.clearer.destroy_layer(contexts, context_id, layer_id);
         self.layers.retain(|&ids| ids != (context_id, layer_id));
         if let Some(mut layer) = self.openxr_layers.remove(&layer_id) {
+            if let Some(gl) = contexts.bindings(context_id) {
+                layer.color_buffer.destroy(gl);
+            }
             if let Some(depth_stencil_texture) = layer.depth_stencil_texture {
                 let gl = contexts.bindings(context_id).unwrap();
                 unsafe { gl.delete_texture(depth_stencil_texture) };
@@ -578,7 +603,7 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
 
     fn end_frame(
         &mut self,
-        _contexts: &mut dyn GLContexts<SurfmanGL>,
+        contexts: &mut dyn GLContexts<SurfmanGL>,
         layers: &[(ContextId, LayerId)],
     ) -> Result<(), Error> {
         let guard = self.shared_data.lock().unwrap();
@@ -586,8 +611,25 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
 
         // At this point the frame contents have been rendered, so we can release access to the texture
         // in preparation for displaying it.
-        for (_, openxr_layer) in &mut self.openxr_layers {
+        for &(context_id, layer_id) in &self.layers {
+            let openxr_layer = self
+                .openxr_layers
+                .get_mut(&layer_id)
+                .ok_or(Error::NoMatchingDevice)?;
             if openxr_layer.waited {
+                let device = contexts.device(context_id).ok_or(Error::NoMatchingDevice)?;
+                let gl = contexts
+                    .bindings(context_id)
+                    .ok_or(Error::NoMatchingDevice)?;
+                openxr_layer.color_buffer.present(
+                    gl,
+                    &mut self.clearer,
+                    layer_id,
+                    openxr_layer.presentation_texture,
+                    device.surface_gl_texture_target(),
+                    (openxr_layer.size.width, openxr_layer.size.height),
+                )?;
+                unsafe { gl.flush() };
                 openxr_layer.swapchain.release_image().map_err(|e| {
                     Error::BackendSpecific(format!("Session::release_image {:?}", e))
                 })?;
@@ -611,35 +653,42 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
             .iter()
             .filter_map(|&(_, layer_id)| {
                 let openxr_layer = openxr_layers.get(&layer_id)?;
-                Some([
-                    openxr::CompositionLayerProjectionView::new()
-                        .pose(data.left.view.pose)
-                        .fov(l_fov)
-                        .sub_image(
-                            openxr::SwapchainSubImage::new()
-                                .swapchain(&openxr_layer.swapchain)
-                                .image_array_index(0)
-                                .image_rect(image_rect(openxr_layer.viewports.viewports[0])),
-                        ),
-                    openxr::CompositionLayerProjectionView::new()
-                        .pose(data.right.view.pose)
-                        .fov(r_fov)
-                        .sub_image(
-                            openxr::SwapchainSubImage::new()
-                                .swapchain(&openxr_layer.swapchain)
-                                .image_array_index(0)
-                                .image_rect(image_rect(openxr_layer.viewports.viewports[1])),
-                        ),
-                ])
+                Some((
+                    openxr_layer.alpha,
+                    [
+                        openxr::CompositionLayerProjectionView::new()
+                            .pose(data.left.view.pose)
+                            .fov(l_fov)
+                            .sub_image(
+                                openxr::SwapchainSubImage::new()
+                                    .swapchain(&openxr_layer.swapchain)
+                                    .image_array_index(0)
+                                    .image_rect(image_rect(openxr_layer.viewports.viewports[0])),
+                            ),
+                        openxr::CompositionLayerProjectionView::new()
+                            .pose(data.right.view.pose)
+                            .fov(r_fov)
+                            .sub_image(
+                                openxr::SwapchainSubImage::new()
+                                    .swapchain(&openxr_layer.swapchain)
+                                    .image_array_index(0)
+                                    .image_rect(image_rect(openxr_layer.viewports.viewports[1])),
+                            ),
+                    ],
+                ))
             })
             .collect::<Vec<_>>();
 
         let primary_layers = primary_views
             .iter()
-            .map(|views| {
+            .map(|(alpha, views)| {
                 CompositionLayerProjection::new()
                     .space(&data.space)
-                    .layer_flags(CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
+                    .layer_flags(if *alpha {
+                        CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA
+                    } else {
+                        CompositionLayerFlags::EMPTY
+                    })
                     .views(&views[..])
             })
             .collect::<Vec<_>>();
@@ -670,24 +719,31 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
                 .iter()
                 .filter_map(|&(_, layer_id)| {
                     let openxr_layer = openxr_layers.get(&layer_id)?;
-                    Some([openxr::CompositionLayerProjectionView::new()
-                        .pose(secondary.view.pose)
-                        .fov(s_fov)
-                        .sub_image(
-                            openxr::SwapchainSubImage::new()
-                                .swapchain(&openxr_layer.swapchain)
-                                .image_array_index(0)
-                                .image_rect(image_rect(openxr_layer.viewports.viewports[2])),
-                        )])
+                    Some((
+                        openxr_layer.alpha,
+                        [openxr::CompositionLayerProjectionView::new()
+                            .pose(secondary.view.pose)
+                            .fov(s_fov)
+                            .sub_image(
+                                openxr::SwapchainSubImage::new()
+                                    .swapchain(&openxr_layer.swapchain)
+                                    .image_array_index(0)
+                                    .image_rect(image_rect(openxr_layer.viewports.viewports[2])),
+                            )],
+                    ))
                 })
                 .collect::<Vec<_>>();
 
             let secondary_layers = secondary_views
                 .iter()
-                .map(|views| {
+                .map(|(alpha, views)| {
                     CompositionLayerProjection::new()
                         .space(&data.space)
-                        .layer_flags(CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
+                        .layer_flags(if *alpha {
+                            CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA
+                        } else {
+                            CompositionLayerFlags::EMPTY
+                        })
                         .views(&views[..])
                 })
                 .collect::<Vec<_>>();
@@ -766,7 +822,9 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
                     .map_err(|e| {
                         Error::BackendSpecific(format!("Layer::get_surface_texture {:?}", e))
                     })?;
-                let color_texture = device.surface_texture_object(color_surface_texture);
+                let presentation_texture = device.surface_texture_object(color_surface_texture);
+                openxr_layer.presentation_texture = presentation_texture;
+                let color_texture = openxr_layer.color_buffer.texture(presentation_texture);
                 let color_target = device.surface_gl_texture_target();
                 let depth_stencil_texture = openxr_layer.depth_stencil_texture;
                 let texture_array_index = None;
@@ -796,7 +854,7 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
                     color_texture,
                     color_target,
                     openxr_layer.depth_stencil_texture,
-                );
+                )?;
                 Ok(SubImages {
                     layer_id,
                     sub_image,
@@ -945,8 +1003,6 @@ impl OpenXrDevice {
             right_view_configuration.recommended_image_rect_height,
         );
 
-        let swapchain_sample_count = left_view_configuration.recommended_swapchain_sample_count;
-
         let secondary_active = false;
         let (secondary, secondary_blend_mode) = if supports_secondary {
             let view_configuration = *instance
@@ -1021,7 +1077,6 @@ impl OpenXrDevice {
             secondary_active,
             primary_blend_mode,
             secondary_blend_mode,
-            swapchain_sample_count,
         });
         drop(data);
 
@@ -1142,8 +1197,10 @@ impl OpenXrDevice {
                         ),
                     };
                     let transform = transform(&e.pose_in_previous_space());
-                    self.events
-                        .callback(Event::ReferenceSpaceChanged(base_space, e.pose_valid().then_some(transform)));
+                    self.events.callback(Event::ReferenceSpaceChanged(
+                        base_space,
+                        e.pose_valid().then_some(transform),
+                    ));
                 },
                 Some(_) => {
                     // FIXME: Handle other events
@@ -1188,8 +1245,8 @@ impl SharedData {
         if let Some(ref secondary) = self.secondary {
             let secondary_vp = Rect::new(
                 Point2D::new(self.left.extent.width + self.right.extent.width, 0),
-                Size2D::new(secondary.extent.width, secondary.extent.height) /
-                    SECONDARY_VIEW_DOWNSCALE,
+                Size2D::new(secondary.extent.width, secondary.extent.height)
+                    / SECONDARY_VIEW_DOWNSCALE,
             );
             viewports.push(secondary_vp)
         }

@@ -8,15 +8,16 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use euclid::{Point2D, Rect, Size2D};
-use glow::{self as gl, Context as Gl, HasContext, PixelUnpackData};
+use glow::{self as gl, Context as Gl, HasContext};
 use surfman::chains::{PreserveBuffer, SwapChains, SwapChainsAPI};
 use surfman::{Context as SurfmanContext, Device as SurfmanDevice, SurfaceAccess, SurfaceTexture};
 use webxr_api::{
-    ContextId, Error, GLContexts, GLTypes, LayerGeometry, LayerId, LayerInfo, LayerInit,
-    LayerManagerAPI, MAX_FRAMEBUFFER_DIMENSION, SubImage, SubImages, Viewport, Viewports,
+    ContextId, Error, GLContexts, GLTypes, LayerAttributes, LayerGeometry, LayerId, LayerInfo,
+    LayerInit, LayerManagerAPI, MAX_FRAMEBUFFER_DIMENSION, SubImage, SubImages, Viewport,
+    Viewports,
 };
 
-use crate::gl_utils::GlClearer;
+use crate::gl_utils::{GlClearer, LayerColorBuffer, create_depth_stencil};
 
 #[derive(Clone, Copy, Debug)]
 pub enum SurfmanGL {}
@@ -33,6 +34,7 @@ pub struct SurfmanLayerManager {
     surface_textures: HashMap<LayerId, SurfaceTexture>,
     depth_stencil_textures: HashMap<LayerId, Option<gl::NativeTexture>>,
     layer_geometry: HashMap<LayerId, LayerGeometry>,
+    color_buffers: HashMap<LayerId, LayerColorBuffer>,
     framebuffer_limit: Size2D<i32, Viewport>,
     clearer: GlClearer,
 }
@@ -49,6 +51,7 @@ impl SurfmanLayerManager {
             surface_textures,
             depth_stencil_textures,
             layer_geometry: HashMap::new(),
+            color_buffers: HashMap::new(),
             framebuffer_limit: Size2D::new(MAX_FRAMEBUFFER_DIMENSION, MAX_FRAMEBUFFER_DIMENSION),
             clearer,
         }
@@ -89,24 +92,20 @@ impl LayerManagerAPI<SurfmanGL> for SurfmanLayerManager {
             LayerInit::WebGLLayer { stencil, depth, .. }
             | LayerInit::ProjectionLayer { stencil, depth, .. } => stencil || depth,
         };
+        let color = LayerColorBuffer::new(
+            gl,
+            device.surface_gl_texture_target(),
+            (size.width, size.height),
+            init.alpha(),
+        )?;
         let depth_stencil = if has_depth_stencil {
-            let texture = unsafe { gl.create_texture() }.map_err(Error::BackendSpecific)?;
-            unsafe {
-                let saved = gl.get_parameter_texture(gl::TEXTURE_BINDING_2D);
-                gl.bind_texture(gl::TEXTURE_2D, Some(texture));
-                gl.tex_image_2d(
-                    gl::TEXTURE_2D,
-                    0,
-                    gl::DEPTH24_STENCIL8 as _,
-                    size.width,
-                    size.height,
-                    0,
-                    gl::DEPTH_STENCIL,
-                    gl::UNSIGNED_INT_24_8,
-                    PixelUnpackData::Slice(None),
-                );
-                gl.bind_texture(gl::TEXTURE_2D, saved);
-            }
+            let texture = match create_depth_stencil(gl, (size.width, size.height)) {
+                Ok(texture) => texture,
+                Err(error) => {
+                    color.destroy(gl);
+                    return Err(error);
+                },
+            };
             Some(texture)
         } else {
             None
@@ -121,19 +120,26 @@ impl LayerManagerAPI<SurfmanGL> for SurfmanLayerManager {
             context,
             SurfaceAccess::GPUOnly,
         ) {
-            if let Some(texture) = depth_stencil {
-                if let Some(gl) = contexts.bindings(context_id) {
+            if let Some(gl) = contexts.bindings(context_id) {
+                color.destroy(gl);
+                if let Some(texture) = depth_stencil {
                     unsafe { gl.delete_texture(texture) };
                 }
             }
             return Err(Error::BackendSpecific(format!("{error:?}")));
         }
+        self.color_buffers.insert(layer_id, color);
         self.depth_stencil_textures.insert(layer_id, depth_stencil);
         self.layer_geometry.insert(layer_id, geometry.clone());
         self.layers.push((context_id, layer_id));
         Ok(LayerInfo {
             id: layer_id,
             geometry,
+            attributes: LayerAttributes {
+                alpha: init.alpha(),
+                antialias: false,
+                ignore_depth_values: true,
+            },
         })
     }
 
@@ -144,6 +150,11 @@ impl LayerManagerAPI<SurfmanGL> for SurfmanLayerManager {
         layer_id: LayerId,
     ) {
         self.layer_geometry.remove(&layer_id);
+        if let Some(color) = self.color_buffers.remove(&layer_id) {
+            if let Some(gl) = contexts.bindings(context_id) {
+                color.destroy(gl);
+            }
+        }
         self.clearer.destroy_layer(contexts, context_id, layer_id);
         let Some(device) = contexts.device(context_id) else {
             return;
@@ -194,7 +205,11 @@ impl LayerManagerAPI<SurfmanGL> for SurfmanLayerManager {
                 let surface_texture = swap_chain
                     .take_surface_texture(&device, context)
                     .map_err(|_| Error::NoMatchingDevice)?;
-                let color_texture = device.surface_texture_object(&surface_texture);
+                let color_texture = self
+                    .color_buffers
+                    .get(&layer_id)
+                    .ok_or(Error::NoMatchingDevice)?
+                    .texture(device.surface_texture_object(&surface_texture));
                 let color_target = device.surface_gl_texture_target();
                 let depth_stencil_texture = self
                     .depth_stencil_textures
@@ -231,7 +246,7 @@ impl LayerManagerAPI<SurfmanGL> for SurfmanLayerManager {
                     color_texture,
                     color_target,
                     depth_stencil_texture,
-                );
+                )?;
                 Ok(SubImages {
                     layer_id,
                     sub_image,
@@ -247,13 +262,34 @@ impl LayerManagerAPI<SurfmanGL> for SurfmanLayerManager {
         layers: &[(ContextId, LayerId)],
     ) -> Result<(), Error> {
         for &(context_id, layer_id) in layers {
+            let device = contexts.device(context_id).ok_or(Error::NoMatchingDevice)?;
             let gl = contexts
                 .bindings(context_id)
                 .ok_or(Error::NoMatchingDevice)?;
-            unsafe {
-                gl.flush();
-            }
-            let device = contexts.device(context_id).ok_or(Error::NoMatchingDevice)?;
+            let surface = self
+                .surface_textures
+                .get(&layer_id)
+                .ok_or(Error::NoMatchingDevice)?;
+            let size = self
+                .layer_geometry
+                .get(&layer_id)
+                .ok_or(Error::NoMatchingDevice)?
+                .framebuffer_size;
+            self.color_buffers
+                .get(&layer_id)
+                .ok_or(Error::NoMatchingDevice)?
+                .present(
+                    gl,
+                    &mut self.clearer,
+                    layer_id,
+                    device.surface_texture_object(surface),
+                    device.surface_gl_texture_target(),
+                    (size.width, size.height),
+                )?;
+            self.clearer
+                .release_surface(gl, layer_id, device.surface_texture_object(surface));
+            unsafe { gl.flush() };
+
             let context = contexts
                 .context(context_id)
                 .ok_or(Error::NoMatchingDevice)?;

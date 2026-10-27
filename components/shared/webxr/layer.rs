@@ -10,7 +10,7 @@ use euclid::{Rect, Size2D};
 use malloc_size_of_derive::MallocSizeOf;
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, LayerGeometry, Viewport, Viewports, MAX_FRAMEBUFFER_DIMENSION};
+use crate::{Error, LayerGeometry, MAX_FRAMEBUFFER_DIMENSION, Viewport, Viewports};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct ContextId(pub u64);
@@ -214,6 +214,15 @@ impl Default for LayerId {
 pub struct LayerInfo {
     pub id: LayerId,
     pub geometry: LayerGeometry,
+    pub attributes: LayerAttributes,
+}
+
+/// Buffer capabilities actually allocated by the layer backend.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, MallocSizeOf)]
+pub struct LayerAttributes {
+    pub antialias: bool,
+    pub alpha: bool,
+    pub ignore_depth_values: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -238,17 +247,33 @@ pub enum LayerInit {
 }
 
 impl LayerInit {
-    pub fn geometry(&self, viewports: &Viewports, limits: Size2D<i32, Viewport>) -> Result<LayerGeometry, Error> {
+    pub fn alpha(&self) -> bool {
+        match *self {
+            Self::WebGLLayer { alpha, .. } | Self::ProjectionLayer { alpha, .. } => alpha,
+        }
+    }
+
+    pub fn geometry(
+        &self,
+        viewports: &Viewports,
+        limits: Size2D<i32, Viewport>,
+    ) -> Result<LayerGeometry, Error> {
         let scale = match *self {
-            Self::WebGLLayer { framebuffer_scale_factor, .. } => framebuffer_scale_factor,
+            Self::WebGLLayer {
+                framebuffer_scale_factor,
+                ..
+            } => framebuffer_scale_factor,
             Self::ProjectionLayer { scale_factor, .. } => scale_factor,
         };
         LayerGeometry::new(viewports, scale, limits)
     }
 
     pub fn texture_size(&self, viewports: &Viewports) -> Size2D<i32, Viewport> {
-        self.geometry(viewports, Size2D::new(MAX_FRAMEBUFFER_DIMENSION, MAX_FRAMEBUFFER_DIMENSION))
-            .map_or_else(|_| Size2D::zero(), |geometry| geometry.framebuffer_size)
+        self.geometry(
+            viewports,
+            Size2D::new(MAX_FRAMEBUFFER_DIMENSION, MAX_FRAMEBUFFER_DIMENSION),
+        )
+        .map_or_else(|_| Size2D::zero(), |geometry| geometry.framebuffer_size)
     }
 }
 

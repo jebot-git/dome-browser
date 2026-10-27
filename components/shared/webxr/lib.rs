@@ -30,15 +30,18 @@ pub use hittest::{
     EntityType, EntityTypes, HitTestId, HitTestResult, HitTestSource, HitTestSpace, Ray, Triangle,
 };
 pub use input::{
-    GamepadLayout, Handedness, InputFrame, InputId, InputSource, SelectEvent, SelectKind, TargetRayMode,
+    GamepadLayout, Handedness, InputFrame, InputId, InputSource, SelectEvent, SelectKind,
+    TargetRayMode,
 };
 pub use layer::{
-    ContextId, GLContexts, GLTypes, LayerGrandManager, LayerGrandManagerAPI, LayerId, LayerInfo, LayerInit,
-    LayerLayout, LayerManager, LayerManagerAPI, LayerManagerFactory, SubImage, SubImages,
+    ContextId, GLContexts, GLTypes, LayerAttributes, LayerGrandManager, LayerGrandManagerAPI,
+    LayerId, LayerInfo, LayerInit, LayerLayout, LayerManager, LayerManagerAPI, LayerManagerFactory,
+    SubImage, SubImages,
 };
 pub use mock::{
     MockButton, MockButtonType, MockDeviceInit, MockDeviceMsg, MockDiscoveryAPI, MockInputInit,
-    MockInputMsg, MockRegion, MockViewInit, MockViewsInit, MockWorld, mock_gamepad_layout, mock_gamepad_state,
+    MockInputMsg, MockRegion, MockViewInit, MockViewsInit, MockWorld, mock_gamepad_layout,
+    mock_gamepad_state,
 };
 pub use registry::{MainThreadRegistry, Registry};
 pub use session::{
