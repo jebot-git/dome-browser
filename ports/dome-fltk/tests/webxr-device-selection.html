@@ -1,0 +1,60 @@
+<!doctype html><meta charset=utf-8><title>XR selected device and context compatibility</title><body>
+<script>
+const state=window.test={ready:true,finished:false,error:null,checks:[],cases:[],events:[]};state.snapshot=()=>({...state,snapshot:undefined});
+const check=(value,label)=>{if(!value)throw Error(label);state.checks.push(label)};
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const xr=navigator.xr,identity=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
+function init(modes=['immersive-vr']){return {supportedModes:modes,supportedFeatures:['viewer','local'],viewerOrigin:{position:[0,0,0],orientation:[0,0,0,1]},views:['left','right'].map(eye=>({eye,resolution:{width:16,height:16},projectionMatrix:identity,viewOffset:{position:[0,0,0],orientation:[0,0,0,1]}}))}}
+async function context(version){const canvas=document.createElement('canvas');canvas.width=16;canvas.height=16;document.body.append(canvas);const gl=canvas.getContext(version);check(!!gl,version+' context exists');await gl.makeXRCompatible();check(gl.getContextAttributes().xrCompatible,version+' context is initially compatible');return gl}
+const request=mode=>new Promise((resolve,reject)=>xr.test.simulateUserActivation(()=>xr.requestSession(mode).then(resolve,reject)));
+async function scenario(name,body){try{await body();state.cases.push({name,passed:true})}catch(error){state.cases.push({name,passed:false,error:String(error)+'\n'+error.stack})}finally{await xr.test.disconnectAllDevices();await sleep(50)}}
+async function main(){
+ await scenario('Device loss invalidates contexts without event listeners',async()=>{
+  const device=await xr.test.simulateDeviceConnection(init());const contexts=await Promise.all(['webgl','webgl2'].map(context));
+  const resources=contexts.map(gl=>{const texture=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,texture);return texture});
+  await device.disconnect();await sleep(200);
+  for(const [index,gl]of contexts.entries()){
+   check(gl.getContextAttributes().xrCompatible===false,'Device loss clears compatibility without an XR event listener, version '+index);
+   check(!gl.isContextLost()&&gl.isTexture(resources[index]),'Device loss preserves ordinary GL resources, version '+index);
+  }
+ });
+ await scenario('Queries use the selected immersive device',async()=>{
+  await xr.test.simulateDeviceConnection(init());await xr.test.simulateDeviceConnection(init(['immersive-ar']));
+  check(await xr.isSessionSupported('immersive-ar')===true,'The preferred AR device supports AR');
+  check(await xr.isSessionSupported('immersive-vr')===false,'A mode query does not silently choose another immersive device');
+ });
+ await scenario('An active immersive session retains its device',async()=>{
+  await xr.test.simulateDeviceConnection(init());const gl=await context('webgl');const session=await request('immersive-vr');
+  session.updateRenderState({baseLayer:new XRWebGLLayer(session,gl)});let ended=0;session.addEventListener('end',()=>ended++);
+  try{
+   await xr.test.simulateDeviceConnection(init(['immersive-ar']));await sleep(100);
+   check(await xr.isSessionSupported('immersive-vr')===true&&await xr.isSessionSupported('immersive-ar')===false,'An added device does not replace the selected device during an active session');
+   check(ended===0&&gl.getContextAttributes().xrCompatible,'The existing session and its compatibility remain usable');
+  }finally{await session.end()}
+  check(await xr.isSessionSupported('immersive-ar')===true&&await xr.isSessionSupported('immersive-vr')===false,'Selection may move to the preferred device after the session ends');
+  await sleep(100);check(!gl.getContextAttributes().xrCompatible,'A later selection change invalidates earlier compatibility');
+ });
+ await scenario('An active inline session also retains the selected device',async()=>{
+  await xr.test.simulateDeviceConnection(init(['inline','immersive-vr']));await xr.isSessionSupported('immersive-vr');const session=await xr.requestSession('inline');
+  try{await xr.test.simulateDeviceConnection(init(['immersive-ar']));check(await xr.isSessionSupported('immersive-vr')===true&&await xr.isSessionSupported('immersive-ar')===false,'Any active XR session retains the existing available immersive device')}
+  finally{await session.end()}
+ });
+ await scenario('An unselected device can disappear without invalidating compatibility',async()=>{
+  const other=await xr.test.simulateDeviceConnection(init());await xr.test.simulateDeviceConnection(init(['immersive-ar']));const gl=await context('webgl2');
+  await other.disconnect();await sleep(100);
+  check(await xr.isSessionSupported('immersive-ar')&&gl.getContextAttributes().xrCompatible,'Unselected device loss preserves the selected device and compatible GL context');
+ });
+ await scenario('Selected device loss shuts down every session before notification',async()=>{
+  const device=await xr.test.simulateDeviceConnection(init(['inline','immersive-vr']));const gl=await context('webgl2');
+  const immersive=await request('immersive-vr');immersive.updateRenderState({baseLayer:new XRWebGLLayer(immersive,gl)});const inline=await xr.requestSession('inline');
+  let ended=0;const ends=[immersive,inline].map(session=>new Promise(resolve=>session.addEventListener('end',()=>{ended++;resolve()},{once:true})));
+  await xr.test.simulateDeviceConnection(init(['immersive-ar']));await sleep(100);
+  const notification=new Promise(resolve=>xr.addEventListener('devicechange',()=>resolve({ended,compatible:gl.getContextAttributes().xrCompatible}),{once:true}));
+  await device.disconnect();await Promise.all(ends);const observed=await notification;
+  check(observed.ended===2&&!observed.compatible,'Device-change listeners observe ended sessions and invalidated compatibility');
+  check(await xr.isSessionSupported('immersive-ar')&&!gl.isContextLost(),'The replacement device is selected while ordinary graphics remain available');
+ });
+ const failed=state.cases.filter(row=>!row.passed);if(failed.length)state.error=JSON.stringify(failed);state.finished=true;
+}
+main().catch(error=>{state.error=String(error)+'\n'+error.stack;state.finished=true});
+</script>

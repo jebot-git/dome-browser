@@ -2,6 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, Ordering},
+};
 use std::thread;
 use std::time::Duration;
 
@@ -16,6 +20,27 @@ use crate::{
     ContextId, DeviceAPI, Error, Event, Floor, Frame, FrameUpdateEvent, HitTestId, HitTestSource,
     InputSource, LayerGrandManager, LayerId, LayerInfo, LayerInit, Native, Viewport, Viewports,
 };
+
+/// Closing is distinct from closed: selection may move immediately, but change
+/// notification must wait until the backend has queued its session-end event.
+pub(crate) struct SessionActivity(AtomicU8);
+impl SessionActivity {
+    pub(crate) fn new() -> Self {
+        Self(AtomicU8::new(0))
+    }
+    pub(crate) fn is_active(&self) -> bool {
+        self.0.load(Ordering::Acquire) == 0
+    }
+    pub(crate) fn is_closed(&self) -> bool {
+        self.0.load(Ordering::Acquire) == 2
+    }
+    pub(crate) fn begin_closing(&self) {
+        self.0.store(1, Ordering::Release);
+    }
+    fn finish_closing(&self) {
+        self.0.store(2, Ordering::Release);
+    }
+}
 
 // How long to wait for an rAF.
 static TIMEOUT: Duration = Duration::from_millis(5);
@@ -121,6 +146,10 @@ impl Quitter {
     pub fn quit(&self) {
         let _ = self.sender.send(SessionMsg::Quit);
     }
+
+    pub fn abort(&self) {
+        let _ = self.sender.send(SessionMsg::Abort);
+    }
 }
 
 /// An object that represents an XR session.
@@ -143,6 +172,12 @@ pub struct Session {
 pub struct SessionId(pub(crate) u32);
 
 impl Session {
+    pub(crate) fn abort_handle(&self) -> Quitter {
+        Quitter {
+            sender: self.sender.clone(),
+        }
+    }
+
     pub fn id(&self) -> SessionId {
         self.id
     }
@@ -292,6 +327,13 @@ pub struct SessionThread<Device> {
     device: Device,
     id: SessionId,
     render_state: RenderState,
+    active: Arc<SessionActivity>,
+}
+
+impl<Device> Drop for SessionThread<Device> {
+    fn drop(&mut self) {
+        self.active.finish_closing();
+    }
 }
 
 impl<Device> SessionThread<Device>
@@ -320,6 +362,7 @@ where
             running,
             id,
             render_state: RenderState::NotInRenderLoop,
+            active: Arc::new(SessionActivity::new()),
         })
     }
 
@@ -392,6 +435,7 @@ where
                     Some(frame) => frame,
                     None => {
                         warn!("Device stopped providing frames, exiting");
+                        self.quit();
                         return false;
                     },
                 };
@@ -417,6 +461,7 @@ where
                     Some(frame) => frame,
                     None => {
                         warn!("Device stopped providing frames, exiting");
+                        self.quit();
                         return false;
                     },
                 };
@@ -454,8 +499,10 @@ where
     }
 
     fn quit(&mut self) {
+        self.active.begin_closing();
         self.render_state = RenderState::NotInRenderLoop;
         self.device.quit();
+        self.active.finish_closing();
     }
 }
 
@@ -490,6 +537,7 @@ pub struct SessionBuilder<'a, GL> {
     sessions: &'a mut Vec<Box<dyn MainThreadSession>>,
     layer_grand_manager: LayerGrandManager<GL>,
     id: SessionId,
+    active: Arc<SessionActivity>,
 }
 
 impl<'a, GL: 'static> SessionBuilder<'a, GL> {
@@ -501,11 +549,13 @@ impl<'a, GL: 'static> SessionBuilder<'a, GL> {
         sessions: &'a mut Vec<Box<dyn MainThreadSession>>,
         layer_grand_manager: LayerGrandManager<GL>,
         id: SessionId,
+        active: Arc<SessionActivity>,
     ) -> Self {
         SessionBuilder {
             sessions,
             layer_grand_manager,
             id,
+            active,
         }
     }
 
@@ -520,12 +570,17 @@ impl<'a, GL: 'static> SessionBuilder<'a, GL> {
         };
         let layer_grand_manager = self.layer_grand_manager;
         let id = self.id;
+        let active = self.active;
         thread::spawn(move || {
             match factory(layer_grand_manager).and_then(|device| SessionThread::new(device, id)) {
                 Ok(mut thread) => {
+                    thread.active = active;
                     let session = thread.new_session();
-                    let _ = acks.send(Ok(session));
-                    thread.run();
+                    if acks.send(Ok(session)).is_ok() {
+                        thread.run();
+                    } else {
+                        thread.quit();
+                    }
                 },
                 Err(err) => {
                     let _ = acks.send(Err(err));
@@ -543,6 +598,7 @@ impl<'a, GL: 'static> SessionBuilder<'a, GL> {
     {
         let device = factory(self.layer_grand_manager)?;
         let mut session_thread = SessionThread::new(device, self.id)?;
+        session_thread.active = self.active;
         let session = session_thread.new_session();
         self.sessions.push(Box::new(session_thread));
         Ok(session)

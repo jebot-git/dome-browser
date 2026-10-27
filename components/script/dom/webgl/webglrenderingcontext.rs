@@ -167,11 +167,24 @@ struct DroppableWebGLRenderingContext {
     #[no_trace]
     #[conditional_malloc_size_of]
     webgl_sender: DomRefCell<Rc<WebGLMsgSender>>,
+    #[cfg(feature = "webxr")]
+    #[no_trace]
+    #[ignore_malloc_size_of = "Only a pipeline ID and task route"]
+    xr_cleanup: (servo_base::id::PipelineId, crate::tasks::task_source::SendableTaskSource),
 }
 
 impl Drop for DroppableWebGLRenderingContext {
     fn drop(&mut self) {
         let _ = self.webgl_sender.borrow().send_remove();
+        #[cfg(feature = "webxr")]
+        {
+            let pipeline = self.xr_cleanup.0;
+            self.xr_cleanup.1.queue(task!(prune_xr_context_observation: move |_cx| {
+                if let Some(window) = crate::event_loop::script_thread::ScriptThread::find_window(pipeline) {
+                    window.update_xr_device_observation();
+                }
+            }));
+        }
     }
 }
 
@@ -190,6 +203,10 @@ pub(crate) struct WebGLRenderingContext {
     #[no_trace]
     last_error: Cell<Option<WebGLError>>,
     xr_compatible: Cell<bool>,
+    xr_compatibility_generation: Cell<Option<u64>>,
+    xr_compatibility_pending: Cell<u32>,
+    xr_compatibility_request: Cell<u64>,
+    xr_compatibility_completed: Cell<u64>,
     context_lost: Cell<bool>,
     context_loss_error_pending: Cell<bool>,
     context_restorable: Cell<bool>,
@@ -268,6 +285,10 @@ impl WebGLRenderingContext {
                 canvas,
                 last_error: Cell::new(None),
                 xr_compatible: Cell::new(false),
+                xr_compatibility_generation: Cell::new(None),
+                xr_compatibility_pending: Cell::new(0),
+                xr_compatibility_request: Cell::new(0),
+                xr_compatibility_completed: Cell::new(0),
                 context_lost: Cell::new(false),
                 context_loss_error_pending: Cell::new(false),
                 context_restorable: Cell::new(false),
@@ -305,13 +326,18 @@ impl WebGLRenderingContext {
                 api_type: ctx_data.api_type,
                 droppable: DroppableWebGLRenderingContext {
                     webgl_sender: DomRefCell::new(Rc::new(ctx_data.sender)),
+                    #[cfg(feature = "webxr")]
+                    xr_cleanup: (window.pipeline_id(), window.task_manager().dom_manipulation_task_source().to_sendable()),
                 },
             };
             #[cfg(feature = "webxr")]
             if attrs.xr_compatible && pref!(dom_webxr_enabled) && window.Document()
                 .allowed_to_use_policy_feature(net_traits::permissions_policy::PolicyFeature::XrSpatialTracking)
             {
-                context.xr_compatible.set(context.check_xr_compatible_sync(window).is_ok());
+                if let Ok(generation) = context.check_xr_compatible_sync(window) {
+                    context.xr_compatible.set(true);
+                    context.xr_compatibility_generation.set(Some(generation));
+                }
             }
             context
         })
@@ -333,11 +359,12 @@ impl WebGLRenderingContext {
             size,
             attrs,
         ) {
-            Ok(ctx) => Some(reflect_weak_referenceable_dom_object(
-                cx,
-                Rc::new(ctx),
-                window,
-            )),
+            Ok(ctx) => {
+                let context = reflect_weak_referenceable_dom_object(cx, Rc::new(ctx), window);
+                #[cfg(feature = "webxr")]
+                window.track_xr_webgl_context(&context);
+                Some(context)
+            },
             Err(msg) => {
                 error!("Couldn't create WebGLRenderingContext: {}", msg);
                 let event = WebGLContextEvent::new(
@@ -382,6 +409,10 @@ impl WebGLRenderingContext {
         self.restoration_pending.set(false);
         self.last_error.set(None);
         self.xr_compatible.set(false);
+        #[cfg(feature = "webxr")]
+        if let Some(window) = self.global().downcast::<Window>() {
+            window.update_xr_device_observation();
+        }
         self.extension_manager.reset_after_loss();
         // Native removal also tears down the context's XR layers and swap chain.
         // Removal waits for any in-flight compositor use to complete.
@@ -495,20 +526,37 @@ impl WebGLRenderingContext {
     }
 
     #[cfg(feature = "webxr")]
-    fn queue_xr_compatibility_error(&self, promise: &RootedPromise) {
+    pub(crate) fn wants_xr_device_observation(&self) -> bool {
+        self.xr_compatible.get() || self.xr_compatibility_pending.get() != 0
+    }
+
+    #[cfg(feature = "webxr")]
+    pub(crate) fn invalidate_xr_compatibility(&self, generation: u64) {
+        if self.xr_compatibility_generation.get() != Some(generation) {
+            self.xr_compatible.set(false);
+        }
+    }
+
+    #[cfg(feature = "webxr")]
+    fn queue_xr_compatibility_error(&self, promise: &RootedPromise, pending: bool, request: u64) {
         use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
         let context = Trusted::new(self);
         let promise = TrustedPromise::from(promise);
         self.global().task_manager().dom_manipulation_task_source().queue(task!(reject_xr_compatibility: move |cx| {
             let context = context.root();
             let promise = promise.root(cx);
-            context.xr_compatible.set(false);
+            if request >= context.xr_compatibility_completed.get() {
+                context.xr_compatible.set(false);
+                context.xr_compatibility_completed.set(request);
+            }
+            if pending { context.xr_compatibility_pending.set(context.xr_compatibility_pending.get().saturating_sub(1)); }
+            if let Some(window) = context.global().downcast::<Window>() { window.update_xr_device_observation(); }
             promise.reject_error(cx, Error::InvalidState(None));
         }));
     }
 
     #[cfg(feature = "webxr")]
-    fn check_xr_compatible_sync(&self, window: &Window) -> Result<(), webxr_api::Error> {
+    fn check_xr_compatible_sync(&self, window: &Window) -> Result<u64, webxr_api::Error> {
         use profile_traits::generic_callback::GenericCallback;
         let (sender, receiver) =
             generic_channel::channel().ok_or(webxr_api::Error::CommunicationError)?;
@@ -5516,18 +5564,25 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             promise.reject_error(cx, Error::InvalidState(None));
             return promise;
         };
-        if !window.Document().allowed_to_use_policy_feature(net_traits::permissions_policy::PolicyFeature::XrSpatialTracking) {
+        if !window.Document().allowed_to_use_policy_feature(
+            net_traits::permissions_policy::PolicyFeature::XrSpatialTracking,
+        ) {
             promise.resolve_native(cx, &());
             return promise;
         }
+        let request = self.xr_compatibility_request.get().wrapping_add(1);
+        self.xr_compatibility_request.set(request);
         if self.is_context_lost() {
-            self.queue_xr_compatibility_error(&promise);
+            self.queue_xr_compatibility_error(&promise, false, request);
             return promise;
         }
         let Some(mut registry) = window.webxr_registry() else {
-            self.queue_xr_compatibility_error(&promise);
+            self.queue_xr_compatibility_error(&promise, false, request);
             return promise;
         };
+        self.xr_compatibility_pending
+            .set(self.xr_compatibility_pending.get().saturating_add(1));
+        window.update_xr_device_observation();
         let task_source = global
             .task_manager()
             .dom_manipulation_task_source()
@@ -5542,10 +5597,21 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             task_source.queue(task!(finish_xr_compatibility: move |cx| {
                 let context = context.root();
                 let promise = promise.root(cx);
-                let result = if context.is_context_lost() || context.context_id() != requested_context { Err(webxr_api::Error::NoMatchingDevice) } else { result };
-                context.xr_compatible.set(result.is_ok());
+                let result = result.and_then(|generation| {
+                    if context.is_context_lost() || context.context_id() != requested_context ||
+                       !context.global().as_window().accept_xr_device_generation(generation) {
+                        Err(webxr_api::Error::NoMatchingDevice)
+                    } else { Ok(generation) }
+                });
+                context.xr_compatibility_pending.set(context.xr_compatibility_pending.get().saturating_sub(1));
+                if request >= context.xr_compatibility_completed.get() {
+                    context.xr_compatibility_completed.set(request);
+                    context.xr_compatible.set(result.is_ok());
+                    if let Ok(generation) = result { context.xr_compatibility_generation.set(Some(generation)); }
+                }
+                context.global().as_window().update_xr_device_observation();
                 match result {
-                    Ok(()) => promise.resolve_native(cx, &()),
+                    Ok(_) => promise.resolve_native(cx, &()),
                     Err(_) => promise.reject_error(cx, Error::InvalidState(None)),
                 }
             }));
@@ -5559,7 +5625,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
                 )
             });
         if sent.is_err() {
-            self.queue_xr_compatibility_error(&promise);
+            self.queue_xr_compatibility_error(&promise, true, request);
         }
         promise
     }

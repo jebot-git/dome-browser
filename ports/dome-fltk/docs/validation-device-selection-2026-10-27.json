@@ -1,0 +1,360 @@
+{
+  "completed_utc": "2026-10-27T20:57:53.747753+00:00",
+  "source_base_commit": "e2e33c11e2026979acb5afd6df732ffcbf521e74",
+  "candidate_sha256": "9fceb185d77106a040aeff22930ce428d37afd032bed39e5e2aa8f637a30f280",
+  "test_embedder_sha256": "2792504b4856e882367c0855b66d6dec3745cb7f726dc05d13f0523e7b915704",
+  "compiled_inputs_unchanged": true,
+  "source_file_sha256": {
+    "components/script/dom/webgl/webglrenderingcontext.rs": "261d7f25253dac3c550fde9b89f5cda4a042ab8e151e34fab017821943316057",
+    "components/script/dom/webxr/xrsystem.rs": "dcd242003c7586334500fe12e4f8329871eecb34e9b855d261147decb5e4c3e0",
+    "components/script/dom/window/window.rs": "dfa796489c68040f4bf54592f77245ee917418be105c35adc5515bc5c20443f5",
+    "components/shared/webxr/device.rs": "b4025a270ac1df1435f74fc9d15dd6c33ac34e850a6bbdb879842e2974634bab",
+    "components/shared/webxr/lib.rs": "19dc8cc37577fd1e83d8a09d18bb4cd265a85b8a62fa5ef93aee3ccb81b49e3e",
+    "components/shared/webxr/registry.rs": "3044604b297826ae623669fccabbd2a9795d5edfbc9760407d049486c4b113de",
+    "components/shared/webxr/session.rs": "1a8cba0bdf214690e6457c18d42bdb6ecb24c775548c44d8bd448a36b97ed42a",
+    "ports/dome-fltk/README.md": "5275d7ef30cee28a78c7ccf4a0c6d46bf48765f0d1684c7d581552e350ae5f0e",
+    "ports/dome-fltk/docs/WEBXR_DEVICECHANGE.md": "fa039734437795180ec9b0e7e8c37a1e9289a66aea6402d5b2d31819f82dbd81",
+    "ports/dome-fltk/src/xr.rs": "e1044666cd5bf6b698ece372b4f02eca54d313b7453c3c000b1327751e0efbbd",
+    "ports/dome-fltk/tests/webxr-context-compatibility.py": "21b530f6e042b8190fecf87d201f101e0b5f409989d4b47885fdd2cb25a638f5",
+    "components/shared/webxr/registry_tests.rs": "5fdb324ee00a0586ed27ca406a74e588e69bb772539eb551af44096d36feaa27",
+    "ports/dome-fltk/docs/WEBXR_DEVICE_SELECTION.md": "0e3d9f1d204ce49f63cfc50ef1dda8ef53720019c17a93657db37eafaf691eb5",
+    "ports/dome-fltk/tests/webxr-device-selection-native-child.html": "e5c84afd1589e7f38f48e212f1ab10725b2c2e9f9783d3cd458903a20f4bf797",
+    "ports/dome-fltk/tests/webxr-device-selection-native.html": "5b7e173f950ef751aeb6402e82ebb0caaf3861756fc7ed62887c0eaf54ae0c42",
+    "ports/dome-fltk/tests/webxr-device-selection.html": "3c613f71e5bb8b574bfc48b953fb02bad76830acd10077e252cc24b750180bb1",
+    "ports/dome-fltk/tests/webxr-device-selection.py": "51b53ba77abee7ae1abd433f4f031662a4fd9fccde4eb43a48588772470285a9"
+  },
+  "selected_units": 234,
+  "runtime_checks": 7496,
+  "worker_shutdown_cases": 3,
+  "upstream_passed_cases": 563,
+  "upstream_optional_unsupported": 4,
+  "regression_jobs": 46,
+  "all_required_passed": true,
+  "initial_regression_failures": [],
+  "additional_pen_confirmations": 0,
+  "all_original_upstream_assertions_passed": false,
+  "upstream_obsolete_expectation_cases": 1,
+  "compiled_input_count": 58,
+  "units": [
+    {
+      "name": "selection",
+      "passed": 7,
+      "log_sha256": "6686d7938773107969e9d447b540169373b0d395690f459e3270244406cde3d0"
+    },
+    {
+      "name": "permissions-policy",
+      "passed": 15,
+      "log_sha256": "1f7a1ad1aff84844f69d8dfd915e8fe96a77bcaf5309653d1a620eda0a907438"
+    },
+    {
+      "name": "frontend",
+      "passed": 187,
+      "log_sha256": "c9d9ad7adf7f9f4ab7ff7d8c72bebbbfa2700d2660c8b759985d52a978fbbdc5"
+    },
+    {
+      "name": "geometry",
+      "passed": 10,
+      "log_sha256": "51c8c8cf6ee3b73d9b737f18f707f0e3149e2e319087eeec0660ec75a6fcbb3f"
+    },
+    {
+      "name": "pointer-ids",
+      "passed": 2,
+      "log_sha256": "449b5fd5ac237938b45e52728c49b82eb840490e9a6787a6ffd6a898c82daa5b"
+    },
+    {
+      "name": "pen-payload",
+      "passed": 3,
+      "log_sha256": "54d2c2b4230588f45d99ab580070515e31e9e191d43560b3c0dd02373dac0563"
+    },
+    {
+      "name": "factory",
+      "passed": 1,
+      "log_sha256": "7b39cfec607672e34758322a791dd6eb39331783ef9fb1898a7c5b8015bc1e3f"
+    },
+    {
+      "name": "secondary",
+      "passed": 4,
+      "log_sha256": "c307bf2c426eb68fe6bf9e2287f683cb9807fc1865f624e82dc5545ff1359cca"
+    },
+    {
+      "name": "renderer",
+      "passed": 5,
+      "log_sha256": "5b78b481f3fb50ef4d819e7d3f6b7585fd5a5561b8d02224949b55a3515397cb"
+    }
+  ],
+  "suites": [
+    {
+      "name": "general-new",
+      "runtime_checks": 46,
+      "report_sha256": "90ae9fa47a09d413d31d88329faa5e9b44df0d28fe73493d31a325e823e1066a"
+    },
+    {
+      "name": "general-old",
+      "runtime_checks": 46,
+      "report_sha256": "90ae9fa47a09d413d31d88329faa5e9b44df0d28fe73493d31a325e823e1066a"
+    },
+    {
+      "name": "native-touch",
+      "runtime_checks": 22,
+      "report_sha256": "c57fa2adefec30239e4c5bb6ec1dc661b34e36aae8bee7f6f00a47e6a6901668"
+    },
+    {
+      "name": "mouse-inline",
+      "runtime_checks": 34,
+      "report_sha256": "9478588714a4f941687ba17a5ccd6aaad23d4e1ced64bd300d47b5894ae4cddc"
+    },
+    {
+      "name": "controller",
+      "runtime_checks": 60,
+      "report_sha256": "0f45954f6528987abf1192830b13a6f5a48d28a1a3e1313d4ed4290cf2faf5fc"
+    },
+    {
+      "name": "reset",
+      "runtime_checks": 101,
+      "report_sha256": "b836e6f371b8477f9d9146694300793b00a71ef23f58661a5c00881508ebab85"
+    },
+    {
+      "name": "mouse-immersive",
+      "runtime_checks": 38,
+      "report_sha256": "b023b5d49671061bb02e93d3cff22681c12abea0971c3fc46685af82098c4084"
+    },
+    {
+      "name": "engine-touch",
+      "runtime_checks": 43,
+      "report_sha256": "de75972ed0c1f30fb78e97a6435b7afa8014cf988f3cebf749ae867351749b37"
+    },
+    {
+      "name": "visibility",
+      "runtime_checks": 77,
+      "report_sha256": "8819e5c8706258cd4b5e4a9134d8a76030ee741c5427af38608d5c0f5d71b8d9"
+    },
+    {
+      "name": "frame-same",
+      "runtime_checks": 17,
+      "report_sha256": "c8206cb861c5b8ed07ed637bf0ea5aac70025aeba7b31449e1e3ecab8589d6d9"
+    },
+    {
+      "name": "frame-cross",
+      "runtime_checks": 17,
+      "report_sha256": "9dc1e73698fe52e7a1ed08e042d4ab40099f69b7f71ccf22b497c848dfa70372"
+    },
+    {
+      "name": "outcomes",
+      "runtime_checks": 9,
+      "report_sha256": "3ea178e01294ab974c3ac19b029a8e42305727f31f66155b7cfc2bf1055ec4d2"
+    },
+    {
+      "name": "native-pen",
+      "runtime_checks": 87,
+      "report_sha256": "048fff2726b5dd8404a743e177d9064e0d2e55665da7fb32fdac64be1f709f5e"
+    },
+    {
+      "name": "upstream",
+      "upstream_passed_cases": 7,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "217e5ef83abc8e3ca81907b40a3c4ddac87d130c3a9e1f45a41b0023cb15099b"
+    },
+    {
+      "name": "layer-scaling",
+      "runtime_checks": 369,
+      "report_sha256": "af84495c3d3911576a68a731e76f17b1f10cc4543e6b328b804064641412919f"
+    },
+    {
+      "name": "layers-upstream",
+      "upstream_passed_cases": 22,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "43fffd439978b4dda92cd5c50fd0fc536d69aa76edeb4ed2709a0326dd9bc356"
+    },
+    {
+      "name": "bounded",
+      "runtime_checks": 21,
+      "report_sha256": "806ee0043f05290dde3bbd02d3fb32dd4c401f7438cbd3728020aca1c896a3fd"
+    },
+    {
+      "name": "reset-upstream",
+      "upstream_passed_cases": 4,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "f8dfdd804e3f2bae582b2733680e7349ff4042ecbde66d2d1628c2bbb0b86f2a"
+    },
+    {
+      "name": "layer-attributes",
+      "runtime_checks": 1037,
+      "report_sha256": "86e10c8cc3cdcec522549527f0bb8940071e78c799782bb0a5e2f2c4e450cb4d"
+    },
+    {
+      "name": "layer-attributes-opaque-context",
+      "runtime_checks": 1037,
+      "report_sha256": "ac23557cf817dbc57e0dae0441f46440e82400aabe34aef9ed3013e4225dbeae"
+    },
+    {
+      "name": "compatibility-native",
+      "runtime_checks": 45,
+      "report_sha256": "7bce403440f1fdc9214369a870278cb71ea3848137ad19e68b01803a1ff3beec"
+    },
+    {
+      "name": "compatibility-nohost",
+      "runtime_checks": 31,
+      "report_sha256": "bc637586fe65cedadd4284e0c5926a677b54f52c6932b0633d7388b5d1ea1495"
+    },
+    {
+      "name": "dynamic-upstream",
+      "upstream_passed_cases": 24,
+      "upstream_optional_unsupported": 4,
+      "report_sha256": "3e10a9b76346a87ad7ef66e0ca808c649ae52542ef5823b76f6903d5746fbd2a"
+    },
+    {
+      "name": "dynamic",
+      "runtime_checks": 610,
+      "report_sha256": "12a7d1813f461827a9441894a656c4a0e8b8ea5371360481839f2125f02ccb8e"
+    },
+    {
+      "name": "secondary",
+      "runtime_checks": 624,
+      "report_sha256": "61903c91faf2155176ee09eba0b89ec8122d8ae6357400560de3f95f10506cb4"
+    },
+    {
+      "name": "secondary-upstream",
+      "upstream_passed_cases": 12,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "95ecc6298bdde340ac41bbc7c3656c3eaffe6f1a1171698aa7754c69566ac1b5"
+    },
+    {
+      "name": "pdf-new",
+      "runtime_checks": 25,
+      "report_sha256": "619c6429c3ad9cd27e00b3d951083926fa0f4fef0f7f6b07f55c8b2ec2302fec"
+    },
+    {
+      "name": "pdf-old",
+      "runtime_checks": 25,
+      "report_sha256": "619c6429c3ad9cd27e00b3d951083926fa0f4fef0f7f6b07f55c8b2ec2302fec"
+    },
+    {
+      "name": "history-new",
+      "runtime_checks": 13,
+      "report_sha256": "f969a071a6e05de8b4e7bd8402b43a8430100420d7e9927c41a6a6d6a6ea3acc"
+    },
+    {
+      "name": "history-old",
+      "runtime_checks": 13,
+      "report_sha256": "f969a071a6e05de8b4e7bd8402b43a8430100420d7e9927c41a6a6d6a6ea3acc"
+    },
+    {
+      "name": "external-links",
+      "runtime_checks": 63,
+      "report_sha256": "9206be69013190baa3e6f0ab8c93f55d8cb34bc245b1220524a03d3bbd38744d"
+    },
+    {
+      "name": "wasm-streams",
+      "runtime_checks": 17,
+      "report_sha256": "08327ee784bc8713f64bed6d95af2ffb5f0d78e6bdddfeaec34048347f063370"
+    },
+    {
+      "name": "downloads",
+      "runtime_checks": 18,
+      "report_sha256": "837e071f609eb045d9596a68028cea8c683d601e4c0092fc5e787ea568f6f1d4"
+    },
+    {
+      "name": "webgl-loss",
+      "runtime_checks": 280,
+      "upstream_passed_cases": 489,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "5f0683f9866d435104dd9eddc31b43d9848e080945bca7f3b648e449741b05e0"
+    },
+    {
+      "name": "worker-shutdown",
+      "worker_shutdown_cases": 3,
+      "report_sha256": "3ae39206dc1610673a9c1d500b21004d3b61c65c98dd996b501f2639b1eeda6c"
+    },
+    {
+      "name": "xr-loss",
+      "runtime_checks": 68,
+      "report_sha256": "98015b5dac2ade834876deab02d9c81a5fe5ea5ca12db6368ddb46afe6e001dd"
+    },
+    {
+      "name": "webgl-gc",
+      "runtime_checks": 16,
+      "report_sha256": "45741a4829a6b36e3990d047e17aecc010e6cfb3fa2bb319242023d70b6e61c9"
+    },
+    {
+      "name": "policy-mock",
+      "runtime_checks": 575,
+      "document_scenarios": 34,
+      "report_sha256": "b6413a219157e7edecba2cf373d38aefe1c09b6bc7d4060a7a1f0c627c893804"
+    },
+    {
+      "name": "policy-upstream",
+      "runtime_checks": 2,
+      "upstream_passed_cases": 3,
+      "upstream_obsolete_expectation_cases": 1,
+      "all_original_upstream_assertions_passed": false,
+      "report_sha256": "0c22c33043524d8eeaa9de10ef83ade6386327023b1decda5b7ab1cdf7a25996"
+    },
+    {
+      "name": "policy-history",
+      "runtime_checks": 1874,
+      "document_scenarios": 115,
+      "report_sha256": "4ce934d28a1094e989596e50c214c4000a5ca0c0bffd251aa099270d3862f6fe"
+    },
+    {
+      "name": "policy-native",
+      "runtime_checks": 23,
+      "report_sha256": "f98cb0e2191b424845abd9091cb59cd735b676557edfeabf049c65a3ac479b90"
+    },
+    {
+      "name": "devicechange-mock",
+      "runtime_checks": 37,
+      "report_sha256": "1edc8719269f41a0bd351d7892d5d68767bf9fee78623df7ae7f3ab1153a2f5c"
+    },
+    {
+      "name": "devicechange-upstream",
+      "runtime_checks": 2,
+      "upstream_passed_cases": 2,
+      "report_sha256": "c5cc8067a6e1c0b42622d57c8a819c47a54e1f02f25127994a3dd2c3eb277817"
+    },
+    {
+      "name": "devicechange-native",
+      "runtime_checks": 30,
+      "report_sha256": "4e2cd30eb2c024cee96988d2f8c227f6400f1903cbeb8ce3983f4c53cb06c0a9"
+    },
+    {
+      "name": "selection-mock",
+      "runtime_checks": 26,
+      "report_sha256": "394b782b5e33250a425e4eb0715d2b9f0f4ff14be6f44889601c96680992c490"
+    },
+    {
+      "name": "selection-native",
+      "runtime_checks": 18,
+      "report_sha256": "fe2a8137ec7149767f9162b9a8163dc3cbe78a452dce6745d76923062d17d848"
+    }
+  ],
+  "initial_reports": [
+    "before/report.json",
+    "before-expanded/report.json",
+    "native-before/report.json"
+  ],
+  "remaining": [
+    "Deferred XR requests during document suspension and teardown",
+    "Automatic GPU-reset detection, adapter migration and capability changes",
+    "Permissions Policy reporting/report-only delivery and further feature registrations",
+    "DomeD shell touch/stylus interactions beyond native client surfaces",
+    "Dynamic scaling on optional native backends",
+    "Physical device validation",
+    "Continuous stability, web adblocking/privacy and local workstation protection maintenance",
+    "Final standards-focused Discord/x.com rendering"
+  ],
+  "unadvertised_features": [
+    "OffscreenCanvas"
+  ],
+  "physical_device_validation": false,
+  "optional_windows_openxr_compiled": false,
+  "installed": false,
+  "sessions_restarted": false,
+  "artifacts_directory": "artifacts/servo-rendering-goal/webxr-device-selection-v1",
+  "host_selected_units": 172,
+  "host_units_retained_from": "webxr-devicechange-v1; host source unchanged this milestone",
+  "host_units_rerun": false,
+  "host_full_unit_log_sha256": "cabcd3ee2284e54579605e4c55bade3687a6ee772f5708a885b149e508cfbb95",
+  "host_unit_log_sha256": "1266e331c2576930ade5910a3ffcfe178e20168e2b56ba5b7299bce595c2b034",
+  "native_host_sha256": "6c7169466c431a0ce2b79ef93c4e98d9312babc14ab3b93d3b1bd8467801e727",
+  "host_compiled_inputs_unchanged": true
+}

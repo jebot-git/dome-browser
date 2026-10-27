@@ -20,7 +20,7 @@ mod space;
 pub mod util;
 mod view;
 
-pub use device::{DeviceAPI, DiscoveryAPI};
+pub use device::{DeviceAPI, DiscoveryAPI, ImmersiveDeviceState};
 pub use error::Error;
 pub use events::{Event, EventBuffer, Visibility};
 pub use frame::{Frame, FrameUpdateEvent, ViewerPose};
@@ -43,7 +43,7 @@ pub use mock::{
     MockInputMsg, MockRegion, MockViewInit, MockViewsInit, MockWorld, mock_gamepad_layout,
     mock_gamepad_state,
 };
-pub use registry::{MainThreadRegistry, Registry};
+pub use registry::{DeviceChange, MainThreadRegistry, Registry};
 pub use session::{
     EnvironmentBlendMode, MainThreadSession, Quitter, Session, SessionBuilder, SessionId,
     SessionInit, SessionMode, SessionThread,

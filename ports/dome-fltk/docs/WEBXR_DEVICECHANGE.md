@@ -5,7 +5,8 @@ trusted generic events when immersive-device availability changes. Delivery is
 restricted to fully active documents permitted to use `xr-spatial-tracking`.
 The event has no user activation and does not grant consent to enter XR.
 
-Observation starts with the first listener and stops with the last listener.
+Observation starts with the first listener or interested WebGL context and stops
+when both kinds of interest disappear.
 Duplicate, once, aborted and property listeners retain normal EventTarget
 behavior. Navigation, history suspension and document destruction stop
 observation; a retained history document resumes with a fresh baseline when
@@ -14,7 +15,8 @@ subscription. Cross-thread callbacks retain document IDs and a task source,
 without rooting the Window or XRSystem.
 
 The native DomeD discovery uses a single lazy background worker. It samples
-capability handshakes every 500 ms while an authorized document is observing,
+capability handshakes every 500 ms while an authorized document or tracked
+session is observing,
 with socket operation timeouts. Monitoring opens no immersive lease and reads
 no tracking data. Initial registration does not manufacture a change event.
 Socket removal, reconnection and replacement are detected. The additive
@@ -40,6 +42,6 @@ endpoint replacement and teardown. They do not establish physical headset
 hotplug behavior or optional native backend support. See the milestone's
 validation report for actual results and retained failures.
 
-Broader device selection policy and resetting every WebGL context's XR
-compatibility flag when the selected device changes remain follow-up work.
-These availability tests alone do not establish that integration.
+Shared device selection and WebGL compatibility generations are described in
+[XR device selection and context compatibility](WEBXR_DEVICE_SELECTION.md).
+The availability tests alone do not establish that integration.

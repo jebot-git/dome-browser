@@ -14,6 +14,14 @@ use crate::{
 };
 
 /// A trait for discovering XR devices
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ImmersiveDeviceState {
+    /// Backend-local identity; a runtime restart or replacement changes it.
+    pub identity: u64,
+    pub supports_vr: bool,
+    pub supports_ar: bool,
+}
+
 pub trait DiscoveryAPI<GL>: 'static {
     fn request_session(
         &mut self,
@@ -23,11 +31,20 @@ pub trait DiscoveryAPI<GL>: 'static {
     ) -> Result<Session, Error>;
     fn supports_session(&self, mode: SessionMode) -> bool;
 
+    fn immersive_device_state(&self) -> Option<ImmersiveDeviceState> {
+        let supports_vr = self.supports_session(SessionMode::ImmersiveVR);
+        let supports_ar = self.supports_session(SessionMode::ImmersiveAR);
+        (supports_vr || supports_ar).then_some(ImmersiveDeviceState {
+            identity: 0,
+            supports_vr,
+            supports_ar,
+        })
+    }
+
     /// Observe changes to immersive-device availability without starting a
     /// session. None stops observation; implementations must not retain a DOM
     /// object or perform tracking in order to answer availability.
     fn set_device_change_callback(&mut self, _callback: Option<ProfileGenericCallback<()>>) {}
-
 
     /// Verify that a context can supply surfaces to this immersive device.
     /// This must not begin a session, consume a lease or request tracking data.
@@ -112,6 +129,9 @@ pub trait DeviceAPI: 'static {
 }
 
 impl<GL: 'static> DiscoveryAPI<GL> for Box<dyn DiscoveryAPI<GL>> {
+    fn immersive_device_state(&self) -> Option<ImmersiveDeviceState> {
+        (**self).immersive_device_state()
+    }
     fn set_device_change_callback(&mut self, callback: Option<ProfileGenericCallback<()>>) {
         (**self).set_device_change_callback(callback);
     }

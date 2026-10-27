@@ -400,6 +400,15 @@ pub(crate) struct Window {
     #[cfg(feature = "webxr")]
     webxr_registry: Option<webxr_api::Registry>,
 
+    #[cfg(feature = "webxr")]
+    xr_webgl_contexts: DOMTracker<crate::dom::webgl::webglrenderingcontext::WebGLRenderingContext>,
+    #[cfg(feature = "webxr")]
+    xr_device_observer: Cell<Option<u64>>,
+    #[cfg(feature = "webxr")]
+    xr_observer_generation: Cell<u64>,
+    #[cfg(feature = "webxr")]
+    xr_device_generation: Cell<Option<u64>>,
+
     /// When an element triggers an image load or starts watching an image load from the
     /// `ImageCache` it adds an entry to this list. When those loads are triggered from
     /// layout, they also add an etry to [`Self::pending_layout_images`].
@@ -3639,14 +3648,118 @@ impl Window {
     }
 
     #[cfg(feature = "webxr")]
-    pub(crate) fn notify_xr_device_change(&self, cx: &mut JSContext, generation: u64) {
-        if let Some(xr) = self.navigator.get().and_then(|navigator| navigator.xr()) {
-            xr.device_changed(cx, generation);
+    pub(crate) fn track_xr_webgl_context(
+        &self,
+        context: &crate::dom::webgl::webglrenderingcontext::WebGLRenderingContext,
+    ) {
+        self.xr_webgl_contexts.track(context);
+        self.update_xr_device_observation();
+    }
+
+    #[cfg(feature = "webxr")]
+    pub(crate) fn stop_xr_device_observation(&self) {
+        if let Some(generation) = self.xr_device_observer.replace(None) {
+            if let Some(registry) = self.webxr_registry() {
+                registry.stop_observing_device_changes(self.pipeline_id(), generation);
+            }
         }
     }
 
     #[cfg(feature = "webxr")]
+    pub(crate) fn update_xr_device_observation(&self) {
+        let mut needed = self
+            .navigator
+            .get()
+            .and_then(|navigator| navigator.xr())
+            .is_some_and(|xr| xr.wants_device_changes());
+        self.xr_webgl_contexts
+            .for_each(|context| needed |= context.wants_xr_device_observation());
+        if !needed
+            || !self.Document().allowed_to_use_policy_feature(
+                net_traits::permissions_policy::PolicyFeature::XrSpatialTracking,
+            )
+        {
+            self.stop_xr_device_observation();
+            return;
+        }
+        if self.xr_device_observer.get().is_some() {
+            return;
+        }
+        let Some(registry) = self.webxr_registry() else {
+            return;
+        };
+        let generation = self.xr_observer_generation.get().wrapping_add(1);
+        self.xr_observer_generation.set(generation);
+        let pipeline = self.pipeline_id();
+        let tasks = self
+            .task_manager()
+            .dom_manipulation_task_source()
+            .to_sendable();
+        let callback = profile_traits::generic_callback::GenericCallback::new(
+            move |message: Result<webxr_api::DeviceChange, _>| {
+                let Ok(change) = message else {
+                    return;
+                };
+                tasks.queue(task!(xr_device_change: move |cx| {
+                    if let Some(window) = ScriptThread::find_window(pipeline) {
+                        window.notify_xr_device_change(cx, generation, change);
+                    }
+                }));
+            },
+        );
+        if let Ok(callback) = callback {
+            if registry
+                .observe_device_changes(pipeline, generation, callback)
+                .is_ok()
+            {
+                self.xr_device_observer.set(Some(generation));
+            }
+        }
+    }
+
+    #[cfg(feature = "webxr")]
+    pub(crate) fn accept_xr_device_generation(&self, generation: u64) -> bool {
+        if self
+            .xr_device_generation
+            .get()
+            .is_some_and(|current| current > generation)
+        {
+            return false;
+        }
+        self.xr_device_generation.set(Some(generation));
+        self.xr_webgl_contexts
+            .for_each(|context| context.invalidate_xr_compatibility(generation));
+        true
+    }
+
+    #[cfg(feature = "webxr")]
+    pub(crate) fn notify_xr_device_change(
+        &self,
+        cx: &mut JSContext,
+        observer: u64,
+        change: webxr_api::DeviceChange,
+    ) {
+        if self.xr_device_observer.get() != Some(observer)
+            || !self.Document().allowed_to_use_policy_feature(
+                net_traits::permissions_policy::PolicyFeature::XrSpatialTracking,
+            )
+        {
+            return;
+        }
+        if !self.accept_xr_device_generation(change.generation) {
+            return;
+        }
+        if change.notify {
+            if let Some(xr) = self.navigator.get().and_then(|navigator| navigator.xr()) {
+                xr.device_changed(cx);
+            }
+        }
+        self.update_xr_device_observation();
+    }
+
+    #[cfg(feature = "webxr")]
     fn end_xr_sessions_for_document_deactivation(&self) {
+        self.stop_xr_device_observation();
         if let Some(navigator) = self.navigator.get() {
             if let Some(xr) = navigator.xr() {
                 xr.end_sessions_for_document_deactivation();
@@ -3661,9 +3774,7 @@ impl Window {
         // Set the window proxy to be this object.
         self.window_proxy().set_currently_active(cx, self);
         #[cfg(feature = "webxr")]
-        if let Some(xr) = self.navigator.get().and_then(|navigator| navigator.xr()) {
-            xr.resume_device_changes();
-        }
+        self.update_xr_device_observation();
 
         // Push the document title to `Paint` since we are
         // activating this document due to a navigation.
@@ -4208,6 +4319,14 @@ impl Window {
             webgl_chan,
             #[cfg(feature = "webxr")]
             webxr_registry,
+            #[cfg(feature = "webxr")]
+            xr_webgl_contexts: DOMTracker::new(),
+            #[cfg(feature = "webxr")]
+            xr_device_observer: Cell::new(None),
+            #[cfg(feature = "webxr")]
+            xr_observer_generation: Cell::new(0),
+            #[cfg(feature = "webxr")]
+            xr_device_generation: Cell::new(None),
             pending_image_callbacks: Default::default(),
             pending_layout_images: Default::default(),
             pending_images_for_rasterization: Default::default(),

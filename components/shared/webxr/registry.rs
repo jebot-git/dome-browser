@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::session::SessionActivity;
 use embedder_traits::EventLoopWaker;
 use log::warn;
 use profile_traits::generic_callback::GenericCallback as ProfileGenericCallback;
@@ -9,11 +10,32 @@ use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::{self, GenericCallback, GenericReceiver, GenericSender};
 use servo_base::id::PipelineId;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::{
-    ContextId, DiscoveryAPI, Error, GLTypes, LayerGrandManager, MainThreadSession, MockDeviceInit,
-    MockDeviceMsg, MockDiscoveryAPI, Session, SessionBuilder, SessionId, SessionInit, SessionMode,
+    ContextId, DiscoveryAPI, Error, GLTypes, ImmersiveDeviceState, LayerGrandManager,
+    MainThreadSession, MockDeviceInit, MockDeviceMsg, MockDiscoveryAPI, Quitter, Session,
+    SessionBuilder, SessionId, SessionInit, SessionMode,
 };
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct DeviceChange {
+    pub generation: u64,
+    /// Baseline messages reconcile contexts without manufacturing an event.
+    pub notify: bool,
+}
+
+struct DiscoveryEntry<GL> {
+    id: u64,
+    device: Box<dyn DiscoveryAPI<GL>>,
+    state: Option<ImmersiveDeviceState>,
+}
+
+struct ActiveSession {
+    active: Arc<SessionActivity>,
+    abort: Quitter,
+    monitor_devices: bool,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Registry {
@@ -22,7 +44,7 @@ pub struct Registry {
 }
 
 pub struct MainThreadRegistry<GL> {
-    discoveries: Vec<Box<dyn DiscoveryAPI<GL>>>,
+    discoveries: Vec<DiscoveryEntry<GL>>,
     sessions: Vec<Box<dyn MainThreadSession>>,
     mocks: Vec<Box<dyn MockDiscoveryAPI<GL>>>,
     sender: GenericSender<RegistryMsg>,
@@ -30,8 +52,17 @@ pub struct MainThreadRegistry<GL> {
     waker: MainThreadWakerImpl,
     grand_manager: LayerGrandManager<GL>,
     next_session_id: u32,
-    device_watchers: HashMap<PipelineId, (u64, ProfileGenericCallback<()>)>,
+    device_watchers: HashMap<PipelineId, (u64, ProfileGenericCallback<DeviceChange>, u64)>,
     device_watch_epoch: u64,
+    observing_devices: bool,
+    next_discovery_id: u64,
+    selected_device: Option<(u64, ImmersiveDeviceState)>,
+    device_generation: u64,
+    enumerated_devices: bool,
+    active_sessions: Vec<ActiveSession>,
+    draining_sessions: Vec<Arc<SessionActivity>>,
+    pending_device_change: bool,
+    device_change_serial: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -70,7 +101,7 @@ impl Registry {
         &self,
         pipeline: PipelineId,
         generation: u64,
-        callback: ProfileGenericCallback<()>,
+        callback: ProfileGenericCallback<DeviceChange>,
     ) -> Result<(), Error> {
         self.sender
             .send(RegistryMsg::ObserveDeviceChanges(
@@ -91,7 +122,7 @@ impl Registry {
     pub fn check_context_compatibility(
         &mut self,
         context: ContextId,
-        dest: ProfileGenericCallback<Result<(), Error>>,
+        dest: ProfileGenericCallback<Result<u64, Error>>,
     ) -> Result<(), Error> {
         self.sender
             .send(RegistryMsg::CheckContextCompatibility(context, dest))
@@ -155,6 +186,15 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
             next_session_id: 0,
             device_watchers: HashMap::new(),
             device_watch_epoch: 0,
+            observing_devices: false,
+            next_discovery_id: 0,
+            selected_device: None,
+            device_generation: 0,
+            enumerated_devices: false,
+            active_sessions: Vec::new(),
+            draining_sessions: Vec::new(),
+            pending_device_change: false,
+            device_change_serial: 0,
         })
     }
 
@@ -183,7 +223,30 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
         .ok()
     }
 
-    fn configure_device_observation(&mut self, observing: bool) {
+    fn reap_finished_sessions(&mut self) {
+        let draining = &mut self.draining_sessions;
+        self.active_sessions.retain(|session| {
+            if session.active.is_active() {
+                return true;
+            }
+            if !session.active.is_closed() {
+                draining.push(session.active.clone());
+            }
+            false
+        });
+    }
+
+    fn configure_device_observation(&mut self) {
+        self.reap_finished_sessions();
+        let observing = !self.device_watchers.is_empty()
+            || self
+                .active_sessions
+                .iter()
+                .any(|session| session.monitor_devices);
+        if self.observing_devices == observing {
+            return;
+        }
+        self.observing_devices = observing;
         self.device_watch_epoch = self.device_watch_epoch.wrapping_add(1);
         for index in 0..self.discoveries.len() {
             let callback = if observing {
@@ -191,34 +254,98 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
             } else {
                 None
             };
-            self.discoveries[index].set_device_change_callback(callback);
+            self.discoveries[index]
+                .device
+                .set_device_change_callback(callback);
         }
     }
 
     fn notify_device_changes(&mut self) {
-        let had_watchers = !self.device_watchers.is_empty();
-        self.device_watchers
-            .retain(|_, (_, callback)| callback.send(()).is_ok());
-        if had_watchers && self.device_watchers.is_empty() {
-            self.configure_device_observation(false);
+        self.draining_sessions.retain(|active| !active.is_closed());
+        if !self.draining_sessions.is_empty() {
+            self.pending_device_change = true;
+            return;
         }
+        self.pending_device_change = false;
+        let serial = self.device_change_serial;
+        let change = DeviceChange {
+            generation: self.device_generation,
+            notify: true,
+        };
+        self.device_watchers.retain(|_, (_, callback, observed)| {
+            if *observed == serial {
+                return true;
+            }
+            *observed = serial;
+            callback.send(change).is_ok()
+        });
+        self.configure_device_observation();
+    }
+
+    fn refresh_selection(&mut self) {
+        self.reap_finished_sessions();
+        let mut list_changed = false;
+        for entry in &mut self.discoveries {
+            let state = entry.device.immersive_device_state();
+            list_changed |= entry.state != state;
+            entry.state = state;
+        }
+        let previous = self.selected_device;
+        let retained = if !self.active_sessions.is_empty() {
+            previous.and_then(|(id, old)| {
+                self.discoveries
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .and_then(|entry| {
+                        entry
+                            .state
+                            .filter(|state| state.identity == old.identity)
+                            .map(|state| (id, state))
+                    })
+            })
+        } else {
+            None
+        };
+        self.selected_device = retained.or_else(|| {
+            self.discoveries
+                .iter()
+                .find_map(|entry| entry.state.map(|state| (entry.id, state)))
+        });
+        let selection_changed = previous != self.selected_device;
+        if self.enumerated_devices && selection_changed {
+            self.device_generation = self.device_generation.wrapping_add(1);
+            for session in &self.active_sessions {
+                self.draining_sessions.push(session.active.clone());
+                session.abort.abort();
+            }
+            self.active_sessions.clear();
+        }
+        let notify = self.enumerated_devices && (selection_changed || list_changed);
+        self.enumerated_devices = true;
+        if notify {
+            self.device_change_serial = self.device_change_serial.wrapping_add(1);
+            self.notify_device_changes();
+        }
+        self.configure_device_observation();
     }
 
     fn register_discovery(&mut self, mut discovery: Box<dyn DiscoveryAPI<GL>>, first: bool) {
-        let observing = !self.device_watchers.is_empty();
-        let immersive = observing
-            && (discovery.supports_session(SessionMode::ImmersiveVR)
-                || discovery.supports_session(SessionMode::ImmersiveAR));
-        if observing {
+        if self.observing_devices {
             discovery.set_device_change_callback(self.device_change_callback());
         }
+        let entry = DiscoveryEntry {
+            id: self.next_discovery_id,
+            device: discovery,
+            state: None,
+        };
+        self.next_discovery_id += 1;
         if first {
-            self.discoveries.insert(0, discovery);
+            self.discoveries.insert(0, entry);
         } else {
-            self.discoveries.push(discovery);
+            self.discoveries.push(entry);
         }
-        if immersive {
-            self.notify_device_changes();
+        if self.enumerated_devices && self.observing_devices {
+            self.refresh_selection();
         }
     }
 
@@ -244,6 +371,10 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
             session.run_one_frame();
         }
         self.sessions.retain(|session| session.running());
+        self.configure_device_observation();
+        if self.pending_device_change {
+            self.notify_device_changes();
+        }
     }
 
     pub fn running(&self) -> bool {
@@ -261,40 +392,42 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
                 }
             },
             RegistryMsg::ObserveDeviceChanges(pipeline, generation, callback) => {
-                let start = self.device_watchers.is_empty();
+                self.refresh_selection();
+                let _ = callback.send(DeviceChange {
+                    generation: self.device_generation,
+                    notify: false,
+                });
                 self.device_watchers
-                    .insert(pipeline, (generation, callback));
-                if start {
-                    self.configure_device_observation(true);
-                }
+                    .insert(pipeline, (generation, callback, self.device_change_serial));
+                self.configure_device_observation();
             },
             RegistryMsg::StopObservingDeviceChanges(pipeline, generation) => {
                 if self
                     .device_watchers
                     .get(&pipeline)
-                    .is_some_and(|(current, _)| *current == generation)
+                    .is_some_and(|(current, _, _)| *current == generation)
                 {
                     self.device_watchers.remove(&pipeline);
-                    if self.device_watchers.is_empty() {
-                        self.configure_device_observation(false);
-                    }
+                    self.configure_device_observation();
                 }
             },
             RegistryMsg::DeviceAvailabilityChanged(epoch) => {
                 if epoch == self.device_watch_epoch {
-                    self.notify_device_changes();
+                    self.refresh_selection();
                 }
             },
             RegistryMsg::CheckContextCompatibility(context, dest) => {
+                self.refresh_selection();
                 let result = self
-                    .discoveries
-                    .iter()
-                    .find(|d| {
-                        d.supports_session(SessionMode::ImmersiveVR)
-                            || d.supports_session(SessionMode::ImmersiveAR)
-                    })
+                    .selected_device
+                    .and_then(|(id, _)| self.discoveries.iter().find(|entry| entry.id == id))
                     .ok_or(Error::NoMatchingDevice)
-                    .and_then(|d| d.check_context_compatibility(context, &self.grand_manager));
+                    .and_then(|entry| {
+                        entry
+                            .device
+                            .check_context_compatibility(context, &self.grand_manager)
+                    })
+                    .map(|()| self.device_generation);
                 let _ = dest.send(result);
             },
             RegistryMsg::SupportsSession(mode, dest) => {
@@ -310,24 +443,70 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
     }
 
     fn supports_session(&mut self, mode: SessionMode) -> Result<(), Error> {
-        for discovery in &self.discoveries {
-            if discovery.supports_session(mode) {
-                return Ok(());
-            }
+        if mode == SessionMode::Inline {
+            return Ok(());
         }
-        Err(Error::NoMatchingDevice)
+        self.refresh_selection();
+        let supported = self.selected_device.is_some_and(|(_, state)| match mode {
+            SessionMode::ImmersiveVR => state.supports_vr,
+            SessionMode::ImmersiveAR => state.supports_ar,
+            SessionMode::Inline => true,
+        });
+        if supported {
+            Ok(())
+        } else {
+            Err(Error::NoMatchingDevice)
+        }
     }
 
     fn request_session(&mut self, mode: SessionMode, init: SessionInit) -> Result<Session, Error> {
-        for discovery in &mut self.discoveries {
-            if discovery.supports_session(mode) {
-                let id = SessionId(self.next_session_id);
-                self.next_session_id += 1;
-                let xr = SessionBuilder::new(&mut self.sessions, self.grand_manager.clone(), id);
-                match discovery.request_session(mode, &init, xr) {
-                    Ok(session) => return Ok(session),
-                    Err(err) => warn!("XR device error {:?}", err),
-                }
+        if mode != SessionMode::Inline {
+            self.refresh_selection();
+        }
+        for entry in &mut self.discoveries {
+            if mode != SessionMode::Inline
+                && self.selected_device.map(|(id, _)| id) != Some(entry.id)
+            {
+                continue;
+            }
+            if !entry.device.supports_session(mode) {
+                continue;
+            }
+            let id = SessionId(self.next_session_id);
+            self.next_session_id += 1;
+            let active = Arc::new(SessionActivity::new());
+            let xr = SessionBuilder::new(
+                &mut self.sessions,
+                self.grand_manager.clone(),
+                id,
+                active.clone(),
+            );
+            match entry.device.request_session(mode, &init, xr) {
+                Ok(session) => {
+                    let monitor_devices = mode != SessionMode::Inline
+                        || session.granted_features().iter().any(|feature| {
+                            matches!(
+                                feature.as_str(),
+                                "local"
+                                    | "local-floor"
+                                    | "bounded-floor"
+                                    | "unbounded"
+                                    | "hit-test"
+                                    | "anchors"
+                                    | "plane-detection"
+                                    | "mesh-detection"
+                                    | "hand-tracking"
+                            )
+                        });
+                    self.active_sessions.push(ActiveSession {
+                        active,
+                        abort: session.abort_handle(),
+                        monitor_devices,
+                    });
+                    self.configure_device_observation();
+                    return Ok(session);
+                },
+                Err(err) => warn!("XR device error {:?}", err),
             }
         }
         warn!("no device could support the session");
@@ -361,10 +540,10 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
 #[expect(clippy::large_enum_variant)]
 enum RegistryMsg {
     DisconnectMockDevice(GenericSender<MockDeviceMsg>, ProfileGenericCallback<()>),
-    ObserveDeviceChanges(PipelineId, u64, ProfileGenericCallback<()>),
+    ObserveDeviceChanges(PipelineId, u64, ProfileGenericCallback<DeviceChange>),
     StopObservingDeviceChanges(PipelineId, u64),
     DeviceAvailabilityChanged(u64),
-    CheckContextCompatibility(ContextId, ProfileGenericCallback<Result<(), Error>>),
+    CheckContextCompatibility(ContextId, ProfileGenericCallback<Result<u64, Error>>),
     RequestSession(
         SessionMode,
         SessionInit,
@@ -376,3 +555,7 @@ enum RegistryMsg {
         ProfileGenericCallback<Result<GenericSender<MockDeviceMsg>, Error>>,
     ),
 }
+
+#[cfg(test)]
+#[path = "registry_tests.rs"]
+mod selection_tests;

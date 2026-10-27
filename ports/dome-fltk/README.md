@@ -700,11 +700,17 @@ shell touch interaction and physical touchscreen/tablet/controller/runtime
 validation of the staged revisions remain follow-up work.
 
 Authorized active documents can observe immersive-device availability through
-`navigator.xr.ondevicechange`. Native observation stops when the final listener
-is removed, its document becomes inactive, or its browsing context is destroyed.
+`navigator.xr.ondevicechange`. Native observation stops when no listener or
+compatible/pending WebGL context remains, its document becomes inactive, or its
+browsing context is destroyed.
 It uses capability handshakes without entering XR or reading tracking data.
 DomeD runtime suspension and endpoint replacement are covered by the private
 bridge fixture. See [device-change behavior and validation](docs/WEBXR_DEVICECHANGE.md).
+Support queries, immersive requests and context compatibility share one selected
+device, preserving it during active sessions. Device replacement clears context
+compatibility without losing ordinary graphics resources; retained history
+documents reconcile their contexts on resume. See
+[device selection and compatibility](docs/WEBXR_DEVICE_SELECTION.md).
 
 ## Validation
 

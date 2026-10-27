@@ -15,9 +15,11 @@ p=argparse.ArgumentParser(description=__doc__)
 for name in ['binary','native-fixture','compositor','output']:p.add_argument('--'+name,type=Path,required=True)
 p.add_argument('--no-xr-host',action='store_true',help='Check failure without an immersive device')
 p.add_argument('--devicechange',action='store_true',help='Validate notifications and observer lifecycle against the real bridge fixture')
+p.add_argument('--device-selection',action='store_true',help='Validate compatibility invalidation without XR event listeners')
 p.add_argument('--policy-denied',action='store_true',help='Validate response policy with a live private host available')
 p.add_argument('--context-loss',action='store_true',help='Lose and recreate active immersive WebGL contexts')
 a=p.parse_args()
+if a.device_selection:a.devicechange=True
 if a.devicechange and (a.policy_denied or a.context_loss or a.no_xr_host):p.error('Device-change mode uses its own live bridge scenario')
 if a.policy_denied and (a.context_loss or a.no_xr_host):p.error('Policy scenario uses its own live-host mode')
 if a.context_loss and a.no_xr_host:p.error('context loss requires the private XR host')
@@ -86,7 +88,11 @@ try:
   class Site(http.server.BaseHTTPRequestHandler):
    def log_message(self,*_):pass
    def do_GET(self):
-    b=json.dumps(host_ops).encode() if self.path=='/host-ops' else (Path(__file__).with_name('webxr-devicechange-native.html') if a.devicechange else Path(__file__).with_name('webxr-permissions-policy-native.html') if a.policy_denied else Path(__file__).with_suffix('.html')).read_bytes()
+    b=json.dumps(host_ops).encode() if self.path=='/host-ops' else (Path(__file__).with_name('webxr-device-selection-native.html') if a.device_selection else Path(__file__).with_name('webxr-devicechange-native.html') if a.devicechange else Path(__file__).with_name('webxr-permissions-policy-native.html') if a.policy_denied else Path(__file__).with_suffix('.html')).read_bytes()
+    if a.device_selection and self.path.startswith('/selection-observer'):
+     b=Path(__file__).with_name('webxr-device-selection-native-child.html').read_bytes()
+    elif a.device_selection and self.path.startswith('/selection-idle'):
+     b=b'''<script>parent.postMessage({selectionObserver:true,tag:'idle',ready:true},'*');addEventListener('message',e=>{if(e.data.selectionCommand==='back')history.back()});</script>'''
     if a.devicechange and self.path.startswith('/observer'):
      b=b'''<script>let count=0;const tag=new URL(location).searchParams.get('tag');navigator.xr.ondevicechange=e=>parent.postMessage({availabilityObserver:true,tag,count:++count,trusted:e.isTrusted},'*');addEventListener('pageshow',()=>parent.postMessage({availabilityObserver:true,tag,count,ready:true},'*'));addEventListener('message',e=>{if(e.data.availabilityCommand==='idle')location.assign('/idle')});</script>'''
     elif a.devicechange and self.path.startswith('/idle'):
@@ -126,7 +132,7 @@ try:
    return done and sum(e['type']=='check' for e in events)==done['count']
   wait(completed)
   check(not [e for e in events if e['type']=='error'],'Device-change observer validation completes' if a.devicechange else 'Both WebGL versions complete context compatibility validation')
-  done=next(e['data'] for e in events if e['type']=='done');check((done.get('kind')=='devicechange') if a.devicechange else (done['versions']==['webgl','webgl2'] and done['noHost']==a.no_xr_host),'The requested observer lifecycle scenario completes' if a.devicechange else 'The requested native device mode covers both WebGL versions')
+  done=next(e['data'] for e in events if e['type']=='done');check((done.get('kind')==('device-selection' if a.device_selection else 'devicechange')) if a.devicechange else (done['versions']==['webgl','webgl2'] and done['noHost']==a.no_xr_host),'The requested observer lifecycle scenario completes' if a.devicechange else 'The requested native device mode covers both WebGL versions')
   for event in sorted([e for e in events if e['type']=='check'],key=lambda e:e['order']):check(event['data']['passed'],event['data']['name'])
   if a.devicechange:
    check(bool(host_ops) and all(op=='hello' for op in host_ops) and not captures,'Availability monitoring never opens a lease or reads tracking')
@@ -142,4 +148,4 @@ try:
    check(child.wait(timeout=10)==0,'Browser closes cleanly after native XR validation')
 except BaseException as ex:failure=str(ex);raise
 finally:
- (out/'report.json').write_text(json.dumps(dict(passed=failure is None and bool(checks),failure=failure,checks=checks,events=events,captures=captures,relay_errors=errors,host_operations=host_ops,host_timings=host_timings,no_xr_host=a.no_xr_host,context_loss=a.context_loss,policy_denied=a.policy_denied,devicechange=a.devicechange,simulated_capabilities=caps,binary_sha256=hashlib.sha256(a.binary.read_bytes()).hexdigest(),scope='Real browser and native DomeD availability notifications with a private synthetic XR host; no headset claim' if a.devicechange else 'Real browser, WebGL GPU buffers and native DomeD bridge with a private synthetic XR host; no headset claim'),indent=2))
+ (out/'report.json').write_text(json.dumps(dict(passed=failure is None and bool(checks),failure=failure,checks=checks,events=events,captures=captures,relay_errors=errors,host_operations=host_ops,host_timings=host_timings,no_xr_host=a.no_xr_host,context_loss=a.context_loss,policy_denied=a.policy_denied,devicechange=a.devicechange,device_selection=a.device_selection,simulated_capabilities=caps,binary_sha256=hashlib.sha256(a.binary.read_bytes()).hexdigest(),scope='Real browser and native DomeD availability notifications with a private synthetic XR host; no headset claim' if a.devicechange else 'Real browser, WebGL GPU buffers and native DomeD bridge with a private synthetic XR host; no headset claim'),indent=2))

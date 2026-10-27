@@ -1,0 +1,13 @@
+<!doctype html><meta charset=utf-8><body><script>
+let pageshows=0,resources=[],initialized=false;window.selectionContexts=[];
+const report=extra=>parent.postMessage({selectionObserver:true,tag:'child',pageshows,ready:true,compatible:selectionContexts.length===2&&selectionContexts.every(gl=>gl.getContextAttributes().xrCompatible),resources:selectionContexts.every((gl,index)=>gl.isTexture(resources[index])),...extra},'*');
+addEventListener('pageshow',()=>{pageshows++;if(initialized)report({})});
+addEventListener('message',event=>{
+ if(event.data.selectionCommand==='idle')location.assign('/selection-idle');
+ if(event.data.selectionCommand==='rearm')Promise.all(selectionContexts.map(gl=>gl.makeXRCompatible())).then(()=>report({rearmed:true}));
+});
+(async()=>{
+ selectionContexts=['webgl','webgl2'].map(version=>{const canvas=document.createElement('canvas');document.body.append(canvas);return canvas.getContext(version)});
+ await Promise.all(selectionContexts.map(gl=>gl.makeXRCompatible()));resources=selectionContexts.map(gl=>{const texture=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,texture);return texture});initialized=true;report({});
+})().catch(error=>parent.postMessage({selectionObserver:true,tag:'child',error:String(error)},'*'));
+</script>

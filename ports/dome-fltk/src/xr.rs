@@ -391,6 +391,17 @@ struct Discovery {
     availability: availability::Monitor,
 }
 impl DiscoveryAPI<SurfmanGL> for Discovery {
+    fn immersive_device_state(&self) -> Option<webxr_api::ImmersiveDeviceState> {
+        use std::hash::{Hash, Hasher};
+        let mut identity = std::collections::hash_map::DefaultHasher::new();
+        availability_key()?.hash(&mut identity);
+        Some(webxr_api::ImmersiveDeviceState {
+            identity: identity.finish(),
+            supports_vr: true,
+            supports_ar: false,
+        })
+    }
+
     fn set_device_change_callback(&mut self, callback: Option<servo::profile_traits::generic_callback::GenericCallback<()>>) {
         self.availability.observe(callback);
     }
