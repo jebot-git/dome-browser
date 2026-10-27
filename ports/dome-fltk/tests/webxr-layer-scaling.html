@@ -2,6 +2,7 @@
 <style>body{background:#11334c;color:white;font:18px monospace}button{padding:18px}canvas{width:220px;height:120px}</style>
 <button id="start">Start framebuffer validation</button><canvas id="one" width="240" height="120"></canvas><canvas id="two" width="240" height="120"></canvas>
 <script>
+const lifecycle=location.hash==='#lifecycle';
 let order=0;const post=(type,data)=>fetch('/event',{method:'POST',body:JSON.stringify({order:++order,type,data})});
 const rect=v=>({x:v.x,y:v.y,width:v.width,height:v.height});
 const scales=[1,.5,1.5,.73,0,-5,100,1e100,1];
@@ -30,12 +31,29 @@ start.onclick=async()=>{
     gl.clearColor(34/255,55/255,89/255,1);gl.clear(gl.COLOR_BUFFER_BIT);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,sentinel);gl.bindFramebuffer(gl.READ_FRAMEBUFFER,readSentinel);gl.activeTexture(gl.TEXTURE3);
    }
+   if(lifecycle){
+    const control=gl.createFramebuffer(),depth=gl.createRenderbuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER,control);gl.bindRenderbuffer(gl.RENDERBUFFER,depth);
+    gl.renderbufferStorage(gl.RENDERBUFFER,gl.DEPTH_COMPONENT16,4,4);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,sentinelTexture,0);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,depth);
+    const attached=gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,null,0);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,null);
+    const detached=gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,sentinelTexture,0);
+    post('transparent',{version,attached,detached,reattached:gl.checkFramebufferStatus(gl.FRAMEBUFFER),error:gl.getError()});
+    gl.deleteFramebuffer(control);gl.deleteRenderbuffer(depth);gl.bindRenderbuffer(gl.RENDERBUFFER,null);
+    if(version==='webgl2'){gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,sentinel);gl.bindFramebuffer(gl.READ_FRAMEBUFFER,readSentinel)}
+    else gl.bindFramebuffer(gl.FRAMEBUFFER,sentinel);
+   }
    for(const scale of scales){
-    const marker=16+phase++;const layer=new XRWebGLLayer(session,gl,{framebufferScaleFactor:scale});
+    const marker=16+phase++;const layerInit={framebufferScaleFactor:scale,...(lifecycle?[{depth:true,stencil:false},{depth:false,stencil:true},{depth:false,stencil:false}][(phase-1)%3]:{})};
+    const layer=new XRWebGLLayer(session,gl,layerInit);
     const initialSize=[layer.framebufferWidth,layer.framebufferHeight];
     gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([13,21,34,255]));
     session.updateRenderState({baseLayer:layer});
-    for(let frameIndex=0;frameIndex<3;frameIndex++)await new Promise((resolve,reject)=>session.requestAnimationFrame((time,frame)=>{
+    for(let frameIndex=0;frameIndex<3;frameIndex++){await new Promise((resolve,reject)=>session.requestAnimationFrame((time,frame)=>{
      try{
       const pose=frame.getViewerPose(space);if(!pose)throw Error('No viewer pose');
       const expectedDraw=[50+frameIndex,marker,20,255];
@@ -49,6 +67,15 @@ start.onclick=async()=>{
       }
       gl.bindFramebuffer(gl.FRAMEBUFFER,layer.framebuffer);
       const status=gl.checkFramebufferStatus(gl.FRAMEBUFFER),views=[];
+      if(lifecycle){
+       const bits=[gl.getParameter(gl.DEPTH_BITS),gl.getParameter(gl.STENCIL_BITS)];
+       const rejected=[];
+       gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,null,0);rejected.push(gl.getError());
+       gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_STENCIL_ATTACHMENT,gl.RENDERBUFFER,null);rejected.push(gl.getError());
+       gl.getFramebufferAttachmentParameter(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME);rejected.push(gl.getError());
+       gl.deleteFramebuffer(layer.framebuffer);rejected.push(gl.getError());
+       post('opaque',{version,marker,frameIndex,expectsDepthStencil:layerInit.depth||layerInit.stencil,bits,rejected,status:gl.checkFramebufferStatus(gl.FRAMEBUFFER)});
+      }
       gl.enable(gl.SCISSOR_TEST);
       for(const view of pose.views){
        const v=layer.getViewport(view),left=view.eye==='left';views.push({eye:view.eye,...rect(v)});
@@ -67,6 +94,13 @@ start.onclick=async()=>{
       setTimeout(resolve,0);
      }catch(e){reject(e)}
     }));
+     if(lifecycle){
+      gl.bindFramebuffer(gl.FRAMEBUFFER,layer.framebuffer);
+      post('released',{version,marker,frameIndex,bits:[gl.getParameter(gl.DEPTH_BITS),gl.getParameter(gl.STENCIL_BITS)],size:[layer.framebufferWidth,layer.framebufferHeight],status:gl.checkFramebufferStatus(gl.FRAMEBUFFER),error:gl.getError()});
+      if(version==='webgl2'){gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,sentinel);gl.bindFramebuffer(gl.READ_FRAMEBUFFER,readSentinel)}
+      else gl.bindFramebuffer(gl.FRAMEBUFFER,sentinel);
+     }
+    }
     const after=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,after);
     if([...after].join(',')!==(version==='webgl2'?'34,55,89,255':[52,marker,20,255].join(','))||gl.getError()!==gl.NO_ERROR)throw Error('XR end-frame changed application framebuffer state');
    }

@@ -346,6 +346,13 @@ impl WebGLFramebuffer {
     }
 
     pub(crate) fn update_status(&self) {
+        // The XR runtime owns opaque attachment storage. Its allocation remains
+        // authoritative while textures are exchanged or detached between frames;
+        // the transient WebGLTexture wrappers have no script-side image metadata.
+        if self.is_in_xr_session() {
+            return;
+        }
+
         let z = self.depth.borrow();
         let s = self.stencil.borrow();
         let zs = self.depthstencil.borrow();
@@ -679,16 +686,26 @@ impl WebGLFramebuffer {
         // https://immersive-web.github.io/webxr/#opaque-framebuffer
         self.validate_transparent()?;
 
-        for slot in std::iter::once(binding).chain(self.aliased_binding(attachment)) {
-            if let Some(att) = &*slot.borrow() {
-                att.detach();
-            }
-            *slot.borrow_mut() = None;
-        }
+        self.clear_attachment_binding(binding, attachment);
         if INTERESTING_ATTACHMENT_POINTS.contains(&attachment) {
             self.reattach_depth_stencil()?;
         }
         Ok(())
+    }
+
+    // Update attachment ownership after the caller has detached the GL image.
+    // Opaque XR maintenance also uses this without the transparent-framebuffer
+    // validation or WebGL 1 depth/stencil reattachment of script-owned images.
+    fn clear_attachment_binding(
+        &self,
+        binding: &DomRefCell<Option<WebGLFramebufferAttachment>>,
+        attachment: u32,
+    ) {
+        for slot in std::iter::once(binding).chain(self.aliased_binding(attachment)) {
+            if let Some(att) = slot.borrow_mut().take() {
+                att.detach();
+            }
+        }
     }
 
     fn attachment_binding(
@@ -884,7 +901,11 @@ impl WebGLFramebuffer {
             ));
 
         if texture.is_none() {
-            self.detach_binding(binding, attachment)?;
+            if self.is_in_xr_session() {
+                self.clear_attachment_binding(binding, attachment);
+            } else {
+                self.detach_binding(binding, attachment)?;
+            }
         }
 
         self.update_status();

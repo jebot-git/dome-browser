@@ -25,10 +25,17 @@ separate WebGL 2 read/draw targets. Failed surface creation releases the depth
 texture created for that allocation; failure to create the script framebuffer
 releases its compositor layer.
 
+Frame completion detaches both color and packed depth/stencil images, clears
+script-side attachment ownership (including both WebGL 2 alias slots), and
+restores the application's read/draw bindings. This internal operation bypasses
+page-facing opaque-framebuffer restrictions. Pages still cannot change, inspect
+or delete opaque attachments. The allocated dimensions remain authoritative
+between frames, when the transient texture wrappers have been removed.
+
 The sizing and viewport requirements follow
 [WebXR Device API, XRWebGLLayer](https://www.w3.org/TR/2026/CRD-webxr-20260609/#xrwebgllayer-interface).
 This milestone does not establish full WebXR layer conformance. Broader context
-loss/compatibility behavior, attachment lifecycle, negotiated attributes and
+loss/compatibility behavior, negotiated attributes and
 dynamic viewport scaling remain part of the continuing compatibility work.
 
 ## Validation
@@ -41,6 +48,18 @@ replace layers and contexts, and inspect actual rendered buffers and submitted
 pixels. Distinct application read/draw framebuffers and a non-default texture
 unit check GL state continuity. Every eye's extent, color and vertical
 orientation are checked against the recorded transport image.
+
+Add `--lifecycle` to verify 54 frame transitions across the same 18 layer/scale
+combinations. This mode alternates depth-only requests, stencil-only requests
+and requests with neither attachment. It checks native depth/stencil bits
+during rendering, backend attachment/detachment command ordering in both
+contexts, WebGL 2 attachment sizes after cleanup, stable dimensions and
+framebuffer availability, rejected page mutations/inspection/deletion, and ordinary
+framebuffer detachment/reattachment controls in both WebGL versions. The native
+WebGL 2 bit queries outside callbacks are an implementation cleanup regression,
+not an additional WebXR conformance requirement. Legacy WebGL 1 driver bit
+queries on an incomplete framebuffer may retain the last complete buffer's
+values, so this mode checks cleanup through the backend trace for that context.
 
 ```sh
 uv run --no-project --with python-xlib --with pillow \
