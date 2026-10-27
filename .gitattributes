@@ -6,3 +6,6 @@ support/openharmony/**/*.ets linguist-language=ts
 # Denote all files that are truly binary and should not be modified.
 *.png binary
 *.jpg binary
+
+# Preserve the vendored upstream Windows launcher byte for byte.
+third_party/surfman/android-example/gradlew.bat -text

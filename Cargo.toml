@@ -13,7 +13,7 @@ members = [
     "tests/unit/*",
 ]
 default-members = ["ports/servoshell"]
-exclude = [".cargo", "support/crown", "third_party/stylo"]
+exclude = [".cargo", "support/crown", "third_party/stylo", "third_party/surfman"]
 
 [workspace.package]
 version = "0.7.0"
@@ -454,6 +454,7 @@ lto = "thin"
 codegen-units = 1
 
 [patch.crates-io]
+surfman = { path = "third_party/surfman" }
 webrender = { path = "third_party/webrender" }
 webrender_api = { path = "third_party/webrender_api" }
 html5ever = { path = "third_party/html5ever" }
