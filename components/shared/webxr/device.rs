@@ -9,8 +9,8 @@ use profile_traits::generic_callback::GenericCallback as ProfileGenericCallback;
 
 use crate::{
     ContextId, EnvironmentBlendMode, Error, Event, Floor, Frame, HitTestId, HitTestSource,
-    InputSource, LayerId, LayerInfo, LayerInit, Native, Quitter, Session, SessionBuilder, SessionInit,
-    SessionMode, Viewports,
+    InputSource, LayerGrandManager, LayerId, LayerInfo, LayerInit, Native, Quitter, Session,
+    SessionBuilder, SessionInit, SessionMode, Viewports,
 };
 
 /// A trait for discovering XR devices
@@ -22,6 +22,16 @@ pub trait DiscoveryAPI<GL>: 'static {
         xr: SessionBuilder<GL>,
     ) -> Result<Session, Error>;
     fn supports_session(&self, mode: SessionMode) -> bool;
+
+    /// Verify that a context can supply surfaces to this immersive device.
+    /// This must not begin a session, consume a lease or request tracking data.
+    fn check_context_compatibility(
+        &self,
+        _context: ContextId,
+        _manager: &LayerGrandManager<GL>,
+    ) -> Result<(), Error> {
+        Err(Error::NoMatchingDevice)
+    }
 }
 
 /// A trait for using an XR device
@@ -86,6 +96,13 @@ pub trait DeviceAPI: 'static {
 }
 
 impl<GL: 'static> DiscoveryAPI<GL> for Box<dyn DiscoveryAPI<GL>> {
+    fn check_context_compatibility(
+        &self,
+        context: ContextId,
+        manager: &LayerGrandManager<GL>,
+    ) -> Result<(), Error> {
+        (**self).check_context_compatibility(context, manager)
+    }
     fn request_session(
         &mut self,
         mode: SessionMode,

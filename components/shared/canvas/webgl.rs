@@ -1497,6 +1497,8 @@ pub enum YAxisTreatment {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct GLContextAttributes {
+    #[serde(default)]
+    pub xr_compatible: bool,
     pub alpha: bool,
     pub depth: bool,
     pub stencil: bool,

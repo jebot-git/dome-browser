@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::{self, GenericCallback, GenericReceiver, GenericSender};
 
 use crate::{
-    DiscoveryAPI, Error, GLTypes, LayerGrandManager, MainThreadSession, MockDeviceInit,
+    ContextId, DiscoveryAPI, Error, GLTypes, LayerGrandManager, MainThreadSession, MockDeviceInit,
     MockDeviceMsg, MockDiscoveryAPI, Session, SessionBuilder, SessionId, SessionInit, SessionMode,
 };
 
@@ -48,6 +48,17 @@ impl MainThreadWakerImpl {
 }
 
 impl Registry {
+    pub fn check_context_compatibility(
+        &mut self,
+        context: ContextId,
+        dest: ProfileGenericCallback<Result<(), Error>>,
+    ) -> Result<(), Error> {
+        self.sender
+            .send(RegistryMsg::CheckContextCompatibility(context, dest))
+            .map_err(|_| Error::CommunicationError)?;
+        self.waker.wake();
+        Ok(())
+    }
     pub fn supports_session(
         &mut self,
         mode: SessionMode,
@@ -149,6 +160,18 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
 
     fn handle_msg(&mut self, msg: RegistryMsg) {
         match msg {
+            RegistryMsg::CheckContextCompatibility(context, dest) => {
+                let result = self
+                    .discoveries
+                    .iter()
+                    .find(|d| {
+                        d.supports_session(SessionMode::ImmersiveVR)
+                            || d.supports_session(SessionMode::ImmersiveAR)
+                    })
+                    .ok_or(Error::NoMatchingDevice)
+                    .and_then(|d| d.check_context_compatibility(context, &self.grand_manager));
+                let _ = dest.send(result);
+            },
             RegistryMsg::SupportsSession(mode, dest) => {
                 let _ = dest.send(self.supports_session(mode));
             },
@@ -206,6 +229,7 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
 #[derive(Serialize, Deserialize)]
 #[expect(clippy::large_enum_variant)]
 enum RegistryMsg {
+    CheckContextCompatibility(ContextId, ProfileGenericCallback<Result<(), Error>>),
     RequestSession(
         SessionMode,
         SessionInit,

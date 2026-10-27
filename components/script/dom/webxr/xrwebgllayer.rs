@@ -268,7 +268,9 @@ impl XRWebGLLayerMethods<crate::DomTypeHolder> for XRWebGLLayer {
             return Err(Error::InvalidState(None));
         }
         // XXXManishearth step 3: throw error if context is lost
-        // XXXManishearth step 4: check XR compat flag for immersive sessions
+        if session.is_immersive() && !context.is_xr_compatible() {
+            return Err(Error::InvalidState(None));
+        }
 
         let (framebuffer, layer_id, viewports, attributes) = if session.is_immersive() {
             // The allocation result is authoritative after device/GPU clamping.

@@ -4,6 +4,7 @@
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use rustc_hash::FxHashMap;
 use servo_canvas_traits::webgl::{
@@ -14,8 +15,8 @@ use webxr::SurfmanGL as WebXRSurfman;
 use webxr_api::{
     ContextId as WebXRContextId, Error as WebXRError, GLContexts as WebXRContexts,
     GLTypes as WebXRTypes, LayerGrandManager as WebXRLayerGrandManager,
-    LayerGrandManagerAPI as WebXRLayerGrandManagerAPI, LayerId as WebXRLayerId, LayerInfo as WebXRLayerInfo,
-    LayerInit as WebXRLayerInit, LayerManager as WebXRLayerManager,
+    LayerGrandManagerAPI as WebXRLayerGrandManagerAPI, LayerId as WebXRLayerId,
+    LayerInfo as WebXRLayerInfo, LayerInit as WebXRLayerInit, LayerManager as WebXRLayerManager,
     LayerManagerAPI as WebXRLayerManagerAPI, LayerManagerFactory as WebXRLayerManagerFactory,
     SubImages as WebXRSubImages, Viewports as WebXRViewports,
 };
@@ -139,6 +140,7 @@ pub(crate) struct WebXRBridgeInit {
     sender: GenericSender<WebGLMsg>,
     factory_receiver: crossbeam_channel::Receiver<WebXRLayerManagerFactory<WebXRSurfman>>,
     factory_sender: crossbeam_channel::Sender<WebXRLayerManagerFactory<WebXRSurfman>>,
+    factory_order: Arc<Mutex<()>>,
 }
 
 impl WebXRBridgeInit {
@@ -148,6 +150,7 @@ impl WebXRBridgeInit {
             sender,
             factory_sender,
             factory_receiver,
+            factory_order: Arc::new(Mutex::new(())),
         }
     }
 
@@ -155,6 +158,7 @@ impl WebXRBridgeInit {
         WebXRLayerGrandManager::new(WebXRBridgeGrandManager {
             sender: self.sender.clone(),
             factory_sender: self.factory_sender.clone(),
+            factory_order: self.factory_order.clone(),
         })
     }
 }
@@ -168,6 +172,7 @@ struct WebXRBridgeGrandManager {
     // the webxr threads, so we can use a crossbeam channel to send
     // factories.
     factory_sender: crossbeam_channel::Sender<WebXRLayerManagerFactory<WebXRSurfman>>,
+    factory_order: Arc<Mutex<()>>,
 }
 
 impl WebXRLayerGrandManagerAPI<WebXRSurfman> for WebXRBridgeGrandManager {
@@ -176,12 +181,23 @@ impl WebXRLayerGrandManagerAPI<WebXRSurfman> for WebXRBridgeGrandManager {
         factory: WebXRLayerManagerFactory<WebXRSurfman>,
     ) -> Result<WebXRLayerManager, WebXRError> {
         let (sender, receiver) = webgl_channel().ok_or(WebXRError::CommunicationError)?;
-        let _ = self.factory_sender.send(factory);
-        let _ = self
-            .sender
-            .send(WebGLMsg::WebXRCommand(WebXRCommand::CreateLayerManager(
-                sender,
-            )));
+        {
+            // Factories and commands travel through different channels. Keep
+            // each pair ordered across every clone, including XR session and
+            // compatibility work running on different threads.
+            let _order = self
+                .factory_order
+                .lock()
+                .map_err(|_| WebXRError::CommunicationError)?;
+            self.factory_sender
+                .send(factory)
+                .map_err(|_| WebXRError::CommunicationError)?;
+            self.sender
+                .send(WebGLMsg::WebXRCommand(WebXRCommand::CreateLayerManager(
+                    sender,
+                )))
+                .map_err(|_| WebXRError::CommunicationError)?;
+        }
         let sender = self.sender.clone();
         let manager_id = receiver
             .recv()
@@ -198,6 +214,7 @@ impl WebXRLayerGrandManagerAPI<WebXRSurfman> for WebXRBridgeGrandManager {
         WebXRLayerGrandManager::new(WebXRBridgeGrandManager {
             sender: self.sender.clone(),
             factory_sender: self.factory_sender.clone(),
+            factory_order: self.factory_order.clone(),
         })
     }
 }
@@ -313,5 +330,128 @@ impl WebXRContexts<WebXRSurfman> for WebGLThread {
     fn bindings(&mut self, context_id: WebXRContextId) -> Option<&glow::Context> {
         let data = self.make_current_if_needed(context_id.into())?;
         Some(&data.gl)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Barrier;
+    use std::thread;
+
+    struct NoContexts;
+    impl WebXRContexts<WebXRSurfman> for NoContexts {
+        fn device(&self, _: WebXRContextId) -> Option<<WebXRSurfman as WebXRTypes>::Device> {
+            None
+        }
+        fn context(
+            &mut self,
+            _: WebXRContextId,
+        ) -> Option<&mut <WebXRSurfman as WebXRTypes>::Context> {
+            None
+        }
+        fn bindings(
+            &mut self,
+            _: WebXRContextId,
+        ) -> Option<&<WebXRSurfman as WebXRTypes>::Bindings> {
+            None
+        }
+    }
+
+    struct Tagged([(WebXRContextId, WebXRLayerId); 1]);
+    impl WebXRLayerManagerAPI<WebXRSurfman> for Tagged {
+        fn create_layer(
+            &mut self,
+            _: &mut dyn WebXRContexts<WebXRSurfman>,
+            _: WebXRContextId,
+            _: WebXRLayerInit,
+            _: WebXRViewports,
+        ) -> Result<WebXRLayerInfo, WebXRError> {
+            Err(WebXRError::NoMatchingDevice)
+        }
+        fn destroy_layer(
+            &mut self,
+            _: &mut dyn WebXRContexts<WebXRSurfman>,
+            _: WebXRContextId,
+            _: WebXRLayerId,
+        ) {
+        }
+        fn layers(&self) -> &[(WebXRContextId, WebXRLayerId)] {
+            &self.0
+        }
+        fn begin_frame(
+            &mut self,
+            _: &mut dyn WebXRContexts<WebXRSurfman>,
+            _: &[(WebXRContextId, WebXRLayerId)],
+        ) -> Result<Vec<WebXRSubImages>, WebXRError> {
+            Err(WebXRError::NoMatchingDevice)
+        }
+        fn end_frame(
+            &mut self,
+            _: &mut dyn WebXRContexts<WebXRSurfman>,
+            _: &[(WebXRContextId, WebXRLayerId)],
+        ) -> Result<(), WebXRError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn concurrent_factories_stay_paired_with_their_commands() {
+        const THREADS: usize = 32;
+        const ROUNDS: usize = 8;
+        let (sender, receiver) = webgl_channel().unwrap();
+        let init = WebXRBridgeInit::new(sender);
+        let factories = init.factory_receiver.clone();
+        let grand = init.layer_grand_manager();
+        let reader = thread::spawn(move || {
+            let (mut created, mut paired, mut closed) = (0, 0, 0);
+            while closed < THREADS * ROUNDS {
+                match receiver.recv().unwrap() {
+                    WebGLMsg::WebXRCommand(WebXRCommand::CreateLayerManager(reply)) => {
+                        let manager = factories.recv().unwrap().build(&mut NoContexts).unwrap();
+                        let tag = manager.layers()[0].0.0 as u32;
+                        reply
+                            .send(Ok(WebXRLayerManagerId::new(NonZeroU32::new(tag).unwrap())))
+                            .unwrap();
+                        created += 1;
+                    },
+                    WebGLMsg::WebXRCommand(WebXRCommand::DestroyLayer(manager, context, _)) => {
+                        assert_eq!(
+                            manager.get() as u64,
+                            context.0,
+                            "factory result went to a different caller"
+                        );
+                        paired += 1;
+                    },
+                    WebGLMsg::WebXRCommand(WebXRCommand::DestroyLayerManager(_)) => closed += 1,
+                    other => panic!("unexpected factory-test message: {other:?}"),
+                }
+            }
+            assert_eq!(created, THREADS * ROUNDS);
+            assert_eq!(paired, created);
+        });
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let callers: Vec<_> = (0..THREADS)
+            .map(|index| {
+                let grand = grand.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    for round in 0..ROUNDS {
+                        let tag = (round * THREADS + index + 1) as u64;
+                        let mut manager = grand
+                            .create_layer_manager(move |_| {
+                                Ok(Tagged([(WebXRContextId(tag), WebXRLayerId::default())]))
+                            })
+                            .unwrap();
+                        manager.destroy_layer(WebXRContextId(tag), WebXRLayerId::default());
+                    }
+                })
+            })
+            .collect();
+        for caller in callers {
+            caller.join().unwrap();
+        }
+        reader.join().unwrap();
     }
 }

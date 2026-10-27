@@ -63,7 +63,9 @@ try:
      request=read_json(self.request);size=request.get('bytes',0);assert 0<=size<=4096*4096*4
      pixels=exact(self.request,size) if size else b''
      with socket.socket(socket.AF_UNIX) as native:
-      native.settimeout(5);native.connect(str(backend));write_json(native,request);native.sendall(pixels);reply=read_json(native)
+      native.settimeout(5);native.connect(str(backend));write_json(native,request)
+      if pixels:native.sendall(pixels)
+      reply=read_json(native)
      if request['op']=='hello':reply.update(caps)
      if pixels and reply.get('ok'):
       image=Image.frombytes('RGBA',(request['width'],request['height']),pixels)
@@ -71,7 +73,7 @@ try:
       path=out/('stereo-'+str(marker)+'.png');image.save(path)
       captures.append(dict(header=request,marker=marker,path=str(path),sha256=hashlib.sha256(pixels).hexdigest()))
      write_json(self.request,reply)
-    except BaseException as ex:errors.append(str(ex))
+    except BaseException as ex:errors.append({'operation':locals().get('request',{}).get('op'),'error':str(ex)})
   class Server(socketserver.ThreadingUnixStreamServer):daemon_threads=True
   relay=Server(str(runtime/'proxy.sock'),Relay);threading.Thread(target=relay.serve_forever,daemon=True).start();stack.callback(relay.server_close);stack.callback(relay.shutdown)
   fixture=TouchWayland(a.compositor.resolve(),runtime,out);stack.callback(fixture.close)

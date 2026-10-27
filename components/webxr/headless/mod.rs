@@ -130,6 +130,15 @@ fn run_loop(receiver: GenericReceiver<MockDeviceMsg>, data: Arc<Mutex<HeadlessDe
 }
 
 impl DiscoveryAPI<SurfmanGL> for HeadlessDiscovery {
+    fn check_context_compatibility(
+        &self,
+        context: ContextId,
+        manager: &LayerGrandManager<SurfmanGL>,
+    ) -> Result<(), Error> {
+        crate::compatibility::check_mock(manager, context)
+    }
+
+
     fn request_session(
         &mut self,
         mode: SessionMode,

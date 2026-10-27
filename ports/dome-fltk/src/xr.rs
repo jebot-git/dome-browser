@@ -372,6 +372,11 @@ struct Discovery {
     focus: Focus,
 }
 impl DiscoveryAPI<SurfmanGL> for Discovery {
+    fn check_context_compatibility(&self, context: ContextId, manager: &LayerGrandManager<SurfmanGL>) -> std::result::Result<(), Error> {
+        let adapter = self.connection.create_adapter().map_err(backend)?;
+        webxr::compatibility::check(manager, context, self.connection.clone(), adapter)
+    }
+
     fn supports_session(&self, mode: SessionMode) -> bool {
         mode == SessionMode::ImmersiveVR && probe().is_ok()
     }

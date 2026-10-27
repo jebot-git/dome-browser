@@ -274,6 +274,16 @@ fn create_instance(
 }
 
 impl DiscoveryAPI<SurfmanGL> for OpenXrDiscovery {
+    fn check_context_compatibility(
+        &self,
+        context: ContextId,
+        manager: &LayerGrandManager<SurfmanGL>,
+    ) -> Result<(), Error> {
+        let instance =
+            create_instance(false, false, false, &self.app_info).map_err(Error::BackendSpecific)?;
+        GraphicsProvider::check_context_compatibility(&instance.instance, context, manager)
+    }
+
     fn request_session(
         &mut self,
         mode: SessionMode,

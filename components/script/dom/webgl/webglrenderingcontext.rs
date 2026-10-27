@@ -36,6 +36,8 @@ use servo_canvas_traits::webgl::{
 use servo_config::pref;
 use webrender_api::ImageKey;
 
+#[cfg(feature = "webxr")]
+use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::canvas_context::{CanvasContext, HTMLCanvasElementOrOffscreenCanvas};
 #[cfg(feature = "webxr")]
 use crate::dom::RootedPromise;
@@ -185,6 +187,7 @@ pub(crate) struct WebGLRenderingContext {
     #[ignore_malloc_size_of = "Defined in servo_canvas_traits"]
     #[no_trace]
     last_error: Cell<Option<WebGLError>>,
+    xr_compatible: Cell<bool>,
     texture_packing_alignment: Cell<u8>,
     texture_unpacking_settings: Cell<TextureUnpacking>,
     // TODO(nox): Should be Cell<u8>.
@@ -247,13 +250,14 @@ impl WebGLRenderingContext {
         result.map(|ctx_data| {
             let max_combined_texture_image_units = ctx_data.limits.max_combined_texture_image_units;
             let max_vertex_attribs = ctx_data.limits.max_vertex_attribs as usize;
-            Self {
+            let context = Self {
                 reflector_: Reflector::new(),
                 webgl_version,
                 glsl_version: ctx_data.glsl_version,
                 limits: ctx_data.limits,
                 canvas,
                 last_error: Cell::new(None),
+                xr_compatible: Cell::new(false),
                 texture_packing_alignment: Cell::new(4),
                 texture_unpacking_settings: Cell::new(TextureUnpacking::CONVERT_COLORSPACE),
                 texture_unpacking_alignment: Cell::new(4),
@@ -286,7 +290,12 @@ impl WebGLRenderingContext {
                 droppable: DroppableWebGLRenderingContext {
                     webgl_sender: Rc::new(ctx_data.sender),
                 },
+            };
+            #[cfg(feature = "webxr")]
+            if attrs.xr_compatible && pref!(dom_webxr_enabled) && window.Document().is_fully_active() {
+                context.xr_compatible.set(context.check_xr_compatible_sync(window).is_ok());
             }
+            context
         })
     }
 
@@ -332,6 +341,43 @@ impl WebGLRenderingContext {
                 None
             },
         }
+    }
+
+    pub(crate) fn is_xr_compatible(&self) -> bool {
+        self.xr_compatible.get()
+    }
+
+    #[cfg(feature = "webxr")]
+    fn queue_xr_compatibility_error(&self, promise: &RootedPromise) {
+        use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
+        let context = Trusted::new(self);
+        let promise = TrustedPromise::from(promise);
+        self.global().task_manager().dom_manipulation_task_source().queue(task!(reject_xr_compatibility: move |cx| {
+            let context = context.root();
+            let promise = promise.root(cx);
+            context.xr_compatible.set(false);
+            promise.reject_error(cx, Error::InvalidState(None));
+        }));
+    }
+
+    #[cfg(feature = "webxr")]
+    fn check_xr_compatible_sync(&self, window: &Window) -> Result<(), webxr_api::Error> {
+        use profile_traits::generic_callback::GenericCallback;
+        let (sender, receiver) =
+            generic_channel::channel().ok_or(webxr_api::Error::CommunicationError)?;
+        let callback = GenericCallback::new(move |message| {
+            let result = message.unwrap_or(Err(webxr_api::Error::CommunicationError));
+            let _ = sender.send(result);
+        })
+        .map_err(|_| webxr_api::Error::CommunicationError)?;
+        let mut registry = window
+            .webxr_registry()
+            .ok_or(webxr_api::Error::NoMatchingDevice)?;
+        registry
+            .check_context_compatibility(webxr_api::ContextId::from(self.context_id()), callback)?;
+        receiver
+            .recv()
+            .map_err(|_| webxr_api::Error::CommunicationError)?
     }
 
     pub(crate) fn set_image_key(&self, image_key: ImageKey) {
@@ -2667,6 +2713,8 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         let attrs = receiver.recv().unwrap();
 
         Some(WebGLContextAttributes {
+            #[cfg(feature = "webxr")]
+            xrCompatible: self.xr_compatible.get(),
             alpha: attrs.alpha,
             antialias: attrs.antialias,
             depth: attrs.depth,
@@ -5154,8 +5202,54 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
     /// <https://immersive-web.github.io/webxr/#dom-webglrenderingcontextbase-makexrcompatible>
     #[cfg(feature = "webxr")]
     fn MakeXRCompatible(&self, cx: &mut js::context::JSContext) -> RootedPromise {
-        // XXXManishearth Fill in with compatibility checks when rust-webxr supports this
-        Promise::new_resolved(cx, &self.global(), ())
+        use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
+        use profile_traits::generic_callback::GenericCallback;
+        let global = self.global();
+        let promise = Promise::new(cx, &global);
+        let Some(window) = global.downcast::<Window>() else {
+            promise.reject_error(cx, Error::InvalidState(None));
+            return promise;
+        };
+        if !window.Document().is_fully_active() {
+            promise.resolve_native(cx, &());
+            return promise;
+        }
+        let Some(mut registry) = window.webxr_registry() else {
+            self.queue_xr_compatibility_error(&promise);
+            return promise;
+        };
+        let task_source = global
+            .task_manager()
+            .dom_manipulation_task_source()
+            .to_sendable();
+        let mut trusted = Some((Trusted::new(self), TrustedPromise::from(&promise)));
+        let callback = GenericCallback::new(move |message| {
+            let Some((context, promise)) = trusted.take() else {
+                return;
+            };
+            let result = message.unwrap_or(Err(webxr_api::Error::CommunicationError));
+            task_source.queue(task!(finish_xr_compatibility: move |cx| {
+                let context = context.root();
+                let promise = promise.root(cx);
+                context.xr_compatible.set(result.is_ok());
+                match result {
+                    Ok(()) => promise.resolve_native(cx, &()),
+                    Err(_) => promise.reject_error(cx, Error::InvalidState(None)),
+                }
+            }));
+        });
+        let sent = callback
+            .map_err(|_| webxr_api::Error::CommunicationError)
+            .and_then(|callback| {
+                registry.check_context_compatibility(
+                    webxr_api::ContextId::from(self.context_id()),
+                    callback,
+                )
+            });
+        if sent.is_err() {
+            self.queue_xr_compatibility_error(&promise);
+        }
+        promise
     }
 }
 

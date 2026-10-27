@@ -48,8 +48,6 @@ use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::globalscope::GlobalScope;
-#[cfg(feature = "webxr")]
-use crate::dom::promise::Promise;
 use crate::dom::webgl::validations::WebGLValidator;
 use crate::dom::webgl::validations::tex_image_2d::{
     TexImage2DValidator, TexImage2DValidatorResult, TexStorageValidator, TexStorageValidatorResult,
@@ -5115,8 +5113,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
     /// <https://immersive-web.github.io/webxr/#dom-webglrenderingcontextbase-makexrcompatible>
     #[cfg(feature = "webxr")]
     fn MakeXRCompatible(&self, cx: &mut js::context::JSContext) -> RootedPromise {
-        // XXXManishearth Fill in with compatibility checks when rust-webxr supports this
-        Promise::new_resolved(cx, &self.global(), ())
+        self.base.MakeXRCompatible(cx)
     }
 }
 

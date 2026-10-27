@@ -1,0 +1,94 @@
+<!doctype html><meta charset="utf-8"><title>XR context compatibility</title>
+<style>body{background:#11334c;color:white;font:18px monospace}button{padding:18px}canvas{width:220px;height:120px}</style>
+<button id="start" disabled>Start context validation</button>
+<script>
+let order=0,count=0;const states=[],noHost=location.hash==='#no-host';
+const post=(type,data)=>fetch('/event',{method:'POST',body:JSON.stringify({order:++order,type,data})});
+const check=(passed,name,data={})=>{count++;post('check',{passed:!!passed,name,data})};
+const rect=v=>({x:v.x,y:v.y,width:v.width,height:v.height});
+const fail=e=>post('error',{name:e.name,message:e.message,stack:e.stack});
+async function make(gl){try{await gl.makeXRCompatible();return null}catch(e){return e.name}}
+function create(version,options){const canvas=document.createElement('canvas');canvas.width=240;canvas.height=120;document.body.appendChild(canvas);const gl=canvas.getContext(version,options);if(!gl)throw Error(version+' unavailable');return gl}
+function resources(gl,version){
+ gl.activeTexture(gl.TEXTURE3);const texture=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,texture);
+ gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,4,4,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+ const framebuffer=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,framebuffer);
+ gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,texture,0);gl.clearColor(13/255,21/255,34/255,1);gl.clear(gl.COLOR_BUFFER_BIT);
+ let read=framebuffer;
+ if(version==='webgl2'){
+  const r=gl.createTexture();gl.activeTexture(gl.TEXTURE4);gl.bindTexture(gl.TEXTURE_2D,r);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,4,4,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+  read=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,read);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,r,0);gl.clearColor(34/255,55/255,89/255,1);gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,framebuffer);gl.bindFramebuffer(gl.READ_FRAMEBUFFER,read);gl.activeTexture(gl.TEXTURE3);
+ }
+ return {texture,framebuffer,read};
+}
+function intact(gl,version,s,label){
+ const pixel=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
+ const state={textureAlive:gl.isTexture(s.texture),activeUnit:gl.getParameter(gl.ACTIVE_TEXTURE)===gl.TEXTURE3,textureBinding:gl.getParameter(gl.TEXTURE_BINDING_2D)===s.texture,drawBinding:gl.getParameter(gl.FRAMEBUFFER_BINDING)===s.framebuffer,readBinding:version!=='webgl2'||gl.getParameter(gl.READ_FRAMEBUFFER_BINDING)===s.read,pixel:[...pixel],error:gl.getError()};
+ check(state.textureAlive&&state.activeUnit&&state.textureBinding&&state.drawBinding&&state.readBinding&&state.pixel.join(',')===(version==='webgl2'?'34,55,89,255':'13,21,34,255')&&state.error===0,version+': '+label,state);
+}
+(async()=>{
+ for(const version of ['webgl','webgl2']){
+  const gl=create(version),saved=resources(gl,version);let lost=0,restored=0;
+  gl.canvas.addEventListener('webglcontextlost',()=>lost++);gl.canvas.addEventListener('webglcontextrestored',()=>restored++);
+  check(gl.getContextAttributes().xrCompatible===false,version+': ordinary context starts incompatible');
+  let settled=false;const first=gl.makeXRCompatible();first.then(()=>settled=true,()=>settled=true);
+  await Promise.resolve();check(!settled,version+': compatibility settles through a task after current microtasks');
+  const result=await first.then(()=>null,e=>e.name);
+  check(result===(noHost?'InvalidStateError':null),version+': negotiation reflects immersive device availability',{result});
+  check(gl.getContextAttributes().xrCompatible===!noHost,version+': actual compatibility flag follows negotiation');
+  intact(gl,version,saved,'negotiation preserves GPU resources and distinct framebuffer bindings');
+  const requests=[gl.makeXRCompatible(),gl.makeXRCompatible(),gl.makeXRCompatible()];
+  check(new Set(requests).size===3,version+': concurrent calls return distinct promises');
+  const results=await Promise.all(requests.map(p=>p.then(()=>null,e=>e.name)));
+  check(results.every(v=>v===(noHost?'InvalidStateError':null)),version+': all concurrent requests settle consistently',{results});
+  intact(gl,version,saved,'concurrent negotiation preserves application state');
+  const requested=create(version,{xrCompatible:true});
+  check(requested.getContextAttributes().xrCompatible===!noHost,version+': synchronous creation request reports actual compatibility');
+  const guard=create(version);
+  check(guard.getContextAttributes().xrCompatible===false,version+': compatibility is not inherited by another context');
+  check(lost===0&&restored===0,version+': compatible adapter needs no artificial loss/restoration');
+  states.push({gl,version,saved,guard});
+ }
+ const ops=await fetch('/host-ops').then(r=>r.json());
+ check(!ops.includes('begin_session')&&!ops.includes('wait_frame'), 'Negotiation never opens a lease or requests headset tracking',{ops});
+ start.disabled=false;post('ready',{start:rect(start.getBoundingClientRect()),viewport:[innerWidth,innerHeight],ratio:devicePixelRatio});
+})().catch(fail);
+start.onclick=async()=>{
+ try{
+  const session=await navigator.xr.requestSession(noHost?'inline':'immersive-vr');
+  const space=await session.requestReferenceSpace(noHost?'viewer':'local');
+  for(const {gl,guard,version} of states){
+   if(noHost){
+    const layer=new XRWebGLLayer(session,guard);check(layer.framebuffer===null,version+': inline layer accepts an ordinary incompatible context');
+    check(guard.getContextAttributes().xrCompatible===false,version+': inline layer does not promote compatibility');
+    continue;
+   }
+   let error=null;try{new XRWebGLLayer(session,guard)}catch(e){error=e.name}
+   check(error==='InvalidStateError',version+': immersive layer rejects an incompatible context',{error});
+   check(await make(guard)===null&&guard.getContextAttributes().xrCompatible===true,version+': existing context can be prepared during a session');
+   const layer=new XRWebGLLayer(session,guard);session.updateRenderState({baseLayer:layer});
+   const marker=version==='webgl'?70:71;
+   for(let i=0;i<2;i++)await new Promise((resolve,reject)=>session.requestAnimationFrame((time,frame)=>{try{
+    const pose=frame.getViewerPose(space);if(!pose)throw Error('No XR pose');guard.bindFramebuffer(guard.FRAMEBUFFER,layer.framebuffer);guard.enable(guard.SCISSOR_TEST);
+    for(const view of pose.views){const v=layer.getViewport(view);guard.scissor(v.x,v.y,v.width,v.height);guard.clearColor(view.eye==='left'?1:0,view.eye==='right'?1:0,marker/255,1);guard.clear(guard.COLOR_BUFFER_BIT)}
+    guard.disable(guard.SCISSOR_TEST);check(guard.getError()===0,version+': negotiated context renders an immersive frame');setTimeout(resolve,0);
+   }catch(e){reject(e)}}));
+  }
+  await session.end();
+  if(!noHost){
+   await fetch('/availability',{method:'POST',body:'false'});
+   for(const {gl,version,saved} of states){
+    check(await make(gl)==='InvalidStateError'&&gl.getContextAttributes().xrCompatible===false,version+': unavailable device rejects and clears previous compatibility');
+    intact(gl,version,saved,'unavailable device preserves existing WebGL resources');
+   }
+   await fetch('/availability',{method:'POST',body:'true'});
+   for(const {gl,version,saved} of states){
+    check(await make(gl)===null&&gl.getContextAttributes().xrCompatible===true,version+': reconnected device negotiates again');
+    intact(gl,version,saved,'reconnection preserves existing WebGL resources');
+   }
+  }
+  post('done',{count,versions:states.map(s=>s.version),noHost});
+ }catch(e){fail(e)}
+};
+</script>

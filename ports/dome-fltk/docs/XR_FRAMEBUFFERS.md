@@ -38,6 +38,40 @@ This milestone does not establish full WebXR layer conformance. Broader context
 loss/compatibility behavior and dynamic viewport scaling remain part of the
 continuing compatibility work.
 
+## Context eligibility
+
+Every context starts with `xrCompatible=false`. A creation request with
+`xrCompatible:true` asks the backend to check its surface-transfer path before
+reporting compatibility. `makeXRCompatible()` performs the same check through
+the XR registry and completes its promise on a subsequent document task.
+Concurrent calls receive distinct promises. Factory dispatch keeps its paired
+factory/command messages ordered across XR and compatibility threads. Immersive layers reject contexts
+whose actual compatibility flag is false; inline layers use their existing
+canvas and do not need this flag.
+
+For DomeD and GL-window backends, the check imports a small independent
+producer surface into a temporary context on the compositor's adapter and
+checks that its framebuffer is complete. It does not open an XR session,
+acquire a headset lease, read tracking data or copy application pixels. The
+probe disposes of its temporary native objects and restores the producer as
+the WebGL thread's current context. Layer allocation and frame transitions
+also preserve native bindings across Surfman operations, so asynchronous XR
+work cannot change the framebuffer observed by an application query. Mock devices check producer surface
+allocation without claiming external adapter interoperability. The optional
+Windows OpenXR path selects its graphics-requirements adapter for the import
+check; that source path still needs Windows compilation/runtime validation.
+
+An unavailable immersive device rejects negotiation with `InvalidStateError`
+and clears an earlier compatibility flag. A device can become available again
+without replacing existing WebGL resources. Adapter migration and complete
+WebGL loss/restoration remain unfinished: this milestone does not add the
+`WEBGL_lose_context` extension or claim resource invalidation, reset and
+restoration events. Full Permissions Policy integration also remains part of
+the broader standards work.
+
+The eligibility and task-ordering requirements follow
+[WebXR context compatibility](https://www.w3.org/TR/2026/CRD-webxr-20260609/#webgl-context-compatibility).
+
 ## Buffer formats and frame initialization
 
 The Surfman/DomeD path uses single-sample images and reports `antialias=false`.
@@ -127,3 +161,11 @@ view resolutions. General browser, native pen/touch, controller, mouse,
 reference-space reset and visibility regressions cover the shared changes.
 These isolated software-rendered tests do not establish physical headset or
 tablet interoperability, or hardware acceleration performance.
+
+`tests/webxr-context-compatibility.py` exercises native device presence and
+absence, synchronous creation requests, queued/concurrent negotiation,
+per-context flags, immersive rejection/acceptance, reconnects and preservation
+of real textures, pixel contents and distinct WebGL 2 read/draw bindings. Its
+private host records operations to verify that negotiation itself never opens
+a lease or asks for tracking. Add `--no-xr-host` to exercise rejection and
+sensor-free inline operation without an immersive device.

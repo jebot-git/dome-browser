@@ -4,6 +4,7 @@
 
 use std::{mem, ptr};
 
+use crate::SurfmanGL;
 use euclid::{Size2D, UnknownUnit};
 use log::warn;
 use openxr::d3d::{D3D11, Requirements, SessionCreateInfoD3D11};
@@ -14,7 +15,7 @@ use surfman::{
     Adapter as SurfmanAdapter, Connection as SurfmanConnection, Context as SurfmanContext,
     Device as SurfmanDevice, Error as SurfmanError, SurfaceTexture,
 };
-use webxr_api::Error;
+use webxr_api::{ContextId, Error, LayerGrandManager};
 use winapi::Interface;
 use winapi::shared::winerror::{DXGI_ERROR_NOT_FOUND, S_OK};
 use winapi::shared::{dxgi, dxgiformat};
@@ -26,6 +27,16 @@ use crate::openxr::graphics::{GraphicsProvider, GraphicsProviderMethods};
 pub type Backend = D3D11;
 
 impl GraphicsProviderMethods<D3D11> for GraphicsProvider {
+    fn check_context_compatibility(
+        instance: &Instance,
+        context: ContextId,
+        manager: &LayerGrandManager<SurfmanGL>,
+    ) -> Result<(), Error> {
+        let adapter = create_surfman_adapter(instance).ok_or(Error::NoMatchingDevice)?;
+        let connection = SurfmanConnection::new().map_err(|_| Error::NoMatchingDevice)?;
+        crate::compatibility::check(manager, context, connection, adapter)
+    }
+
     fn enable_graphics_extensions(exts: &mut ExtensionSet) {
         exts.khr_d3d11_enable = true;
     }
@@ -115,8 +126,8 @@ fn get_matching_adapter(
             let result = adapter.GetDesc1(&mut adapter_desc);
             assert_eq!(result, S_OK);
             let adapter_luid = &adapter_desc.AdapterLuid;
-            if adapter_luid.LowPart == requirements.adapter_luid.LowPart &&
-                adapter_luid.HighPart == requirements.adapter_luid.HighPart
+            if adapter_luid.LowPart == requirements.adapter_luid.LowPart
+                && adapter_luid.HighPart == requirements.adapter_luid.HighPart
             {
                 return Ok(adapter);
             }

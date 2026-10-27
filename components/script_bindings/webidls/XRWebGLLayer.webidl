@@ -42,3 +42,7 @@ interface XRWebGLLayer: XRLayer {
 partial interface mixin WebGLRenderingContextBase {
     [Pref="dom_webxr_enabled"] Promise<undefined> makeXRCompatible();
 };
+
+partial dictionary WebGLContextAttributes {
+    boolean xrCompatible = false;
+};

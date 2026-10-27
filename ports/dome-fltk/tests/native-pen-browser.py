@@ -154,6 +154,7 @@ try:
         'Pen click and compatibility mousedown detail share the same per-tool sequence')
   send('tablet-out');send('tablet-in',[205,195],slot=4);command('overlay-after-click');start=mark()
   send('tablet-down',slot=4);send('tablet-up',slot=4);send('tablet-down',slot=4);send('tablet-up',slot=4);settle()
+  wait(lambda:len(named('click',start))==2 and len(named('pointerup',start))==2);settle()
   check([e['detail'] for e in named('click',start)]==[1,1] and not named('dblclick',start),
         'Replacing the target at the same position starts a new pen click sequence')
   command('remove-overlay');send('tablet-out',slot=4);send('tablet-in',[500,322]);start=mark();send('tablet-down');send('tablet-up');send('tablet-down');send('tablet-up');settle()

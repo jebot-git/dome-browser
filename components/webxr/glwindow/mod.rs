@@ -99,6 +99,20 @@ impl GlWindowDiscovery {
 }
 
 impl DiscoveryAPI<SurfmanGL> for GlWindowDiscovery {
+    fn check_context_compatibility(
+        &self,
+        context: ContextId,
+        manager: &LayerGrandManager<SurfmanGL>,
+    ) -> Result<(), Error> {
+        crate::compatibility::check(
+            manager,
+            context,
+            self.connection.clone(),
+            self.adapter.clone(),
+        )
+    }
+
+
     fn request_session(
         &mut self,
         mode: SessionMode,

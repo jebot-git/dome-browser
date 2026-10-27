@@ -758,6 +758,10 @@ impl VirtualMethods for HTMLCanvasElement {
 impl Convert<GLContextAttributes> for WebGLContextAttributes {
     fn convert(self) -> GLContextAttributes {
         GLContextAttributes {
+            xr_compatible: {
+                #[cfg(feature = "webxr")] { self.xrCompatible }
+                #[cfg(not(feature = "webxr"))] { false }
+            },
             alpha: self.alpha,
             depth: self.depth,
             stencil: self.stencil,
