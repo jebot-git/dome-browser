@@ -9,7 +9,7 @@ use profile_traits::generic_callback::GenericCallback as ProfileGenericCallback;
 
 use crate::{
     ContextId, EnvironmentBlendMode, Error, Event, Floor, Frame, HitTestId, HitTestSource,
-    InputSource, LayerId, LayerInit, Native, Quitter, Session, SessionBuilder, SessionInit,
+    InputSource, LayerId, LayerInfo, LayerInit, Native, Quitter, Session, SessionBuilder, SessionInit,
     SessionMode, Viewports,
 };
 
@@ -27,7 +27,7 @@ pub trait DiscoveryAPI<GL>: 'static {
 /// A trait for using an XR device
 pub trait DeviceAPI: 'static {
     /// Create a new layer
-    fn create_layer(&mut self, context_id: ContextId, init: LayerInit) -> Result<LayerId, Error>;
+    fn create_layer(&mut self, context_id: ContextId, init: LayerInit) -> Result<LayerInfo, Error>;
 
     /// Destroy a layer
     fn destroy_layer(&mut self, context_id: ContextId, layer_id: LayerId);

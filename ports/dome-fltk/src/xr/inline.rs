@@ -39,7 +39,7 @@ impl Device {
     }
 }
 impl DeviceAPI for Device {
-    fn create_layer(&mut self, _: ContextId, _: LayerInit) -> std::result::Result<LayerId, Error> {
+    fn create_layer(&mut self, _: ContextId, _: LayerInit) -> std::result::Result<LayerInfo, Error> {
         // Inline XRWebGLLayer uses the canvas's default framebuffer in Servo.
         Err(backend(
             "An inline session does not allocate a compositor layer",

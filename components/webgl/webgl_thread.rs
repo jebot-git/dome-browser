@@ -467,8 +467,8 @@ impl WebGLThread {
             WebXRCommand::DestroyLayerManager(manager_id) => {
                 webxr_bridge.destroy_layer_manager(manager_id);
             },
-            WebXRCommand::CreateLayer(manager_id, context_id, layer_init, sender) => {
-                let result = webxr_bridge.create_layer(manager_id, self, context_id, layer_init);
+            WebXRCommand::CreateLayer(manager_id, context_id, layer_init, viewports, sender) => {
+                let result = webxr_bridge.create_layer(manager_id, self, context_id, layer_init, viewports);
                 let _ = sender.send(result);
             },
             WebXRCommand::DestroyLayer(manager_id, context_id, layer_id) => {

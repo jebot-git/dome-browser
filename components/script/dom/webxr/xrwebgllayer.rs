@@ -58,6 +58,8 @@ pub(crate) struct XRWebGLLayer {
     ignore_depth_values: bool,
     /// If none, this is an inline session (the composition disabled flag is true)
     framebuffer: Option<Dom<WebGLFramebuffer>>,
+    #[no_trace]
+    viewports: Vec<Rect<i32, Viewport>>,
 }
 
 impl XRWebGLLayer {
@@ -67,6 +69,7 @@ impl XRWebGLLayer {
         init: &XRWebGLLayerInit,
         framebuffer: Option<&WebGLFramebuffer>,
         layer_id: Option<LayerId>,
+        viewports: Vec<Rect<i32, Viewport>>,
     ) -> XRWebGLLayer {
         XRWebGLLayer {
             xr_layer: XRLayer::new_inherited(session, context, layer_id),
@@ -76,6 +79,7 @@ impl XRWebGLLayer {
             alpha: init.alpha,
             ignore_depth_values: init.ignoreDepthValues,
             framebuffer: framebuffer.map(Dom::from_ref),
+            viewports,
         }
     }
 
@@ -89,6 +93,7 @@ impl XRWebGLLayer {
         init: &XRWebGLLayerInit,
         framebuffer: Option<&WebGLFramebuffer>,
         layer_id: Option<LayerId>,
+        viewports: Vec<Rect<i32, Viewport>>,
     ) -> DomRoot<XRWebGLLayer> {
         reflect_dom_object_with_proto(
             cx,
@@ -98,6 +103,7 @@ impl XRWebGLLayer {
                 init,
                 framebuffer,
                 layer_id,
+                viewports,
             )),
             global,
             proto,
@@ -148,83 +154,99 @@ impl XRWebGLLayer {
         let color_texture = WebGLTexture::new_webxr(cx, &context, color_texture_id, session);
         let target = self.texture_target();
 
-        // Save the current bindings
-        let saved_framebuffer = context.get_draw_framebuffer_slot().get();
-        let saved_framebuffer_target = framebuffer.target();
+        let saved_target = framebuffer.target();
         let saved_texture_id = context
             .textures()
             .active_texture_slot(target, context.webgl_version())
             .ok()
             .and_then(|slot| slot.get().map(|texture| texture.id()));
-
-        // We have to pick a framebuffer target.
-        // If there is a draw framebuffer, we use its target,
-        // otherwise we just use DRAW_FRAMEBUFFER.
-        let framebuffer_target = saved_framebuffer
-            .as_ref()
-            .and_then(|fb| fb.target())
-            .unwrap_or(constants::DRAW_FRAMEBUFFER);
-
-        // Update the attachments
         context.send_command(WebGLCommand::BindTexture(target, Some(color_texture_id)));
-        framebuffer.bind(framebuffer_target);
-        framebuffer
-            .texture2d_even_if_opaque(
-                constants::COLOR_ATTACHMENT0,
-                self.texture_target(),
-                Some(&color_texture),
-                0,
-            )
-            .ok()?;
-        if let Some(id) = sub_images.sub_image.as_ref()?.depth_stencil_texture {
-            // TODO: Cache this texture
-            let depth_stencil_texture_id = WebGLTextureId::new(id);
-            let depth_stencil_texture =
-                WebGLTexture::new_webxr(cx, &context, depth_stencil_texture_id, session);
+        framebuffer.bind(constants::FRAMEBUFFER);
+        let attached = (|| {
             framebuffer
                 .texture2d_even_if_opaque(
-                    constants::DEPTH_STENCIL_ATTACHMENT,
-                    constants::TEXTURE_2D,
-                    Some(&depth_stencil_texture),
+                    constants::COLOR_ATTACHMENT0,
+                    target,
+                    Some(&color_texture),
                     0,
                 )
                 .ok()?;
-        }
-
-        // Restore the old bindings
+            if let Some(id) = sub_images.sub_image.as_ref()?.depth_stencil_texture {
+                let depth_texture =
+                    WebGLTexture::new_webxr(cx, &context, WebGLTextureId::new(id), session);
+                framebuffer
+                    .texture2d_even_if_opaque(
+                        constants::DEPTH_STENCIL_ATTACHMENT,
+                        constants::TEXTURE_2D,
+                        Some(&depth_texture),
+                        0,
+                    )
+                    .ok()?;
+            }
+            Some(())
+        })();
         context.send_command(WebGLCommand::BindTexture(target, saved_texture_id));
-        if let Some(framebuffer_target) = saved_framebuffer_target {
-            framebuffer.bind(framebuffer_target);
+        if let Some(target) = saved_target {
+            framebuffer.bind(target);
         }
-        if let Some(framebuffer) = saved_framebuffer {
-            framebuffer.bind(framebuffer_target);
-        }
-        Some(())
+        Self::restore_framebuffer_bindings(&context);
+        attached
     }
 
     pub(crate) fn end_frame(&self, _frame: &XRFrame) -> Option<()> {
         debug!("XRWebGLLayer end frame");
-        // TODO: invalidate the old texture
         let framebuffer = self.framebuffer.as_ref()?;
-        // TODO: rebind the current bindings
+        let context = framebuffer.upcast().context()?;
+        let saved_target = framebuffer.target();
         framebuffer.bind(constants::FRAMEBUFFER);
-        framebuffer
-            .texture2d_even_if_opaque(constants::COLOR_ATTACHMENT0, self.texture_target(), None, 0)
-            .ok()?;
-        framebuffer
-            .texture2d_even_if_opaque(
-                constants::DEPTH_STENCIL_ATTACHMENT,
-                constants::DEPTH_STENCIL_ATTACHMENT,
-                None,
-                0,
-            )
-            .ok()?;
-
-        if let Some(context) = framebuffer.upcast().context() {
-            context.Flush();
+        let detached = (|| {
+            framebuffer
+                .texture2d_even_if_opaque(
+                    constants::COLOR_ATTACHMENT0,
+                    self.texture_target(),
+                    None,
+                    0,
+                )
+                .ok()?;
+            framebuffer
+                .texture2d_even_if_opaque(
+                    constants::DEPTH_STENCIL_ATTACHMENT,
+                    constants::TEXTURE_2D,
+                    None,
+                    0,
+                )
+                .ok()?;
+            Some(())
+        })();
+        if let Some(target) = saved_target {
+            framebuffer.bind(target);
         }
+        Self::restore_framebuffer_bindings(&context);
+        context.Flush();
+        detached
+    }
 
-        Some(())
+    fn restore_framebuffer_bindings(context: &WebGLRenderingContext) {
+        let draw = context.get_draw_framebuffer_slot().get();
+        let read = context.get_read_framebuffer_slot().get();
+        if context.webgl_version() == servo_canvas_traits::webgl::WebGLVersion::WebGL2 {
+            context.bind_framebuffer_to(
+                constants::DRAW_FRAMEBUFFER,
+                draw.as_deref(),
+                context.get_draw_framebuffer_slot(),
+            );
+            context.bind_framebuffer_to(
+                constants::READ_FRAMEBUFFER,
+                read.as_deref(),
+                context.get_read_framebuffer_slot(),
+            );
+        } else {
+            context.bind_framebuffer_to(
+                constants::FRAMEBUFFER,
+                draw.as_deref(),
+                context.get_draw_framebuffer_slot(),
+            );
+        }
     }
 
     pub(crate) fn context(&self) -> &WebGLRenderingContext {
@@ -254,27 +276,29 @@ impl XRWebGLLayerMethods<crate::DomTypeHolder> for XRWebGLLayer {
         // XXXManishearth step 3: throw error if context is lost
         // XXXManishearth step 4: check XR compat flag for immersive sessions
 
-        let (framebuffer, layer_id) = if session.is_immersive() {
-            // Step 9.2. "Initialize layer’s framebuffer to a new opaque framebuffer created with context."
-            let size = session
-                .with_session(|session| session.recommended_framebuffer_resolution())
-                .ok_or(Error::Operation(None))?;
-            let framebuffer = WebGLFramebuffer::maybe_new_webxr(cx, session, &context, size)
-                .ok_or(Error::Operation(None))?;
-
-            // Step 9.3. "Allocate and initialize resources compatible with session’s XR device,
-            // including GPU accessible memory buffers, as required to support the compositing of layer."
+        let (framebuffer, layer_id, viewports) = if session.is_immersive() {
+            // The allocation result is authoritative after device/GPU clamping.
+            // Its dimensions and eye rectangles must match the compositor.
             let context_id = WebXRContextId::from(context.context_id());
-            let layer_init: LayerInit = init.convert();
-            let layer_id = session
-                .with_session(|session| session.create_layer(context_id, layer_init))
+            let info = session
+                .with_session(|session| session.create_layer(context_id, init.convert()))
                 .map_err(|_| Error::Operation(None))?;
-
-            // Step 9.4: "If layer’s resources were unable to be created for any reason,
-            // throw an OperationError and abort these steps."
-            (Some(framebuffer), Some(layer_id))
+            let Some(framebuffer) = WebGLFramebuffer::maybe_new_webxr(
+                cx,
+                session,
+                &context,
+                info.geometry.framebuffer_size,
+            ) else {
+                session.with_session(|session| session.destroy_layer(context_id, info.id));
+                return Err(Error::Operation(None));
+            };
+            (
+                Some(framebuffer),
+                Some(info.id),
+                info.geometry.viewports.viewports,
+            )
         } else {
-            (None, None)
+            (None, None, Vec::new())
         };
 
         // Ensure that we finish setting up this layer before continuing.
@@ -290,6 +314,7 @@ impl XRWebGLLayerMethods<crate::DomTypeHolder> for XRWebGLLayer {
             init,
             framebuffer.as_deref(),
             layer_id,
+            viewports,
         ))
     }
 
@@ -343,19 +368,11 @@ impl XRWebGLLayerMethods<crate::DomTypeHolder> for XRWebGLLayer {
 
         let index = view.viewport_index();
 
-        let viewport = self.session().with_session(|s| {
-            // Inline sessions
-            if s.viewports().is_empty() {
-                Rect::from_size(self.size().to_i32())
-            } else {
-                s.viewports()[index]
-            }
-        });
-
-        // NOTE: According to spec, viewport sizes should be recalculated here if the
-        // requested viewport scale has changed. However, existing browser implementations
-        // don't seem to do this for stereoscopic immersive sessions.
-        // Revisit if Servo gets support for handheld AR/VR via ARCore/ARKit
+        let viewport = if self.framebuffer.is_none() {
+            Rect::from_size(self.size().to_i32())
+        } else {
+            *self.viewports.get(index)?
+        };
 
         Some(XRViewport::new(cx, &self.global(), viewport))
     }

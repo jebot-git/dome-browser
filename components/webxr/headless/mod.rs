@@ -14,7 +14,7 @@ use webxr_api::util::{self, ClipPlanes, HitTestList};
 use webxr_api::{
     ApiSpace, BaseSpace, ContextId, DeviceAPI, DiscoveryAPI, EnvironmentBlendMode, Error, Event,
     EventBuffer, Floor, Frame, FrameUpdateEvent, HitTestId, HitTestResult, HitTestSource, Input,
-    InputFrame, InputId, InputSource, LayerGrandManager, LayerId, LayerInit, LayerManager,
+    InputFrame, InputId, InputSource, LayerGrandManager, LayerId, LayerInfo, LayerInit, LayerManager,
     MockButton, MockDeviceInit, MockDeviceMsg, MockDiscoveryAPI, MockInputMsg, MockViewInit,
     MockViewsInit, MockWorld, Native, Quitter, Ray, SelectEvent, SelectKind, Session,
     SessionBuilder, SessionInit, SessionMode, Space, SubImages, View, Viewer, ViewerPose,
@@ -215,10 +215,9 @@ impl HeadlessDevice {
             return Ok(manager);
         }
         let swap_chains = SwapChains::new();
-        let viewports = self.viewports();
         let layer_manager = self
             .grand_manager
-            .create_layer_manager(move |_| Ok(SurfmanLayerManager::new(viewports, swap_chains)))?;
+            .create_layer_manager(move |_| Ok(SurfmanLayerManager::new(swap_chains)))?;
         self.layer_manager = Some(layer_manager);
         Ok(self.layer_manager.as_mut().unwrap())
     }
@@ -235,8 +234,9 @@ impl DeviceAPI for HeadlessDevice {
         d.viewports(per_session.mode)
     }
 
-    fn create_layer(&mut self, context_id: ContextId, init: LayerInit) -> Result<LayerId, Error> {
-        self.layer_manager()?.create_layer(context_id, init)
+    fn create_layer(&mut self, context_id: ContextId, init: LayerInit) -> Result<LayerInfo, Error> {
+        let viewports = self.viewports();
+        self.layer_manager()?.create_layer(context_id, init, viewports)
     }
 
     fn destroy_layer(&mut self, context_id: ContextId, layer_id: LayerId) {

@@ -20,7 +20,7 @@ use webxr_api::util::ClipPlanes;
 use webxr_api::{
     CUBE_BACK, CUBE_BOTTOM, CUBE_LEFT, CUBE_RIGHT, CUBE_TOP, ContextId, DeviceAPI, DiscoveryAPI,
     Display, Error, Event, EventBuffer, Floor, Frame, InputSource, LEFT_EYE, LayerGrandManager,
-    LayerId, LayerInit, LayerManager, Native, Quitter, RIGHT_EYE, Session, SessionBuilder,
+    LayerId, LayerInfo, LayerInit, LayerManager, Native, Quitter, RIGHT_EYE, Session, SessionBuilder,
     SessionInit, SessionMode, SomeEye, VIEWER, View, Viewer, ViewerPose, Viewport, Viewports,
     Views,
 };
@@ -175,8 +175,9 @@ impl DeviceAPI for GlWindowDevice {
         Viewports { viewports }
     }
 
-    fn create_layer(&mut self, context_id: ContextId, init: LayerInit) -> Result<LayerId, Error> {
-        self.layer_manager()?.create_layer(context_id, init)
+    fn create_layer(&mut self, context_id: ContextId, init: LayerInit) -> Result<LayerInfo, Error> {
+        let viewports = self.viewports();
+        self.layer_manager()?.create_layer(context_id, init, viewports)
     }
 
     fn destroy_layer(&mut self, context_id: ContextId, layer_id: LayerId) {
@@ -466,10 +467,9 @@ impl GlWindowDevice {
             return Ok(manager);
         }
         let swap_chains = self.swap_chains.clone();
-        let viewports = self.viewports();
         let layer_manager = self
             .grand_manager
-            .create_layer_manager(move |_| Ok(SurfmanLayerManager::new(viewports, swap_chains)))?;
+            .create_layer_manager(move |_| Ok(SurfmanLayerManager::new(swap_chains)))?;
         self.layer_manager = Some(layer_manager);
         Ok(self.layer_manager.as_mut().unwrap())
     }

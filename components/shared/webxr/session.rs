@@ -14,7 +14,7 @@ use servo_base::generic_channel::{self, GenericReceiver, GenericSender};
 
 use crate::{
     ContextId, DeviceAPI, Error, Event, Floor, Frame, FrameUpdateEvent, HitTestId, HitTestSource,
-    InputSource, LayerGrandManager, LayerId, LayerInit, Native, Viewport, Viewports,
+    InputSource, LayerGrandManager, LayerId, LayerInfo, LayerInit, Native, Viewport, Viewports,
 };
 
 // How long to wait for an rAF.
@@ -91,7 +91,7 @@ pub enum EnvironmentBlendMode {
 // The messages that are sent from the content thread to the session thread.
 #[derive(Debug, Serialize, Deserialize)]
 enum SessionMsg {
-    CreateLayer(ContextId, LayerInit, GenericSender<Result<LayerId, Error>>),
+    CreateLayer(ContextId, LayerInit, GenericSender<Result<LayerInfo, Error>>),
     DestroyLayer(ContextId, LayerId),
     SetLayers(Vec<(ContextId, LayerId)>),
     SetEventDest(ProfileGenericCallback<Event>),
@@ -176,7 +176,7 @@ impl Session {
             .map(|rect| Size2D::new(rect.max_x(), rect.max_y()))
     }
 
-    pub fn create_layer(&self, context_id: ContextId, init: LayerInit) -> Result<LayerId, Error> {
+    pub fn create_layer(&self, context_id: ContextId, init: LayerInit) -> Result<LayerInfo, Error> {
         let Some((sender, receiver)) = generic_channel::channel() else {
             return Err(Error::CommunicationError);
         };

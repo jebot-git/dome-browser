@@ -14,7 +14,7 @@ def check(value,name):
  checks.append({'name':name,'passed':bool(value)});print(('PASS ' if value else 'FAIL ')+name,flush=True)
  if not value and not a.diagnostic:raise AssertionError(name)
 def latest():
- s=snapshots[-1] if snapshots else None
+ s=snapshots[max(range(len(snapshots)),key=lambda i:(snapshots[i]['frames'],i))] if snapshots else None
  if s:assert not s.get('error'),s['error']
  return s
 def wait(fn):
@@ -137,6 +137,7 @@ try:
   send('tablet-in',[205,195]);command('prevent');start=mark();send('tablet-down');wait(lambda:named('selectstart',start));send('tablet-up');zero()
   check(not named('mousedown',start) and not named('mouseup',start) and len(named('click',start))==1,'Prevented pointerdown suppresses compatibility mouse buttons while click remains independent')
   command('allow');start=mark();send('tablet-move',[452,322]);send('tablet-down');send('tablet-up');settle()
+  wait(lambda:any(e.get('target')=='check' for e in named('click',start)));settle()
   check(latest()['checked'] and not named('selectstart',start),'A native pen click preserves checkbox activation outside XR canvases')
   send('tablet-move',[205,195]);start=mark();send('tablet-down');wait(lambda:named('selectstart',start));key('l',('Control_L',));zero()
   send('tablet-move',[220,195]);send('tablet-up');settle()

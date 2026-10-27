@@ -21,7 +21,7 @@ use webxr::{SurfmanGL, SurfmanLayerManager};
 use webxr_api::util::{ClipPlanes, fov_to_projection_matrix};
 use webxr_api::{
     ContextId, DeviceAPI, DiscoveryAPI, Error, Event, EventBuffer, Floor, Frame, InputSource,
-    LayerGrandManager, LayerId, LayerInit, LayerManager, Native, Quitter, Session, SessionBuilder,
+    LayerGrandManager, LayerId, LayerInfo, LayerGeometry, LayerInit, LayerManager, Native, Quitter, Session, SessionBuilder,
     SessionInit, SessionMode, View, ViewerPose, Viewports, Views, Visibility,
 };
 mod input;
@@ -439,6 +439,7 @@ struct BridgeDevice {
     chains: SwapChains<LayerId, Device>,
     grand: LayerGrandManager<SurfmanGL>,
     manager: Option<LayerManager>,
+    layer_geometry: std::collections::HashMap<LayerId, LayerGeometry>,
     frame: Option<HostFrame>,
     anchor: Option<RigidTransform3D<f32, Native, Native>>,
     clip: ClipPlanes,
@@ -540,6 +541,7 @@ impl BridgeDevice {
             chains: SwapChains::new(),
             grand,
             manager: None,
+            layer_geometry: std::collections::HashMap::new(),
             reference_spaces: reference_space::Tracker::new(initial.reference_space),
             frame: Some(initial),
             anchor: Some(initial_anchor),
@@ -558,11 +560,11 @@ impl BridgeDevice {
     }
     fn manager(&mut self) -> std::result::Result<&mut LayerManager, Error> {
         if self.manager.is_none() {
-            let viewports = self.hello.viewports();
             let chains = self.chains.clone();
+            let limit = Size2D::new(self.hello.max_width.min(4096) as i32, self.hello.max_height.min(4096) as i32);
             self.manager =
                 Some(self.grand.create_layer_manager(move |_| {
-                    Ok(SurfmanLayerManager::new(viewports, chains))
+                    Ok(SurfmanLayerManager::new(chains).with_framebuffer_limit(limit))
                 })?);
         }
         Ok(self.manager.as_mut().unwrap())
@@ -678,8 +680,14 @@ impl BridgeDevice {
         }
         let width = size.width as u32;
         let height = size.height as u32;
-        let split = width * self.hello.view_sizes[0][0] / self.hello.width;
-        let views:Vec<_>=frame.views.iter().enumerate().map(|(i,v)|json!({"rect":{"x":if i==0{0}else{split},"y":0,"width":if i==0{split}else{width-split},"height":height},"pose":v.pose,"fov":v.fov})).collect();
+        let geometry = self.layer_geometry.get(&layer).ok_or("XR layer has no allocation geometry")?;
+        if geometry.framebuffer_size.width != size.width || geometry.framebuffer_size.height != size.height {
+            return Err("XR submitted surface differs from its allocation geometry".into());
+        }
+        let views: Vec<_> = frame.views.iter().zip(&geometry.viewports.viewports).map(|(view, rect)| json!({
+            "rect":{"x":rect.origin.x,"y":size.height-rect.max_y(),"width":rect.size.width,"height":rect.size.height},
+            "pose":view.pose,"fov":view.fov,
+        })).collect();
         rpc(
             &self.path,
             json!({"op":"end_frame","token":self.token,"frame_id":frame.frame_id,"width":width,"height":height,"transport":"rgba","layer_flags":2,"bytes":pixels.len(),"views":views}),
@@ -693,31 +701,14 @@ impl DeviceAPI for BridgeDevice {
         &mut self,
         context: ContextId,
         init: LayerInit,
-    ) -> std::result::Result<LayerId, Error> {
-        // Surfman's projection viewports are native-sized. Scaling the backing
-        // texture alone would send a clipped or incorrectly split stereo frame.
-        if let LayerInit::WebGLLayer {
-            framebuffer_scale_factor,
-            ..
-        } = &init
-        {
-            if *framebuffer_scale_factor != 1.0 {
-                return Err(backend("DomeD currently requires framebufferScaleFactor 1"));
-            }
-        }
-        let size = init.texture_size(&self.hello.viewports());
-        if size.width <= 0
-            || size.height <= 0
-            || size.width > self.hello.max_width.min(4096) as i32
-            || size.height > self.hello.max_height.min(4096) as i32
-        {
-            return Err(backend("XR layer dimensions exceed the bridge limit"));
-        }
-        // Multiple WebGL layers may exist while updateRenderState selects the
-        // active base layer. The shared manager owns each allocation/lifetime.
-        self.manager()?.create_layer(context, init)
+    ) -> std::result::Result<LayerInfo, Error> {
+        let viewports = self.hello.viewports();
+        let info = self.manager()?.create_layer(context, init, viewports)?;
+        self.layer_geometry.insert(info.id, info.geometry.clone());
+        Ok(info)
     }
     fn destroy_layer(&mut self, context: ContextId, layer: LayerId) {
+        self.layer_geometry.remove(&layer);
         if let Ok(manager) = self.manager() {
             manager.destroy_layer(context, layer);
         }

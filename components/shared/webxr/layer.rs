@@ -10,7 +10,7 @@ use euclid::{Rect, Size2D};
 use malloc_size_of_derive::MallocSizeOf;
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Viewport, Viewports};
+use crate::{Error, LayerGeometry, Viewport, Viewports, MAX_FRAMEBUFFER_DIMENSION};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct ContextId(pub u64);
@@ -92,7 +92,8 @@ pub trait LayerManagerAPI<GL: GLTypes> {
         contexts: &mut dyn GLContexts<GL>,
         context_id: ContextId,
         init: LayerInit,
-    ) -> Result<LayerId, Error>;
+        viewports: Viewports,
+    ) -> Result<LayerInfo, Error>;
 
     fn destroy_layer(
         &mut self,
@@ -129,8 +130,9 @@ impl LayerManager {
         &mut self,
         context_id: ContextId,
         init: LayerInit,
-    ) -> Result<LayerId, Error> {
-        self.0.create_layer(&mut (), context_id, init)
+        viewports: Viewports,
+    ) -> Result<LayerInfo, Error> {
+        self.0.create_layer(&mut (), context_id, init, viewports)
     }
 
     pub fn destroy_layer(&mut self, context_id: ContextId, layer_id: LayerId) {
@@ -207,6 +209,13 @@ impl Default for LayerId {
     }
 }
 
+/// The compositor allocation returned to the content thread after layer creation.
+#[derive(Clone, Debug, Deserialize, Serialize, MallocSizeOf)]
+pub struct LayerInfo {
+    pub id: LayerId,
+    pub geometry: LayerGeometry,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub enum LayerInit {
     /// <https://www.w3.org/TR/webxr/#dictdef-xrwebgllayerinit>
@@ -229,24 +238,17 @@ pub enum LayerInit {
 }
 
 impl LayerInit {
+    pub fn geometry(&self, viewports: &Viewports, limits: Size2D<i32, Viewport>) -> Result<LayerGeometry, Error> {
+        let scale = match *self {
+            Self::WebGLLayer { framebuffer_scale_factor, .. } => framebuffer_scale_factor,
+            Self::ProjectionLayer { scale_factor, .. } => scale_factor,
+        };
+        LayerGeometry::new(viewports, scale, limits)
+    }
+
     pub fn texture_size(&self, viewports: &Viewports) -> Size2D<i32, Viewport> {
-        match self {
-            LayerInit::WebGLLayer {
-                framebuffer_scale_factor: scale,
-                ..
-            } |
-            LayerInit::ProjectionLayer {
-                scale_factor: scale,
-                ..
-            } => {
-                let native_size = viewports
-                    .viewports
-                    .iter()
-                    .fold(Rect::zero(), |acc, view| acc.union(view))
-                    .size;
-                (native_size.to_f32() * *scale).to_i32()
-            },
-        }
+        self.geometry(viewports, Size2D::new(MAX_FRAMEBUFFER_DIMENSION, MAX_FRAMEBUFFER_DIMENSION))
+            .map_or_else(|_| Size2D::zero(), |geometry| geometry.framebuffer_size)
     }
 }
 

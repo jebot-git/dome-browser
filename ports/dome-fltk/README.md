@@ -522,8 +522,12 @@ and device destruction release the browser lease. They never request exit of
 DomeD's real XR session.
 
 The bridge supports immersive VR with an active projection layer and an RGBA
-transport at `framebufferScaleFactor: 1`. Multiple projection layers may be
-allocated while `updateRenderState` chooses the active base layer. AR, depth
+transport with scaled WebGL framebuffers. Scale requests are clamped to keep
+all eye viewports non-empty and within device/GL allocation limits. The
+reported dimensions, viewports and native submission share the same per-layer
+geometry. See [WebXR framebuffer validation](docs/XR_FRAMEBUFFERS.md). Multiple
+projection layers may be allocated while `updateRenderState` chooses the active
+base layer. AR, depth
 layers, hands, hit testing, bounded floor and DMA-BUF submission are not
 advertised. The installed release has no controller stream. The development
 adapter opts into the host's versioned controller extension only when the host

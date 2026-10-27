@@ -8,7 +8,7 @@ use euclid::RigidTransform3D;
 use webxr::SurfmanGL;
 use webxr_api::{
     ContextId, DeviceAPI, DiscoveryAPI, Error, Event, EventBuffer, Floor, Frame, InputSource,
-    LayerId, LayerInit, Native, Quitter, Session, SessionBuilder, SessionInit, SessionMode,
+    LayerId, LayerInfo, LayerInit, Native, Quitter, Session, SessionBuilder, SessionInit, SessionMode,
     ViewerPose, Viewports, Views,
 };
 fn backend(error: impl std::fmt::Debug) -> Error {

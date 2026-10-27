@@ -1,0 +1,78 @@
+<!doctype html><meta charset="utf-8"><title>WebXR framebuffer scaling</title>
+<style>body{background:#11334c;color:white;font:18px monospace}button{padding:18px}canvas{width:220px;height:120px}</style>
+<button id="start">Start framebuffer validation</button><canvas id="one" width="240" height="120"></canvas><canvas id="two" width="240" height="120"></canvas>
+<script>
+let order=0;const post=(type,data)=>fetch('/event',{method:'POST',body:JSON.stringify({order:++order,type,data})});
+const rect=v=>({x:v.x,y:v.y,width:v.width,height:v.height});
+const scales=[1,.5,1.5,.73,0,-5,100,1e100,1];
+start.onclick=async()=>{
+ try{
+  const session=await navigator.xr.requestSession('immersive-vr');
+  const space=await session.requestReferenceSpace('local');
+  let phase=0;
+  for(const version of ['webgl','webgl2']){
+   const canvas=document.querySelector(version==='webgl'?'#one':'#two');
+   const gl=canvas.getContext(version,{xrCompatible:true});if(!gl)throw Error(version+' context unavailable');
+   await gl.makeXRCompatible();
+   gl.activeTexture(gl.TEXTURE3);
+   const sentinelTexture=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,sentinelTexture);
+   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,4,4,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+   const sentinel=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,sentinel);
+   gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,sentinelTexture,0);
+   gl.clearColor(13/255,21/255,34/255,1);gl.clear(gl.COLOR_BUFFER_BIT);
+   let readSentinel=sentinel;
+   if(version==='webgl2'){
+    gl.activeTexture(gl.TEXTURE4);const readTexture=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,readTexture);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,4,4,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+    readSentinel=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,readSentinel);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,readTexture,0);
+    gl.clearColor(34/255,55/255,89/255,1);gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,sentinel);gl.bindFramebuffer(gl.READ_FRAMEBUFFER,readSentinel);gl.activeTexture(gl.TEXTURE3);
+   }
+   for(const scale of scales){
+    const marker=16+phase++;const layer=new XRWebGLLayer(session,gl,{framebufferScaleFactor:scale});
+    const initialSize=[layer.framebufferWidth,layer.framebufferHeight];
+    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([13,21,34,255]));
+    session.updateRenderState({baseLayer:layer});
+    for(let frameIndex=0;frameIndex<3;frameIndex++)await new Promise((resolve,reject)=>session.requestAnimationFrame((time,frame)=>{
+     try{
+      const pose=frame.getViewerPose(space);if(!pose)throw Error('No viewer pose');
+      const expectedDraw=[50+frameIndex,marker,20,255];
+      gl.clearColor(expectedDraw[0]/255,expectedDraw[1]/255,expectedDraw[2]/255,1);gl.clear(gl.COLOR_BUFFER_BIT);
+      if(version==='webgl2')gl.bindFramebuffer(gl.READ_FRAMEBUFFER,sentinel);
+      const drawn=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,drawn);
+      if([...drawn].join(',')!==expectedDraw.join(','))throw Error('XR begin-frame changed the application draw framebuffer binding');
+      if(version==='webgl2'){
+       gl.bindFramebuffer(gl.READ_FRAMEBUFFER,readSentinel);const read=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,read);
+       if([...read].join(',')!=='34,55,89,255')throw Error('XR begin-frame changed the application read framebuffer binding');
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER,layer.framebuffer);
+      const status=gl.checkFramebufferStatus(gl.FRAMEBUFFER),views=[];
+      gl.enable(gl.SCISSOR_TEST);
+      for(const view of pose.views){
+       const v=layer.getViewport(view),left=view.eye==='left';views.push({eye:view.eye,...rect(v)});
+       gl.viewport(v.x,v.y,v.width,v.height);gl.scissor(v.x,v.y,v.width,v.height);
+       gl.clearColor(left?1:0,left?0:1,marker/255,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+       const half=Math.floor(v.height/2);gl.scissor(v.x,v.y+half,v.width,v.height-half);
+       gl.clearColor(left?1:100/255,left?100/255:1,marker/255,1);gl.clear(gl.COLOR_BUFFER_BIT);
+      }
+      gl.disable(gl.SCISSOR_TEST);
+      const samples=views.map(v=>{
+       const bytes=new Uint8Array(4);gl.readPixels(v.x+Math.floor(v.width/2),v.y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,bytes);return [...bytes];
+      });
+      if(frameIndex===2)post('phase',{version,scale,marker,initialSize,size:[layer.framebufferWidth,layer.framebufferHeight],views,status,error:gl.getError(),samples});
+      if(version==='webgl2'){gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,sentinel);gl.bindFramebuffer(gl.READ_FRAMEBUFFER,readSentinel)}
+      else gl.bindFramebuffer(gl.FRAMEBUFFER,sentinel);
+      setTimeout(resolve,0);
+     }catch(e){reject(e)}
+    }));
+    const after=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,after);
+    if([...after].join(',')!==(version==='webgl2'?'34,55,89,255':[52,marker,20,255].join(','))||gl.getError()!==gl.NO_ERROR)throw Error('XR end-frame changed application framebuffer state');
+   }
+  }
+  await session.end();post('done',{phases:phase});
+ }catch(e){post('error',{name:e.name,message:e.message,stack:e.stack})}
+};
+addEventListener('load',()=>post('ready',{start:rect(start.getBoundingClientRect()),viewport:[innerWidth,innerHeight],ratio:devicePixelRatio}));
+</script>

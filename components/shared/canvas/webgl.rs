@@ -27,8 +27,8 @@ use servo_base::id::PainterId;
 use servo_base::{Epoch, generic_channel};
 use webrender_api::ImageKey;
 use webxr_api::{
-    ContextId as WebXRContextId, Error as WebXRError, LayerId as WebXRLayerId,
-    LayerInit as WebXRLayerInit, SubImages as WebXRSubImages,
+    ContextId as WebXRContextId, Error as WebXRError, LayerId as WebXRLayerId, LayerInfo as WebXRLayerInfo,
+    LayerInit as WebXRLayerInit, SubImages as WebXRSubImages, Viewports as WebXRViewports,
 };
 
 /// Helper function that creates a WebGL channel (WebGLSender, WebGLReceiver) to be used in WebGLCommands.
@@ -605,7 +605,8 @@ pub enum WebXRCommand {
         WebXRLayerManagerId,
         WebXRContextId,
         WebXRLayerInit,
-        GenericSender<Result<WebXRLayerId, WebXRError>>,
+        WebXRViewports,
+        GenericSender<Result<WebXRLayerInfo, WebXRError>>,
     ),
     DestroyLayer(WebXRLayerManagerId, WebXRContextId, WebXRLayerId),
     BeginFrame(

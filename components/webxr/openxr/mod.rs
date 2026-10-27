@@ -29,7 +29,7 @@ use webxr_api::util::{self, ClipPlanes};
 use webxr_api::{
     self, BaseSpace, Capture, ContextId, DeviceAPI, DiscoveryAPI, Display, Error, Event,
     EventBuffer, Floor, Frame, GLContexts, InputId, InputSource, LayerGrandManager, LayerId,
-    LayerInit, LayerManager, LayerManagerAPI, LeftEye, Native, Quitter, RightEye, SelectKind,
+    LayerInfo, LayerGeometry, LayerInit, LayerManager, LayerManagerAPI, LeftEye, Native, Quitter, RightEye, SelectKind,
     Session as WebXrSession, SessionBuilder, SessionInit, SessionMode, SubImage, SubImages, View,
     ViewerPose, Viewport, Viewports, Views, Visibility,
 };
@@ -392,6 +392,7 @@ struct OpenXrLayer {
     swapchain: Swapchain<Backend>,
     depth_stencil_texture: Option<gl::NativeTexture>,
     size: Size2D<i32, Viewport>,
+    viewports: Viewports,
     images: Vec<<Backend as Graphics>::SwapchainImage>,
     surface_textures: Vec<Option<SurfaceTexture>>,
     waited: bool,
@@ -426,7 +427,7 @@ impl OpenXrLayer {
     fn new(
         swapchain: Swapchain<Backend>,
         depth_stencil_texture: Option<gl::NativeTexture>,
-        size: Size2D<i32, Viewport>,
+        geometry: LayerGeometry,
     ) -> Result<OpenXrLayer, Error> {
         let images = swapchain
             .enumerate_images()
@@ -437,7 +438,8 @@ impl OpenXrLayer {
         Ok(OpenXrLayer {
             swapchain,
             depth_stencil_texture,
-            size,
+            size: geometry.framebuffer_size,
+            viewports: geometry.viewports,
             images,
             surface_textures,
             waited,
@@ -474,7 +476,8 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
         contexts: &mut dyn GLContexts<SurfmanGL>,
         context_id: ContextId,
         init: LayerInit,
-    ) -> Result<LayerId, Error> {
+        viewports: Viewports,
+    ) -> Result<LayerInfo, Error> {
         let guard = self.shared_data.lock().unwrap();
         let data = guard.as_ref().unwrap();
 
@@ -483,7 +486,10 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
             Error::BackendSpecific(format!("Session::enumerate_swapchain_formats {:?}", e))
         })?;
         let format = GraphicsProvider::pick_format(&formats);
-        let texture_size = init.texture_size(&data.viewports());
+        let gl = contexts.bindings(context_id).ok_or(Error::NoMatchingDevice)?;
+        let maximum = unsafe { gl.get_parameter_i32(gl::MAX_TEXTURE_SIZE).min(gl.get_parameter_i32(gl::MAX_RENDERBUFFER_SIZE)) };
+        let geometry = init.geometry(&viewports, Size2D::new(maximum, maximum))?;
+        let texture_size = geometry.framebuffer_size;
         let sample_count = data.swapchain_sample_count;
         let swapchain_create_info = SwapchainCreateInfo {
             create_flags: SwapchainCreateFlags::EMPTY,
@@ -532,10 +538,10 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
         };
 
         let layer_id = LayerId::default();
-        let openxr_layer = OpenXrLayer::new(swapchain, depth_stencil_texture, texture_size)?;
+        let openxr_layer = OpenXrLayer::new(swapchain, depth_stencil_texture, geometry.clone())?;
         self.layers.push((context_id, layer_id));
         self.openxr_layers.insert(layer_id, openxr_layer);
-        Ok(layer_id)
+        Ok(LayerInfo { id: layer_id, geometry })
     }
 
     fn destroy_layer(
@@ -601,7 +607,6 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
             std::mem::swap(&mut r_fov.angle_up, &mut l_fov.angle_down);
         }
 
-        let viewports = data.viewports();
         let primary_views = layers
             .iter()
             .filter_map(|&(_, layer_id)| {
@@ -614,7 +619,7 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
                             openxr::SwapchainSubImage::new()
                                 .swapchain(&openxr_layer.swapchain)
                                 .image_array_index(0)
-                                .image_rect(image_rect(viewports.viewports[0])),
+                                .image_rect(image_rect(openxr_layer.viewports.viewports[0])),
                         ),
                     openxr::CompositionLayerProjectionView::new()
                         .pose(data.right.view.pose)
@@ -623,7 +628,7 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
                             openxr::SwapchainSubImage::new()
                                 .swapchain(&openxr_layer.swapchain)
                                 .image_array_index(0)
-                                .image_rect(image_rect(viewports.viewports[1])),
+                                .image_rect(image_rect(openxr_layer.viewports.viewports[1])),
                         ),
                 ])
             })
@@ -672,7 +677,7 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
                             openxr::SwapchainSubImage::new()
                                 .swapchain(&openxr_layer.swapchain)
                                 .image_array_index(0)
-                                .image_rect(image_rect(viewports.viewports[2])),
+                                .image_rect(image_rect(openxr_layer.viewports.viewports[2])),
                         )])
                 })
                 .collect::<Vec<_>>();
@@ -773,8 +778,8 @@ impl LayerManagerAPI<SurfmanGL> for OpenXrLayerManager {
                     texture_array_index,
                     viewport: Rect::new(origin, texture_size),
                 });
-                let view_sub_images = data
-                    .viewports()
+                let view_sub_images = openxr_layer
+                    .viewports
                     .viewports
                     .iter()
                     .map(|&viewport| SubImage {
@@ -1207,8 +1212,9 @@ impl DeviceAPI for OpenXrDevice {
             .viewports()
     }
 
-    fn create_layer(&mut self, context_id: ContextId, init: LayerInit) -> Result<LayerId, Error> {
-        self.layer_manager.create_layer(context_id, init)
+    fn create_layer(&mut self, context_id: ContextId, init: LayerInit) -> Result<LayerInfo, Error> {
+        let viewports = self.viewports();
+        self.layer_manager.create_layer(context_id, init, viewports)
     }
 
     fn destroy_layer(&mut self, context_id: ContextId, layer_id: LayerId) {

@@ -14,10 +14,10 @@ use webxr::SurfmanGL as WebXRSurfman;
 use webxr_api::{
     ContextId as WebXRContextId, Error as WebXRError, GLContexts as WebXRContexts,
     GLTypes as WebXRTypes, LayerGrandManager as WebXRLayerGrandManager,
-    LayerGrandManagerAPI as WebXRLayerGrandManagerAPI, LayerId as WebXRLayerId,
+    LayerGrandManagerAPI as WebXRLayerGrandManagerAPI, LayerId as WebXRLayerId, LayerInfo as WebXRLayerInfo,
     LayerInit as WebXRLayerInit, LayerManager as WebXRLayerManager,
     LayerManagerAPI as WebXRLayerManagerAPI, LayerManagerFactory as WebXRLayerManagerFactory,
-    SubImages as WebXRSubImages,
+    SubImages as WebXRSubImages, Viewports as WebXRViewports,
 };
 
 use crate::webgl_thread::WebGLThread;
@@ -73,12 +73,13 @@ impl WebXRBridge {
         contexts: &mut dyn WebXRContexts<WebXRSurfman>,
         context_id: WebXRContextId,
         layer_init: WebXRLayerInit,
-    ) -> Result<WebXRLayerId, WebXRError> {
+        viewports: WebXRViewports,
+    ) -> Result<WebXRLayerInfo, WebXRError> {
         let manager = self
             .managers
             .get_mut(&manager_id)
             .ok_or(WebXRError::NoMatchingDevice)?;
-        manager.create_layer(contexts, context_id, layer_init)
+        manager.create_layer(contexts, context_id, layer_init, viewports)
     }
 
     pub(crate) fn destroy_layer(
@@ -213,7 +214,8 @@ impl<GL: WebXRTypes> WebXRLayerManagerAPI<GL> for WebXRBridgeManager {
         _: &mut dyn WebXRContexts<GL>,
         context_id: WebXRContextId,
         init: WebXRLayerInit,
-    ) -> Result<WebXRLayerId, WebXRError> {
+        viewports: WebXRViewports,
+    ) -> Result<WebXRLayerInfo, WebXRError> {
         let (sender, receiver) = webgl_channel().ok_or(WebXRError::CommunicationError)?;
         let _ = self
             .sender
@@ -221,12 +223,13 @@ impl<GL: WebXRTypes> WebXRLayerManagerAPI<GL> for WebXRBridgeManager {
                 self.manager_id,
                 context_id,
                 init,
+                viewports,
                 sender,
             )));
         let layer_id = receiver
             .recv()
             .map_err(|_| WebXRError::CommunicationError)??;
-        self.layers.push((context_id, layer_id));
+        self.layers.push((context_id, layer_id.id));
         Ok(layer_id)
     }
 
