@@ -33,7 +33,7 @@ interface XRWebGLLayer: XRLayer {
   readonly attribute unsigned long framebufferHeight;
 
   // Methods
-  XRViewport? getViewport(XRView view);
+  [Throws] XRViewport? getViewport(XRView view);
 
   // Static Methods
   static double getNativeFramebufferScaleFactor(XRSession session);

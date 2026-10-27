@@ -61,9 +61,9 @@ impl SessionInit {
         }
         let mut granted = self.required_features.clone();
         for f in &self.optional_features {
-            if f == "viewer" ||
-                (f == "local" && mode != SessionMode::Inline) ||
-                supported.contains(f)
+            if f == "viewer"
+                || (f == "local" && mode != SessionMode::Inline)
+                || supported.contains(f)
             {
                 granted.push(f.clone());
             }
@@ -91,9 +91,14 @@ pub enum EnvironmentBlendMode {
 // The messages that are sent from the content thread to the session thread.
 #[derive(Debug, Serialize, Deserialize)]
 enum SessionMsg {
-    CreateLayer(ContextId, LayerInit, GenericSender<Result<LayerInfo, Error>>),
+    CreateLayer(
+        ContextId,
+        LayerInit,
+        GenericSender<Result<LayerInfo, Error>>,
+    ),
     DestroyLayer(ContextId, LayerId),
     SetLayers(Vec<(ContextId, LayerId)>),
+    SetLayerViewports(ContextId, LayerId, Viewports),
     SetEventDest(ProfileGenericCallback<Event>),
     SetFrameDest(ProfileGenericCallback<Frame>),
     UpdateClipPlanes(/* near */ f32, /* far */ f32),
@@ -131,6 +136,7 @@ pub struct Session {
     granted_features: Vec<String>,
     id: SessionId,
     supported_frame_rates: Vec<f32>,
+    dynamic_viewport_scaling: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, MallocSizeOf)]
@@ -157,6 +163,16 @@ impl Session {
 
     pub fn environment_blend_mode(&self) -> EnvironmentBlendMode {
         self.environment_blend_mode
+    }
+
+    pub fn supports_dynamic_viewport_scaling(&self) -> bool {
+        self.dynamic_viewport_scaling
+    }
+
+    pub fn set_layer_viewports(&self, context: ContextId, layer: LayerId, viewports: Viewports) {
+        let _ = self
+            .sender
+            .send(SessionMsg::SetLayerViewports(context, layer, viewports));
     }
 
     pub fn viewports(&self) -> &[Rect<i32, Viewport>] {
@@ -231,7 +247,8 @@ impl Session {
         match event {
             FrameUpdateEvent::UpdateFloorTransform(floor) => self.floor_transform = floor,
             FrameUpdateEvent::UpdateViewports(vp) => self.viewports = vp,
-            FrameUpdateEvent::HitTestSourceAdded(_) | FrameUpdateEvent::ReferenceSpaceChanged(..) => (),
+            FrameUpdateEvent::HitTestSourceAdded(_)
+            | FrameUpdateEvent::ReferenceSpaceChanged(..) => (),
         }
     }
 
@@ -323,6 +340,7 @@ where
             granted_features,
             id: self.id,
             supported_frame_rates,
+            dynamic_viewport_scaling: self.device.supports_dynamic_viewport_scaling(),
         }
     }
 
@@ -357,6 +375,11 @@ where
             SessionMsg::DestroyLayer(context_id, layer_id) => {
                 self.layers.retain(|&(_, other_id)| layer_id != other_id);
                 self.device.destroy_layer(context_id, layer_id);
+            },
+            SessionMsg::SetLayerViewports(context, layer, viewports) => {
+                if self.layers.contains(&(context, layer)) {
+                    self.device.set_layer_viewports(context, layer, viewports);
+                }
             },
             SessionMsg::SetLayers(layers) => {
                 self.pending_layers = Some(layers);

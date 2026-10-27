@@ -233,6 +233,8 @@ impl HeadlessDevice {
 }
 
 impl DeviceAPI for HeadlessDevice {
+    fn supports_dynamic_viewport_scaling(&self) -> bool { true }
+
     fn floor_transform(&self) -> Option<RigidTransform3D<f32, Native, Floor>> {
         self.data.lock().unwrap().floor_transform
     }

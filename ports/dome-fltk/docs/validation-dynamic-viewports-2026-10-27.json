@@ -1,0 +1,218 @@
+{
+  "completed_utc": "2026-10-27T15:30:16.042165+00:00",
+  "source_base_commit": "3f6a5f95e70c1c26d9c6fdca46bc61627f8ebcce",
+  "candidate_sha256": "9ea9b73eb003d4842a26e60820a987cd338787c957b6fa7b9b44ea4b6dd18e84",
+  "test_embedder_sha256": "63170bc4707f9ac82ffa9b1b3e8ff64fe20850fb2cf67612ed8f89b276de2954",
+  "compiled_inputs_unchanged": true,
+  "accepted_results": "accepted-regression-results.json",
+  "pointer_fixture_diagnosis": "pointer-delivery-audit.json",
+  "source_file_sha256": {
+    "components/script/dom/webxr/xrframe.rs": "94b04d5e669d47c7de24be564f399cfee6d28319edfcd51cd80f6e8ec52dc354",
+    "components/script/dom/webxr/xrsession.rs": "770c139892f1da3ef1d594e5382f4250f4b3d5a8a6b149c143271a248aad6bfe",
+    "components/script/dom/webxr/xrview.rs": "ff7b242f8c74dddf47025e0828d335a57366baa357025dbe5a83fe318affd83e",
+    "components/script/dom/webxr/xrviewerpose.rs": "d87a4ca463839861df5916df324e17a90cec188cf41865a5f78908a1ef87cbd2",
+    "components/script/dom/webxr/xrviewport.rs": "b2311c86e64fd82d826f798ccd2cd63d2d1cd71fb46d8d802af9e8b5ad362484",
+    "components/script/dom/webxr/xrwebgllayer.rs": "65141608c9bcb7000c3cc6b18446ad305e8bf5e843f1fac7a92e333be4fd41c4",
+    "components/script_bindings/webidls/XRView.webidl": "7322b08a30ab4b701b4e646a714e211126459ee05151d7bb607fb30d80ec0d8c",
+    "components/script_bindings/webidls/XRWebGLLayer.webidl": "8511500acf04aa8dca58de13c38a5d40d3ee643214bf8e0f80a4e83d20037984",
+    "components/shared/webxr/device.rs": "cebc6f5484e1184dcba8081f9edc422c4ba53c57907878bd42ddcbd9fd05f3e2",
+    "components/shared/webxr/geometry.rs": "911ab3cda0fca118d70863d6c14465cb1c9dc3cb927c2f405290797fd217cdc2",
+    "components/shared/webxr/lib.rs": "aa2ea38c85143c5a03caac1bc316e839e4921d1d76b78f3f78ccbc05bb41ab49",
+    "components/shared/webxr/session.rs": "09f59b2015c733653622aa8779ba4bf8c2697664c2553ff473b90d4d9221569f",
+    "components/webxr/headless/mod.rs": "575ad1947ab1e7ffbdcf42c5c9cab334a978ca9afaff56947cf1fd95ac78306d",
+    "ports/dome-fltk/src/xr.rs": "c1b736ce4d4a5286cdbe6d8f587ac0da6b60786e3a6dc263fe0bdb7b59e5c606",
+    "ports/dome-fltk/tests/webxr-inline-pointer.py": "ac69a18c363d6923944947849922db21a776ad9dc0348a97f8b376e5f4abb398",
+    "ports/dome-fltk/tests/webxr-layer-scaling.py": "f1977a89905eeaac8f306510c1e2becebf1351851051c34b3be36978529e249e",
+    "ports/dome-fltk/tests/webxr-layer-wpt.py": "9c1c3f14560dfe775b3fcb8ef13eb5e142c70771cdc41ed2af5aa4b47f4ed593",
+    "ports/dome-fltk/tests/webxr-dynamic-viewports.html": "14a4dff22f6ba9ed85f3fe8610fdbe9db089c59d638f498967924373c77ee1b4",
+    "ports/dome-fltk/tests/webxr_dynamic_viewports.py": "91cd85d9e27f10390143fb550ff6b133114def1d545f0eed82ef96de355d51f1"
+  },
+  "selected_units": 203,
+  "runtime_checks": 3747,
+  "upstream_passed_cases": 57,
+  "upstream_optional_unsupported": 4,
+  "regression_jobs": 24,
+  "all_required_passed": true,
+  "units": [
+    {
+      "name": "frontend",
+      "passed": 182,
+      "log_sha256": "15d7bc9116353fa6ad6a9a72b934c93c6890a2bdd00ea4f558ace464976f36c4"
+    },
+    {
+      "name": "geometry",
+      "passed": 10,
+      "log_sha256": "c899e11a5ccee16e1d188505dbbbd08f5a14ea368e351f48903fe52003fbe6fe"
+    },
+    {
+      "name": "pointer-ids",
+      "passed": 2,
+      "log_sha256": "1911c6df4676f89992c5f1a18c0d88bc5e7142b1ee333919044f041c47e954de"
+    },
+    {
+      "name": "pen-payload",
+      "passed": 3,
+      "log_sha256": "3a400baa1a8ae27478afb12a7b7e1f0a90b5d1229017fbdbd3222598005c31ee"
+    },
+    {
+      "name": "factory",
+      "passed": 1,
+      "log_sha256": "9c9d513c139713c88ddfff0f3c89db119d4d5b022de55b834c2452068e572643"
+    },
+    {
+      "name": "renderer",
+      "passed": 5,
+      "log_sha256": "a55647b9c71b530793922e158998147fd4311fdf3a7904a7b37496493a44e8f8"
+    }
+  ],
+  "suites": [
+    {
+      "name": "layers-upstream",
+      "upstream_passed_cases": 22,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "8da8bc5c0107cdd16d3e945b1bf65d9b45d4cae3aa4fb43b66afc7e5e22b580e"
+    },
+    {
+      "name": "layer-scaling",
+      "runtime_checks": 369,
+      "report_sha256": "4557df3b2f898d069bdbc87eefd451b91525a9093d81d5d152edd3ade50ca048"
+    },
+    {
+      "name": "bounded",
+      "runtime_checks": 21,
+      "report_sha256": "5031810ad3956ba62095bbd0f0e8c2cc2160a347782a62d9865182dd31175423"
+    },
+    {
+      "name": "reset-upstream",
+      "upstream_passed_cases": 4,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "0194fefee41a650939fa433af84cf6da2f1a7d44939990841133f92d7403d29e"
+    },
+    {
+      "name": "general-new",
+      "runtime_checks": 46,
+      "report_sha256": "90ae9fa47a09d413d31d88329faa5e9b44df0d28fe73493d31a325e823e1066a"
+    },
+    {
+      "name": "general-old",
+      "runtime_checks": 46,
+      "report_sha256": "90ae9fa47a09d413d31d88329faa5e9b44df0d28fe73493d31a325e823e1066a"
+    },
+    {
+      "name": "native-touch",
+      "runtime_checks": 22,
+      "report_sha256": "c57fa2adefec30239e4c5bb6ec1dc661b34e36aae8bee7f6f00a47e6a6901668"
+    },
+    {
+      "name": "mouse-inline",
+      "runtime_checks": 34,
+      "report_sha256": "3fafb5f112f5e25bbb7f932524646edb9d0d2e60e034e20f1a176c06ab971411"
+    },
+    {
+      "name": "controller",
+      "runtime_checks": 60,
+      "report_sha256": "613aa769985c437c65480a6e981c86008c303998f70e860d06b1e1ff52854b2b"
+    },
+    {
+      "name": "mouse-immersive",
+      "runtime_checks": 38,
+      "report_sha256": "17285d23b5aba6e6ac4355a5e87f01f9b41bf429ef6c0e46378876365af00f89"
+    },
+    {
+      "name": "reset",
+      "runtime_checks": 101,
+      "report_sha256": "e009f2994bd3e03cdd158a43114eb2a94e3a805e46d4888d2702d0896b4ab870"
+    },
+    {
+      "name": "engine-touch",
+      "runtime_checks": 43,
+      "report_sha256": "b4f54ef79df2e56a1731675f8c686df467d6bbf30ae91d0b5c42f8cc32b2efe8"
+    },
+    {
+      "name": "visibility",
+      "runtime_checks": 77,
+      "report_sha256": "26a04734384d9890444d9dfadd552fa8ab5d145119c3273ca4d396a33f55ce9a"
+    },
+    {
+      "name": "frame-same",
+      "runtime_checks": 17,
+      "report_sha256": "c8206cb861c5b8ed07ed637bf0ea5aac70025aeba7b31449e1e3ecab8589d6d9"
+    },
+    {
+      "name": "frame-cross",
+      "runtime_checks": 17,
+      "report_sha256": "9dc1e73698fe52e7a1ed08e042d4ab40099f69b7f71ccf22b497c848dfa70372"
+    },
+    {
+      "name": "outcomes",
+      "runtime_checks": 9,
+      "report_sha256": "3ea178e01294ab974c3ac19b029a8e42305727f31f66155b7cfc2bf1055ec4d2"
+    },
+    {
+      "name": "native-pen",
+      "runtime_checks": 87,
+      "report_sha256": "048fff2726b5dd8404a743e177d9064e0d2e55665da7fb32fdac64be1f709f5e"
+    },
+    {
+      "name": "upstream",
+      "upstream_passed_cases": 7,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "b7dd9518adffdddd39f04a79c1140a79a154c8b744bf47cca99eaff5ecc7782c"
+    },
+    {
+      "name": "layer-attributes",
+      "runtime_checks": 1037,
+      "report_sha256": "75d7bafaed36e0aa52ae368be9421bb7a977ce3507cafff155af91a864934134"
+    },
+    {
+      "name": "layer-attributes-opaque-context",
+      "runtime_checks": 1037,
+      "report_sha256": "23f4fd9e5ed5bd02a4460befd99e98504012e277dd73af15f92b511971a8fb01"
+    },
+    {
+      "name": "compatibility-native",
+      "runtime_checks": 45,
+      "report_sha256": "4f60ee5bb56fd17ece04f14adefc438c7af3e92f690b95c829180f021e839549"
+    },
+    {
+      "name": "compatibility-nohost",
+      "runtime_checks": 31,
+      "report_sha256": "428930aa248f688a48115ab66c3add9150ae6117c10c4a26acda5ea3c504e6ea"
+    },
+    {
+      "name": "dynamic",
+      "runtime_checks": 610,
+      "report_sha256": "25ea1be0196a3170f6f181d1267f664d8a0abdb2c9a8330413666bc3c64aa083"
+    },
+    {
+      "name": "dynamic-upstream",
+      "upstream_passed_cases": 24,
+      "upstream_optional_unsupported": 4,
+      "report_sha256": "5039e04f552e91b084684d981966ad2a9fde22ed6fb42a35c3773722f6a00b1b"
+    }
+  ],
+  "initial_reports": [
+    "before/report.json",
+    "before-upstream-r2/report.json",
+    "r1-edges-before/report.json",
+    "r2-mouse-immersive/report.json"
+  ],
+  "remaining": [
+    "Full WebGL context loss/restoration and adapter migration",
+    "Permissions Policy integration and broader WebXR coverage",
+    "Mock secondary-view support",
+    "DomeD shell touch/stylus interactions beyond native client surfaces",
+    "Dynamic scaling on optional native backends",
+    "Physical device validation",
+    "Continuous stability, web adblocking/privacy and local workstation protection maintenance",
+    "Final standards-focused Discord/x.com rendering"
+  ],
+  "physical_device_validation": false,
+  "optional_windows_openxr_compiled": false,
+  "installed": false,
+  "sessions_restarted": false,
+  "artifacts_directory": "artifacts/servo-rendering-goal/webxr-dynamic-viewports-v1",
+  "goal_status": "active",
+  "stage": "Dynamic WebXR viewport scaling and frame semantics validated; broader standards work remains",
+  "rerun_jobs": 2
+}

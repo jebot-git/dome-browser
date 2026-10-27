@@ -7,6 +7,7 @@ from Xlib import X,XK
 from Xlib.ext import xtest
 from wayland_touch_fixture import TouchWayland
 from webxr_layer_attributes import validate_attributes
+from webxr_dynamic_viewports import validate_dynamic
 
 signal.pthread_sigmask(signal.SIG_SETMASK,[])
 resource.setrlimit(resource.RLIMIT_CORE,(0,0))
@@ -15,10 +16,11 @@ if os.environ.get('DOME_LAYER_SCALE_BUS')!='1':
 p=argparse.ArgumentParser(description=__doc__)
 for name in ['binary','native-fixture','compositor','output']:p.add_argument('--'+name,type=Path,required=True)
 p.add_argument('--lifecycle',action='store_true',help='Also verify opaque protection and depth/stencil release between frames')
+p.add_argument('--dynamic',action='store_true',help='Validate per-frame viewport requests and native submission rectangles')
 p.add_argument('--attributes',action='store_true',help='Validate real buffer formats, reported attributes and implicit clears')
 p.add_argument('--opaque-context',action='store_true',help='Use default buffers without alpha/premultiplication in the attribute fixture')
 a=p.parse_args();
-if a.attributes and a.lifecycle:p.error('--attributes and --lifecycle are separate fixtures')
+if sum([a.attributes,a.lifecycle,a.dynamic])>1:p.error('--attributes, --lifecycle and --dynamic are separate fixtures')
 if a.opaque_context and not a.attributes:p.error('--opaque-context requires --attributes')
 out=a.output.resolve();out.mkdir(parents=True,exist_ok=False)
 backend_cleanup={};checks=[];events=[];captures=[];errors=[];child=None;failure=None
@@ -80,7 +82,7 @@ try:
   class Site(http.server.BaseHTTPRequestHandler):
    def log_message(self,*_):pass
    def do_GET(self):
-    b=(Path(__file__).with_name('webxr-layer-attributes.html') if a.attributes else Path(__file__).with_suffix('.html')).read_bytes();self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(b)));self.end_headers();self.wfile.write(b)
+    b=(Path(__file__).with_name('webxr-layer-attributes.html') if a.attributes else Path(__file__).with_name('webxr-dynamic-viewports.html') if a.dynamic else Path(__file__).with_suffix('.html')).read_bytes();self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(b)));self.end_headers();self.wfile.write(b)
    def do_POST(self):
     events.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))));self.send_response(204);self.end_headers()
   site=http.server.ThreadingHTTPServer(('127.0.0.1',0),Site);threading.Thread(target=site.serve_forever,daemon=True).start();stack.callback(site.server_close);stack.callback(site.shutdown)
@@ -94,11 +96,14 @@ try:
    types=[e['type'] for e in events]
    if 'error' in types:return True
    if 'done' not in types:return False
+   if a.dynamic:return types.count('dynamic')==36 and types.count('dynamic-inline')==2 and types.count('assertion')==next(e['data']['assertions'] for e in events if e['type']=='done')
    if a.attributes:return types.count('inline')==4 and types.count('allocation')==32 and types.count('buffer')==96 and types.count('after')==96
    return types.count('phase')==18 and (not a.lifecycle or types.count('released')==54 and types.count('opaque')==54 and types.count('transparent')==2)
   wait(complete)
   failures=[e for e in events if e['type']=='error'];check(not failures,'Both WebGL versions complete the requested layer fixture')
-  if a.attributes:
+  if a.dynamic:
+   validate_dynamic(check,events,captures,wait)
+  elif a.attributes:
    validate_attributes(check,events,captures,wait)
   else:
    phases=sorted([e['data'] for e in events if e['type']=='phase'],key=lambda v:v['marker']);check(len(phases)==18,'Every scale and WebGL version produces a validated frame')

@@ -8,9 +8,13 @@ use dom_struct::dom_struct;
 use euclid::{Rect, Size2D};
 use js::context::JSContext;
 use js::rust::HandleObject;
+use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object_with_proto;
 use servo_canvas_traits::webgl::{WebGLCommand, WebGLContextId, WebGLTextureId};
-use webxr_api::{ContextId as WebXRContextId, LayerAttributes, LayerId, LayerInit, Viewport};
+use webxr_api::{
+    ContextId as WebXRContextId, LayerAttributes, LayerId, LayerInit, Viewport, Viewports,
+    scaled_viewport,
+};
 
 use crate::canvas_context::CanvasContext;
 use crate::conversions::Convert;
@@ -57,6 +61,7 @@ pub(crate) struct XRWebGLLayer {
     framebuffer: Option<Dom<WebGLFramebuffer>>,
     #[no_trace]
     viewports: Vec<Rect<i32, Viewport>>,
+    viewport_objects: DomRefCell<Vec<Option<(Dom<XRViewport>, f64, Dom<XRFrame>)>>>,
 }
 
 impl XRWebGLLayer {
@@ -74,6 +79,7 @@ impl XRWebGLLayer {
             ignore_depth_values: attributes.ignore_depth_values,
             framebuffer: framebuffer.map(Dom::from_ref),
             viewports,
+            viewport_objects: DomRefCell::new(Vec::new()),
         }
     }
 
@@ -216,6 +222,21 @@ impl XRWebGLLayer {
             framebuffer.bind(target);
         }
         Self::restore_framebuffer_bindings(&context);
+        if let Some(layer) = self.layer_id() {
+            let viewports = Viewports {
+                viewports: self
+                    .viewports
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &full)| {
+                        scaled_viewport(full, self.session().current_viewport_scale(index))
+                    })
+                    .collect(),
+            };
+            self.session().with_session(|session| {
+                session.set_layer_viewports(self.context_id().into(), layer, viewports)
+            });
+        }
         context.Flush();
         detached
     }
@@ -370,19 +391,56 @@ impl XRWebGLLayerMethods<crate::DomTypeHolder> for XRWebGLLayer {
     }
 
     /// <https://immersive-web.github.io/webxr/#dom-xrwebgllayer-getviewport>
-    fn GetViewport(&self, cx: &mut JSContext, view: &XRView) -> Option<DomRoot<XRViewport>> {
-        if self.session() != view.session() {
-            return None;
+    fn GetViewport(
+        &self,
+        cx: &mut JSContext,
+        view: &XRView,
+    ) -> Fallible<Option<DomRoot<XRViewport>>> {
+        if self.session() != view.session() || !view.frame().is_active() {
+            return Err(Error::InvalidState(None));
         }
-
         let index = view.viewport_index();
-
-        let viewport = if self.framebuffer.is_none() {
+        let cached = self
+            .viewport_objects
+            .borrow()
+            .get(index)
+            .and_then(|cached| {
+                cached.as_ref().map(|(viewport, scale, frame)| {
+                    (
+                        DomRoot::from_ref(&**viewport),
+                        *scale,
+                        DomRoot::from_ref(&**frame),
+                    )
+                })
+            });
+        if cached
+            .as_ref()
+            .is_some_and(|(_, _, frame)| &**frame == view.frame())
+        {
+            return Ok(cached.map(|(viewport, _, _)| viewport));
+        }
+        let full = if self.framebuffer.is_none() {
             Rect::from_size(self.size().to_i32())
         } else {
-            *self.viewports.get(index)?
+            let Some(full) = self.viewports.get(index) else {
+                return Ok(None);
+            };
+            *full
         };
-
-        Some(XRViewport::new(cx, &self.global(), viewport))
+        let scale = self.session().commit_viewport_scale(index);
+        let viewport = scaled_viewport(full, scale);
+        let result = if let Some((cached, cached_scale, _)) = cached
+            && cached_scale == scale
+            && cached.rect() == viewport
+        {
+            cached
+        } else {
+            XRViewport::new(cx, &self.global(), viewport)
+        };
+        let mut cache = self.viewport_objects.borrow_mut();
+        let length = cache.len().max(index + 1);
+        cache.resize_with(length, || None);
+        cache[index] = Some((Dom::from_ref(&*result), scale, Dom::from_ref(view.frame())));
+        Ok(Some(result))
     }
 }

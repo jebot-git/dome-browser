@@ -11,6 +11,66 @@ use crate::{Error, Viewport, Viewports};
 /// A common allocation bound, further limited by the device and GL context.
 pub const MAX_FRAMEBUFFER_DIMENSION: i32 = 4096;
 
+/// Scale state belongs to the device view, shared by all XRView wrappers and
+/// layers in a session. The first viewport query locks it until the next frame.
+#[derive(Debug, MallocSizeOf)]
+pub struct ViewportScale {
+    requested: f64,
+    current: f64,
+    modifiable: bool,
+}
+
+impl Default for ViewportScale {
+    fn default() -> Self {
+        Self {
+            requested: 1.0,
+            current: 1.0,
+            modifiable: true,
+        }
+    }
+}
+
+impl ViewportScale {
+    pub fn request(&mut self, scale: Option<f64>) {
+        if let Some(scale) = scale
+            && scale.is_finite()
+            && scale > 0.0
+        {
+            self.requested = scale.min(1.0);
+        }
+    }
+    pub fn begin_frame(&mut self) {
+        self.modifiable = true;
+    }
+    pub fn commit(&mut self) -> f64 {
+        if self.modifiable {
+            self.current = self.requested;
+        }
+        self.modifiable = false;
+        self.current
+    }
+    pub fn current(&self) -> f64 {
+        self.current
+    }
+}
+
+/// Dynamic scaling preserves the allocation and each eye's origin. Clamp each
+/// dimension to one pixel before conversion, including subnormal scale values.
+pub fn scaled_viewport(full: Rect<i32, Viewport>, scale: f64) -> Rect<i32, Viewport> {
+    let scale = if scale.is_finite() {
+        scale.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    Rect::new(
+        full.origin,
+        Size2D::new(
+            (full.size.width as f64 * scale).floor().max(1.0) as i32,
+            (full.size.height as f64 * scale).floor().max(1.0) as i32,
+        ),
+    )
+}
+
 /// The actual allocation and eye rectangles of one compositor layer. These
 /// dimensions travel with its ID so script and compositors use the same layout.
 #[derive(Clone, Debug, Deserialize, Serialize, MallocSizeOf)]
@@ -113,6 +173,56 @@ impl LayerGeometry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn viewport_request_is_committed_once_per_frame_and_persists() {
+        let mut state = ViewportScale::default();
+        state.request(Some(0.5));
+        assert_eq!(state.current(), 1.0);
+        assert_eq!(state.commit(), 0.5);
+        state.request(Some(0.25));
+        assert_eq!(state.commit(), 0.5);
+        state.begin_frame();
+        assert_eq!(state.current(), 0.5);
+        assert_eq!(state.commit(), 0.25);
+        state.begin_frame();
+        assert_eq!(state.commit(), 0.25);
+    }
+
+    #[test]
+    fn invalid_viewport_requests_do_not_replace_a_pending_scale() {
+        let mut state = ViewportScale::default();
+        state.request(Some(0.75));
+        for value in [
+            None,
+            Some(0.0),
+            Some(-1.0),
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+        ] {
+            state.request(value);
+        }
+        assert_eq!(state.commit(), 0.75);
+        state.begin_frame();
+        state.request(Some(2.0));
+        assert_eq!(state.commit(), 1.0);
+    }
+
+    #[test]
+    fn dynamic_viewports_preserve_origins_and_fit_asymmetric_eyes() {
+        for full in native().viewports {
+            for scale in [1.0, 0.73, 0.5, f64::MIN_POSITIVE, f64::from_bits(1)] {
+                let scaled = scaled_viewport(full, scale);
+                assert_eq!(scaled.origin, full.origin);
+                assert!(scaled.size.width > 0 && scaled.size.height > 0);
+                assert!(full.contains_rect(&scaled));
+                assert_eq!(
+                    scaled.size.width,
+                    ((full.size.width as f64 * scale).floor() as i32).max(1)
+                );
+            }
+        }
+    }
 
     fn native() -> Viewports {
         Viewports {

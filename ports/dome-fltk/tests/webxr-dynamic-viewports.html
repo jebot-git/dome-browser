@@ -1,0 +1,93 @@
+<!doctype html><meta charset="utf-8"><title>WebXR dynamic viewports</title>
+<style>body{background:#11334c;color:white;font:18px monospace}button{padding:18px}canvas{width:220px;height:120px}</style>
+<button id="start">Start dynamic viewport validation</button><canvas id="one" width="240" height="120"></canvas><canvas id="two" width="240" height="120"></canvas>
+<script>
+let order=0,assertions=0,marker=30;
+const post=(type,data)=>fetch('/event',{method:'POST',body:JSON.stringify({order:++order,type,data})});
+const rect=v=>({x:v.x,y:v.y,width:v.width,height:v.height});
+const check=(passed,name)=>{assertions++;post('assertion',{passed:!!passed,name})};
+function invalid(call){try{call();return false}catch(e){return e.name==='InvalidStateError'}}
+function badNumber(call){try{call();return false}catch(e){return e.name==='TypeError'}}
+const raf=(session,callback)=>new Promise((resolve,reject)=>session.requestAnimationFrame((time,frame)=>{
+ try{callback(frame);setTimeout(resolve,0)}catch(e){reject(e)}
+}));
+start.onclick=async()=>{
+ try{
+  const session=await navigator.xr.requestSession('immersive-vr');
+  const space=await session.requestReferenceSpace('local'),alternate=await session.requestReferenceSpace('viewer');
+  const inlines=[];
+  for(const version of ['webgl','webgl2']){
+   const canvas=document.querySelector(version==='webgl'?'#one':'#two');
+   const gl=canvas.getContext(version,{xrCompatible:true});await gl.makeXRCompatible();
+   const inline=await navigator.xr.requestSession('inline'),inlineSpace=await inline.requestReferenceSpace('viewer');
+   const inlineLayer=new XRWebGLLayer(inline,gl);inline.updateRenderState({baseLayer:inlineLayer});
+   inlines.push({version,gl,inline,inlineSpace,inlineLayer});
+   let oldViews=null,previousScales=[1,1],previousViewports=null;
+   for(const allocation of [1,.73]){
+    const layer=new XRWebGLLayer(session,gl,{framebufferScaleFactor:allocation});
+    const initialSize=[layer.framebufferWidth,layer.framebufferHeight];
+    session.updateRenderState({baseLayer:layer});
+    for(let step=0;step<9;step++){
+     await raf(session,frame=>{
+      const views=frame.getViewerPose(space).views,other=frame.getViewerPose(alternate).views;
+      const label=version+' allocation '+allocation+' step '+step;
+      check(views.length===2&&views.every((v,i)=>v.index===i),label+': view indices follow the underlying view order');
+      check(views.every(v=>v.recommendedViewportScale===null),label+': no invented performance recommendation');
+      if(oldViews)check(oldViews.every(v=>invalid(()=>layer.getViewport(v))),label+': old frame views are rejected');
+      check(invalid(()=>inlineLayer.getViewport(views[0])),label+': a foreign session view is rejected');
+      if(step===0&&allocation===1){views.forEach(v=>v.requestViewportScale(1));previousScales=[1,1]}
+      if(step===1){views[0].requestViewportScale(.5);views[1].requestViewportScale(.75);previousScales=[.5,.75]}
+      if(step===2)previousScales=[.25,.5];
+      if(step===3){views[0].requestViewportScale(2);views[1].requestViewportScale(Number.MIN_VALUE);previousScales=[1,Number.MIN_VALUE]}
+      if(step===4){views[1].requestViewportScale(1e-8);previousScales=[1,1e-8]}
+      if(step===4)for(const v of views){for(const value of [null,undefined,0,-1])v.requestViewportScale(value);check(badNumber(()=>v.requestViewportScale(Infinity))&&badNumber(()=>v.requestViewportScale(NaN)),label+': nonfinite scale input uses WebIDL validation')}
+      if(step===5){views[0].requestViewportScale(.73);views[1].requestViewportScale(.31);previousScales=[.73,.31]}
+      if(step===7){oldViews[0].requestViewportScale(.4);oldViews[1].requestViewportScale(.6);previousScales=[.4,.6]}
+      const current=++marker;gl.bindFramebuffer(gl.FRAMEBUFFER,layer.framebuffer);
+      gl.disable(gl.SCISSOR_TEST);gl.clearColor(9/255,11/255,current/255,1);gl.clear(gl.COLOR_BUFFER_BIT);
+      const actual=[],objects=[];gl.enable(gl.SCISSOR_TEST);
+      for(let i=0;i<views.length;i++){
+       const v=layer.getViewport(views[i]);objects.push(v);
+       if(step===4&&i===1)check(v!==previousViewports[1]&&JSON.stringify(rect(v))===JSON.stringify(rect(previousViewports[1])),label+': a changed scale creates a new viewport even when dimensions round identically');
+       actual.push({eye:views[i].eye,...rect(v)});
+       check(v===layer.getViewport(views[i])&&v===layer.getViewport(other[i]),label+': repeated poses share a stable viewport object '+i);
+       const width=i===0?Math.floor(63*initialSize[0]/127):initialSize[0]-Math.floor(63*initialSize[0]/127);
+       check(v.width===Math.max(1,Math.floor(width*previousScales[i]))&&v.height===Math.max(1,Math.floor(initialSize[1]*previousScales[i])),label+': requested dimensions apply independently '+i);
+       if(step===1){views[i].requestViewportScale(i===0?.25:.5);check(v===layer.getViewport(other[i]),label+': late request waits for the next frame '+i)}
+       gl.viewport(v.x,v.y,v.width,v.height);gl.scissor(v.x,v.y,v.width,v.height);
+       gl.clearColor(i===0?1:0,i===1?1:0,current/255,1);gl.clear(gl.COLOR_BUFFER_BIT);
+       const half=Math.floor(v.height/2);gl.scissor(v.x,v.y+half,v.width,v.height-half);
+       gl.clearColor(i===0?1:100/255,i===1?1:100/255,current/255,1);gl.clear(gl.COLOR_BUFFER_BIT);
+      }
+      previousViewports=objects;
+      gl.disable(gl.SCISSOR_TEST);
+      const samples=actual.map(v=>{const pixel=new Uint8Array(4);gl.readPixels(v.x,v.y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return [...pixel]});
+      post('dynamic',{version,allocation,step,marker:current,initialSize,size:[layer.framebufferWidth,layer.framebufferHeight],views:actual,samples,status:gl.checkFramebufferStatus(gl.FRAMEBUFFER),error:gl.getError()});
+      if(!oldViews)oldViews=views;
+     });
+     check(oldViews.every(v=>invalid(()=>layer.getViewport(v))),version+': inactive views are rejected outside callbacks');
+    }
+   }
+  }
+  await session.end();
+  for(const {version,gl,inline,inlineSpace,inlineLayer:layer} of inlines){
+   let old=null,cached=null;
+   for(let step=0;step<3;step++)await raf(inline,frame=>{
+    const view=frame.getViewerPose(inlineSpace).views[0],other=frame.getViewerPose(inlineSpace).views[0];
+    if(step===0)view.requestViewportScale(.5);
+    if(old)check(invalid(()=>layer.getViewport(old)),version+': inline retained views are rejected in another frame');
+    const v=layer.getViewport(view),scale=step===0?.5:.25;
+    check(v.width===Math.floor(layer.framebufferWidth*scale)&&v.height===Math.floor(layer.framebufferHeight*scale),version+': inline requested scale persists '+step);
+    check(view.index===0&&view.recommendedViewportScale===null&&layer.getViewport(other)===v,version+': inline wrappers share the underlying view '+step);
+    if(step===0){gl.canvas.width+=8;check(layer.getViewport(view)===v,version+': resizing the inline canvas cannot change its locked viewport');old=view;view.requestViewportScale(.25);check(layer.getViewport(view)===v,version+': inline late request is deferred')}
+    if(step===2)check(v===cached,version+': unchanged viewport retains object identity across frames');
+    cached=v;
+   });
+   check(invalid(()=>layer.getViewport(old)),version+': inactive inline view is rejected');
+   post('dynamic-inline',{version});await inline.end();
+  }
+  post('done',{assertions});
+ }catch(e){post('error',{name:e.name,message:e.message,stack:e.stack})}
+};
+addEventListener('load',()=>post('ready',{start:rect(start.getBoundingClientRect()),viewport:[innerWidth,innerHeight],ratio:devicePixelRatio}));
+</script>

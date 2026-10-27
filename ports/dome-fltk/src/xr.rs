@@ -445,6 +445,7 @@ struct BridgeDevice {
     grand: LayerGrandManager<SurfmanGL>,
     manager: Option<LayerManager>,
     layer_info: std::collections::HashMap<LayerId, LayerInfo>,
+    submitted_viewports: std::collections::HashMap<LayerId, Viewports>,
     frame: Option<HostFrame>,
     anchor: Option<RigidTransform3D<f32, Native, Native>>,
     clip: ClipPlanes,
@@ -547,6 +548,7 @@ impl BridgeDevice {
             grand,
             manager: None,
             layer_info: std::collections::HashMap::new(),
+            submitted_viewports: std::collections::HashMap::new(),
             reference_spaces: reference_space::Tracker::new(initial.reference_space),
             frame: Some(initial),
             anchor: Some(initial_anchor),
@@ -690,7 +692,7 @@ impl BridgeDevice {
         if geometry.framebuffer_size.width != size.width || geometry.framebuffer_size.height != size.height {
             return Err("XR submitted surface differs from its allocation geometry".into());
         }
-        let views: Vec<_> = frame.views.iter().zip(&geometry.viewports.viewports).map(|(view, rect)| json!({
+        let views: Vec<_> = frame.views.iter().zip(&self.submitted_viewports.get(&layer).unwrap_or(&geometry.viewports).viewports).map(|(view, rect)| json!({
             "rect":{"x":rect.origin.x,"y":size.height-rect.max_y(),"width":rect.size.width,"height":rect.size.height},
             "pose":view.pose,"fov":view.fov,
         })).collect();
@@ -703,6 +705,17 @@ impl BridgeDevice {
     }
 }
 impl DeviceAPI for BridgeDevice {
+    fn supports_dynamic_viewport_scaling(&self) -> bool { true }
+
+    fn set_layer_viewports(&mut self, _context: ContextId, layer: LayerId, viewports: Viewports) {
+        let Some(info) = self.layer_info.get(&layer) else { return; };
+        if viewports.viewports.len() == info.geometry.viewports.viewports.len() &&
+            viewports.viewports.iter().zip(&info.geometry.viewports.viewports).all(|(scaled, full)|
+                scaled.size.width > 0 && scaled.size.height > 0 && full.contains_rect(scaled)) {
+            self.submitted_viewports.insert(layer, viewports);
+        }
+    }
+
     fn create_layer(
         &mut self,
         context: ContextId,
@@ -715,6 +728,7 @@ impl DeviceAPI for BridgeDevice {
     }
     fn destroy_layer(&mut self, context: ContextId, layer: LayerId) {
         self.layer_info.remove(&layer);
+        self.submitted_viewports.remove(&layer);
         if let Ok(manager) = self.manager() {
             manager.destroy_layer(context, layer);
         }

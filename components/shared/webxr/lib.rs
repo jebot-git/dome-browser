@@ -24,7 +24,7 @@ pub use device::{DeviceAPI, DiscoveryAPI};
 pub use error::Error;
 pub use events::{Event, EventBuffer, Visibility};
 pub use frame::{Frame, FrameUpdateEvent, ViewerPose};
-pub use geometry::{LayerGeometry, MAX_FRAMEBUFFER_DIMENSION};
+pub use geometry::{LayerGeometry, MAX_FRAMEBUFFER_DIMENSION, ViewportScale, scaled_viewport};
 pub use hand::{Finger, FingerJoint, Hand, HandSpace, Joint, JointFrame};
 pub use hittest::{
     EntityType, EntityTypes, HitTestId, HitTestResult, HitTestSource, HitTestSpace, Ray, Triangle,

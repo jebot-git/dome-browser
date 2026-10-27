@@ -141,6 +141,7 @@ impl XRFrameMethods<crate::DomTypeHolder> for XRFrame {
             cx,
             self.global().as_window(),
             &self.session,
+            self,
             to_base,
             viewer_pose,
         )))

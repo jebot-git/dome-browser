@@ -47,6 +47,16 @@ pub trait DeviceAPI: 'static {
 
     fn viewports(&self) -> Viewports;
 
+    /// Whether the compositor can consume independently scaled per-view rectangles.
+    fn supports_dynamic_viewport_scaling(&self) -> bool {
+        false
+    }
+
+    /// Rectangles committed by the application for the current frame. This does
+    /// not resize the allocation or change the device's full-sized viewports.
+    fn set_layer_viewports(&mut self, _context: ContextId, _layer: LayerId, _viewports: Viewports) {
+    }
+
     /// Begin an animation frame.
     fn begin_animation_frame(&mut self, layers: &[(ContextId, LayerId)]) -> Option<Frame>;
 

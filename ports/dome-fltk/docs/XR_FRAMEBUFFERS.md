@@ -35,8 +35,58 @@ between frames, when the transient texture wrappers have been removed.
 The sizing and viewport requirements follow
 [WebXR Device API, XRWebGLLayer](https://www.w3.org/TR/2026/CRD-webxr-20260609/#xrwebgllayer-interface).
 This milestone does not establish full WebXR layer conformance. Broader context
-loss/compatibility behavior and dynamic viewport scaling remain part of the
-continuing compatibility work.
+loss/compatibility behavior remains part of the continuing compatibility work.
+
+## Dynamic viewports
+
+`XRView.requestViewportScale()` changes the view's rendering region without
+reallocating its framebuffer. Requested and current scales belong to the
+underlying session view, so they survive new `XRView` wrappers, different
+reference spaces, animation frames and base-layer replacement. Each view has
+an `index` corresponding to its position in the pose's views array.
+
+The first `getViewport()` query for a view in an animation frame commits its
+requested scale and locks it for that frame. Later requests take effect on
+the next frame's first query. Null, undefined and nonpositive requests are
+ignored; values above one clamp to one. WebIDL rejects nonfinite inputs.
+Dimensions round downward with a one-pixel minimum, preserving each eye's
+full-sized origin. A changed scale creates a new viewport object even if its
+dimensions round identically. Repeated queries keep the same object for the
+remainder of the frame, including after an inline canvas resize. An unchanged
+scale and rectangle retain the object across frames. Retained views can
+request a future scale, but viewport queries
+reject inactive frames or views from another session with `InvalidStateError`.
+
+Inline sessions and DomeD sessions support these requests. The mock device
+also supports scaling for standards tests. Other device implementations keep
+their full-sized viewports until their presentation paths opt in. At frame
+completion, DomeD receives the exact scaled rectangles used for drawing; it
+validates them against the original allocation and converts their vertical
+origins for native submission. The allocation and full-sized eye rectangles
+remain unchanged. No scale-recommendation heuristic is implemented, so
+`recommendedViewportScale` returns null.
+
+These rules follow the [WebXR viewport scaling algorithms](https://www.w3.org/TR/2026/CRD-webxr-20260609/#dom-xrview-requestviewportscale).
+
+`tests/webxr-layer-scaling.py --dynamic` exercises both WebGL versions,
+asymmetric eyes, two allocation scales, independent eye requests, frame
+locking, persistence, tiny scales, invalid input, retained views and inline
+sessions. Native captures compare submitted rectangles and pixels, including
+orientation and the unused area beside reduced viewports. The dedicated
+upstream scaling page runs with `tests/webxr-layer-wpt.py --dynamic-only`.
+Its four optional recommendation cases are reported separately; all scaling
+assertions must pass. The broader secondary-view mock-device gap remains
+outside this dedicated scaling suite.
+
+The [27 October validation record](validation-dynamic-viewports-2026-10-27.json)
+contains the tested source and binary hashes: 203 selected unit tests, 3,747
+runtime checks and 57 passing upstream cases across 24 accepted regression
+suites, with four optional recommendation cases unsupported. The 610 viewport
+checks include 366 API assertions and native rectangle/pixel validation.
+The mouse fixture waits for the complete event-report sequence before checking
+selection counts; HTTP delivery order does not determine browser event order.
+This remains scoped software/native-fixture validation, with physical-device
+and optional-backend validation still outstanding.
 
 ## Context eligibility
 

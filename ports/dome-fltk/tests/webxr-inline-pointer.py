@@ -116,7 +116,8 @@ try:
  check(direction_close(latest()['latest'][1]['poses'][0]['pose'],[1.133333333,0,-1]),'Each inline session uses its own field of view for the same pointer')
  command('swap');wait(lambda:selection(0,'selectend',before));check(not selection(0,'select',before),'Changing the output canvas cancels its old gesture')
  check(latest()['latest'][1]['length']==1,'Another session on the original canvas retains its gesture')
- button(False);wait(lambda:selection(1,'selectend',before));check(len(selection(1,'select',before))==1,'A layer change in one session does not cancel selection in another')
+ button(False);ended=wait(lambda:selection(1,'selectend',before))[-1];wait(lambda:synced_heartbeat(ended['order']))
+ check(len(selection(1,'select',before))==1,'A layer change in one session does not cancel selection in another')
  command('restore-output');wait(lambda:latest()['latest'][0]['length']==0)
  if host:
   command('prepare-immersive');move();before=mark();button(True);wait(lambda:selection(0,'selectstart',before));key('space')

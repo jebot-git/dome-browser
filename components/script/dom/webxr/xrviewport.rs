@@ -27,6 +27,10 @@ impl XRViewport {
         }
     }
 
+    pub(crate) fn rect(&self) -> Rect<i32, Viewport> {
+        self.viewport
+    }
+
     pub(crate) fn new(
         cx: &mut JSContext,
         global: &GlobalScope,

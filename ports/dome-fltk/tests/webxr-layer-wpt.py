@@ -7,7 +7,7 @@ are preserved and hashed. Production browser APIs are not replaced.
 """
 import argparse,hashlib,json,os,re,subprocess,sys
 from pathlib import Path
-p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True);a=p.parse_args()
+p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--dynamic-only',action='store_true',help='Run the dynamic scaling suite, reporting absent optional recommendations separately');a=p.parse_args()
 here=Path(__file__).resolve().parent;source=here.parents[2];wpt=source/'tests/wpt/tests'
 out=a.output.resolve();out.mkdir(parents=True,exist_ok=False);driver=out/'driver';driver.mkdir()
 hashes={};pages=[]
@@ -24,7 +24,8 @@ navigator.xr.test.simulateDeviceConnection=async init=>{
 };
 </script>"""
 
-for name in ['xrWebGLLayer_framebuffer_scale','xrWebGLLayer_viewports','xrWebGLLayer_framebuffer_draw','xrWebGLLayer_opaque_framebuffer','xrWebGLLayer_opaque_framebuffer_stencil','xrWebGLLayer_framebuffer_sameObject']:
+names=['xr_viewport_scale'] if a.dynamic_only else ['xrWebGLLayer_framebuffer_scale','xrWebGLLayer_viewports','xrWebGLLayer_framebuffer_draw','xrWebGLLayer_opaque_framebuffer','xrWebGLLayer_opaque_framebuffer_stencil','xrWebGLLayer_framebuffer_sameObject']
+for name in names:
  path=wpt/'webxr'/(name+'.https.html');hashes[str(path.relative_to(source))]=hashlib.sha256(path.read_bytes()).hexdigest()
  def script(match):
   src=match.group(1)
@@ -56,8 +57,10 @@ code=(here/'webxr-bounded.py').read_text().replace('Test embedder starts the bou
 (out/'upstream-source.json').write_text(json.dumps({'source_sha256':hashes,'assertion_bodies_changed':False,'setup_helper_changed':False,'test_api_adapter':{'field':'FakeXRDevice.defaultFramebufferScale_','value':1,'reason':'Upstream scale page uses Chromium-private metadata; native mock device resolutions are unscaled'},'transport':'Loopback HTTP and sequential srcdoc iframe aggregation; embedded original script resources and completion reporter'},indent=2)+'\n')
 subprocess.run([sys.executable,str(driver/'webxr-layer-wpt-embed.py'),str(a.binary.resolve()),str(out/'runtime')],check=True)
 report=json.loads((out/'runtime/report.json').read_text());assert report['passed']
-suites=report['events']['suites'];assert len(suites)==6
-passed=all(s['status']==0 and s['results'] and all(t['status']==0 for t in s['results']) for s in suites)
-(out/'report.json').write_text(json.dumps({'passed':passed,'suites':suites,'binary_sha256':report['binary_sha256'],'runtime_report':'runtime/report.json','upstream_source':'upstream-source.json','full_wpt_runner':False},indent=2)+'\n')
+suites=report['events']['suites'];assert len(suites)==len(names)
+optional=[t for s in suites for t in s['results'] if t['status']==4 and t['name'].startswith('recommendedViewportScale for ') and t['message']=='recommendedViewportScale not provided'] if a.dynamic_only else []
+passed=all(s['status']==0 and s['results'] and all(t['status']==0 or any(t is o for o in optional) for t in s['results']) for s in suites)
+if a.dynamic_only:passed = passed and sum(len(s['results']) for s in suites)==28
+(out/'report.json').write_text(json.dumps({'passed':passed,'suites':suites,'binary_sha256':report['binary_sha256'],'runtime_report':'runtime/report.json','upstream_source':'upstream-source.json','full_wpt_runner':False,'passed_cases':sum(t['status']==0 for s in suites for t in s['results']),'optional_unsupported':optional},indent=2)+'\n')
 
 assert passed, "An upstream layer suite failed; inspect report.json"

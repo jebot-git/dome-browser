@@ -15,6 +15,7 @@ enum XREye {
 [SecureContext, Exposed=Window, Pref="dom_webxr_enabled"]
 interface XRView {
   readonly attribute XREye eye;
+  readonly attribute unsigned long index;
   readonly attribute Float32Array projectionMatrix;
   [SameObject] readonly attribute XRRigidTransform transform;
   readonly attribute double? recommendedViewportScale;

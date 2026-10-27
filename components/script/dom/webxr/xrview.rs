@@ -2,8 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::Cell;
-
 use dom_struct::dom_struct;
 use euclid::RigidTransform3D;
 use js::context::JSContext;
@@ -17,6 +15,7 @@ use crate::dom::bindings::codegen::Bindings::XRViewBinding::{XREye, XRViewMethod
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::window::Window;
+use crate::dom::xrframe::XRFrame;
 use crate::dom::xrrigidtransform::XRRigidTransform;
 use crate::dom::xrsession::{BaseSpace, BaseTransform, XRSession, cast_transform};
 
@@ -31,12 +30,13 @@ pub(crate) struct XRView {
     #[no_trace]
     view: View<ApiSpace>,
     transform: Dom<XRRigidTransform>,
-    requested_viewport_scale: Cell<f64>,
+    frame: Dom<XRFrame>,
 }
 
 impl XRView {
     fn new_inherited(
         session: &XRSession,
+        frame: &XRFrame,
         transform: &XRRigidTransform,
         eye: XREye,
         viewport_index: usize,
@@ -50,7 +50,7 @@ impl XRView {
             proj: HeapBufferSource::default(),
             view,
             transform: Dom::from_ref(transform),
-            requested_viewport_scale: Cell::new(1.0),
+            frame: Dom::from_ref(frame),
         }
     }
 
@@ -58,6 +58,7 @@ impl XRView {
         cx: &mut JSContext,
         window: &Window,
         session: &XRSession,
+        frame: &XRFrame,
         view: &View<V>,
         eye: XREye,
         viewport_index: usize,
@@ -70,6 +71,7 @@ impl XRView {
             cx,
             Box::new(XRView::new_inherited(
                 session,
+                frame,
                 &transform,
                 eye,
                 viewport_index,
@@ -83,6 +85,10 @@ impl XRView {
         &self.session
     }
 
+    pub(crate) fn frame(&self) -> &XRFrame {
+        &self.frame
+    }
+
     pub(crate) fn viewport_index(&self) -> usize {
         self.viewport_index
     }
@@ -92,6 +98,10 @@ impl XRViewMethods<crate::DomTypeHolder> for XRView {
     /// <https://immersive-web.github.io/webxr/#dom-xrview-eye>
     fn Eye(&self) -> XREye {
         self.eye
+    }
+
+    fn Index(&self) -> u32 {
+        self.viewport_index as u32
     }
 
     /// <https://immersive-web.github.io/webxr/#dom-xrview-projectionmatrix>
@@ -115,18 +125,14 @@ impl XRViewMethods<crate::DomTypeHolder> for XRView {
 
     /// <https://www.w3.org/TR/webxr/#dom-xrview-recommendedviewportscale>
     fn GetRecommendedViewportScale(&self) -> Option<Finite<f64>> {
-        // Just return 1.0 since we currently will always use full-sized viewports
-        Finite::new(1.0)
+        // No performance heuristic is implemented.
+        None
     }
 
     /// <https://www.w3.org/TR/webxr/#dom-xrview-requestviewportscale>
     fn RequestViewportScale(&self, scale: Option<Finite<f64>>) {
-        if let Some(scale) = scale &&
-            *scale > 0.0
-        {
-            let clamped_scale = scale.clamp(0.0, 1.0);
-            self.requested_viewport_scale.set(clamped_scale);
-        }
+        self.session
+            .request_viewport_scale(self.viewport_index, scale.map(|scale| *scale));
     }
 
     /// <https://www.w3.org/TR/webxr-ar-module-1/#dom-xrview-isfirstpersonobserver>

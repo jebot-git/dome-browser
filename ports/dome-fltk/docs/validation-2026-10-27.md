@@ -1,5 +1,9 @@
 # Browser validation, 27 October 2026
 
+This record identifies the earlier context-compatibility candidate. The subsequent
+[dynamic viewport validation](validation-dynamic-viewports-2026-10-27.json)
+records the newer implementation and expanded regression scope.
+
 The optimized FLTK/Servo candidate passed 200 selected unit tests, 3,131 runtime
 checks and 33 upstream cases across Pointer Events and WebXR. The native pen
 suite contains 87 checks covering pressure/orientation, pending capture, capture replacement,
