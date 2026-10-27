@@ -74,6 +74,7 @@ impl MixedMessage {
                 ScriptThreadMessage::ExitPipeline(_webview_id, id, ..) => Some(*id),
                 ScriptThreadMessage::ExitScriptThread => None,
                 ScriptThreadMessage::SendInputEvent(_, id, _) => Some(*id),
+                ScriptThreadMessage::UpdatePointerState(id, _) => Some(*id),
                 ScriptThreadMessage::RefreshCursor(id, ..) => Some(*id),
                 ScriptThreadMessage::GetTitle(id) => Some(*id),
                 ScriptThreadMessage::GetDocumentOrigin(id, _) => Some(*id),

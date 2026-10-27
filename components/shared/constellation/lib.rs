@@ -82,6 +82,17 @@ pub enum EmbedderToConstellationMessage {
     SetWebViewHasSystemFocus(WebViewId, bool),
     /// Forward an input event to an appropriate ScriptTask.
     ForwardInputEvent(WebViewId, InputEventAndId, Option<PaintHitTestResult>),
+    /// Pointer samples additionally carry WebView-wide identity and route data.
+    ForwardPointerInputEvent(
+        WebViewId,
+        InputEventAndId,
+        PaintHitTestResult,
+        embedder_traits::PointerEventContext,
+    ),
+    /// Publish pointer activity to every document of this top-level view.
+    UpdatePointerState(WebViewId, embedder_traits::PointerState),
+    /// Complete input dropped from a bounded native-pointer queue.
+    DiscardedInputEvents(WebViewId, Vec<embedder_traits::InputEventOutcome>),
     /// Request that the given pipeline refresh the cursor by doing a hit test at the most
     /// recently hovered cursor position and resetting the cursor. This happens after a
     /// display list update is rendered.

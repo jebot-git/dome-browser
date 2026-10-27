@@ -369,18 +369,7 @@ impl ServoInner {
             webview_id,
         } in pending_handled_input_events
         {
-            self.paint.borrow_mut().notify_input_event_handled(
-                webview_id,
-                event_id,
-                InputEventResult::DispatchFailed,
-            );
-            if let Some(webview) = self.get_webview_handle(webview_id) {
-                webview.delegate().notify_input_event_handled(
-                    webview,
-                    event_id,
-                    InputEventResult::DispatchFailed,
-                );
-            }
+            self.complete_input_event(webview_id, event_id, InputEventResult::DispatchFailed);
         }
 
         if self.constellation_proxy.disconnected() {
@@ -532,6 +521,25 @@ impl ServoInner {
         }
     }
 
+    fn complete_input_event(
+        &self,
+        webview_id: WebViewId,
+        id: InputEventId,
+        result: InputEventResult,
+    ) {
+        let outcomes = self
+            .paint
+            .borrow_mut()
+            .notify_input_event_handled(webview_id, id, result);
+        for InputEventOutcome { id, result } in outcomes {
+            if let Some(webview) = self.get_webview_handle(webview_id) {
+                webview
+                    .delegate()
+                    .notify_input_event_handled(webview, id, result);
+            }
+        }
+    }
+
     fn handle_embedder_message(&self, message: EmbedderMsg) {
         match message {
             EmbedderMsg::Status(webview_id, status_text) => {
@@ -603,33 +611,25 @@ impl ServoInner {
                 }
             },
             EmbedderMsg::InputEventsHandled(webview_id, event_outcomes) => {
-                let webview = self.get_webview_handle(webview_id);
                 for InputEventOutcome {
                     id: input_event_id,
                     result,
                 } in event_outcomes
                 {
-                    self.paint.borrow_mut().notify_input_event_handled(
-                        webview_id,
-                        input_event_id,
-                        result,
-                    );
-                    if let Some(ref webview) = webview {
-                        webview.delegate().notify_input_event_handled(
-                            webview.clone(),
-                            input_event_id,
-                            result,
-                        );
-                    }
+                    self.complete_input_event(webview_id, input_event_id, result);
                 }
             },
             EmbedderMsg::CosmeticFilters(id, request, reply) => {
-                let selectors = self.get_webview_handle(id)
-                    .map(|view| view.delegate().cosmetic_filters(view, request)).unwrap_or_default();
+                let selectors = self
+                    .get_webview_handle(id)
+                    .map(|view| view.delegate().cosmetic_filters(view, request))
+                    .unwrap_or_default();
                 let _ = reply.send(selectors);
             },
             EmbedderMsg::ManageLogin(id, details, reply) => {
-                let result = self.get_webview_handle(id).and_then(|view| view.delegate().manage_login(view, details));
+                let result = self
+                    .get_webview_handle(id)
+                    .and_then(|view| view.delegate().manage_login(view, details));
                 let _ = reply.send(result);
             },
             EmbedderMsg::ClearClipboard(webview_id) => {
@@ -646,11 +646,15 @@ impl ServoInner {
             },
             EmbedderMsg::GetPrimarySelection(webview_id, sender) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
-                    webview.clipboard_delegate().get_primary_selection(webview, StringRequest::from(sender));
+                    webview
+                        .clipboard_delegate()
+                        .get_primary_selection(webview, StringRequest::from(sender));
                 }
             },
             EmbedderMsg::SetPrimarySelection(id, text) => {
-                if let Some(view) = self.get_webview_handle(id) {view.clipboard_delegate().set_primary_selection(view,text);}
+                if let Some(view) = self.get_webview_handle(id) {
+                    view.clipboard_delegate().set_primary_selection(view, text);
+                }
             },
             EmbedderMsg::SetClipboardText(webview_id, string) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
@@ -909,24 +913,12 @@ impl ServoInner {
                     .finish_evaluation(evaluation_id, result);
             },
             ConstellationToEmbedderMsg::InputEventsHandled(webview_id, event_outcomes) => {
-                let webview = self.get_webview_handle(webview_id);
                 for InputEventOutcome {
                     id: input_event_id,
                     result,
                 } in event_outcomes
                 {
-                    self.paint.borrow_mut().notify_input_event_handled(
-                        webview_id,
-                        input_event_id,
-                        result,
-                    );
-                    if let Some(ref webview) = webview {
-                        webview.delegate().notify_input_event_handled(
-                            webview.clone(),
-                            input_event_id,
-                            result,
-                        );
-                    }
+                    self.complete_input_event(webview_id, input_event_id, result);
                 }
             },
             ConstellationToEmbedderMsg::HistoryTraversalComplete(webview_id, traversal_id) => {
@@ -1226,9 +1218,12 @@ impl Servo {
         // multiprocess observer. Cosmetic generation is an explicit document
         // refresh notification, so deliver it to those script loops as well.
         if name == "network_cosmetic_filter_generation" && !opts::get().multiprocess {
-            self.0.constellation_proxy.send(EmbedderToConstellationMessage::PreferencesUpdated(vec![
-                ("network_cosmetic_filter_generation", PrefValue::Int(prefs::get().network_cosmetic_filter_generation)),
-            ]));
+            self.0
+                .constellation_proxy
+                .send(EmbedderToConstellationMessage::PreferencesUpdated(vec![(
+                    "network_cosmetic_filter_generation",
+                    PrefValue::Int(prefs::get().network_cosmetic_filter_generation),
+                )]));
         }
     }
 

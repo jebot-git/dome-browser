@@ -1384,10 +1384,12 @@ impl ScriptThread {
         if let Some(timer) = self.timer_scheduler.borrow().next_deadline() {
             deadline = deadline.min(timer);
         }
-        if self.needs_rendering_update.load(Ordering::Relaxed) ||
-            self.documents.borrow().iter().any(|(_, document)| {
-                document.has_active_request_animation_frame_callbacks()
-            })
+        if self.needs_rendering_update.load(Ordering::Relaxed)
+            || self
+                .documents
+                .borrow()
+                .iter()
+                .any(|(_, document)| document.has_active_request_animation_frame_callbacks())
         {
             deadline = deadline.min(now + Duration::from_micros(16_000));
         }
@@ -1399,7 +1401,10 @@ impl ScriptThread {
     /// defer new registrations until that period's deadline. Return to normal
     /// task processing between callbacks so input and timers keep priority.
     fn invoke_one_idle_callback(&self, cx: &mut JSContext) -> bool {
-        let windows: Vec<_> = self.documents.borrow().iter()
+        let windows: Vec<_> = self
+            .documents
+            .borrow()
+            .iter()
             .filter(|(_, document)| document.is_fully_active())
             .map(|(_, document)| DomRoot::from_ref(document.window()))
             .collect();
@@ -1448,7 +1453,9 @@ impl ScriptThread {
         let fully_active = self.get_fully_active_document_ids();
         // Expired timeouts run as ordinary tasks, even when there is no idle
         // time. Never race an idle callback ahead of an already due timeout.
-        self.timer_scheduler.borrow_mut().dispatch_completed_timers();
+        self.timer_scheduler
+            .borrow_mut()
+            .dispatch_completed_timers();
         let ready = self.receivers.try_recv(&self.task_queue, &fully_active);
         let mut event = match ready {
             Some(event) => event,
@@ -1905,7 +1912,10 @@ impl ScriptThread {
                 self.handle_get_origin_details(pipeline_id, result_sender);
             },
             ScriptThreadMessage::GetDownloadClient(pipeline_id, callback) => {
-                let client = self.documents.borrow().find_document(pipeline_id)
+                let client = self
+                    .documents
+                    .borrow()
+                    .find_document(pipeline_id)
                     .filter(|document| document.is_fully_active())
                     .map(|document| (document.url(), document.window().request_client(None)));
                 let _ = callback.send(client);
@@ -2016,6 +2026,12 @@ impl ScriptThread {
             ScriptThreadMessage::MediaSessionAction(pipeline_id, action) => {
                 self.handle_media_session_action(cx, pipeline_id, action)
             },
+            ScriptThreadMessage::UpdatePointerState(pipeline_id, state) => {
+                let document = self.documents.borrow().find_document(pipeline_id);
+                if let Some(document) = document {
+                    document.event_handler().update_pointer_state(cx, state);
+                }
+            },
             ScriptThreadMessage::SendInputEvent(webview_id, id, event) => {
                 self.handle_input_event(webview_id, id, event)
             },
@@ -2063,16 +2079,25 @@ impl ScriptThread {
                 self.handle_refresh_cursor(pipeline_id);
             },
             ScriptThreadMessage::PreferencesUpdated(updates) => {
-                let cosmetic_changed = updates.iter().any(|(name, _)| name == "network_cosmetic_filter_generation" || name == "network_cosmetic_filtering_enabled");
+                let cosmetic_changed = updates.iter().any(|(name, _)| {
+                    name == "network_cosmetic_filter_generation"
+                        || name == "network_cosmetic_filtering_enabled"
+                });
                 let mut current_preferences = prefs::get().clone();
                 for (name, value) in updates {
                     current_preferences.set_value(&name, value);
                 }
                 prefs::set(current_preferences);
                 if cosmetic_changed {
-                    let documents: Vec<_> = self.documents.borrow().iter()
-                        .map(|(_, document)| DomRoot::from_ref(&*document)).collect();
-                    for document in documents { document.reset_cosmetic_filters(cx); }
+                    let documents: Vec<_> = self
+                        .documents
+                        .borrow()
+                        .iter()
+                        .map(|(_, document)| DomRoot::from_ref(&*document))
+                        .collect();
+                    for document in documents {
+                        document.reset_cosmetic_filters(cx);
+                    }
                 }
             },
             ScriptThreadMessage::ForwardKeyboardScroll(pipeline_id, scroll) => {
@@ -2902,7 +2927,11 @@ impl ScriptThread {
         );
     }
 
-    fn document_cookie_site(&self, id: PipelineId, webview_id: WebViewId) -> Option<ImmutableOrigin> {
+    fn document_cookie_site(
+        &self,
+        id: PipelineId,
+        webview_id: WebViewId,
+    ) -> Option<ImmutableOrigin> {
         if let Some(document) = self.documents.borrow().find_document(id) {
             return document.cookie_site();
         }
@@ -2912,14 +2941,24 @@ impl ScriptThread {
             webview_id,
             pipeline_id: id,
         };
-        channel.send(ScriptToConstellationMessage::GetDocumentOriginDetails(id, sender)).ok()?;
+        channel
+            .send(ScriptToConstellationMessage::GetDocumentOriginDetails(
+                id, sender,
+            ))
+            .ok()?;
         receiver.recv().ok()?.and_then(|(_, _, site)| site)
     }
 
     fn handle_get_origin_details(
         &self,
         id: PipelineId,
-        result_sender: GenericSender<Option<(OriginSnapshot, Vec<ImmutableOrigin>, Option<ImmutableOrigin>)>>,
+        result_sender: GenericSender<
+            Option<(
+                OriginSnapshot,
+                Vec<ImmutableOrigin>,
+                Option<ImmutableOrigin>,
+            )>,
+        >,
     ) {
         let origin_details = self.documents.borrow().find_document(id).map(|document| {
             (
@@ -3374,7 +3413,9 @@ impl ScriptThread {
         // fetch now instead of retaining it until script-thread destruction.
         let incomplete = {
             let mut loads = self.incomplete_loads.borrow_mut();
-            let index = loads.iter().position(|load| load.pipeline_id == pipeline_id);
+            let index = loads
+                .iter()
+                .position(|load| load.pipeline_id == pipeline_id);
             index.map(|index| loads.remove(index))
         };
         let had_incomplete_load = incomplete.is_some();
@@ -3611,8 +3652,10 @@ impl ScriptThread {
         let final_url = metadata.final_url.clone();
         let navigation_cookie_same_site =
             incomplete.navigation_cookie_same_site_for_response(&final_url);
-        let _ = script_to_constellation_chan
-            .send(ScriptToConstellationMessage::SetFinalUrl(final_url.clone(), metadata.protocol_state.clone()));
+        let _ = script_to_constellation_chan.send(ScriptToConstellationMessage::SetFinalUrl(
+            final_url.clone(),
+            metadata.protocol_state.clone(),
+        ));
 
         debug!(
             "ScriptThread: loading {} on pipeline {:?}",
@@ -3779,9 +3822,7 @@ impl ScriptThread {
         let is_html_document = match content_type {
             // Every +xml subtype is XML, including image/svg+xml and
             // text/*+xml. Navigations must use an XML document and tokenizer.
-            Some(ref mime) if mime.has_suffix("xml") => {
-                IsHTMLDocument::NonHTMLDocument
-            },
+            Some(ref mime) if mime.has_suffix("xml") => IsHTMLDocument::NonHTMLDocument,
 
             Some(ref mime) if mime.matches(TEXT, XML) || mime.matches(APPLICATION, XML) => {
                 IsHTMLDocument::NonHTMLDocument
@@ -4311,7 +4352,9 @@ impl ScriptThread {
             .borrow_mut()
             .push((incomplete.pipeline_id, context));
 
-        let cookie_site = incomplete.parent_info.and_then(|parent| self.document_cookie_site(parent, incomplete.webview_id()));
+        let cookie_site = incomplete
+            .parent_info
+            .and_then(|parent| self.document_cookie_site(parent, incomplete.webview_id()));
         let request_builder = incomplete.request_builder(cookie_site);
         incomplete.controller = FetchController::new(
             request_builder.id,
@@ -4478,7 +4521,9 @@ impl ScriptThread {
                 metadata.final_url.clone(),
             ));
 
-        let cookie_site = incomplete_load.parent_info.and_then(|parent| self.document_cookie_site(parent, incomplete_load.webview_id()));
+        let cookie_site = incomplete_load
+            .parent_info
+            .and_then(|parent| self.document_cookie_site(parent, incomplete_load.webview_id()));
         let mut request_builder = incomplete_load.request_builder(cookie_site);
         request_builder.referrer = metadata
             .referrer

@@ -9,6 +9,7 @@ pub(super) struct PenPointer {
     pub pointer_id: i32,
     primary: bool,
     pub(super) buttons: u16,
+    pub(super) owned: bool,
     hover: Option<Dom<Element>>,
     actual: Option<Dom<Element>>,
     compat_hover: Option<Dom<Element>>,
@@ -43,6 +44,7 @@ struct Snapshot {
     id: i32,
     primary: bool,
     buttons: u16,
+    owned: bool,
     hover: Option<DomRoot<Element>>,
     actual: Option<DomRoot<Element>>,
     compat_hover: Option<DomRoot<Element>>,
@@ -61,6 +63,7 @@ impl DocumentEventHandler {
             id: p.pointer_id,
             primary: p.primary,
             buttons: p.buttons,
+            owned: p.owned,
             hover: p.hover.as_ref().map(|e| DomRoot::from_ref(&**e)),
             actual: p.actual.as_ref().map(|e| DomRoot::from_ref(&**e)),
             compat_hover: p.compat_hover.as_ref().map(|e| DomRoot::from_ref(&**e)),
@@ -84,6 +87,118 @@ impl DocumentEventHandler {
             sample: p.sample,
         })
     }
+    pub(crate) fn update_pointer_state(
+        &self,
+        cx: &mut JSContext,
+        state: embedder_traits::PointerState,
+    ) {
+        if state.active {
+            self.pointer_states
+                .borrow_mut()
+                .insert(state.pointer_id, state);
+            return;
+        }
+        self.pointer_states.borrow_mut().remove(&state.pointer_id);
+        let native = self
+            .pen_pointers
+            .borrow()
+            .iter()
+            .find(|(_, p)| p.pointer_id == state.pointer_id)
+            .map(|(id, _)| *id);
+        if let Some(native) = native
+            && let Some(p) = self.pen_snapshot(native)
+        {
+            let mut sample = p.sample;
+            sample.event_type = PenEventType::Cancel;
+            let input = ConstellationInputEvent {
+                pointer_context: None,
+                hit_test_result: None,
+                pressed_mouse_buttons: self.mouse_button_state.get(),
+                active_keyboard_modifiers: self.active_keyboard_modifiers.get(),
+                event: InputEvent::Pen(sample).into(),
+            };
+            self.retire_pen(cx, sample, &input);
+        }
+    }
+
+    pub(super) fn hit_test_for_capture(
+        &self,
+        input: &ConstellationInputEvent,
+        target: &Element,
+    ) -> Option<HitTestResult> {
+        let client = input.hit_test_result.as_ref()?.point_in_viewport;
+        let page = client + self.window.scroll_offset().cast_unit();
+        let origin = target
+            .upcast::<Node>()
+            .border_box()
+            .unwrap_or_default()
+            .origin;
+        Some(HitTestResult {
+            node: DomRoot::from_ref(target.upcast()),
+            dom_position_for_selection: None,
+            cursor: Cursor::Default,
+            point_in_node: page - Vector2D::new(origin.x.to_f32_px(), origin.y.to_f32_px()),
+            point_in_frame: client,
+            point_relative_to_initial_containing_block: page,
+        })
+    }
+
+    fn leave_pen_document(
+        &self,
+        cx: &mut JSContext,
+        sample: PenEvent,
+        input: &ConstellationInputEvent,
+    ) {
+        let Some(p) = self.pen_snapshot(sample.id) else {
+            return;
+        };
+        #[cfg(feature = "webxr")]
+        self.window
+            .inline_xr_pointer_event(cx, p.id, InlinePointerAction::Cancel, None);
+        self.pen_boundaries(
+            cx,
+            sample,
+            p.id,
+            p.primary,
+            p.client,
+            p.page,
+            p.hover.as_deref(),
+            None,
+            input.active_keyboard_modifiers,
+        );
+        if p.primary
+            && self.mouse_button_state.get().is_empty()
+            && p.compat_hover.is_some()
+            && self.current_hover_target.get().as_deref() == p.compat_hover.as_deref()
+        {
+            let leave = MouseLeftViewportEvent {
+                focus_moving_to_another_iframe: false,
+                is_compatibility_event: true,
+            };
+            let compat = ConstellationInputEvent {
+                pointer_context: None,
+                hit_test_result: input.hit_test_result.clone(),
+                pressed_mouse_buttons: MouseButtons::empty(),
+                active_keyboard_modifiers: input.active_keyboard_modifiers,
+                event: InputEvent::MouseLeftViewport(leave).into(),
+            };
+            self.handle_mouse_left_viewport_event(cx, &compat, &leave);
+            self.unset_active_element(cx.no_gc());
+        }
+        self.pen_clicks
+            .safe_borrow_mut(cx.no_gc())
+            .remove(&sample.id);
+        if let Some(p) = self.pen_pointers.borrow_mut().get_mut(&sample.id) {
+            p.hover = None;
+            p.actual = None;
+            p.compat_hover = None;
+            p.down = None;
+            p.auxiliary.clear();
+            p.click_allowed = false;
+            p.owned = !input.pointer_context.is_some_and(|context| context.has_hit);
+        }
+    }
+
     pub(super) fn retarget_pen_mouse_hit(hit: &mut HitTestResult, target: Option<&Element>) {
         let Some(target) = target else {
             return;
@@ -489,7 +604,7 @@ impl DocumentEventHandler {
         let Some(p) = self.pen_snapshot(event.id) else {
             return;
         };
-        let was_pressed = p.buttons != 0;
+        let was_pressed = p.owned && p.buttons != 0;
         let mut sample = p.sample;
         sample.event_type = PenEventType::Cancel;
         sample = sample.normalized();
@@ -540,7 +655,7 @@ impl DocumentEventHandler {
             None,
             input.active_keyboard_modifiers,
         );
-        if p.primary && self.mouse_button_state.get().is_empty() {
+        if p.owned && p.primary && self.mouse_button_state.get().is_empty() {
             if p.compat_hover.is_some()
                 && self.current_hover_target.get().as_deref() == p.compat_hover.as_deref()
             {
@@ -549,6 +664,7 @@ impl DocumentEventHandler {
                     is_compatibility_event: true,
                 };
                 let compat = ConstellationInputEvent {
+                    pointer_context: None,
                     event: InputEvent::MouseLeftViewport(leave).into(),
                     hit_test_result: input.hit_test_result.clone(),
                     pressed_mouse_buttons: MouseButtons::empty(),
@@ -574,32 +690,42 @@ impl DocumentEventHandler {
             self.retire_pen(cx, sample, input);
             return InputEventResult::default();
         }
-        let Some(hit) = self
+        let actual_hit = self
             .window
-            .hit_test_from_input_event(HitTestFlags::IncludeDomPosition, input)
+            .hit_test_from_input_event(HitTestFlags::IncludeDomPosition, input);
+        let Some(client) = input
+            .hit_test_result
+            .as_ref()
+            .map(|hit| hit.point_in_viewport)
         else {
             self.retire_pen(cx, sample, input);
             return InputEventResult::default();
         };
-        let Some(element) = hit
-            .node
-            .inclusive_ancestors(ShadowIncluding::Yes)
-            .find_map(DomRoot::downcast::<Element>)
-        else {
-            self.retire_pen(cx, sample, input);
-            return InputEventResult::default();
-        };
-        let client = hit.point_in_frame;
-        let page = hit.point_relative_to_initial_containing_block;
+        let page = client + self.window.scroll_offset().cast_unit();
+        let in_pipeline = input
+            .pointer_context
+            .is_none_or(|context| context.hit_in_pipeline);
+        let actual_element = actual_hit.as_ref().filter(|_| in_pipeline).and_then(|hit| {
+            hit.node
+                .inclusive_ancestors(ShadowIncluding::Yes)
+                .find_map(DomRoot::downcast::<Element>)
+        });
         if !self.pen_pointers.borrow().contains_key(&sample.id) {
-            let id = self.next_touch_pointer_id.get();
-            self.next_touch_pointer_id.set(id + 1);
+            let id = input.pointer_context.map_or_else(
+                || self.next_touch_pointer_id.get(),
+                |context| context.pointer_id,
+            );
+            self.next_touch_pointer_id
+                .set(id.checked_add(1).unwrap_or(1));
             self.pen_pointers.safe_borrow_mut(cx.no_gc()).insert(
                 sample.id,
                 PenPointer {
                     pointer_id: id,
                     primary: sample.primary,
-                    buttons: 0,
+                    buttons: input
+                        .pointer_context
+                        .map_or(0, |context| context.previous_buttons),
+                    owned: true,
                     hover: None,
                     actual: None,
                     compat_hover: None,
@@ -614,7 +740,10 @@ impl DocumentEventHandler {
                 },
             );
         }
-        let old = self.pen_snapshot(sample.id).unwrap();
+        let mut old = self.pen_snapshot(sample.id).unwrap();
+        if let Some(context) = input.pointer_context {
+            old.buttons = context.previous_buttons;
+        }
         {
             let mut pointers = self.pen_pointers.safe_borrow_mut(cx.no_gc());
             let p = pointers.get_mut(&sample.id).unwrap();
@@ -622,11 +751,22 @@ impl DocumentEventHandler {
             p.client = client;
             p.page = page;
             p.sample = sample;
-            p.actual = Some(Dom::from_ref(&*element));
+            p.actual = actual_element.as_deref().map(Dom::from_ref);
+            if in_pipeline {
+                p.owned = true;
+            }
         }
         self.process_pending_pointer_capture(cx, old.id, "pen", old.primary);
         let capture = self.get_pointer_capture_target(old.id);
-        let target = capture.as_deref().unwrap_or(&element);
+        if capture.is_none() && actual_element.is_none() {
+            self.leave_pen_document(cx, sample, input);
+            return InputEventResult::PenRouteRejected;
+        }
+        let element = capture.as_ref().or(actual_element.as_ref()).unwrap();
+        let target = capture.as_deref().unwrap_or(element);
+        let hit = actual_hit
+            .or_else(|| self.hit_test_for_capture(input, target))
+            .unwrap();
         let hover = self.pen_snapshot(sample.id).unwrap().hover;
         self.pen_boundaries(
             cx,
@@ -670,7 +810,7 @@ impl DocumentEventHandler {
             p.page = page;
             p.sample = sample;
             p.hover = Some(Dom::from_ref(target));
-            p.actual = Some(Dom::from_ref(&*element));
+            p.actual = actual_element.as_deref().map(Dom::from_ref);
             if first_down {
                 p.suppress_mouse = false;
             }
@@ -783,6 +923,7 @@ impl DocumentEventHandler {
                 .unwrap_or_default();
             *self.click_counting_info.safe_borrow_mut(cx.no_gc()) = pen_clicks;
             let make = |event: InputEvent, buttons: u16| ConstellationInputEvent {
+                pointer_context: None,
                 hit_test_result: input.hit_test_result.clone(),
                 pressed_mouse_buttons: MouseButtons::from_bits_retain(buttons & 31),
                 active_keyboard_modifiers: input.active_keyboard_modifiers,
@@ -974,6 +1115,7 @@ impl DocumentEventHandler {
         }
         if last_up && compatibility && capture.is_some() {
             let hover = ConstellationInputEvent {
+                pointer_context: None,
                 hit_test_result: input.hit_test_result.clone(),
                 pressed_mouse_buttons: MouseButtons::empty(),
                 active_keyboard_modifiers: input.active_keyboard_modifiers,
@@ -985,11 +1127,11 @@ impl DocumentEventHandler {
             self.handle_native_mouse_move_event(cx, &hover);
         }
         let compat_hover = self.current_hover_target.get();
-        let final_hover = self
-            .get_pointer_capture_target(old.id)
-            .unwrap_or_else(|| element.clone());
+        let final_hover = self.get_pointer_capture_target(old.id).or(actual_element);
         if let Some(p) = self.pen_pointers.borrow_mut().get_mut(&sample.id) {
-            p.hover = Some(Dom::from_ref(&*final_hover));
+            if let Some(final_hover) = final_hover {
+                p.hover = Some(Dom::from_ref(&*final_hover));
+            }
             if compatibility {
                 p.compat_hover = compat_hover.as_deref().map(Dom::from_ref);
             }

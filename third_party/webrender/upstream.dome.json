@@ -1,0 +1,12 @@
+{
+  "package": "webrender",
+  "version": "0.70.0",
+  "source": "crates.io release archive",
+  "vcs": {
+    "git": {
+      "sha1": "2e341fa14234aa6f1dfb8d3309e7eae0f5d1d7f7"
+    },
+    "path_in_vcs": "webrender"
+  },
+  "archive_sha256": "ede9dbc3cfb3e2c073a68e20f8fd54d9f6be8587be1c7c948e1ac51112421ef6"
+}

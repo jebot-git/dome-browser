@@ -52,18 +52,18 @@ impl EventLoopWaker for Waker {
 #[derive(Default)]
 struct State {
     dirty: Cell<bool>,
-    pending: RefCell<Option<(InputEventId, u64)>>,
+    pending: RefCell<Vec<(InputEventId, u64)>>,
 }
 impl WebViewDelegate for State {
     fn notify_new_frame_ready(&self, _: WebView) {
         self.dirty.set(true);
     }
-    fn notify_input_event_handled(&self, _: WebView, id: InputEventId, _: InputEventResult) {
-        let pending = self.pending.borrow_mut().take();
-        if let Some((expected, token)) = pending {
-            assert_eq!(id, expected);
-            reply(json!({"token":token,"handled":true}));
-        }
+    fn notify_input_event_handled(&self, _: WebView, id: InputEventId, result: InputEventResult) {
+        let mut pending = self.pending.borrow_mut();
+        let index = pending.iter().position(|(expected, _)| *expected == id)
+            .expect("Every external event must complete exactly once; internal events stay private");
+        let (_, token) = pending.remove(index);
+        reply(json!({"token":token,"handled":true,"failed":result.contains(InputEventResult::DispatchFailed)}));
     }
     fn notify_crashed(&self, _: WebView, reason: String, trace: Option<String>) {
         eprintln!("Test webview crashed: {reason} {trace:?}");
@@ -130,7 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match command["op"].as_str().ok_or("op required")? {
                 "touch" => {
                     assert!(
-                        state.pending.borrow().is_none(),
+                        state.pending.borrow().is_empty(),
                         "Only one native event may be pending"
                     );
                     let phase = match command["phase"].as_str() {
@@ -158,7 +158,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     event.can_synthesize_mouse_events =
                         command["compat"].as_bool().unwrap_or(false);
                     let id = view.notify_input_event(InputEvent::Touch(event));
-                    *state.pending.borrow_mut() = Some((id, token));
+                    state.pending.borrow_mut().push((id, token));
+                },
+                "pen-batch" => {
+                    assert!(state.pending.borrow().is_empty());
+                    for sample in command["samples"].as_array().ok_or("samples required")? {
+                        let phase = match sample["phase"].as_str() {
+                            Some("sample") => servo::PenEventType::Sample,
+                            Some("leave") => servo::PenEventType::Leave,
+                            Some("cancel") => servo::PenEventType::Cancel,
+                            _ => return Err("Unknown pen phase".into()),
+                        };
+                        let mut event = servo::PenEvent::new(phase,
+                            sample["id"].as_i64().unwrap_or(1).try_into()?,
+                            servo::DevicePoint::new(sample["x"].as_f64().unwrap_or(80.) as f32,
+                                sample["y"].as_f64().unwrap_or(100.) as f32).into());
+                        event.buttons = sample["buttons"].as_u64().unwrap_or(0).try_into()?;
+                        event.pressure = if event.buttons != 0 { 0.5 } else { 0. };
+                        let id = view.notify_input_event(InputEvent::Pen(event));
+                        state.pending.borrow_mut().push((id, sample["token"].as_u64().ok_or("sample token required")?));
+                    }
+                    reply(json!({"token":token,"queued":true}));
                 },
                 "eval" => {
                     let script = command["script"].as_str().ok_or("script required")?;

@@ -630,7 +630,7 @@ with DomeD's `input-test-fixture` feature and accepts stdin commands only in a
 nested test compositor; the normal compositor build excludes it. These isolated
 software-rendered tests do not establish touchscreen hardware interoperability.
 
-Native stylus integration is being added in stages. DomeD now routes tablet
+The staged native stylus path includes the browser, FLTK and DomeD. DomeD routes tablet
 proximity, tip, barrel buttons and supported axes through its Wayland tablet
 manager. Pressed tools keep their original surface; window visibility and device
 removal terminate that ownership. `tests/native-tablet-host.py` uses the separate
@@ -642,8 +642,12 @@ without a raw callback; cancellation cannot activate a button or transfer a held
 contact into a replacement handler. `tests/native-pen-toolkit.py` and
 `native-pen-probe.cpp` cover those transitions at 100% and 150% scaling,
 including native surface recreation and pens without pressure sensors.
-Browser pen dispatch and DOM pressure/tilt/hover integration remain pending;
-the toolkit callback does not yet establish native browser stylus support.
+The browser's optional pen callback delivers trusted pen PointerEvents with
+pressure, orientation, hover, barrel/eraser buttons and capture, alongside
+independent finger and mouse input. The staged native pen suite covers DOM,
+compatibility mouse events, editing and inline WebXR lifecycles. See
+[native pen routing](docs/PEN_ROUTING.md) for cross-frame capture, pointer
+lifetime, bounded input queues and their isolated validation fixtures.
 
 The staged browser/runtime pair transports cumulative native reference-space
 origin state. OpenXR changes are applied at their scheduled display time; a
@@ -663,9 +667,9 @@ embedder, rather than the full WPT infrastructure. The event contracts follow th
 [WebXR Device API](https://www.w3.org/TR/webxr/) and
 [OpenXR reference-space change event](https://registry.khronos.org/OpenXR/specs/1.1/man/html/XrEventDataReferenceSpaceChangePending.html).
 
-Broader WebXR feature/conformance coverage, native stylus delivery, DomeD shell
-touch interaction and physical touchscreen/controller/runtime validation of the
-staged revisions remain follow-up work.
+Broader WebXR feature/conformance coverage, auxiliary default actions, DomeD
+shell touch interaction and physical touchscreen/tablet/controller/runtime
+validation of the staged revisions remain follow-up work.
 
 ## Validation
 

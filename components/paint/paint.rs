@@ -89,8 +89,8 @@ pub struct WebGLPaint {
 impl WebGLPaint {
     fn shutdown(&self) {
         self.webgl_threads.exit();
-        if let Some(webgl_join_handle) = self.webgl_join_handle.take() &&
-            webgl_join_handle.join().is_err()
+        if let Some(webgl_join_handle) = self.webgl_join_handle.take()
+            && webgl_join_handle.join().is_err()
         {
             warn!("Could not join WebGLThread.");
         }
@@ -905,10 +905,14 @@ impl Paint {
         webview_id: WebViewId,
         input_event_id: InputEventId,
         result: InputEventResult,
-    ) {
+    ) -> Vec<embedder_traits::InputEventOutcome> {
         if let Some(mut painter) = self.maybe_painter_mut(webview_id.into()) {
-            painter.notify_input_event_handled(webview_id, input_event_id, result);
+            return painter.notify_input_event_handled(webview_id, input_event_id, result);
         }
+        vec![embedder_traits::InputEventOutcome {
+            id: input_event_id,
+            result,
+        }]
     }
 
     /// Generate an image key from the appropriate [`Painter`] or, if it is unknown, generate

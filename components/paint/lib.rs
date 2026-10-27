@@ -23,6 +23,7 @@ mod tracing;
 
 mod paint;
 mod painter;
+mod pointer_ids;
 mod pinch_zoom;
 mod pipeline_details;
 mod refresh_driver;

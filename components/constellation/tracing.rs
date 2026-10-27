@@ -62,7 +62,10 @@ mod from_embedder {
                 Self::NewWebView(..) => target!("NewWebView"),
                 Self::CloseWebView(..) => target!("CloseWebView"),
                 Self::SetWebViewHasSystemFocus(..) => target!("SetWebViewHasSystemFocus"),
-                Self::ForwardInputEvent(_webview_id, event, ..) => event.log_target(),
+                Self::ForwardInputEvent(_webview_id, event, ..) |
+                Self::ForwardPointerInputEvent(_webview_id, event, ..) => event.log_target(),
+                Self::UpdatePointerState(..) => target!("UpdatePointerState"),
+                Self::DiscardedInputEvents(..) => target!("DiscardedInputEvents"),
                 Self::RefreshCursor(..) => target!("RefreshCursor"),
                 Self::ExitFullScreen(_) => target!("ExitFullScreen"),
                 Self::MediaSessionAction(_) => target!("MediaSessionAction"),

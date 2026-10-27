@@ -193,6 +193,8 @@ pub enum ScriptThreadMessage {
     ExitScriptThread,
     /// Sends a DOM event.
     SendInputEvent(WebViewId, PipelineId, ConstellationInputEvent),
+    /// Update WebView-wide pointer activity and active-document ownership.
+    UpdatePointerState(PipelineId, embedder_traits::PointerState),
     /// Request that the given pipeline refresh the cursor by doing a hit test at the most
     /// recently hovered cursor position and resetting the cursor. This happens after a
     /// display list update is rendered.
@@ -207,10 +209,19 @@ pub enum ScriptThreadMessage {
     /// the origin of a parent in a different event loop.
     GetDocumentOriginDetails(
         PipelineId,
-        GenericSender<Option<(OriginSnapshot, Vec<ImmutableOrigin>, Option<ImmutableOrigin>)>>,
+        GenericSender<
+            Option<(
+                OriginSnapshot,
+                Vec<ImmutableOrigin>,
+                Option<ImmutableOrigin>,
+            )>,
+        >,
     ),
     /// Snapshot a fully active document for an explicit native resource save.
-    GetDownloadClient(PipelineId, GenericCallback<Option<(ServoUrl, RequestClient)>>),
+    GetDownloadClient(
+        PipelineId,
+        GenericCallback<Option<(ServoUrl, RequestClient)>>,
+    ),
     /// Notifies script thread of a change to one of its document's activity
     SetDocumentActivity(PipelineId, DocumentActivity),
     /// Set whether to use less resources by running timers at a heavily limited rate.
@@ -434,6 +445,9 @@ impl TryFrom<MouseButton> for MouseButtons {
 /// Input events from the embedder that are sent via the `Constellation`` to the `ScriptThread`.
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct ConstellationInputEvent {
+    /// Pointer identity and route selected by Paint, absent for other input.
+    #[serde(default)]
+    pub pointer_context: Option<embedder_traits::PointerEventContext>,
     /// The hit test result of this input event, if any.
     pub hit_test_result: Option<PaintHitTestResult>,
     /// The pressed mouse button state of the constellation when this input

@@ -32,6 +32,7 @@ pub(crate) struct ConstellationWebView {
 
     /// The [`PipelineId`] of the currently active pipeline at the top level of this WebView.
     pub active_top_level_pipeline_id: Option<PipelineId>,
+    pub pointer_states: FxHashMap<i32, embedder_traits::PointerState>,
 
     /// A counter for changes to [`Self::active_top_level_pipeline_id`].
     pub active_top_level_pipeline_epoch: Epoch,
@@ -121,6 +122,7 @@ impl ConstellationWebView {
             webview_id,
             user_content_manager_id,
             active_top_level_pipeline_id: None,
+            pointer_states: Default::default(),
             active_top_level_pipeline_epoch: Epoch::default(),
             pending_changes: Default::default(),
             browsing_context_group,
@@ -272,14 +274,14 @@ impl ConstellationWebView {
                 .point_in_viewport;
         }
 
-        let _ = pipeline
+        pipeline
             .event_loop
             .send(ScriptThreadMessage::SendInputEvent(
                 self.webview_id,
                 pipeline.id,
                 event,
-            ));
-        true
+            ))
+            .is_ok()
     }
 
     pub(crate) fn close_browsing_context(&mut self, browsing_context_id: BrowsingContextId) {

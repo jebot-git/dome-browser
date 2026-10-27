@@ -39,6 +39,10 @@ bitflags! {
         /// is sent while Servo is shutting down or when it is in an intermediate state.
         /// Typically these events should be considered to be consumed.
         const DispatchFailed = 1 << 2;
+        /// Paint must route this pen sample to its actual hit document instead.
+        /// This is an internal routing result, not an embedding callback.
+        const PenRouteRejected = 1 << 3;
+
     }
 }
 
@@ -46,6 +50,26 @@ bitflags! {
 pub struct InputEventOutcome {
     pub id: InputEventId,
     pub result: InputEventResult,
+}
+
+/// Paint's pointer identity and routing information for one native sample.
+/// IDs are allocated within a WebView, shared by pen and touch contacts.
+#[derive(Clone, Copy, Debug, Deserialize, MallocSizeOf, Serialize)]
+pub struct PointerEventContext {
+    pub pointer_id: i32,
+    pub previous_buttons: u16,
+    pub hit_in_pipeline: bool,
+    pub has_hit: bool,
+}
+
+/// WebView-wide pointer lifetime and active-document state. This carries no
+/// hardware identity and is also sent to documents without a hit on the pointer.
+#[derive(Clone, Copy, Debug, Deserialize, MallocSizeOf, Serialize)]
+pub struct PointerState {
+    pub pointer_id: i32,
+    pub active: bool,
+    pub buttons: u16,
+    pub pipeline_id: servo_base::id::PipelineId,
 }
 
 /// An input event that is sent from the embedder to Servo.
@@ -320,7 +344,11 @@ pub struct MouseLeftViewportEvent {
 
 /// Native pen range updates are independent of touch gesture processing.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, MallocSizeOf, PartialEq, Serialize)]
-pub enum PenEventType { Sample, Leave, Cancel }
+pub enum PenEventType {
+    Sample,
+    Leave,
+    Cancel,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct PenEvent {
@@ -338,27 +366,68 @@ pub struct PenEvent {
 }
 impl PenEvent {
     pub fn new(event_type: PenEventType, id: i32, point: WebViewPoint) -> Self {
-        Self { event_type, id, point, primary: true, buttons: 0, pressure: 0.,
-            tangential_pressure: 0., tilt_x: 0., tilt_y: 0., twist: 0. }
+        Self {
+            event_type,
+            id,
+            point,
+            primary: true,
+            buttons: 0,
+            pressure: 0.,
+            tangential_pressure: 0.,
+            tilt_x: 0.,
+            tilt_y: 0.,
+            twist: 0.,
+        }
     }
     pub fn normalized(mut self) -> Self {
         self.buttons &= 63;
-        self.pressure = if self.pressure.is_finite() {self.pressure.clamp(0.,1.)} else {0.};
-        self.tangential_pressure = if self.tangential_pressure.is_finite() {self.tangential_pressure.clamp(-1.,1.)} else {0.};
-        self.tilt_x = if self.tilt_x.is_finite() {self.tilt_x.clamp(-90.,90.)} else {0.};
-        self.tilt_y = if self.tilt_y.is_finite() {self.tilt_y.clamp(-90.,90.)} else {0.};
-        self.twist = if self.twist.is_finite() {self.twist.rem_euclid(360.)} else {0.};
-        if self.event_type!=PenEventType::Sample {self.buttons=0;}
-        if self.buttons==0 {self.pressure=0.;}
+        self.pressure = if self.pressure.is_finite() {
+            self.pressure.clamp(0., 1.)
+        } else {
+            0.
+        };
+        self.tangential_pressure = if self.tangential_pressure.is_finite() {
+            self.tangential_pressure.clamp(-1., 1.)
+        } else {
+            0.
+        };
+        self.tilt_x = if self.tilt_x.is_finite() {
+            self.tilt_x.clamp(-90., 90.)
+        } else {
+            0.
+        };
+        self.tilt_y = if self.tilt_y.is_finite() {
+            self.tilt_y.clamp(-90., 90.)
+        } else {
+            0.
+        };
+        self.twist = if self.twist.is_finite() {
+            self.twist.rem_euclid(360.)
+        } else {
+            0.
+        };
+        if self.event_type != PenEventType::Sample {
+            self.buttons = 0;
+        }
+        if self.buttons == 0 {
+            self.pressure = 0.;
+        }
         self
     }
     /// Orientation derived from the same rounded legacy tilt exposed to script.
-    pub fn orientation(self) -> (i32,i32,f64,f64) {
-        let sample=self.normalized();let x=sample.tilt_x.round() as i32;let y=sample.tilt_y.round() as i32;
-        let tx=(x as f64).to_radians().tan();let ty=(y as f64).to_radians().tan();
-        let altitude=1f64.atan2(tx.hypot(ty));
-        let azimuth=if x==0 && y==0 {0.} else {ty.atan2(tx).rem_euclid(std::f64::consts::TAU)};
-        (x,y,altitude,azimuth)
+    pub fn orientation(self) -> (i32, i32, f64, f64) {
+        let sample = self.normalized();
+        let x = sample.tilt_x.round() as i32;
+        let y = sample.tilt_y.round() as i32;
+        let tx = (x as f64).to_radians().tan();
+        let ty = (y as f64).to_radians().tan();
+        let altitude = 1f64.atan2(tx.hypot(ty));
+        let azimuth = if x == 0 && y == 0 {
+            0.
+        } else {
+            ty.atan2(tx).rem_euclid(std::f64::consts::TAU)
+        };
+        (x, y, altitude, azimuth)
     }
 }
 
@@ -547,24 +616,48 @@ pub enum GamepadUpdateType {
 #[cfg(test)]
 mod pen_tests {
     use super::*;
-    fn sample() -> PenEvent {PenEvent::new(PenEventType::Sample,1,crate::DevicePoint::new(0.,0.).into())}
+    fn sample() -> PenEvent {
+        PenEvent::new(
+            PenEventType::Sample,
+            1,
+            crate::DevicePoint::new(0., 0.).into(),
+        )
+    }
     #[test]
     fn pen_axes_reject_nonfinite_values_and_bound_physical_ranges() {
-        let mut p=sample();p.buttons=0xffff;p.pressure=f32::NAN;p.tangential_pressure=2.;
-        p.tilt_x=f64::INFINITY;p.tilt_y=-120.;p.twist=-15.;let p=p.normalized();
-        assert_eq!((p.buttons,p.pressure,p.tangential_pressure),(63,0.,1.));
-        assert_eq!((p.tilt_x,p.tilt_y,p.twist),(0.,-90.,345.));
+        let mut p = sample();
+        p.buttons = 0xffff;
+        p.pressure = f32::NAN;
+        p.tangential_pressure = 2.;
+        p.tilt_x = f64::INFINITY;
+        p.tilt_y = -120.;
+        p.twist = -15.;
+        let p = p.normalized();
+        assert_eq!((p.buttons, p.pressure, p.tangential_pressure), (63, 0., 1.));
+        assert_eq!((p.tilt_x, p.tilt_y, p.twist), (0., -90., 345.));
     }
     #[test]
     fn pen_orientation_matches_legacy_tilt() {
-        let mut p=sample();p.tilt_x=30.;let (x,y,alt,azi)=p.orientation();
-        assert_eq!((x,y),(30,0));assert!((alt-std::f64::consts::PI/3.).abs()<1e-10);assert_eq!(azi,0.);
-        p.tilt_x=0.;p.tilt_y=-45.;let (_,_,alt,azi)=p.orientation();
-        assert!((alt-std::f64::consts::PI/4.).abs()<1e-10);assert!((azi-std::f64::consts::PI*1.5).abs()<1e-10);
+        let mut p = sample();
+        p.tilt_x = 30.;
+        let (x, y, alt, azi) = p.orientation();
+        assert_eq!((x, y), (30, 0));
+        assert!((alt - std::f64::consts::PI / 3.).abs() < 1e-10);
+        assert_eq!(azi, 0.);
+        p.tilt_x = 0.;
+        p.tilt_y = -45.;
+        let (_, _, alt, azi) = p.orientation();
+        assert!((alt - std::f64::consts::PI / 4.).abs() < 1e-10);
+        assert!((azi - std::f64::consts::PI * 1.5).abs() < 1e-10);
     }
     #[test]
     fn pen_hover_and_retirement_clear_contact_pressure_and_buttons() {
-        let mut p=sample();p.pressure=1.;assert_eq!(p.normalized().pressure,0.);
-        p.buttons=33;p.event_type=PenEventType::Cancel;let p=p.normalized();assert_eq!((p.buttons,p.pressure),(0,0.));
+        let mut p = sample();
+        p.pressure = 1.;
+        assert_eq!(p.normalized().pressure, 0.);
+        p.buttons = 33;
+        p.event_type = PenEventType::Cancel;
+        let p = p.normalized();
+        assert_eq!((p.buttons, p.pressure), (0, 0.));
     }
 }

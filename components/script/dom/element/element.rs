@@ -4308,11 +4308,11 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
         // Step 1. If the pointerId provided as the method's argument does not match any of
         // the active pointers, then throw a DOMException with the name "NotFoundError".
         //
-        // Note: "active pointers" is global across documents. We can only cheaply check
-        // active pointers in this element's document. If the pointer is active in another
-        // document (e.g., parent/child frame), step 5 below will silently terminate.
-        // We intentionally do not throw here in that case to avoid being stricter than
-        // the spec.
+        if !event_handler.is_known_pointer(pointer_id) {
+            return Err(Error::NotFound(Some(
+                "Can't capture a pointer that is not active".into(),
+            )));
+        }
 
         // Step 2. If the element is not connected, throw a "InvalidStateError" DOMException.
         if !self.upcast::<Node>().is_connected() {
@@ -4325,11 +4325,9 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
         // (pointerLockElement), throw an "InvalidStateError" DOMException.
         // TODO: Implement when pointer lock is supported.
 
-        // Step 4/5. If the pointer is not in the active buttons state or the element's
-        // node document is not the active document of the pointer, then terminate these
-        // steps. `is_active_pointer` on this document covers both conditions: it returns
-        // true only when the pointer is in the active buttons state in *this* document,
-        // which implies this document is the pointer's active document.
+        // The handler checks active buttons and document ownership before setting
+        // pending capture. A known pointer in another document silently returns.
+
         if !event_handler.is_active_pointer(pointer_id) {
             return Ok(());
         }
@@ -4349,7 +4347,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
         // Step 1. If the pointerId provided as the method's argument does not match any of
         // the active pointers and these steps are not being invoked as a result of the
         // implicit release of pointer capture, then throw a DOMException with the name "NotFoundError".
-        if !event_handler.is_active_pointer(pointer_id) {
+        if !event_handler.is_known_pointer(pointer_id) {
             return Err(Error::NotFound(Some(
                 "Can't release a pointer that is not active".into(),
             )));

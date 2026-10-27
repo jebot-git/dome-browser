@@ -1,0 +1,35 @@
+<!doctype html><meta charset="utf-8"><title>Native pen frame routing</title>
+<style>body{margin:0;height:1000px;background:#eee}#area{position:absolute;left:20px;top:60px;width:180px;height:120px;background:#acf;touch-action:none}iframe{position:absolute;left:360px;top:40px;width:220px;height:220px;border:4px solid #456;transform-origin:0 0}</style>
+<div id="area">Native pen target</div>
+<script>
+const child=new URL(location).searchParams.has('child'), area=document.querySelector('#area');
+let frames=0, events=[], state={frames:0}, commands=[], release=false, lastId=null, probe=null;
+for(const name of ['pointerover','pointerenter','pointerout','pointerleave','pointerdown','pointermove','pointerup','pointercancel','gotpointercapture','lostpointercapture','mousedown','mousemove','mouseup','click']){
+ document.addEventListener(name,e=>{
+  if(e.pointerType && e.pointerType!=='pen' && e.pointerType!=='touch')return;
+  if(e.pointerId!==undefined)lastId=e.pointerId;
+  if(name==='pointerdown' && release)e.target.releasePointerCapture(e.pointerId);
+  events.push({name,id:e.pointerId,kind:e.pointerType,buttons:e.buttons,button:e.button,client:[e.clientX,e.clientY],page:[e.pageX,e.pageY],target:e.target.id||e.target.nodeName,primary:e.isPrimary,trusted:e.isTrusted});
+ },true);
+}
+function act(c){
+ if(c.op==='release')release=c.value;
+ if(c.op==='capture'){try{area.setPointerCapture(c.id??lastId);probe={op:c.op,error:null,captured:area.hasPointerCapture(c.id??lastId)}}catch(e){probe={op:c.op,error:e.name,captured:false}}}
+ if(c.op==='probe'){try{area.setPointerCapture(c.id);probe={op:c.op,error:null,captured:area.hasPointerCapture(c.id)}}catch(e){probe={op:c.op,error:e.name,captured:false}}}
+ if(c.op==='transform'){document.querySelector('iframe').style.transform=c.value;}
+ if(c.op==='scroll')scrollTo(0,c.value);
+}
+if(child){
+ addEventListener('message',e=>{if(e.source===parent && e.data.command){act(e.data.command);parent.postMessage({ack:e.data.command.token},'*')}});
+ requestAnimationFrame(function tick(){parent.postMessage({child:{frames:++frames,events,probe,viewport:[innerWidth,innerHeight],scroll:[scrollX,scrollY]}},'*');requestAnimationFrame(tick)});
+}else{
+ const iframe=document.createElement('iframe');iframe.src=new URL(location).searchParams.get('frame');document.body.append(iframe);
+ addEventListener('message',e=>{if(e.source!==iframe.contentWindow || e.origin!==new URL(iframe.src).origin)return;if(e.data.child)state=e.data.child;if(e.data.ack)fetch('/ack',{method:'POST',body:JSON.stringify(e.data.ack)})});
+ setInterval(async()=>{for(const c of await (await fetch('/commands')).json()){if(c.child)iframe.contentWindow.postMessage({command:c},new URL(iframe.src).origin);else{act(c);fetch('/ack',{method:'POST',body:JSON.stringify(c.token)})}}},30);
+ requestAnimationFrame(function tick(){
+  const m=getComputedStyle(iframe).transform;
+  fetch('/snapshot',{method:'POST',body:JSON.stringify({frames:++frames,events,probe,child:state,ratio:devicePixelRatio,viewport:[innerWidth,innerHeight],scroll:[scrollX,scrollY],frame:{x:iframe.offsetLeft-scrollX,y:iframe.offsetTop-scrollY,border:iframe.clientLeft,matrix:m}})});
+  requestAnimationFrame(tick);
+ });
+}
+</script>
