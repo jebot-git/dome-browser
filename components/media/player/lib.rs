@@ -2,7 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::any::Any;
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::Duration;
 
 extern crate servo_media_streams as streams;
@@ -96,7 +98,23 @@ pub enum StreamType {
     Seekable,
 }
 
+/// Backend-neutral playback attachment for an MSE session. The owning DOM/media
+/// layer retains this input independently of the player and consumes its events.
+pub trait MediaSourceInput: Any + Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+    fn buffered(&self) -> Vec<Range<f64>>;
+    fn seekable(&self) -> Vec<Range<f64>>;
+    /// Release buffers and detach when the player's resource is stopped.
+    fn detach(&self);
+}
+
 pub trait Player: Send + MediaInstance {
+    /// Set before the first operation that initializes playback. Backends that
+    /// do not implement MSE reject the input without exposing partial support.
+    fn set_media_source(&self, _source: Arc<dyn MediaSourceInput>) -> Result<(), PlayerError> {
+        Err(PlayerError::Backend("MediaSource input is not supported".into()))
+    }
+
     fn play(&self) -> Result<(), PlayerError>;
     fn pause(&self) -> Result<(), PlayerError>;
     fn paused(&self) -> bool;

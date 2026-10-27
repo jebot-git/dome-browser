@@ -473,10 +473,10 @@ impl FontContext {
         if matches!(
             format_hint,
             FontFaceSourceFormat::Keyword(
-                FontFaceSourceFormatKeyword::Truetype |
-                    FontFaceSourceFormatKeyword::Opentype |
-                    FontFaceSourceFormatKeyword::Woff |
-                    FontFaceSourceFormatKeyword::Woff2
+                FontFaceSourceFormatKeyword::Truetype
+                    | FontFaceSourceFormatKeyword::Opentype
+                    | FontFaceSourceFormatKeyword::Woff
+                    | FontFaceSourceFormatKeyword::Woff2
             )
         ) {
             return true;
@@ -488,43 +488,14 @@ impl FontContext {
                 return true;
             }
 
-            return pref!(layout_css_font_variations_enabled) &&
-                (string == "truetype-variations" ||
-                    string == "opentype-variations" ||
-                    string == "woff-variations" ||
-                    string == "woff2-variations");
+            return pref!(layout_css_font_variations_enabled)
+                && (string == "truetype-variations"
+                    || string == "opentype-variations"
+                    || string == "woff-variations"
+                    || string == "woff2-variations");
         }
 
         false
-    }
-
-    fn is_local_or_unknown_url_font(
-        &self,
-        family_name: &LowercaseFontFamilyName,
-        source: &Source,
-    ) -> bool {
-        match source {
-            Source::Url(url) => !url
-                .url
-                .url()
-                .cloned()
-                .map(ServoUrl::from)
-                .map(FontIdentifier::Web)
-                .filter(|font_identifier| self.font_data.read().contains_key(font_identifier))
-                .is_some_and(|font_identifier| {
-                    self.web_fonts
-                        .read()
-                        .families
-                        .get(family_name)
-                        .is_some_and(|templates| {
-                            templates
-                                .templates
-                                .iter()
-                                .any(|template| template.borrow().identifier == font_identifier)
-                        })
-                }),
-            Source::Local(_) => true,
-        }
     }
 
     /// Adds the provided new web font request to the list of pending downloads.
@@ -572,7 +543,6 @@ impl FontContext {
             return false;
         };
 
-        self.font_data.write().insert(identifier.clone(), font_data);
         let descriptor = handle.descriptor();
         for download_state in download_states {
             let mut descriptor = descriptor.clone();
@@ -580,12 +550,16 @@ impl FontContext {
                 &download_state.css_font_face_descriptors,
             );
 
-            let new_template = FontTemplate::new(
+            let mut new_template = FontTemplate::new(
                 identifier.clone(),
                 descriptor,
                 download_state.initiator.font_face_rule().cloned(),
             );
 
+            // The completion owns these bytes until a live stylesheet or
+            // script face installs the template. Canceled and never-installed
+            // loads must not leave entries in the originating context.
+            new_template.script_font_data = Some(font_data.clone());
             download_state.handle_web_font_load_success(new_template);
         }
 
@@ -646,7 +620,7 @@ impl WebFontDownloadState {
         }
     }
 
-    pub(crate) fn handle_web_font_load_success(self, new_template: FontTemplate) {
+    pub(crate) fn handle_web_font_load_success(self, mut new_template: FontTemplate) {
         let family_name = self.css_font_face_descriptors.family_name.clone();
         match self.initiator {
             WebFontLoadInitiator::Stylesheet(initiator) => {
@@ -655,8 +629,8 @@ impl WebFontDownloadState {
                     if self
                         .font_context
                         .number_of_loading_web_fonts
-                        .fetch_sub(1, Ordering::SeqCst) ==
-                        1
+                        .fetch_sub(1, Ordering::SeqCst)
+                        == 1
                     {
                         // This was the last loading font - we must inform the script thread that the load
                         // has finished because this an opportunity to resolve document.fonts.ready.
@@ -665,10 +639,17 @@ impl WebFontDownloadState {
                     return;
                 }
 
-                self.font_context
-                    .web_fonts
-                    .write()
-                    .add_new_template(family_name, new_template);
+                // Install the template and its bytes atomically with respect
+                // to collection, using the same store/data lock order.
+                let mut store = self.font_context.web_fonts.write();
+                if let Some(data) = new_template.script_font_data.take() {
+                    self.font_context
+                        .font_data
+                        .write()
+                        .insert(new_template.identifier.clone(), data);
+                }
+                store.add_new_template(family_name, new_template);
+                drop(store);
                 self.font_context
                     .invalidate_font_groups_after_web_font_load();
 
@@ -692,8 +673,8 @@ impl WebFontDownloadState {
                 if self
                     .font_context
                     .number_of_loading_web_fonts
-                    .fetch_sub(1, Ordering::SeqCst) ==
-                    1
+                    .fetch_sub(1, Ordering::SeqCst)
+                    == 1
                 {
                     // This was the last loading font - we must inform the script thread that the load
                     // has finished because this an opportunity to resolve document.fonts.ready.
@@ -775,6 +756,12 @@ impl FontContextWebFontMethods for Arc<FontContext> {
             .lock()
             .diff_old_and_new_font_face_rules(stylist, guards);
 
+        // Retire old rule owners before a replacement can finish loading. A
+        // newly parsed rule can reuse the same URL and descriptors, but still
+        // needs its own template: removing the old rule must not remove it.
+        for removed_rule in &difference.removed_font_faces {
+            self.remove_single_font_face_rule(removed_rule, &mut self.web_fonts.write());
+        }
         for added_rule in &difference.added_font_faces {
             self.load_single_font_face_rule(
                 webview_id,
@@ -782,9 +769,6 @@ impl FontContextWebFontMethods for Arc<FontContext> {
                 callback.clone(),
                 document_context,
             );
-        }
-        for removed_rule in &difference.removed_font_faces {
-            self.remove_single_font_face_rule(removed_rule, &mut self.web_fonts.write());
         }
 
         if !difference.removed_font_faces.is_empty() || difference.cascade_index_of_any_rule_changed
@@ -827,14 +811,14 @@ impl FontContextWebFontMethods for Arc<FontContext> {
 
         for subscriber in subscribers {
             // See if the font load was cancelled in the meantime
-            if let WebFontLoadInitiator::Stylesheet(stylesheet_initiator) = &subscriber.initiator &&
-                !self.is_font_active(&stylesheet_initiator.font_face_rule)
+            if let WebFontLoadInitiator::Stylesheet(stylesheet_initiator) = &subscriber.initiator
+                && !self.is_font_active(&stylesheet_initiator.font_face_rule)
             {
                 // This font load was cancelled.
                 if self
                     .number_of_loading_web_fonts
-                    .fetch_sub(1, Ordering::SeqCst) ==
-                    1
+                    .fetch_sub(1, Ordering::SeqCst)
+                    == 1
                 {
                     // This was the last loading font - we must inform the script thread that the load
                     // has finished because this an opportunity to resolve document.fonts.ready.
@@ -879,7 +863,11 @@ impl FontContext {
         let mut webrender_font_instance_keys = self.webrender_font_instance_keys.write();
 
         let mut unused_identifiers: HashSet<FontIdentifier> =
-            webrender_font_keys.keys().cloned().collect();
+            font_data
+                .keys()
+                .chain(webrender_font_keys.keys())
+                .cloned()
+                .collect();
         for templates in web_fonts.families.values() {
             templates.for_all_identifiers(|identifier| {
                 unused_identifiers.remove(identifier);
@@ -955,6 +943,46 @@ impl FontContext {
         self.invalidate_font_groups_after_web_font_load();
     }
 
+    pub fn install_script_font(
+        &self,
+        id: Uuid,
+        family: LowercaseFontFamilyName,
+        mut template: FontTemplate,
+        data: Option<FontData>,
+    ) {
+        template.script_font_face_id = Some(id);
+        // Match collection's lock order. A face retains sanitized bytes while it
+        // is detached, and transfers them to every receiving FontContext.
+        let mut store = self.web_fonts.write();
+        if let Some(data) = data {
+            self.font_data
+                .write()
+                .insert(template.identifier.clone(), data);
+        }
+        store.add_new_template(family, template);
+        drop(store);
+        self.invalidate_font_groups_after_web_font_load();
+    }
+
+    pub fn remove_script_font(&self, id: Uuid) {
+        let mut store = self.web_fonts.write();
+        let mut removed = false;
+        store.families.retain(|_, family| {
+            removed |= family.remove_script_font_face(id);
+            !family.templates.is_empty()
+        });
+        if !removed {
+            return;
+        }
+        self.fonts.write().retain(|_, font| {
+            font.as_ref()
+                .is_none_or(|font| font.template.borrow().script_font_face_id != Some(id))
+        });
+        drop(store);
+        self.invalidate_font_groups_after_web_font_load();
+        self.have_removed_web_fonts.store(true, Ordering::Relaxed);
+    }
+
     pub fn construct_web_font_from_data(
         &self,
         data: &[u8],
@@ -975,9 +1003,8 @@ impl FontContext {
         let handle =
             PlatformFont::new_from_data(identifier.clone(), &font_data, None, false).ok()?;
 
-        let new_template = FontTemplate::new(identifier.clone(), handle.descriptor(), None);
-
-        self.font_data.write().insert(identifier, font_data);
+        let mut new_template = FontTemplate::new(identifier.clone(), handle.descriptor(), None);
+        new_template.script_font_data = Some(font_data);
 
         Some((descriptors.family_name, new_template))
     }
@@ -998,9 +1025,6 @@ impl FontContext {
             .iter()
             .rev()
             .filter(Self::is_supported_web_font_source)
-            .filter(|source| {
-                self.is_local_or_unknown_url_font(&css_font_face_descriptors.family_name, source)
-            })
             .cloned()
             .collect();
 
@@ -1381,6 +1405,11 @@ impl RemoteWebFontDownloader {
         response_message: FetchResponseMsg,
     ) -> DownloaderResponseResult {
         match response_message {
+            FetchResponseMsg::ProcessResponseChunkWithAck(id, bytes, ack) => {
+                let result = self.handle_web_font_fetch_message(FetchResponseMsg::ProcessResponseChunk(id, bytes));
+                let _ = ack.send(());
+                result
+            },
             FetchResponseMsg::ProcessRequestBody(..) => DownloaderResponseResult::InProcess,
             FetchResponseMsg::ProcessCspViolations(_request_id, violations) => {
                 self.document_context
@@ -1651,8 +1680,12 @@ fn font_face_rules_conflict(
     first_rule: &FontFaceRuleDescriptors,
     second_rule: &FontFaceRuleDescriptors,
 ) -> bool {
-    first_rule.font_width == second_rule.font_width &&
-        first_rule.font_style == second_rule.font_style &&
-        first_rule.font_weight == second_rule.font_weight &&
-        first_rule.unicode_range == second_rule.unicode_range
+    first_rule.font_width == second_rule.font_width
+        && first_rule.font_style == second_rule.font_style
+        && first_rule.font_weight == second_rule.font_weight
+        && first_rule.unicode_range == second_rule.unicode_range
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "tests/unit/font_resource_lifetime.rs"]
+mod resource_lifetime_tests;

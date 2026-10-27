@@ -161,10 +161,10 @@ impl FakeXRInputControllerMethods<crate::DomTypeHolder> for FakeXRInputControlle
             return Err(Error::Type(c"Pressed value must be non-negative".into()));
         }
 
-        // TODO: Steps 3-5 of updateButtonState
-        // Passing the one WPT test that utilizes this will require additional work
-        // to specify gamepad button/axes list lengths, as well as passing that info
-        // to the constructor of XRInputSource
+        let state = init_to_mock_buttons(std::slice::from_ref(button_state));
+        if let Some(state) = state.into_iter().next() {
+            self.send_message(MockInputMsg::UpdateButtonState(state));
+        }
 
         Ok(())
     }

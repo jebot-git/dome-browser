@@ -44,60 +44,94 @@ pub struct NetworkManager {
 }
 
 impl NetworkManager {
-    /// Fetch a resource using the browser's cookies, cache, TLS and HTTP auth.
+    /// Fetch a resource using the browser's network session and registered protocol handlers.
     /// This privileged API is for explicit native user actions, not web scripts.
     /// Blob URLs require a document-owned claim and are not accepted here.
     pub fn download_resource(
         &self,
         webview_id: crate::WebViewId,
         url: url::Url,
-        source: url::Url,
-        mut callback: impl FnMut(ResourceDownloadEvent) -> bool + Send + 'static,
+        context: Option<crate::EmbedderControlId>,
+        callback: impl FnMut(ResourceDownloadEvent) -> bool + Send + 'static,
     ) -> Result<(), String> {
-        use net_traits::request::{CredentialsMode, Initiator, Referrer, RequestBuilder};
+        use net_traits::policy_container::PolicyContainer;
+        use net_traits::request::{CredentialsMode, Initiator, Referrer, RequestBuilder, RequestClient, RequestMode};
         use net_traits::{FetchResponseMsg, cancel_async_fetch, fetch_async};
+        use servo_base::generic_channel::GenericCallback;
         use servo_url::ServoUrl;
-        if !matches!(url.scheme(), "http" | "https" | "data") &&
-            !(url.scheme() == "file" && source.scheme() == "file") {
+        use std::sync::Arc;
+
+        if context.is_some_and(|context| context.webview_id != webview_id) {
+            return Err("The save action belongs to another page".into());
+        }
+        let custom = !matches!(url.scheme(), "http" | "https" | "data" | "file" | "blob") &&
+            url.has_host() && !url.cannot_be_a_base();
+        if !(matches!(url.scheme(), "http" | "https" | "data" | "file") || custom) {
             return Err(format!("Saving {} URLs is not supported", url.scheme()));
         }
-        let source = ServoUrl::from_url(source);
-        let request = RequestBuilder::new(Some(webview_id),
-            net_traits::blob_url_store::UrlWithBlobClaim::for_url(ServoUrl::from_url(url))
-                .map_err(|_| "Blob URLs need a document-owned claim")?,
-            Referrer::ReferrerUrl(source.clone()))
-            .origin(source.origin()).credentials_mode(CredentialsMode::Include)
-            .initiator(Initiator::Download);
-        let id = request.id;
         let thread = self.public_resource_threads.core_thread.clone();
-        let cancel_thread = thread.clone();
-        let mut stopped = false;
-        fetch_async(&thread, request, None, Box::new(move |message| {
-            if stopped { return; }
-            let event = match message {
-                FetchResponseMsg::ProcessResponse(_, Ok(metadata)) => {
-                    let metadata = metadata.metadata();
-                    if !metadata.status.is_success() {
-                        ResourceDownloadEvent::Finished(Err(format!("HTTP {}", metadata.status.raw_code())))
-                    } else {
-                        let header = |name: &str| metadata.headers.as_ref()
-                            .and_then(|h| h.get(name)).and_then(|v| v.to_str().ok())
-                            .unwrap_or("").to_owned();
-                        ResourceDownloadEvent::Response { url: metadata.final_url.clone().into_url(),
-                            content_type: header("content-type"), content_disposition: header("content-disposition") }
-                    }
-                },
-                FetchResponseMsg::ProcessResponse(_, Err(error)) => ResourceDownloadEvent::Finished(Err(format!("{error:?}"))),
-                FetchResponseMsg::ProcessResponseChunk(_, bytes) => ResourceDownloadEvent::Data(bytes.to_vec()),
-                FetchResponseMsg::ProcessResponseEOF(_, result, _) => ResourceDownloadEvent::Finished(result.map_err(|e| format!("{e:?}"))),
-                _ => return,
+        let mut pending = Some((url, callback));
+        let snapshot = GenericCallback::new(move |result: Result<Option<(ServoUrl, RequestClient)>, _>| {
+            // Only one reply may start a request, including on a disconnected script thread.
+            let Some((url, mut callback)) = pending.take() else { return; };
+            let Ok(Some((source, mut client))) = result else {
+                callback(ResourceDownloadEvent::Finished(Err("The source document is no longer active".into())));
+                return;
             };
-            let finished = matches!(event, ResourceDownloadEvent::Finished(_));
-            if !callback(event) || finished {
-                stopped = true;
-                cancel_async_fetch(vec![id], &cancel_thread);
+            if url.scheme() == "file" && source.scheme() != "file" {
+                callback(ResourceDownloadEvent::Finished(Err("Saving file URLs requires a local document".into())));
+                return;
             }
-        }));
+            // This is a native UI action, not an author-controlled fetch. Preserve the
+            // actual principal, ancestor-aware cookie site, referrer policy and local
+            // file authority. Author CSP must not disable the browser's Save command.
+            client.preloaded_resources.clear();
+            client.policy_container = Arc::new(PolicyContainer {
+                local_file_origin: client.policy_container.local_file_origin.clone(),
+                referrer_policy: client.policy_container.referrer_policy,
+                ..PolicyContainer::default()
+            });
+            let mut request = RequestBuilder::new(Some(webview_id),
+                net_traits::blob_url_store::UrlWithBlobClaim::for_url(ServoUrl::from_url(url))
+                    .expect("Blob URLs were excluded above"),
+                Referrer::ReferrerUrl(source))
+                .credentials_mode(CredentialsMode::Include)
+                .client(client).initiator(Initiator::Download);
+            // Registered custom handlers distinguish native saves from web subresources.
+            if custom { request = request.mode(RequestMode::Navigate); }
+            let id = request.id;
+            let cancel_thread = thread.clone();
+            let mut stopped = false;
+            fetch_async(&thread, request, None, Box::new(move |message| {
+                if stopped { return; }
+                let event = match message {
+                    FetchResponseMsg::ProcessResponse(_, Ok(metadata)) => {
+                        let metadata = metadata.metadata();
+                        if !metadata.status.is_success() {
+                            ResourceDownloadEvent::Finished(Err(format!("HTTP {}", metadata.status.raw_code())))
+                        } else {
+                            let header = |name: &str| metadata.headers.as_ref()
+                                .and_then(|h| h.get(name)).and_then(|v| v.to_str().ok())
+                                .unwrap_or("").to_owned();
+                            ResourceDownloadEvent::Response { url: metadata.final_url.clone().into_url(),
+                                content_type: header("content-type"), content_disposition: header("content-disposition") }
+                        }
+                    },
+                    FetchResponseMsg::ProcessResponse(_, Err(error)) => ResourceDownloadEvent::Finished(Err(format!("{error:?}"))),
+                    FetchResponseMsg::ProcessResponseChunk(_, bytes) => ResourceDownloadEvent::Data(bytes.to_vec()),
+                    FetchResponseMsg::ProcessResponseEOF(_, result, _) => ResourceDownloadEvent::Finished(result.map_err(|e| format!("{e:?}"))),
+                    _ => return,
+                };
+                let finished = matches!(event, ResourceDownloadEvent::Finished(_));
+                if !callback(event) || finished {
+                    stopped = true;
+                    cancel_async_fetch(vec![id], &cancel_thread);
+                }
+            }));
+        }).map_err(|error| format!("Cannot obtain the source document: {error:?}"))?;
+        self.constellation_proxy.sender().send(
+            EmbedderToConstellationMessage::GetDownloadClient(webview_id, context, snapshot),
+        ).map_err(|_| "The browser is shutting down")?;
         Ok(())
     }
     pub(crate) fn new(

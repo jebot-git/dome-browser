@@ -350,6 +350,8 @@ impl WorkerMethods<crate::DomTypeHolder> for Worker {
         if let Some(cx) = self.context_for_interrupt.borrow().as_ref() {
             cx.request_interrupt_callback()
         }
+        // Interrupts stop executing JS; an idle event loop also needs a wake-up.
+        let _ = self.sender.send(DedicatedWorkerScriptMsg::WakeUp);
     }
 
     // https://html.spec.whatwg.org/multipage/#handler-worker-onmessage

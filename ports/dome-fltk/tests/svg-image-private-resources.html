@@ -1,0 +1,23 @@
+<!doctype html><meta charset="utf-8"><title>Private SVG image representation</title>
+<style>html,body{margin:0}svg{position:absolute;left:0;top:0}</style>
+<script>
+(async()=>{
+ const config=await fetch('/config.json').then(r=>r.json()),SVG='http://www.w3.org/2000/svg';
+ const url=config.crossOrigin+'/svg-image.svg?name=opaque-private-control';
+ const root=document.createElementNS(SVG,'svg');root.setAttribute('width','80');root.setAttribute('height','80');
+ const image=document.createElementNS(SVG,'image');image.setAttribute('width','80');image.setAttribute('height','80');image.setAttribute('href',url);root.append(image);
+ const loaded=new Promise(resolve=>{image.onload=()=>resolve(true);image.onerror=()=>resolve(false);setTimeout(()=>resolve(false),4000)});document.documentElement.append(root);
+ const ok=await loaded;
+ for(let n=0;n<6;n++){root.setAttribute('opacity',n%2?'1':'0.99');await new Promise(requestAnimationFrame)}
+ const names=performance.getEntriesByType('resource').map(entry=>entry.name);
+ const privateCount=names.filter(name=>name.startsWith('data:image/svg+xml;base64,')).length;
+ const xml=new XMLSerializer().serializeToString(root);
+ fetch('/report',{method:'POST',body:JSON.stringify({checks:[
+  {name:'opaque image loads for display',passed:ok},
+  {name:'public resource timing positive control exists',passed:names.includes(url)},
+  {name:'private SVG snapshot URLs are absent from resource timing',passed:privateCount===0},
+  {name:'public href remains the requested URL',passed:image.getAttribute('href')===url},
+  {name:'private encoded image bytes are absent from public XML',passed:!xml.includes('data:')}
+ ],diagnostics:{privateTimingCount:privateCount,publicTimingCount:names.filter(name=>name===url).length},pixel_cases:[{name:'opaque-image-display',x:20,y:20,expected:'green'}],scope:'Opaque image representation privacy: URLs/bodies of internal raster snapshots must remain private, while the original resource stays observable for permitted display/timing. No canvas support is enabled.'})});
+})().catch(error=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[{name:'fixture completed',passed:false,error:String(error)}]})}));
+</script>

@@ -161,7 +161,8 @@ pub(crate) enum Operation {
 #[derive(JSTraceable, MallocSizeOf)]
 struct DroppableWebGLRenderingContext {
     #[no_trace]
-    webgl_sender: WebGLMsgSender,
+    #[conditional_malloc_size_of]
+    webgl_sender: Rc<WebGLMsgSender>,
 }
 
 impl Drop for DroppableWebGLRenderingContext {
@@ -283,7 +284,7 @@ impl WebGLRenderingContext {
                 textures: Textures::new(max_combined_texture_image_units),
                 api_type: ctx_data.api_type,
                 droppable: DroppableWebGLRenderingContext {
-                    webgl_sender: ctx_data.sender,
+                    webgl_sender: Rc::new(ctx_data.sender),
                 },
             }
         })
@@ -501,6 +502,10 @@ impl WebGLRenderingContext {
     #[inline]
     pub(crate) fn sender(&self) -> &WebGLMsgSender {
         &self.droppable.webgl_sender
+    }
+
+    pub(crate) fn cleanup_sender(&self) -> std::rc::Weak<WebGLMsgSender> {
+        Rc::downgrade(&self.droppable.webgl_sender)
     }
 
     #[inline]
@@ -2219,6 +2224,24 @@ impl CanvasContext for WebGLRenderingContext {
     }
 }
 
+// Cleanup may run during GC, when neither DOM weak references nor JS stack
+// capture are valid. Native weak ownership also avoids sending after context removal.
+pub(crate) fn send_webgl_cleanup_command(
+    sender: &std::rc::Weak<WebGLMsgSender>,
+    command: WebGLCommand,
+    fallibility: Operation,
+) {
+    let Some(sender) = sender.upgrade() else { return; };
+    let trace = WebGLCommandBacktrace {
+        #[cfg(feature = "webgl_backtrace")]
+        backtrace: String::new(),
+        #[cfg(feature = "webgl_backtrace")]
+        js_backtrace: None,
+    };
+    let result = sender.send(command, trace);
+    if matches!(fallibility, Operation::Infallible) { result.expect("Operation failed"); }
+}
+
 #[cfg(not(feature = "webgl_backtrace"))]
 #[inline]
 pub(crate) fn capture_webgl_backtrace() -> WebGLCommandBacktrace {
@@ -2778,6 +2801,9 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             _ => return self.webgl_error(InvalidEnum),
         };
         self.bind_buffer_maybe(slot, target, buffer);
+        if target == constants::ELEMENT_ARRAY_BUFFER {
+            self.current_vao(cx).sync_element_array_buffer_cleanup();
+        }
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.6>

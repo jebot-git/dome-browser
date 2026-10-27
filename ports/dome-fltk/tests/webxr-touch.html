@@ -1,0 +1,55 @@
+<!doctype html><meta charset=utf-8><title>Native inline touch and pen</title>
+<style>body{margin:0;background:#203040;color:white}canvas{position:absolute;left:40px;top:80px;width:300px;height:200px;padding:10px;border:5px solid orange;touch-action:none}#other{left:430px}</style>
+<canvas id=canvas width=600 height=400></canvas><canvas id=other width=600 height=400></canvas>
+<iframe style="position:absolute;left:500px;top:440px;width:300px;height:150px" srcdoc="<!doctype html><style>body{margin:0;height:150px;background:gray;touch-action:none}</style>Child frame"></iframe>
+<script>
+'use strict';
+const canvas=document.getElementById('canvas'),other=document.getElementById('other');
+const ids=new WeakMap(),frameIds=new WeakMap();let nextId=0,nextFrame=0;
+const id=s=>{if(!ids.has(s))ids.set(s,++nextId);return ids.get(s);};
+const frameId=f=>{if(!frameIds.has(f))frameIds.set(f,++nextFrame);return frameIds.get(f);};
+const events=[],retired=[],sessions=[],viewers=[];
+const test=window.test={ready:false,error:null,events,frames:0,latest:[],prevent:false,capture:false,endOnStart:false};
+const record=(name,data={})=>events.push({name,...data});
+const describe=s=>({id:id(s),mode:s.targetRayMode,handedness:s.handedness,grip:s.gripSpace===null,gamepad:s.gamepad===null,hand:s.hand==null});
+function pose(f,s,v){const p=f.getPose(s.targetRaySpace,v);if(!p)return null;const m=p.transform.matrix;return [-m[8],-m[9],-m[10]];}
+for(const name of ['pointerdown','pointermove','pointerup','pointercancel','click','gotpointercapture','lostpointercapture'])document.addEventListener(name,e=>{
+ record(name,{pointerId:e.pointerId,pointerType:e.pointerType,primary:e.isPrimary,trusted:e.isTrusted,target:e.target.id});
+ if(name==='pointerdown'&&test.capture)e.target.setPointerCapture(e.pointerId);
+});
+for(const name of ['touchstart','touchmove','touchend','touchcancel'])canvas.addEventListener(name,e=>{record(name,{trusted:e.isTrusted,touches:e.touches.length});if(test.prevent)e.preventDefault();},{passive:false});
+test.snapshot=()=>({ready:test.ready,error:test.error,events:[...events],frames:test.frames,latest:test.latest,lengths:sessions.map(s=>s.inputSources.length)});
+test.command=op=>{
+ if(op==='prevent')test.prevent=true;
+ if(op==='allow')test.prevent=false;
+ if(op==='capture')test.capture=true;
+ if(op==='release-capture')test.capture=false;
+ if(op==='swap')sessions[0].updateRenderState({baseLayer:sessions[0].alternate});
+ if(op==='restore')sessions[0].updateRenderState({baseLayer:sessions[0].original});
+ if(op==='remove')canvas.remove();
+ if(op==='end-on-start')test.endOnStart=true;
+ if(op==='synthetic'){
+  canvas.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerId:77,pointerType:'touch',isPrimary:true}));
+  canvas.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerId:77,pointerType:'touch',isPrimary:true}));
+ }
+ return true;
+};
+(async()=>{
+ const gl=canvas.getContext('webgl'),otherGl=other.getContext('webgl');
+ for(let index=0;index<2;index++){
+  const s=await navigator.xr.requestSession('inline'),v=await s.requestReferenceSpace('viewer');sessions.push(s);viewers.push(v);retired[index]=[];
+  s.original=new XRWebGLLayer(s,gl);s.alternate=new XRWebGLLayer(s,otherGl);s.updateRenderState({baseLayer:s.original});
+  s.addEventListener('inputsourceschange',e=>{retired[index].push(...e.removed);record('sources',{index,added:[...e.added].map(describe),removed:[...e.removed].map(describe),length:s.inputSources.length,trusted:e.isTrusted});});
+  for(const name of ['selectstart','select','selectend'])s.addEventListener(name,e=>{
+   let ray=null,error=null;try{ray=pose(e.frame,e.inputSource,v);}catch(ex){error=ex.name;}
+   record(name,{index,source:describe(e.inputSource),frame:frameId(e.frame),ray,error,trusted:e.isTrusted,time:e.frame.predictedDisplayTime});
+   if(name==='selectstart'&&test.endOnStart&&index===0){test.endOnStart=false;Promise.all([s.end(),s.end()]).then(()=>record('ended',{index})).catch(e=>test.error=String(e));}
+  });
+  const frame=(time,f)=>{
+   test.latest[index]={length:s.inputSources.length,rays:[...s.inputSources].map(src=>({id:id(src),ray:pose(f,src,v)})),retired:retired[index].map(src=>pose(f,src,v))};
+   test.frames++;s.requestAnimationFrame(frame);
+  };s.requestAnimationFrame(frame);
+ }
+ test.ready=true;
+})().catch(e=>test.error=String(e)+' '+e.stack);
+</script>

@@ -276,7 +276,9 @@ pub trait WeakReferenceableDomObjectWrap<D: DomTypes>:
 
 /// A trait to provide a function pointer to wrap function for
 /// DOM iterator interfaces.
-pub trait DomObjectIteratorWrap<D: DomTypes>: DomObjectWrap<D> + JSTraceable + Iterable {
+pub trait DomObjectIteratorWrap<D: DomTypes>:
+    Sized + DomObject + DomGlobalGeneric<D> + JSTraceable + Iterable
+{
     /// Function pointer to the wrap function for `IterableIterator<T>`
     #[expect(clippy::type_complexity)]
     const ITER_WRAP: unsafe fn(

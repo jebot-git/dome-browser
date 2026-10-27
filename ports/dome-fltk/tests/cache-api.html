@@ -1,0 +1,198 @@
+<!doctype html><meta charset="utf-8"><title>Native Cache API regression</title>
+<h1>Native Cache API</h1>
+<script>
+const results=[];
+function assert(value,message){if(!value)throw new Error(message)}
+async function test(name,body){
+ try{await Promise.race([body(),new Promise((_,reject)=>setTimeout(()=>reject(new Error('timeout')),6000))]);results.push({name,passed:true})}
+ catch(error){results.push({name,passed:false,error:String(error)})}
+}
+async function rejects(promise,name){let caught=false;try{await promise}catch(error){caught=true;assert(error.name===name,'Wrong rejection '+error)}assert(caught,'Missing rejection')}
+const url=path=>new URL(path,location.href).href;
+const bin=[0,255,0,13,128];
+const wasm=new Uint8Array([0,97,115,109,1,0,0,0]);
+const wasmInit={headers:{'Content-Type':'application/wasm'}};
+(async()=>{
+ const config=await(await fetch('/config.json')).json();
+ await test('native Cache and CacheStorage exposed in secure context',async()=>{
+  assert(isSecureContext,'Not secure');assert(typeof caches==='object'&&typeof Cache.prototype.put==='function','Cache unavailable');
+  assert(Function.prototype.toString.call(Cache.prototype.put).includes('[native code]'),'Non-native cache implementation');
+ });
+ if(typeof caches==='undefined'){await fetch('/report',{method:'POST',body:JSON.stringify({checks:results,phase:config.phase})});return}
+ if(config.phase==='read'){
+  await test('cache names survive browser restart',async()=>assert(JSON.stringify(await caches.keys())===JSON.stringify(['persist-name','persist-\ud800']),'Wrong persistent names'));
+  await test('response body and metadata survive browser restart',async()=>{
+   const cache=await caches.open('persist-name');const response=await cache.match('/persistent-resource');
+   assert(response&&response.status===201&&response.statusText==='Persisted'&&response.url===''&&response.type==='default','Metadata lost');
+   assert(response.headers.get('x-persist')==='yes','Headers lost');
+   assert(new Uint8Array(await response.arrayBuffer()).join()===bin.join(),'Binary body lost');
+  });
+  await test('unpaired cache names survive restart without aliasing replacement characters',async()=>{
+   assert(await caches.has('persist-\ud800')&&!await caches.has('persist-\ufffd'),'Name identity lost');
+   assert(await(await caches.match('/named-resource',{cacheName:'persist-\ud800'})).text()==='unpaired','Named match lost code units');
+  });
+  await test('cached WASM compiles after browser restart',async()=>{
+   const cache=await caches.open('persist-name');assert(await WebAssembly.compileStreaming(await cache.match('/persisted.wasm')) instanceof WebAssembly.Module,'No module');
+  });
+  await fetch('/report',{method:'POST',body:JSON.stringify({checks:results,phase:config.phase})});return;
+ }
+ for(const name of await caches.keys())await caches.delete(name);
+ const cache=await caches.open('first');
+ await test('constructors are illegal and instance tags correct',async()=>{
+  let caught=false;try{new Cache()}catch(error){caught=error instanceof TypeError}assert(caught,'Cache constructible');
+  caught=false;try{new CacheStorage()}catch(error){caught=error instanceof TypeError}assert(caught,'CacheStorage constructible');
+  assert(Object.prototype.toString.call(cache)==='[object Cache]','Wrong Cache tag');assert(caches===globalThis.caches,'caches not SameObject');
+ });
+ await test('cache name insertion order and repeated open',async()=>{
+  await caches.open('second');const again=await caches.open('first');assert(again!==cache,'Wrapper reused');
+  assert(JSON.stringify(await caches.keys())===JSON.stringify(['first','second']),'Wrong names/order');assert(await caches.has('first'),'Missing name');
+ });
+ await test('missing matches are undefined and arrays are frozen',async()=>{
+  assert(await cache.match('/missing')===undefined,'Missing match is not undefined');
+  const all=await cache.matchAll();const keys=await cache.keys();assert(all.length===0&&keys.length===0,'Not empty');
+  assert(Object.isFrozen(all)&&Object.isFrozen(keys),'Cache result arrays not frozen');
+ });
+ await test('put consumes Response but not Request',async()=>{
+  const request=new Request(url('/entry'));const response=new Response('hello',{status:201,statusText:'Stored',headers:{'X-Test':'yes','Content-Type':'text/plain'}});
+  await cache.put(request,response);assert(response.bodyUsed&&!request.bodyUsed,'Wrong body state');
+ });
+ await test('body metadata and guards restored',async()=>{
+  const response=await cache.match('/entry');assert(response.status===201&&response.statusText==='Stored'&&response.type==='default'&&response.url==='','Wrong metadata');
+  assert(response.headers.get('x-test')==='yes'&&await response.text()==='hello','Wrong body/headers');
+  let caught=false;try{response.headers.set('x-test','changed')}catch(error){caught=error instanceof TypeError}assert(caught,'Response headers mutable');
+  const keys=await cache.keys('/entry');caught=false;try{keys[0].headers.set('x-test','changed')}catch(error){caught=error instanceof TypeError}assert(caught,'Request headers mutable');
+ });
+ await test('repeated matches have independent bodies',async()=>{
+  const a=await cache.match('/entry'),b=await cache.match('/entry');assert(a!==b,'Response reused');
+  assert(await a.text()==='hello'&&await b.text()==='hello','Bodies not independent');
+ });
+ await test('binary body round trip',async()=>{
+  await cache.put('/binary',new Response(new Uint8Array(bin)));
+  assert(new Uint8Array(await(await cache.match('/binary')).arrayBuffer()).join()===bin.join(),'Bytes changed');
+ });
+ await test('null and empty body remain distinct',async()=>{
+  const empty=new Response('',{}),none=new Response(null);await cache.put('/empty',empty);await cache.put('/null',none);
+  assert(empty.bodyUsed&&!none.bodyUsed,'Wrong source body states');const a=await cache.match('/empty'),b=await cache.match('/null');
+  assert(a.body!==null&&b.body===null,'Body nullness lost');assert(await a.text()===''&&await b.text()==='','Wrong empty content');
+ });
+ await test('fragment ignored but search significant',async()=>{
+  await cache.put('/query?q=1#one',new Response('query'));assert(await(await cache.match('/query?q=1#two')).text()==='query','Fragment not ignored');
+  assert(await cache.match('/query?q=2')===undefined,'Search ignored by default');
+  assert(await(await cache.match('/query?q=2',{ignoreSearch:true})).text()==='query','ignoreSearch failed');
+ });
+ await test('method filtering and ignoreMethod do not consume query body',async()=>{
+  const post=new Request(url('/entry'),{method:'POST',body:'query'});
+  assert(await cache.match(post)===undefined,'POST matched');assert((await cache.keys(post)).length===0&&(await cache.matchAll(post)).length===0,'POST keys/matchAll matched');
+  assert(await cache.delete(post)===false,'POST deleted');assert(await(await cache.match(post,{ignoreMethod:true})).text()==='hello','ignoreMethod failed');
+  assert(!post.bodyUsed&&await post.text()==='query','Query body consumed');
+ });
+ await test('Vary selects variants and ignoreVary bypasses it',async()=>{
+  const en=new Request(url('/vary'),{headers:{'Accept-Language':'en'}}),fr=new Request(url('/vary'),{headers:{'Accept-Language':'fr'}});
+  await cache.put(en,new Response('en',{headers:{Vary:'Accept-Language'}}));await cache.put(fr,new Response('fr',{headers:{Vary:'Accept-Language'}}));
+  assert(await(await cache.match(en)).text()==='en'&&await(await cache.match(fr)).text()==='fr','Variant lost');
+  assert(await cache.match('/vary')===undefined,'Missing Vary matched');assert(await(await cache.match('/vary',{ignoreVary:true})).text()==='en','ignoreVary failed');
+  const keys=await cache.keys('/vary',{ignoreVary:true});assert(keys.length===2&&keys[0].headers.get('accept-language')==='en'&&keys[1].headers.get('accept-language')==='fr','Variant keys lost');
+ });
+ await test('Vary distinguishes absent and empty header',async()=>{
+  const request=new Request(url('/empty-vary'),{headers:{'X-Empty':''}});await cache.put(request,new Response('empty',{headers:{Vary:'X-Empty'}}));
+  assert(await cache.match('/empty-vary')===undefined,'Absent equals empty');assert(await(await cache.match(request)).text()==='empty','Empty header not matched');
+ });
+ await test('replacement moves entry to end and delete reports changes',async()=>{
+  const en=new Request(url('/vary'),{headers:{'Accept-Language':'en'}});await cache.put(en,new Response('en2',{headers:{Vary:'Accept-Language'}}));
+  const keys=await cache.keys('/vary',{ignoreVary:true});assert(keys[1].headers.get('accept-language')==='en','Replacement order lost');
+  assert(await cache.delete(en)&&!(await cache.delete(en)),'Delete result wrong');assert((await cache.keys('/vary',{ignoreVary:true})).length===1,'Wrong entries deleted');
+ });
+ await test('CacheStorage match uses name and cache creation order',async()=>{
+  const second=await caches.open('second');await cache.put('/shared',new Response('first'));await second.put('/shared',new Response('second'));
+  assert(await(await caches.match('/shared')).text()==='first','Wrong search order');
+  assert(await(await caches.match('/shared',{cacheName:'second'})).text()==='second','Named lookup wrong');
+  assert(await caches.match('/shared',{cacheName:'missing'})===undefined&&!(await caches.has('missing')),'Missing name created');
+ });
+ await test('deleted cache objects keep their identity',async()=>{
+  const old=await caches.open('ghost');await old.put('/ghost',new Response('old'));assert(await caches.delete('ghost'),'Delete missing');
+  assert(!await caches.has('ghost'),'Name retained');const fresh=await caches.open('ghost');assert(await fresh.match('/ghost')===undefined,'Fresh cache aliases old');
+  assert(await(await old.match('/ghost')).text()==='old','Old handle invalidated');await old.put('/late',new Response('late'));assert(await fresh.match('/late')===undefined,'Old write retargeted');
+ });
+ await test('unsupported write method or scheme rejects',async()=>{
+  await rejects(cache.put(new Request(url('/post'),{method:'POST'}),new Response('bad')),'TypeError');
+  await rejects(cache.put('data:text/plain,not-http',new Response('bad')),'TypeError');
+ });
+ await test('partial and Vary wildcard writes reject',async()=>{
+  await rejects(cache.put('/partial',new Response('bad',{status:206})),'TypeError');
+  await rejects(cache.put('/wildcard',new Response('bad',{headers:{Vary:'Accept-Language,*'}})),'TypeError');
+  assert(await cache.match('/partial')===undefined&&await cache.match('/wildcard')===undefined,'Invalid entry committed');
+ });
+ await test('used and locked response bodies reject',async()=>{
+  const used=new Response('used');await used.text();await rejects(cache.put('/used',used),'TypeError');
+  const locked=new Response('locked');const reader=locked.body.getReader();await rejects(cache.put('/locked',locked),'TypeError');assert(!locked.bodyUsed,'Locked response disturbed');reader.releaseLock();
+ });
+ await test('stream failure propagates original reason without committing',async()=>{
+  const reason={source:'cache-put'};const response=new Response(new ReadableStream({start(controller){controller.error(reason)}}));
+  let caught=false;try{await cache.put('/broken',response)}catch(error){caught=true;assert(error===reason,'Error identity lost')}
+  assert(caught&&await cache.match('/broken')===undefined,'Failed body committed');
+ });
+ await test('asynchronous puts settle the matching operation',async()=>{
+  let release;const slow=new Response(new ReadableStream({start(controller){release=()=>{controller.enqueue(new TextEncoder().encode('slow'));controller.close()}}}));
+  let slowDone=false;const pending=cache.put('/slow',slow).then(()=>slowDone=true);await cache.put('/fast',new Response('fast'));
+  assert(!slowDone,'Wrong promise settled');release();await pending;
+  assert(await(await cache.match('/slow')).text()==='slow'&&await(await cache.match('/fast')).text()==='fast','Body mapped to wrong put');
+ });
+ await test('request metadata survives keys',async()=>{
+  const request=new Request(url('/metadata'),{mode:'cors',credentials:'omit',cache:'no-store',redirect:'manual',referrerPolicy:'no-referrer',integrity:'sha256-example',keepalive:true,headers:{'X-Key':'value'}});
+  await cache.put(request,new Response('metadata'));const key=(await cache.keys('/metadata'))[0];
+  for(const field of ['method','mode','credentials','cache','redirect','referrerPolicy','integrity','keepalive'])assert(key[field]===request[field],'Lost '+field);
+  assert(key.headers.get('x-key')==='value'&&!key.signal.aborted,'Headers/signal lost');
+ });
+ await test('add and addAll fetch bodies with real metadata',async()=>{
+  await cache.add('/asset?one');await cache.addAll(['/asset?two','/asset?three']);const response=await cache.match('/asset?one');
+  assert(response.type==='basic'&&response.url===url('/asset?one')&&await response.text()==='asset:one','Fetch metadata/body lost');
+ });
+ await test('addAll empty list and invalid input behavior',async()=>{
+  assert(await cache.addAll([])===undefined,'Empty result not undefined');
+  await rejects(cache.addAll(['/asset?unused',new Request(url('/post'),{method:'POST'})]),'TypeError');
+  assert(await cache.match('/asset?unused')===undefined,'Invalid batch wrote');
+ });
+ await test('failed addAll leaves all previous contents intact',async()=>{
+  await cache.put('/asset?atomic',new Response('old'));
+  await rejects(cache.addAll(['/asset?atomic','/not-found']),'TypeError');
+  assert(await(await cache.match('/asset?atomic')).text()==='old'&&await cache.match('/not-found')===undefined,'Partial batch committed');
+ });
+ await test('duplicate addAll batch rejects atomically',async()=>{
+  await rejects(cache.addAll(['/asset?duplicate','/asset?duplicate#fragment']),'InvalidStateError');
+  assert(await cache.match('/asset?duplicate')===undefined,'Duplicate batch committed');
+ });
+ await test('add respects an aborted request signal',async()=>{
+  const controller=new AbortController();controller.abort();await rejects(cache.add(new Request(url('/asset?aborted'),{signal:controller.signal})),'AbortError');
+ });
+ await test('opaque response stays unreadable and can be reused',async()=>{
+  const opaque=await fetch(config.crossOrigin+'/opaque',{mode:'no-cors'});assert(opaque.type==='opaque','Not opaque');
+  await cache.put('/opaque',opaque);await cache.put('/opaque-copy',opaque);assert(!opaque.bodyUsed,'Opaque source consumed');
+  const response=await cache.match('/opaque');assert(response.type==='opaque'&&response.status===0&&response.url===''&&response.body===null&&[...response.headers].length===0,'Opaque data exposed');
+  assert(await response.text()===''&&!response.bodyUsed,'Opaque body readable');await cache.put('/opaque-again',response.clone());
+ });
+ await test('opaque Vary wildcard is filtered',async()=>{
+  const opaque=await fetch(config.crossOrigin+'/opaque-vary',{mode:'no-cors'});await cache.put('/opaque-vary',opaque);assert((await cache.match('/opaque-vary')).type==='opaque','Filtered Vary rejected');
+ });
+ await test('dedicated worker shares this origin cache storage',async()=>{
+  await cache.put('/worker-share',new Response('window'));
+  const source=`onmessage=async()=>{try{const cache=await caches.open('first');const body=await(await cache.match(${JSON.stringify(url('/worker-share'))})).text();const other=await caches.open('worker-created');await other.put(${JSON.stringify(url('/from-worker'))},new Response('worker'));postMessage({body})}catch(error){postMessage({error:String(error)})}}`;
+  const objectURL=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));const worker=new Worker(objectURL);
+  try{const result=await new Promise((resolve,reject)=>{worker.onmessage=event=>resolve(event.data);worker.onerror=reject;worker.postMessage('start')});assert(result.body==='window','Worker cache failed '+JSON.stringify(result));assert(await(await caches.match('/from-worker',{cacheName:'worker-created'})).text()==='worker','Worker write invisible')}
+  finally{worker.terminate();URL.revokeObjectURL(objectURL)}
+ });
+ await test('different origin has a separate cache namespace',async()=>{
+  await cache.put('/secret',new Response('primary'));const frame=document.createElement('iframe');
+  const result=new Promise(resolve=>{function listener(event){if(event.source===frame.contentWindow&&event.origin===config.crossOrigin){removeEventListener('message',listener);resolve(event.data)}}addEventListener('message',listener)});
+  frame.src=config.crossOrigin+'/foreign-document?primary='+encodeURIComponent(location.origin);document.body.append(frame);
+  try{const data=await result;assert(data.names&&data.names.length===0,'Foreign namespace leaked '+JSON.stringify(data));assert(!await caches.has('foreign'),'Foreign name leaked');assert(await(await cache.match('/secret')).text()==='primary','Primary data changed')}
+  finally{frame.remove()}
+ });
+ await test('cached WASM supports compileStreaming',async()=>{
+  await cache.put('/module.wasm',new Response(wasm,wasmInit));assert(await WebAssembly.compileStreaming(await cache.match('/module.wasm')) instanceof WebAssembly.Module,'No module');
+ });
+ for(const name of await caches.keys())await caches.delete(name);
+ const persistent=await caches.open('persist-name');await persistent.put('/persistent-resource',new Response(new Uint8Array(bin),{status:201,statusText:'Persisted',headers:{'X-Persist':'yes'}}));await persistent.put('/persisted.wasm',new Response(wasm,wasmInit));
+ const named=await caches.open('persist-\ud800');await named.put('/named-resource',new Response('unpaired'));
+ await fetch('/report',{method:'POST',body:JSON.stringify({checks:results,phase:config.phase})});
+})().catch(async error=>{results.push({name:'fixture completion',passed:false,error:String(error)});await fetch('/report',{method:'POST',body:JSON.stringify({checks:results})})});
+</script>

@@ -325,6 +325,11 @@ impl<'dom> LayoutDom<'dom, Node> {
             .unwrap_or_default()
     }
 
+    pub(crate) fn image_is_ready_for_fallback(self) -> bool {
+        self.downcast::<HTMLImageElement>()
+            .is_some_and(|image_element| image_element.image_is_ready_for_fallback())
+    }
+
     pub(crate) fn canvas_data(self) -> Option<HTMLCanvasData> {
         self.downcast::<HTMLCanvasElement>()
             .map(|canvas| canvas.data())

@@ -1,0 +1,25 @@
+<!doctype html><meta charset="utf-8"><title>Cache batch failure ordering</title>
+<script>
+(async()=>{
+ const checks=[];
+ const check=(name,passed,error)=>checks.push({name,passed,...(error?{error:String(error)}:{})});
+ const cache=await caches.open('batch-error-ordering');
+ for(let iteration=0;iteration<3;iteration++)for(const mode of ['404','206','vary']){
+  const stream='/batch-stream?case='+mode+'-'+iteration;
+  const fail='/batch-failure?mode='+mode+'&case='+iteration;
+  await cache.put(stream,new Response('original'));
+  let reason;
+  try{await cache.addAll([stream,fail])}catch(error){reason=error}
+  check(mode+' first failure remains TypeError '+iteration,reason instanceof TypeError,reason);
+  const retained=await cache.match(stream),missing=await cache.match(fail);
+  check(mode+' failed batch stays atomic '+iteration,!!retained&&await retained.text()==='original'&&missing===undefined);
+ }
+ const success='/batch-stream?case=success';
+ await cache.add(success);
+ check('complete streaming response commits normally',(await(await cache.match(success)).text())==='body'+'x'.repeat(100));
+ const controller=new AbortController();const reason={sentinel:'caller abort'};controller.abort(reason);
+ let caught;try{await cache.add(new Request('/asset?caller-abort',{signal:controller.signal}))}catch(error){caught=error}
+ check('caller abort retains original reason',caught===reason);
+ await fetch('/report',{method:'POST',body:JSON.stringify({checks})});
+})().catch(error=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[{name:'fixture setup',passed:false,error:String(error)}]})}));
+</script>

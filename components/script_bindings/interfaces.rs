@@ -143,6 +143,10 @@ pub trait TestBindingHelpers {
     fn condition_unsatisfied(cx: &mut JSContext, global: HandleObject) -> bool;
 }
 
+pub trait CacheApiHelpers {
+    fn is_enabled(cx: &mut JSContext, global: HandleObject) -> bool;
+}
+
 pub trait WebGL2RenderingContextHelpers {
     fn is_webgl2_enabled(cx: &mut JSContext, global: HandleObject) -> bool;
 }

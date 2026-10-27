@@ -28,17 +28,25 @@ pub fn write(path: &Path, text: &str) -> io::Result<()> {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SavedTab { pub url: String, pub zoom: f32 }
+pub struct SavedTab {
+    pub url: String, pub zoom: f32,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub protocol_state: Option<String>,
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Session { pub version: u32, pub tabs: Vec<SavedTab>, pub active: usize }
 impl Session {
     pub fn parse(text: &str) -> io::Result<Self> {
-        let session: Self = serde_json::from_str(text).map_err(|e| invalid(&e.to_string()))?;
+        let mut session: Self = serde_json::from_str(text).map_err(|e| invalid(&e.to_string()))?;
         if session.version != 1 || session.tabs.is_empty() || session.tabs.len() > 100 || session.active >= session.tabs.len() {
             return Err(invalid("Unsupported or invalid session"));
         }
-        for tab in &session.tabs {
-            if !restorable(&tab.url) || !tab.zoom.is_finite() || !(0.25..=5.).contains(&tab.zoom) {
+        for tab in &mut session.tabs {
+            tab.url=persistent_url(&tab.url).ok_or_else(||invalid("Invalid saved tab URL"))?;
+            if tab.protocol_state.as_deref().is_some_and(|state|state!="abstract" || !tab.url.starts_with("scroll://")) {
+                return Err(invalid("Invalid saved protocol view"));
+            }
+            if !tab.zoom.is_finite() || !(0.25..=5.).contains(&tab.zoom) {
                 return Err(invalid("Invalid saved tab"));
             }
         }
@@ -46,16 +54,20 @@ impl Session {
     }
     pub fn load(path: &Path) -> io::Result<Self> { Self::parse(&read(path)?) }
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        let text = serde_json::to_string_pretty(self).map_err(io::Error::other)? + "\n";
-        Self::parse(&text)?;
+        let normalized=Self::parse(&serde_json::to_string(self).map_err(io::Error::other)?)?;
+        let text = serde_json::to_string_pretty(&normalized).map_err(io::Error::other)? + "\n";
         write(path, &text)
     }
 }
 pub fn restorable(text: &str) -> bool {
-    Url::parse(text).is_ok_and(|u| {
-        u.username().is_empty() && u.password().is_none() &&
-        (matches!(u.scheme(), "http" | "https" | "file") || text == "about:blank")
-    })
+    persistent_url(text).is_some()
+}
+pub fn persistent_url(text:&str)->Option<String> {
+    let url=Url::parse(text).ok()?;
+    if matches!(url.scheme(),"http"|"https"|"file") || text=="about:blank" {
+        return (url.username().is_empty() && url.password().is_none()).then(||text.to_owned());
+    }
+    crate::smallnet::persistent_url(&url).map(|url|url.to_string())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,8 +108,8 @@ impl Bookmarks {
                 let (id, rest) = line.split_once(char::is_whitespace).ok_or_else(|| invalid("Invalid bookmark"))?;
                 let (url, title) = rest.trim_start().split_once(char::is_whitespace).ok_or_else(|| invalid("Bookmark needs a title"))?;
                 let section = id.parse().map_err(|_| invalid("Invalid section number"))?;
-                if !restorable(url) { return Err(invalid("Unsupported bookmark URL")); }
-                entries.push(Bookmark { section, url: url.into(), title: unescape(title.trim()) });
+                let url=persistent_url(url).ok_or_else(||invalid("Unsupported bookmark URL"))?;
+                entries.push(Bookmark { section, url, title: unescape(title.trim()) });
             } else { return Err(invalid("Unrecognized bm.txt line")); }
         }
         if sections.is_empty() { sections.push((0, "Unclassified".into())); }
@@ -116,11 +128,11 @@ impl Bookmarks {
         text
     }
     pub fn add(&mut self, section: &str, url: &str, title: &str) -> io::Result<()> {
-        if !restorable(url) { return Err(invalid("This URL cannot be bookmarked")); }
+        let url=persistent_url(url).ok_or_else(||invalid("This URL cannot be bookmarked"))?;
         let section = clean(section); let section = if section.trim().is_empty() { "Unclassified" } else { section.trim() };
         let id = self.sections.iter().position(|s| s == section).unwrap_or_else(|| { self.sections.push(section.into()); self.sections.len()-1 });
         if let Some(b) = self.entries.iter_mut().find(|b| b.section == id && b.url == url) { b.title = clean(title); }
-        else { self.entries.push(Bookmark { section: id, url: url.into(), title: clean(title) }); }
+        else { self.entries.push(Bookmark { section: id, url, title: clean(title) }); }
         Ok(())
     }
     pub fn merge(&mut self, other: Self) -> io::Result<()> {
@@ -151,9 +163,10 @@ impl History {
         Ok(history)
     }
     pub fn visit(&mut self, url: &str) -> bool {
-        if !restorable(url) || url == "about:blank" || self.urls.first().is_some_and(|s| s == url) { return false; }
-        self.urls.retain(|old| old != url);
-        self.urls.insert(0, url.into());
+        let Some(url)=persistent_url(url) else{return false;};
+        if url == "about:blank" || self.urls.first().is_some_and(|s| *s == url) { return false; }
+        self.urls.retain(|old| *old != url);
+        self.urls.insert(0, url);
         self.urls.truncate(2000);
         let mut size = 0;
         self.urls.retain(|url| { size += url.len() + 1; size <= 4 * 1024 * 1024 });
@@ -168,6 +181,17 @@ impl History {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn protocol_view_roundtrips_and_old_sessions_default_to_resource() {
+        let old=r#"{"version":1,"tabs":[{"url":"scroll://host/resource?lookup#section","zoom":1.25}],"active":0}"#;
+        let mut session=Session::parse(old).unwrap();assert_eq!(session.tabs[0].protocol_state,None);
+        session.tabs[0].protocol_state=Some("abstract".into());
+        assert_eq!(Session::parse(&serde_json::to_string(&session).unwrap()).unwrap(),session);
+        for (url,state) in [("https://host/resource","abstract"),("gemini://host/resource","abstract"),("scroll://host/resource","unknown")] {
+            let invalid=serde_json::json!({"version":1,"tabs":[{"url":url,"zoom":1.,"protocol_state":state}],"active":0});
+            assert!(Session::parse(&invalid.to_string()).is_err());
+        }
+    }
     #[test]
     fn dillo_sections_unicode_entities_and_roundtrip() {
         let text = ":s0: News & blogs\n:s1: 日本語\ns0 https://example.org/a?a=1&b=2 A &lt; B &amp; C\ns1 https://example.jp/ 日本語 &#x2665;\n";
@@ -186,7 +210,7 @@ mod tests {
     }
     #[test]
     fn sessions_validate_active_tab_zoom_and_urls() {
-        let s = Session { version: 1, active: 1, tabs: vec![SavedTab { url: "https://example.org".into(), zoom: 1.25 }, SavedTab { url: "about:blank".into(), zoom: 1. }] };
+        let s = Session { version: 1, active: 1, tabs: vec![SavedTab { url: "https://example.org".into(), zoom: 1.25, protocol_state:None }, SavedTab { url: "about:blank".into(), zoom: 1., protocol_state:None }] };
         let text = serde_json::to_string(&s).unwrap(); assert_eq!(Session::parse(&text).unwrap(), s);
         for url in ["javascript:alert(1)", "data:text/html,x", "https://user:password@example.org"] { assert!(!restorable(url)); }
         let mut s = s; s.active = 2; assert!(Session::parse(&serde_json::to_string(&s).unwrap()).is_err());
@@ -213,5 +237,46 @@ mod tests {
         assert!(!h.visit("https://user:secret@example.org/"));
         assert!(!h.visit("about:blank"));
         assert_eq!(h.urls, ["https://example.org/a", "https://example.org/b"]);
+    }
+    #[test]
+    fn native_protocols_roundtrip_across_all_profile_formats() {
+        let urls=["whois://example.org/?q=Smith","rwhois://example.org/auth-area=example.org?q=domain+example.org","fsp://example.org/archive/readme.txt","titan://example.org/resource?name=Alice#part","scorpion://example.org/file.scorp?find%20text#section","scorpions://example.org:1517/file.scorp#part","gopher://example.org/0/readme%20file#part","gopher+://example.org/0/form%09%09%3F","gophers://example.org:70/0/readme%20file#part",
+            "gemini://example.org/find?two%20words#part","mercury://example.org/find?two%20words#part","guppy://example.org/find?two%20words#part","dict://example.org/m:two%20words:wn:prefix:2#part","scroll://example.org/find?two%20words#1.2",
+            "cso://example.org/?q=Ren%C3%A9e&field=name&return=name%2Cemail#part","ph://example.org/?q=fixture","news:comp.test","news://example.org/Case%2FId@Example.invalid#part","nntp://example.org/comp.test/7?part=1","news://example.org/comp.test?before=51","nex://example.org/readme.txt","spartan://example.org/page","finger://alice@example.org/",
+            "ftp://example.org/pub/readme.txt;type=a#part"];
+        let session=Session {version:1,active:3,tabs:urls.iter().enumerate().map(|(i,url)|SavedTab {url:(*url).into(),zoom:1.+i as f32/10.,protocol_state:None}).collect()};
+        assert_eq!(Session::parse(&serde_json::to_string(&session).unwrap()).unwrap(),session);
+        let mut bookmarks=Bookmarks::default();let mut history=History::default();
+        for url in urls {
+            bookmarks.add("Smallnet 世界",url,"Native <title> & text").unwrap();assert!(history.visit(url));
+        }
+        assert_eq!(Bookmarks::parse(&bookmarks.text()).unwrap(),bookmarks);
+        let root=std::env::temp_dir().join(format!("dome-native-profile-{}",uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        session.save(&root.join("session.json")).unwrap();history.save(&root.join("hs.txt")).unwrap();bookmarks.save(&root.join("bm.txt")).unwrap();
+        assert_eq!(Session::load(&root.join("session.json")).unwrap(),session);
+        assert_eq!(History::load(&root.join("hs.txt")).unwrap(),history);
+        assert_eq!(Bookmarks::load(&root.join("bm.txt")).unwrap(),bookmarks);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn restored_resources_keep_lookup_inputs_without_repeating_submissions() {
+        for (input,expected) in [
+            ("spartan://anon@example.org/submit?one%20load#part","spartan://example.org/submit#part"),
+            ("ftp://fixture:one-load@example.org/pub/readme.txt","ftp://example.org/pub/readme.txt"),
+            ("gopher+://example.org/0/form%09%09%2B%091%0D%0A%2B3%0D%0Aone","gopher+://example.org/0%2Fform%09%09%3F"),
+            ("finger://alice@example.org/","finger://alice@example.org/"),
+            ("gemini://example.org/find?two%20words","gemini://example.org/find?two%20words"),
+            ("scroll://example.org/find?two%20words","scroll://example.org/find?two%20words"),
+        ] {
+            assert_eq!(persistent_url(input).as_deref(),Some(expected));
+            let mut bookmarks=Bookmarks::default();bookmarks.add("Native",input,"Title").unwrap();assert_eq!(bookmarks.entries[0].url,expected);
+            let mut history=History::default();assert!(history.visit(input));assert_eq!(history.urls,[expected]);
+            let session=format!(r#"{{"version":1,"active":0,"tabs":[{{"url":"{input}","zoom":1.0}}]}}"#);
+            assert_eq!(Session::parse(&session).unwrap().tabs[0].url,expected);
+        }
+        for url in ["dome-smallnet-input:temporary","mailto:person@example.org","magnet:?xt=fixture","gopher://user@example.org/", "nex://example.org/?input", "finger://alice:password@example.org/", "scroll://example.org/file;parameters", "gemini://example.org:0/"] {
+            assert!(!restorable(url));
+        }
     }
 }

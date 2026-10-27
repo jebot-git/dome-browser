@@ -31,6 +31,8 @@ pub(crate) enum TaskSourceName {
     /// <https://fetch.spec.whatwg.org/#deferred-fetch-task-source>
     DeferredFetch,
     DOMManipulation,
+    /// <https://html.spec.whatwg.org/multipage/#javascript-engine-task-source>
+    JavaScriptEngine,
     FileReading,
     /// <https://drafts.csswg.org/css-font-loading/#task-source>
     FontLoading,
@@ -68,6 +70,7 @@ impl From<TaskSourceName> for ScriptThreadEventCategory {
             TaskSourceName::DatabaseAccess => ScriptThreadEventCategory::ScriptEvent,
             TaskSourceName::DeferredFetch => ScriptThreadEventCategory::NetworkEvent,
             TaskSourceName::DOMManipulation => ScriptThreadEventCategory::ScriptEvent,
+            TaskSourceName::JavaScriptEngine => ScriptThreadEventCategory::ScriptEvent,
             TaskSourceName::FileReading => ScriptThreadEventCategory::FileRead,
             TaskSourceName::FontLoading => ScriptThreadEventCategory::FontLoading,
             TaskSourceName::Geolocation => ScriptThreadEventCategory::GeolocationEvent,

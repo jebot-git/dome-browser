@@ -582,6 +582,8 @@ impl OpenXRInput {
             grip_origin,
             hand,
             button_values,
+            button_pressed: vec![],
+            button_touched: vec![],
             axis_values,
             input_changed,
         };
@@ -607,6 +609,15 @@ impl OpenXRInput {
             target_ray_mode: TargetRayMode::TrackedPointer,
             supports_grip: true,
             profiles: vec![],
+            gamepad: Some(webxr_api::GamepadLayout {
+                buttons: self.action_buttons_common.len() + match self.handedness {
+                    Handedness::Left => self.action_buttons_left.len(),
+                    Handedness::Right => self.action_buttons_right.len(),
+                    _ => 0,
+                },
+                axes: self.action_axes_common.len(),
+                xr_standard: true,
+            }),
             hand_support,
         }
     }

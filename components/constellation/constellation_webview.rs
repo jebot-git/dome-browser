@@ -166,6 +166,7 @@ impl ConstellationWebView {
             id: self.webview_id,
             theme: Cell::new(self.theme),
             has_system_focus: Cell::new(self.has_system_focus),
+            hidden: Cell::new(self.hidden),
         }
     }
 
@@ -245,6 +246,7 @@ impl ConstellationWebView {
                 synthetic_mouse_leave_event.event.event =
                     InputEvent::MouseLeftViewport(MouseLeftViewportEvent {
                         focus_moving_to_another_iframe,
+                        is_compatibility_event: false,
                     });
 
                 let _ = pipeline

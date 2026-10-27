@@ -30,6 +30,7 @@ impl PerformanceMeasure {
         name: DOMString,
         start_time: CrossProcessInstant,
         duration: Duration,
+        time_origin: CrossProcessInstant,
     ) -> PerformanceMeasure {
         PerformanceMeasure {
             entry: PerformanceEntry::new_inherited(
@@ -37,6 +38,7 @@ impl PerformanceMeasure {
                 EntryType::Measure,
                 Some(start_time),
                 duration,
+                time_origin,
             ),
             detail: Default::default(),
         }
@@ -48,11 +50,15 @@ impl PerformanceMeasure {
         name: DOMString,
         start_time: CrossProcessInstant,
         duration: Duration,
+        time_origin: CrossProcessInstant,
     ) -> DomRoot<PerformanceMeasure> {
         reflect_dom_object(
             cx,
             Box::new(PerformanceMeasure::new_inherited(
-                name, start_time, duration,
+                name,
+                start_time,
+                duration,
+                time_origin,
             )),
             global,
         )

@@ -1,0 +1,51 @@
+<!doctype html><meta charset="utf-8"><title>Module evaluation promises and top-level await</title>
+<script>
+(async()=>{
+ const mode=new URLSearchParams(location.search).get('case');const checks=[],errors=[],rejections=[],workerErrors=[],ownerErrors=[];let worker=null,started=false,workerDone=false;
+ globalThis.moduleDone=false;globalThis.errorReady=mode==='syntax-error';globalThis.expectedModuleReason=mode.includes('undefined')?undefined:new Error('MODULE_EVALUATION_SENTINEL');
+ addEventListener('error',event=>{errors.push({same:event.error===globalThis.expectedModuleReason,ready:globalThis.errorReady,syntax:event.error instanceof SyntaxError,message:event.message});if(mode!=='async-unhandled')event.preventDefault()});
+ addEventListener('unhandledrejection',event=>{rejections.push(typeof event.reason);event.preventDefault()});
+ const delay='await new Promise(resolve=>setTimeout(resolve,80));';
+ const data=source=>'data:text/javascript,'+encodeURIComponent(source);
+ let source='';
+ switch(mode){
+  case 'sync-ok':source='globalThis.moduleDone=true';break;
+  case 'await-ok':source='await Promise.resolve();globalThis.moduleDone=true';break;
+  case 'timer-ok':source=delay+'globalThis.moduleDone=true';break;
+  case 'dependency-ok':source='import {value} from '+JSON.stringify(data(delay+'export const value=42'))+';globalThis.moduleDone=value===42';break;
+  case 'sync-error':case 'sync-undefined':source='globalThis.errorReady=true;throw globalThis.expectedModuleReason';break;
+  case 'await-error':source='await Promise.resolve();globalThis.errorReady=true;throw globalThis.expectedModuleReason';break;
+  case 'timer-undefined':case 'async-unhandled':source=delay+'globalThis.errorReady=true;throw globalThis.expectedModuleReason';break;
+  case 'syntax-error':source='export const = invalid';break;
+  case 'window-pending':source='globalThis.moduleDone=true;await new Promise(()=>{})';break;
+  case 'dynamic-ok':
+   import(data(delay+'export const value=42')).then(m=>{globalThis.moduleDone=m.value===42});break;
+  case 'dynamic-error':
+   import(data(delay+'throw globalThis.expectedModuleReason')).catch(error=>{globalThis.moduleDone=error===globalThis.expectedModuleReason});break;
+  default:
+   if(!mode.startsWith('worker-'))throw new Error('Unknown module case');
+   source="let ready=false;const expected=new Error('WORKER_MODULE_SENTINEL');addEventListener('error',event=>{event.preventDefault();postMessage({kind:'error',same:event.error===expected,ready})});postMessage({kind:'started'});";
+   source+=mode==='worker-pending'?'await new Promise(()=>{});':mode==='worker-busy'?'while(true){}':delay+"ready=true;"+(mode==='worker-error'?'throw expected;':"postMessage({kind:'done'});");
+   const url=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));worker=new Worker(url,{type:'module'});
+   worker.addEventListener('error',event=>{ownerErrors.push(event.message);event.preventDefault()});
+   worker.onmessage=event=>{if(event.data.kind==='started')started=true;else if(event.data.kind==='done')workerDone=true;else workerErrors.push(event.data)};source='';
+ }
+ if(source){const script=document.createElement('script');script.type='module';script.textContent=source;document.head.appendChild(script)}
+ await new Promise(resolve=>setTimeout(resolve,500));
+ const check=(name,passed)=>checks.push({name,passed});
+ if(mode.startsWith('worker-')){
+  check('module worker starts',started);check('worker owner receives no unexpected error',ownerErrors.length===0);check('Window receives no worker error',errors.length===0);
+  check('worker completion matches case',workerDone===(mode==='worker-ok'));
+  check('worker evaluation reports only actual rejection',workerErrors.length===(mode==='worker-error'?1:0));
+  if(mode==='worker-error')check('worker rejection preserves reason and waits for await',workerErrors.length===1&&workerErrors[0].same&&workerErrors[0].ready);
+  worker.terminate();
+ }else{
+  const failure=['sync-error','sync-undefined','await-error','timer-undefined','async-unhandled','syntax-error'].includes(mode);
+  check('module reports only actual rejection',errors.length===(failure?1:0));
+  if(failure){check('module error reports after evaluation reaches throw',errors.length===1&&errors[0].ready);check('module preserves rejection reason',errors.length===1&&(mode==='syntax-error'?errors[0].syntax:errors[0].same))}
+  else check('module completes expected work',globalThis.moduleDone);
+ }
+ check('module evaluation has no duplicate unhandled rejection',rejections.length===0);
+ await fetch('/report',{method:'POST',body:JSON.stringify({checks,mode,errors,rejections,workerErrors,ownerErrors})});
+})().catch(error=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[{name:'fixture completes',passed:false,error:String(error)}]})}));
+</script>

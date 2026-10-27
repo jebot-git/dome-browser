@@ -94,6 +94,8 @@ impl EncodedBytes<'_> {
 enum DOMStringType {
     /// A simple rust string
     Rust(String),
+    /// Ill-formed UTF-16 retained until an API explicitly requests a Rust string.
+    Utf16(Vec<u16>),
     /// A JS String stored in mozjs.
     #[zeroize(skip)]
     JSString(Box<Heap<*mut JSString>>),
@@ -109,6 +111,7 @@ impl Clone for DOMStringType {
     fn clone(&self) -> Self {
         match self {
             Self::Rust(arg0) => Self::Rust(arg0.clone()),
+            Self::Utf16(units) => Self::Utf16(units.clone()),
             Self::JSString(rooted_box) => Self::JSString(Heap::boxed(rooted_box.get())),
             #[cfg(test)]
             Self::Latin1Vec(arg0) => Self::Latin1Vec(arg0.clone()),
@@ -136,6 +139,7 @@ impl DOMStringType {
     unsafe fn as_raw_bytes(&self) -> &[u8] {
         match self {
             DOMStringType::Rust(s) => s.as_bytes(),
+            DOMStringType::Utf16(_) => unreachable!("Convert before requesting encoded bytes"),
             DOMStringType::JSString(rooted_traceable_box) => unsafe {
                 get_latin1_string_bytes(rooted_traceable_box)
             },
@@ -148,6 +152,7 @@ impl DOMStringType {
     fn ensure_rust_string(&mut self) -> &mut String {
         let new_string = match self {
             DOMStringType::Rust(string) => return string,
+            DOMStringType::Utf16(units) => String::from_utf16_lossy(units),
             DOMStringType::JSString(rooted_traceable_box) => {
                 let cx = unsafe { JSContext::get_from_thread() };
                 let cx = cx.as_ref().expect("JS runtime has shut down");
@@ -238,7 +243,7 @@ unsafe impl Trace for DOMStringType {
     unsafe fn trace(&self, tracer: *mut js::jsapi::JSTracer) {
         unsafe {
             match self {
-                DOMStringType::Rust(_s) => {},
+                DOMStringType::Rust(_) | DOMStringType::Utf16(_) => {},
                 DOMStringType::JSString(rooted_traceable_box) => rooted_traceable_box.trace(tracer),
                 #[cfg(test)]
                 DOMStringType::Latin1Vec(_s) => {},
@@ -252,6 +257,7 @@ impl malloc_size_of::MallocSizeOf for DOMStringType {
     fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
         match self {
             DOMStringType::Rust(s) => s.size_of(ops),
+            DOMStringType::Utf16(units) => units.size_of(ops),
             DOMStringType::JSString(_rooted_traceable_box) => {
                 // Managed by JS Engine
                 0
@@ -267,6 +273,7 @@ impl std::fmt::Debug for DOMStringType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DOMStringType::Rust(s) => f.debug_struct("DOMString").field("rust_string", s).finish(),
+            DOMStringType::Utf16(units) => f.debug_tuple("UTF16").field(units).finish(),
             DOMStringType::JSString(_rooted_traceable_box) => f.debug_struct("DOMString").finish(),
             #[cfg(test)]
             DOMStringType::Latin1Vec(s) => f
@@ -297,19 +304,9 @@ impl std::fmt::Debug for DOMStringType {
 /// what to do with values being passed from JavaScript to Rust that contain
 /// unpaired surrogates.
 ///
-/// The hypothesis is that it does not matter much how exactly those values are
-/// transformed, because  passing unpaired surrogates into the DOM is very rare.
-/// Instead Servo will replace the unpaired surrogate by a U+FFFD replacement
-/// character.
-///
-/// Currently, the lack of crash reports about this issue provides some
-/// evidence to support the hypothesis. This evidence will hopefully be used to
-/// convince other browser vendors that it would be safe to replace unpaired
-/// surrogates at the boundary between JavaScript and native code. (This would
-/// unify the `DOMString` and `USVString` types, both in the WebIDL standard
-/// and in Servo.)
-///
-/// Note: the above appears refuted by the needs of `dom/encoding`.
+/// Ill-formed UTF-16 is retained for code-unit-preserving APIs such as CacheStorage.
+/// Converting to a Rust string via `str()` remains lossy; use `to_code_units()`
+/// before that conversion when exact WebIDL DOMString identity is required.
 ///
 /// This string class will keep either the Reference to the mozjs object alive
 /// or will have an internal rust string.
@@ -375,7 +372,6 @@ impl DOMString {
         // Step 2: Let x be ? ToString(V).
         // Step 3: Return the IDL DOMString value that represents the same sequence of
         // code units as the one the JavaScript String value x represents.
-        // Note: this implementation does not preserve the same sequence of code units.
         rooted!(&in(cx) let string_ptr = unsafe { js::rust::ToString(cx, value) });
         unsafe { DOMString::from_raw_js_string(cx, *string_ptr) }
     }
@@ -400,10 +396,23 @@ impl DOMString {
                 let h = Heap::boxed(string_ptr);
                 DOMStringType::JSString(h)
             } else {
-                // We need to convert the string anyway as it is not just latin1
-                DOMStringType::Rust(unsafe {
-                    jsstr_to_string(cx, NonNull::new(string_ptr).unwrap())
-                })
+                // Copy before any allocating operation can move the JS characters.
+                let mut length = 0;
+                let units = unsafe {
+                    let chars = js::rust::wrappers2::JS_GetTwoByteStringCharsAndLength(
+                        cx,
+                        string_ptr,
+                        &mut length,
+                    );
+                    if chars.is_null() {
+                        return Err(DOMStringErrorType::JSConversionError);
+                    }
+                    slice::from_raw_parts(chars, length).to_vec()
+                };
+                match String::from_utf16(&units) {
+                    Ok(string) => DOMStringType::Rust(string),
+                    Err(_) => DOMStringType::Utf16(units),
+                }
             };
             Ok(TracedDOMString(RefCell::new(inner)).root())
         }
@@ -412,6 +421,15 @@ impl DOMString {
     /// Creates a DOMString from a `&'static str` reference. More efficient than allocating the string.
     pub fn from_static(s: &'static str) -> DOMString {
         TracedDOMString(RefCell::new(DOMStringType::RustStatic(s))).root()
+    }
+
+    /// Construct a string without replacing unpaired UTF-16 surrogates.
+    pub fn from_code_units(units: Vec<u16>) -> Self {
+        let inner = match String::from_utf16(&units) {
+            Ok(string) => DOMStringType::Rust(string),
+            Err(_) => DOMStringType::Utf16(units),
+        };
+        TracedDOMString(RefCell::new(inner)).root()
     }
 
     pub fn traced(self) -> TracedDOMString {
@@ -452,6 +470,7 @@ impl TracedDOMString {
     fn debug_js(&self, cx: &JSContext) {
         match *self.0.borrow() {
             DOMStringType::Rust(ref s) => info!("Rust String ({})", s),
+            DOMStringType::Utf16(ref units) => info!("UTF-16 String ({:?})", units),
             DOMStringType::JSString(ref rooted_traceable_box) => {
                 let s = unsafe {
                     jsstr_to_string(cx, NonNull::new(rooted_traceable_box.get()).unwrap())
@@ -483,9 +502,13 @@ impl TracedDOMString {
     /// Return the [`EncodedBytes`] of this [`DOMString`]. This returns the original encoded
     /// bytes of the string without doing any conversions.
     pub fn encoded_bytes<'a>(&'a self, no_gc: &'a NoGC) -> EncodedBytes<'a> {
+        if matches!(&*self.0.borrow(), DOMStringType::Utf16(_)) {
+            self.ensure_rust_string();
+        }
         let inner = self.0.borrow();
         // The lifetime of the `EncodedBytes` struct is bound by the lifetime of the `NoGC` token.
         match &*inner {
+            DOMStringType::Utf16(_) => unreachable!("Converted above"),
             DOMStringType::Rust(..) | DOMStringType::RustStatic(..) => EncodedBytes::Utf8((
                 no_gc,
                 Ref::map(inner, |inner| unsafe { inner.as_raw_bytes() }),
@@ -502,6 +525,24 @@ impl TracedDOMString {
         }
     }
 
+    /// Return exact code units for APIs whose keys are WebIDL DOMStrings.
+    /// Call this before any lossy Rust-string conversion.
+    pub fn to_code_units(&self) -> Vec<u16> {
+        match &*self.0.borrow() {
+            DOMStringType::Utf16(units) => units.clone(),
+            DOMStringType::Rust(string) => string.encode_utf16().collect(),
+            DOMStringType::RustStatic(string) => string.encode_utf16().collect(),
+            DOMStringType::JSString(string) => unsafe {
+                get_latin1_string_bytes(string)
+                    .iter()
+                    .map(|byte| u16::from(*byte))
+                    .collect()
+            },
+            #[cfg(test)]
+            DOMStringType::Latin1Vec(bytes) => bytes.iter().map(|byte| u16::from(*byte)).collect(),
+        }
+    }
+
     pub fn clear(&mut self) {
         let mut inner = self.0.borrow_mut();
         let DOMStringType::Rust(string) = &mut *inner else {
@@ -512,6 +553,9 @@ impl TracedDOMString {
     }
 
     pub fn is_empty(&self) -> bool {
+        if let DOMStringType::Utf16(units) = &*self.0.borrow() {
+            return units.is_empty();
+        }
         // This is safe as the bytes do not leave this function and no gc can happen.
         let no_gc = unsafe { NoGC::new() };
         self.encoded_bytes(&no_gc).is_empty()
@@ -554,6 +598,9 @@ impl TracedDOMString {
     /// Note: This is different than the number of Unicode characters (or code points). A
     /// character may require multiple UTF-16 code units.
     pub fn len_utf16(&self) -> Utf16CodeUnits {
+        if let DOMStringType::Utf16(units) = &*self.0.borrow() {
+            return Utf16CodeUnits(units.len() as u32);
+        }
         // This is safe as the bytes do not leave this function and no GC can happen.
         let no_gc = unsafe { NoGC::new() };
         match self.encoded_bytes(&no_gc) {
@@ -607,8 +654,8 @@ impl TracedDOMString {
 
     /// <https://html.spec.whatwg.org/multipage/#valid-floating-point-number>
     pub fn is_valid_floating_point_number_string(&self) -> bool {
-        is_valid_floating_point_number_string(self.0.borrow_mut().ensure_rust_string()) &&
-            self.parse_floating_point_number().is_some()
+        is_valid_floating_point_number_string(self.0.borrow_mut().ensure_rust_string())
+            && self.parse_floating_point_number().is_some()
     }
 
     pub fn parse<T: FromStr>(&self) -> Result<T, <T as FromStr>::Err> {
@@ -961,6 +1008,12 @@ impl ToJSValConvertible for TracedDOMString {
         let val = self.0.borrow();
         match *val {
             DOMStringType::Rust(ref s) => s.to_jsval(cx, rval),
+            DOMStringType::Utf16(ref units) => unsafe {
+                let string =
+                    js::rust::wrappers2::JS_NewUCStringCopyN(cx, units.as_ptr(), units.len());
+                assert!(!string.is_null(), "JS string allocation failed");
+                rval.set(StringValue(&*string));
+            },
             DOMStringType::JSString(ref rooted_traceable_box) => unsafe {
                 rval.set(StringValue(&*rooted_traceable_box.get()));
             },
@@ -1161,7 +1214,7 @@ impl From<TracedDOMString> for String {
         let inner = val.0.take();
         match inner {
             DOMStringType::Rust(s) => s,
-            DOMStringType::JSString(_) => unreachable!(),
+            DOMStringType::JSString(_) | DOMStringType::Utf16(_) => unreachable!(),
             #[cfg(test)]
             DOMStringType::Latin1Vec(items) => String::from_utf8(items).expect("Not valid latin1"),
             DOMStringType::RustStatic(s) => s.to_owned(),
@@ -1182,7 +1235,7 @@ impl From<TracedDOMString> for Vec<u8> {
         let inner = value.0.take();
         match inner {
             DOMStringType::Rust(s) => s.into_bytes(),
-            DOMStringType::JSString(_) => unreachable!(),
+            DOMStringType::JSString(_) | DOMStringType::Utf16(_) => unreachable!(),
             #[cfg(test)]
             DOMStringType::Latin1Vec(items) => items,
             DOMStringType::RustStatic(_) => unreachable!(),
@@ -1791,6 +1844,23 @@ mod tests {
         {
             let no_gc = unsafe { NoGC::new() };
             assert_eq!(&*s.as_bytes(&no_gc), str.as_bytes());
+        }
+    }
+    #[test]
+    fn preserves_code_units_until_explicit_rust_string_conversion() {
+        for units in [
+            vec![0xd800],
+            vec![0xdc00],
+            vec![0xd800, 65, 0xdc00],
+            vec![0, 0xd83d, 0xde00],
+        ] {
+            let string = DOMString::from_code_units(units.clone());
+            assert_eq!(string.to_code_units(), units);
+            assert_eq!(string.clone().to_code_units(), units);
+            assert_eq!(string.len_utf16(), Utf16CodeUnits(units.len() as u32));
+            assert!(!string.is_empty());
+            assert_eq!(string.to_code_units(), units);
+            assert_eq!(&*string.str(), String::from_utf16_lossy(&units));
         }
     }
 }

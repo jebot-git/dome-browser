@@ -1,0 +1,1702 @@
+--- a/gstappendpipeline-private.h
++++ b/gstappendpipeline-private.h
+@@ -50,6 +50,8 @@
+   void (*eos)                   (GstAppendPipeline   * self,
+                                  GstMediaSourceTrack * track,
+                                  gpointer              user_data);
++  void (*append_complete)       (GstAppendPipeline   * self,
++                                 gpointer              user_data);
+   void (*error)                 (GstAppendPipeline   * self,
+                                  gpointer              user_data);
+ } GstAppendPipelineCallbacks;
+@@ -57,7 +59,7 @@
+ GST_MSE_PRIVATE
+ GstAppendPipeline * gst_append_pipeline_new (
+     GstAppendPipelineCallbacks * callbacks, gpointer user_data,
+-    GError ** error);
++    const gchar * content_type, GError ** error);
+ 
+ GST_MSE_PRIVATE
+ GstFlowReturn gst_append_pipeline_append (GstAppendPipeline * self,
+@@ -65,6 +67,9 @@
+ 
+ GST_MSE_PRIVATE
+ GstFlowReturn gst_append_pipeline_eos (GstAppendPipeline * self);
++
++GST_MSE_PRIVATE
++gboolean gst_append_pipeline_flush (GstAppendPipeline * self);
+ 
+ GST_MSE_PRIVATE
+ gboolean gst_append_pipeline_stop (GstAppendPipeline * self);
+--- a/gstappendpipeline.c
++++ b/gstappendpipeline.c
+@@ -332,6 +332,10 @@
+       if (gst_message_has_name (message, END_OF_APPEND)) {
+         GST_TRACE_OBJECT (self, "end of append");
+         consume_all_samples (self);
++        if (self->callbacks.callbacks.append_complete) {
++          self->callbacks.callbacks.append_complete (self,
++              self->callbacks.user_data);
++        }
+         goto done;
+       }
+       if (gst_message_has_name (message, SHUTDOWN)) {
+@@ -784,10 +788,22 @@
+ 
+ GstAppendPipeline *
+ gst_append_pipeline_new (GstAppendPipelineCallbacks * callbacks,
+-    gpointer user_data, GError ** error)
++    gpointer user_data, const gchar * content_type, GError ** error)
+ {
+   gst_mse_init_logging ();
+   GstAppendPipeline *self = g_object_new (GST_TYPE_APPEND_PIPELINE, NULL);
++  GstMediaSourceMediaType media_type = GST_MEDIA_SOURCE_MEDIA_TYPE_INIT;
++  if (gst_media_source_media_type_parse (&media_type, content_type) &&
++      (g_strcmp0 (media_type.mime_type, "video/mp4") == 0 ||
++          g_strcmp0 (media_type.mime_type, "audio/mp4") == 0)) {
++    /* Typefinding can retain a short initialization segment until media bytes
++     * arrive. A declared container lets the demuxer process that initialization
++     * before append completes and retain it across a subsequent abort. */
++    GstCaps *caps = gst_caps_from_string ("video/quicktime, variant=(string)mse-bytestream");
++    gst_app_src_set_caps (self->src, caps);
++    gst_caps_unref (caps);
++  }
++  gst_media_source_media_type_reset (&media_type);
+   GstStateChangeReturn started =
+       gst_element_set_state (GST_ELEMENT (self->pipeline), GST_STATE_PLAYING);
+   if (started != GST_STATE_CHANGE_SUCCESS) {
+@@ -839,9 +855,33 @@
+ }
+ 
+ gboolean
++gst_append_pipeline_flush (GstAppendPipeline * self)
++{
++  /* Join all old callbacks before allowing the caller to append again. Flush
++   * streaming queues without transitioning to READY, retaining demux metadata. */
++  background_task_stop (self->task);
++  gboolean started = gst_element_send_event (GST_ELEMENT (self->src),
++      gst_event_new_flush_start ());
++  gboolean stopped = gst_element_send_event (GST_ELEMENT (self->src),
++      gst_event_new_flush_stop (TRUE));
++  self->have_outstanding_samples = FALSE;
++  self->encountered_error = FALSE;
++  gboolean resumed = background_task_start (self->task);
++  GST_DEBUG_OBJECT (self, "flush result start=%d stop=%d resume=%d tracks=%u",
++      started, stopped, resumed, self->tracks->len);
++  /* With no discovered output tracks, downstream event aggregation returns
++   * FALSE even though appsrc and the demuxer handled the flush. */
++  return resumed && ((started && stopped) || self->tracks->len == 0);
++}
++
++gboolean
+ gst_append_pipeline_stop (GstAppendPipeline * self)
+ {
+   g_return_val_if_fail (GST_IS_APPEND_PIPELINE (self), FALSE);
++
++  /* The bus becomes flushing on NULL. Join its reader before that transition. */
++  if (self->task)
++    background_task_stop (self->task);
+ 
+   GstElement *pipeline = GST_ELEMENT (self->pipeline);
+ 
+--- a/gstmediasource-private.h
++++ b/gstmediasource-private.h
+@@ -52,6 +52,7 @@
+   GstMediaSourceRange live_seekable_range;
+ 
+   GstClockTime duration;
++  gboolean duration_initialized;
+   GstMediaSourceReadyState ready_state;
+ };
+ 
+--- a/gstmediasource.c
++++ b/gstmediasource.c
+@@ -79,6 +79,7 @@
+   PROP_READY_STATE,
+   PROP_POSITION,
+   PROP_DURATION,
++  PROP_DURATION_INITIALIZED,
+ 
+   N_PROPS,
+ };
+@@ -217,6 +218,11 @@
+       break;
+     case PROP_DURATION:
+       g_value_set_uint64 (value, gst_media_source_get_duration (self));
++      break;
++    case PROP_DURATION_INITIALIZED:
++      GST_OBJECT_LOCK (self);
++      g_value_set_boolean (value, self->duration_initialized);
++      GST_OBJECT_UNLOCK (self);
+       break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+@@ -318,9 +324,12 @@
+   properties[PROP_DURATION] = g_param_spec_uint64 ("duration",
+       "Duration",
+       "The Duration of the Media Source as a GstClockTime",
+-      GST_CLOCK_TIME_NONE, G_MAXUINT64, DEFAULT_DURATION, G_PARAM_READWRITE |
++      0, G_MAXUINT64, DEFAULT_DURATION, G_PARAM_READWRITE |
+       G_PARAM_STATIC_STRINGS);
+ 
++  properties[PROP_DURATION_INITIALIZED] = g_param_spec_boolean ("duration-initialized",
++      "Duration initialized", "Distinguishes unknown duration from positive infinity",
++      FALSE, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
+   g_object_class_install_properties (oclass, N_PROPS, properties);
+ 
+   /**
+@@ -491,6 +500,12 @@
+ static void
+ detach_unlocked (GstMediaSource * self)
+ {
++  /* Repeated stop/dispose must not emit sourceclose again or touch lists
++   * already released by an earlier dispose. */
++  if (!is_attached (self) &&
++      self->ready_state == GST_MEDIA_SOURCE_READY_STATE_CLOSED)
++    return;
++
+   self->ready_state = GST_MEDIA_SOURCE_READY_STATE_CLOSED;
+   set_duration_unlocked (self, GST_CLOCK_TIME_NONE);
+ 
+@@ -671,6 +686,7 @@
+ set_duration_unlocked (GstMediaSource * self, GstClockTime duration)
+ {
+   self->duration = duration;
++  self->duration_initialized = FALSE;
+   update_duration (self);
+ }
+ 
+@@ -687,26 +703,79 @@
+  * Returns: `TRUE` on success, `FALSE` otherwise
+  * Since: 1.24
+  */
++static void
++get_timestamp_bounds (GstMediaSource * self, GstClockTime * start, GstClockTime * end)
++{
++  *start = 0;
++  *end = 0;
++  for (guint i = 0;; i++) {
++    GstSourceBuffer *buf = gst_source_buffer_list_index (self->buffers, i);
++    if (buf == NULL) break;
++    GstClockTime current_start = gst_source_buffer_get_highest_start_time (buf);
++    GstClockTime current_end = gst_source_buffer_get_highest_end_time (buf);
++    if (GST_CLOCK_TIME_IS_VALID (current_start)) *start = MAX (*start, current_start);
++    if (GST_CLOCK_TIME_IS_VALID (current_end)) *end = MAX (*end, current_end);
++    gst_object_unref (buf);
++  }
++}
++
+ gboolean
+ gst_media_source_set_duration (GstMediaSource * self, GstClockTime duration,
+     GError ** error)
+ {
+   g_return_val_if_fail (GST_IS_MEDIA_SOURCE (self), FALSE);
+-
+-  GST_OBJECT_LOCK (self);
++  GST_OBJECT_LOCK (self);
++  gboolean allowed = self->ready_state == GST_MEDIA_SOURCE_READY_STATE_OPEN && !is_updating (self);
++  GST_OBJECT_UNLOCK (self);
++  if (!allowed) {
++    g_set_error (error, GST_MEDIA_SOURCE_ERROR, GST_MEDIA_SOURCE_ERROR_INVALID_STATE,
++        "duration requires an open source with no updating buffers");
++    return FALSE;
++  }
++  GstClockTime highest_start, highest_end;
++  get_timestamp_bounds (self, &highest_start, &highest_end);
++  GST_OBJECT_LOCK (self);
++  if (self->ready_state != GST_MEDIA_SOURCE_READY_STATE_OPEN || is_updating (self)) {
++    g_set_error (error, GST_MEDIA_SOURCE_ERROR, GST_MEDIA_SOURCE_ERROR_INVALID_STATE,
++        "source changed while setting duration");
++    GST_OBJECT_UNLOCK (self);
++    return FALSE;
++  }
++  if (GST_CLOCK_TIME_IS_VALID (duration) && duration < highest_start) {
++    g_set_error (error, GST_MEDIA_SOURCE_ERROR, GST_MEDIA_SOURCE_ERROR_INVALID_STATE,
++        "duration would truncate buffered frames");
++    GST_OBJECT_UNLOCK (self);
++    return FALSE;
++  }
++  if (GST_CLOCK_TIME_IS_VALID (duration)) duration = MAX (duration, highest_end);
+   self->duration = duration;
++  self->duration_initialized = TRUE;
+   update_duration (self);
+   GST_OBJECT_UNLOCK (self);
+-
+   g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_DURATION]);
++  g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_DURATION_INITIALIZED]);
+   return TRUE;
+ }
+ 
+ static void
+-on_received_init_segment (G_GNUC_UNUSED GstSourceBuffer * source_buffer,
++on_received_init_segment (GstSourceBuffer * source_buffer,
+     gpointer user_data)
+ {
+   GstMediaSource *self = GST_MEDIA_SOURCE (user_data);
++  GstClockTime initial_duration = gst_source_buffer_get_initial_duration (source_buffer);
++  GST_OBJECT_LOCK (self);
++  gboolean initialized_now = is_attached (self) &&
++      self->ready_state == GST_MEDIA_SOURCE_READY_STATE_OPEN && !self->duration_initialized;
++  if (initialized_now) {
++    self->duration = initial_duration;
++    self->duration_initialized = TRUE;
++    update_duration (self);
++  }
++  GST_OBJECT_UNLOCK (self);
++  if (initialized_now) {
++    g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_DURATION]);
++    g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_DURATION_INITIALIZED]);
++  }
+ 
+   GST_OBJECT_LOCK (self);
+ 
+@@ -722,6 +791,12 @@
+     GstSourceBuffer *buf = gst_source_buffer_list_index (self->buffers, i);
+     if (buf == NULL) {
+       break;
++    }
++    if (!gst_source_buffer_has_init_segment (buf)) {
++      gst_object_unref (buf);
++      g_ptr_array_unref (all_tracks);
++      GST_OBJECT_UNLOCK (self);
++      return;
+     }
+     GPtrArray *tracks = gst_source_buffer_get_all_tracks (buf);
+     g_ptr_array_extend (all_tracks, tracks, NULL, NULL);
+@@ -738,29 +813,21 @@
+ }
+ 
+ static void
+-on_duration_changed (G_GNUC_UNUSED GstSourceBuffer * source_buffer,
+-    gpointer user_data)
++on_duration_changed (G_GNUC_UNUSED GstSourceBuffer * source_buffer, gpointer user_data)
+ {
+   GstMediaSource *self = GST_MEDIA_SOURCE (user_data);
+-  GstClockTime current = self->duration;
+-  GstClockTime max = 0;
+-  for (guint i = 0;; i++) {
+-    GstSourceBuffer *buf = gst_source_buffer_list_index (self->buffers, i);
+-    if (buf == NULL) {
+-      break;
+-    }
+-    GstClockTime duration = gst_source_buffer_get_duration (buf);
+-    if (GST_CLOCK_TIME_IS_VALID (duration)) {
+-      max = MAX (max, duration);
+-    }
+-    gst_object_unref (buf);
+-  }
+-  if (current == max) {
+-    return;
+-  }
+-  GST_DEBUG_OBJECT (self, "updating %" GST_TIMEP_FORMAT "=>%" GST_TIMEP_FORMAT,
+-      &current, &max);
+-  gst_media_source_set_duration (self, max, NULL);
++  GstClockTime highest_start, highest_end;
++  get_timestamp_bounds (self, &highest_start, &highest_end);
++  GST_OBJECT_LOCK (self);
++  gboolean changed = self->ready_state == GST_MEDIA_SOURCE_READY_STATE_OPEN &&
++      self->duration_initialized && GST_CLOCK_TIME_IS_VALID (self->duration) &&
++      highest_end > self->duration;
++  if (changed) {
++    self->duration = highest_end;
++    update_duration (self);
++  }
++  GST_OBJECT_UNLOCK (self);
++  if (changed) g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_DURATION]);
+ }
+ 
+ static GHashTable *
+@@ -933,16 +1000,16 @@
+     goto error;
+   }
+ 
+-  if (gst_source_buffer_get_updating (buffer))
+-    gst_source_buffer_teardown (buffer);
+-
++  /* Retain the buffer while removing list ownership. Parser callbacks may
++   * acquire the media source lock, so teardown must happen after unlocking. */
++  gst_object_ref (buffer);
+   gst_source_buffer_list_remove (self->active_buffers, buffer);
+-
++  gst_source_buffer_list_remove (self->buffers, buffer);
++  GST_OBJECT_UNLOCK (self);
++
++  gst_source_buffer_teardown (buffer);
+   gst_object_unparent (GST_OBJECT (buffer));
+-  gst_source_buffer_list_remove (self->buffers, buffer);
+-
+-  GST_OBJECT_UNLOCK (self);
+-
++  gst_object_unref (buffer);
+   return TRUE;
+ 
+ error:
+@@ -959,7 +1026,7 @@
+       return;
+     }
+     GST_LOG_OBJECT (self, "shutting down %" GST_PTR_FORMAT, buf);
+-    gst_source_buffer_abort (buf, NULL);
++    gst_source_buffer_end_stream (buf);
+     gst_object_unref (buf);
+   }
+ }
+@@ -1011,10 +1078,18 @@
+     case GST_MEDIA_SOURCE_EOS_ERROR_DECODE:
+       decode_error (self);
+       break;
+-    default:
++    default:{
++      GstClockTime highest_start, highest_end;
++      get_timestamp_bounds (self, &highest_start, &highest_end);
++      GST_OBJECT_LOCK (self);
++      self->duration = highest_end;
++      self->duration_initialized = TRUE;
+       update_duration (self);
++      GST_OBJECT_UNLOCK (self);
++      g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_DURATION]);
+       abort_all_source_buffers (self);
+       break;
++    }
+   }
+ 
+   return TRUE;
+--- a/gstmediasourcesamplemap-private.h
++++ b/gstmediasourcesamplemap-private.h
+@@ -26,6 +26,24 @@
+ #include <gst/mse/mse-prelude.h>
+ 
+ G_BEGIN_DECLS
++
++/* GstBuffer clock timestamps are unsigned. Keep pre-zero decode ordering as
++ * private sample metadata; decoders can consume an unset DTS with a valid PTS. */
++static inline GQuark
++gst_mse_signed_dts_quark (void)
++{
++  return g_quark_from_static_string ("dome-mse-signed-decode-time");
++}
++
++static inline GstClockTimeDiff
++gst_mse_sample_signed_dts (GstSample * sample)
++{
++  GstBuffer *buffer = gst_sample_get_buffer (sample);
++  GstClockTimeDiff *stored = gst_mini_object_get_qdata (
++      GST_MINI_OBJECT_CAST (buffer), gst_mse_signed_dts_quark ());
++  return stored ? *stored : (GstClockTimeDiff) GST_BUFFER_DTS (buffer);
++}
++
+ 
+ #define GST_TYPE_MEDIA_SOURCE_SAMPLE_MAP \
+     (gst_media_source_sample_map_get_type())
+@@ -74,6 +92,9 @@
+     GstMediaSourceSampleMap * self);
+ 
+ GST_MSE_PRIVATE
++GstClockTime gst_media_source_sample_map_get_highest_start_time (GstMediaSourceSampleMap * self);
++
++GST_MSE_PRIVATE
+ GstClockTime gst_media_source_sample_map_get_highest_end_time (
+     GstMediaSourceSampleMap * self);
+ 
+--- a/gstmediasourcesamplemap.c
++++ b/gstmediasourcesamplemap.c
+@@ -65,7 +65,7 @@
+ static inline GstClockTime
+ sample_dts (GstSample * sample)
+ {
+-  return GST_BUFFER_DTS (gst_sample_get_buffer (sample));
++  return MAX (gst_mse_sample_signed_dts (sample), 0);
+ }
+ 
+ static inline GstClockTime
+@@ -96,8 +96,8 @@
+ static gint
+ compare_dts (GstSample * a, GstSample * b, gpointer user_data)
+ {
+-  GstClockTime a_dts = sample_dts (a);
+-  GstClockTime b_dts = sample_dts (b);
++  GstClockTimeDiff a_dts = gst_mse_sample_signed_dts (a);
++  GstClockTimeDiff b_dts = gst_mse_sample_signed_dts (b);
+   if (a_dts == b_dts) {
+     return compare_pts (a, b, user_data);
+   }
+@@ -168,7 +168,9 @@
+   g_return_if_fail (GST_IS_MEDIA_SOURCE_SAMPLE_MAP (self));
+   g_return_if_fail (GST_IS_SAMPLE (sample));
+   GstBuffer *buffer = gst_sample_get_buffer (sample);
+-  g_return_if_fail (GST_BUFFER_DTS_IS_VALID (buffer));
++  g_return_if_fail (GST_BUFFER_DTS_IS_VALID (buffer) ||
++      gst_mini_object_get_qdata (GST_MINI_OBJECT_CAST (buffer),
++          gst_mse_signed_dts_quark ()) != NULL);
+   g_return_if_fail (GST_BUFFER_PTS_IS_VALID (buffer));
+   g_return_if_fail (GST_BUFFER_DURATION_IS_VALID (buffer));
+ 
+@@ -258,132 +260,75 @@
+   return it;
+ }
+ 
+-static GSequenceIter *
+-find_start_point (GstMediaSourceSampleMap * self, GSequenceIter * it,
+-    GList ** to_remove, GstClockTime earliest, GstClockTime latest)
+-{
+-  while (TRUE) {
+-    GValue value = G_VALUE_INIT;
+-    g_value_init (&value, GST_TYPE_MEDIA_SOURCE_CODED_FRAME_GROUP);
+-    it = next_coded_frame_group (it, &value);
+-    GstMediaSourceCodedFrameGroup *group =
+-        gst_value_get_media_source_coded_frame_group (&value);
+-    if (group == NULL) {
+-      GST_TRACE_OBJECT (self,
+-          "reached end of coded frames before finding start point");
+-      goto done;
+-    }
+-
+-    if (group->start >= earliest && group->end <= latest) {
+-      GST_TRACE_OBJECT (self, "found start point for %" GST_TIMEP_FORMAT ": "
+-          TIME_RANGE_FORMAT, &earliest, CODED_FRAME_GROUP_ARGS (group));
+-      *to_remove = g_list_prepend (*to_remove,
+-          gst_media_source_coded_frame_group_copy (group));
+-      goto done;
+-    }
+-
+-    g_value_unset (&value);
+-    continue;
+-  done:
+-    g_value_unset (&value);
+-    return it;
+-  }
+-  return it;
+-}
+-
+-static GSequenceIter *
+-find_end_point (GstMediaSourceSampleMap * self, GSequenceIter * it, GList **
+-    to_remove, GstClockTime latest)
+-{
+-  while (TRUE) {
+-    GValue value = G_VALUE_INIT;
+-    g_value_init (&value, GST_TYPE_MEDIA_SOURCE_CODED_FRAME_GROUP);
+-    it = next_coded_frame_group (it, &value);
+-    GstMediaSourceCodedFrameGroup *group =
+-        gst_value_get_media_source_coded_frame_group (&value);
+-    if (group == NULL) {
+-      GST_TRACE_OBJECT (self,
+-          "reached end of coded frames before finding end point");
+-      goto done;
+-    }
+-    if (group->end >= latest) {
+-      GST_TRACE_OBJECT (self, "found end point for %" GST_TIMEP_FORMAT ": "
+-          TIME_RANGE_FORMAT, &latest, CODED_FRAME_GROUP_ARGS (group));
+-      goto done;
+-    }
+-    *to_remove = g_list_prepend (*to_remove,
+-        gst_media_source_coded_frame_group_copy (group));
+-    g_value_unset (&value);
+-    continue;
+-
+-  done:
+-    g_value_unset (&value);
+-    return it;
+-  }
+-  return it;
+-}
+-
+ gsize
+ gst_media_source_sample_map_remove_range (GstMediaSourceSampleMap * self,
+     GstClockTime earliest, GstClockTime latest)
+ {
+   g_return_val_if_fail (GST_IS_MEDIA_SOURCE_SAMPLE_MAP (self), 0);
+   g_return_val_if_fail (earliest <= latest, 0);
+-
+-  GST_TRACE_OBJECT (self, "request remove range " TIME_RANGE_FORMAT,
+-      TIME_RANGE_ARGS (earliest, latest));
+-
+-  GSequenceIter *it = g_sequence_get_begin_iter (self->samples_by_dts);
+-
+-  GList *to_remove = NULL;
+-
+-  it = find_start_point (self, it, &to_remove, earliest, latest);
+-
+-  if (to_remove == NULL) {
++  if (earliest == latest) {
+     return 0;
+   }
+ 
+-  it = find_end_point (self, it, &to_remove, latest);
+-
+-  to_remove = g_list_reverse (to_remove);
+-
++  /* The removal end extends to the next random access point. Presentation
++   * timestamps determine the requested interval; decode order determines the
++   * dependent frames that must also be discarded. */
++  GstClockTime removal_end = GST_CLOCK_TIME_NONE;
++  for (GSequenceIter *it = g_sequence_get_begin_iter (self->samples_by_pts);
++      !g_sequence_iter_is_end (it); it = g_sequence_iter_next (it)) {
++    GstSample *sample = g_sequence_get (it);
++    if (sample_is_key_unit (sample) && sample_pts (sample) >= latest) {
++      removal_end = sample_pts (sample);
++      break;
++    }
++  }
++  GPtrArray *to_remove = g_ptr_array_new_with_free_func (
++      (GDestroyNotify) gst_sample_unref);
++  gboolean dependencies = FALSE;
++  for (GSequenceIter *it = g_sequence_get_begin_iter (self->samples_by_dts);
++      !g_sequence_iter_is_end (it); it = g_sequence_iter_next (it)) {
++    GstSample *sample = g_sequence_get (it);
++    GstClockTime pts = sample_pts (sample);
++    gboolean requested = pts >= earliest && pts < removal_end;
++    if (sample_is_key_unit (sample)) {
++      dependencies = FALSE;
++    }
++    if (requested || dependencies) {
++      g_ptr_array_add (to_remove, gst_sample_ref (sample));
++      dependencies = TRUE;
++    }
++  }
+   gsize bytes_removed = 0;
+-  for (GList * group_iter = to_remove; group_iter != NULL;
+-      group_iter = g_list_next (group_iter)) {
+-    GstMediaSourceCodedFrameGroup *group = group_iter->data;
+-    for (GList * sample_iter = group->samples; sample_iter != NULL;
+-        sample_iter = g_list_next (sample_iter)) {
+-      GstSample *sample = sample_iter->data;
+-      bytes_removed += sample_buffer_size (sample);
+-      gst_media_source_sample_map_remove (self, sample);
+-    }
+-  }
+-
+-  g_list_free_full (to_remove,
+-      (GDestroyNotify) gst_media_source_coded_frame_group_free);
+-
+-  GST_TRACE_OBJECT (self, "removed=%" G_GSIZE_FORMAT "B, latest=%"
+-      GST_TIMEP_FORMAT, bytes_removed, &latest);
++  for (guint i = 0; i < to_remove->len; i++) {
++    GstSample *sample = g_ptr_array_index (to_remove, i);
++    bytes_removed += sample_buffer_size (sample);
++    gst_media_source_sample_map_remove (self, sample);
++  }
++  g_ptr_array_unref (to_remove);
+   return bytes_removed;
+ }
+ 
+ GstClockTime
+-gst_media_source_sample_map_get_highest_end_time (GstMediaSourceSampleMap *
+-    self)
+-{
+-  g_return_val_if_fail (GST_IS_MEDIA_SOURCE_SAMPLE_MAP (self),
+-      GST_CLOCK_TIME_NONE);
+-  GSequenceIter *iter = g_sequence_get_end_iter (self->samples_by_pts);
+-  iter = g_sequence_iter_prev (iter);
+-  if (g_sequence_iter_is_begin (iter)) {
++gst_media_source_sample_map_get_highest_start_time (GstMediaSourceSampleMap * self)
++{
++  if (g_sequence_is_empty (self->samples_by_pts)) {
+     return GST_CLOCK_TIME_NONE;
+   }
+-  GstSample *sample = g_sequence_get (iter);
+-  GstBuffer *buffer = gst_sample_get_buffer (sample);
+-  g_return_val_if_fail (GST_BUFFER_PTS_IS_VALID (buffer), GST_CLOCK_TIME_NONE);
+-  g_return_val_if_fail (GST_BUFFER_DURATION_IS_VALID (buffer),
+-      GST_CLOCK_TIME_NONE);
+-  return GST_BUFFER_PTS (buffer) + GST_BUFFER_DURATION (buffer);
++  GSequenceIter *it = g_sequence_iter_prev (g_sequence_get_end_iter (self->samples_by_pts));
++  return sample_pts (g_sequence_get (it));
++}
++
++GstClockTime
++gst_media_source_sample_map_get_highest_end_time (GstMediaSourceSampleMap * self)
++{
++  GstClockTime highest = GST_CLOCK_TIME_NONE;
++  for (GSequenceIter *it = g_sequence_get_begin_iter (self->samples_by_pts);
++      !g_sequence_iter_is_end (it); it = g_sequence_iter_next (it)) {
++    GstSample *sample = g_sequence_get (it);
++    GstClockTime end = sample_pts (sample) + sample_duration (sample);
++    highest = GST_CLOCK_TIME_IS_VALID (highest) ? MAX (highest, end) : end;
++  }
++  return highest;
+ }
+ 
+ guint
+--- a/gstmediasourcetrackbuffer-private.h
++++ b/gstmediasourcetrackbuffer-private.h
+@@ -46,6 +46,9 @@
+ gint gst_media_source_track_buffer_get_size (GstMediaSourceTrackBuffer * self);
+ 
+ GST_MSE_PRIVATE
++GstClockTime gst_media_source_track_buffer_get_highest_start_time (GstMediaSourceTrackBuffer * self);
++
++GST_MSE_PRIVATE
+ GstClockTime gst_media_source_track_buffer_get_highest_end_time (
+     GstMediaSourceTrackBuffer * self);
+ 
+@@ -62,13 +65,19 @@
+     GstMediaSourceTrackBuffer * self, gboolean sequence_mode);
+ 
+ GST_MSE_PRIVATE
+-void gst_media_source_track_buffer_add (GstMediaSourceTrackBuffer * self,
++gboolean gst_media_source_track_buffer_add (GstMediaSourceTrackBuffer * self,
+     GstSample * sample);
++
++GST_MSE_PRIVATE
++void gst_media_source_track_buffer_require_random_access (GstMediaSourceTrackBuffer * self);
+ 
+ GST_MSE_PRIVATE
+ gsize
+ gst_media_source_track_buffer_remove_range (GstMediaSourceTrackBuffer * self,
+     GstClockTime start, GstClockTime end);
++
++GST_MSE_PRIVATE
++void gst_media_source_track_buffer_clear_eos (GstMediaSourceTrackBuffer * self);
+ 
+ GST_MSE_PRIVATE
+ void gst_media_source_track_buffer_eos (GstMediaSourceTrackBuffer * self);
+--- a/gstmediasourcetrackbuffer.c
++++ b/gstmediasourcetrackbuffer.c
+@@ -47,6 +47,7 @@
+   GstMediaSourceSampleMap *samples;
+   Timestamps timestamps;
+   guint eos;
++  gboolean need_random_access;
+ 
+   guint32 master_cookie;
+ 
+@@ -108,6 +109,7 @@
+ {
+   self->samples = gst_media_source_sample_map_new ();
+   self->eos = FALSE;
++  self->need_random_access = TRUE;
+   self->master_cookie = 0;
+   timestamps_init (&self->timestamps, FALSE);
+   g_cond_init (&self->new_data_cond);
+@@ -135,20 +137,36 @@
+   }
+ }
+ 
+-void
++gboolean
+ gst_media_source_track_buffer_add (GstMediaSourceTrackBuffer * self,
+     GstSample * sample)
+ {
+-  g_return_if_fail (GST_IS_MEDIA_SOURCE_TRACK_BUFFER (self));
+-  g_return_if_fail (GST_IS_SAMPLE (sample));
+-
+-  NEW_DATA_LOCK (self);
+-
++  g_return_val_if_fail (GST_IS_MEDIA_SOURCE_TRACK_BUFFER (self), FALSE);
++  g_return_val_if_fail (GST_IS_SAMPLE (sample), FALSE);
++
++  NEW_DATA_LOCK (self);
++
++  GstBuffer *buffer = gst_sample_get_buffer (sample);
++  if (self->need_random_access &&
++      GST_BUFFER_FLAG_IS_SET (buffer, GST_BUFFER_FLAG_DELTA_UNIT)) {
++    NEW_DATA_UNLOCK (self);
++    return FALSE;
++  }
++  self->need_random_access = FALSE;
+   timestamps_process (&self->timestamps, sample);
+   gst_media_source_sample_map_add (self->samples, sample);
+   invalidate_cookie (self);
+ 
+   NEW_DATA_SIGNAL (self);
++  NEW_DATA_UNLOCK (self);
++  return TRUE;
++}
++
++void
++gst_media_source_track_buffer_require_random_access (GstMediaSourceTrackBuffer * self)
++{
++  NEW_DATA_LOCK (self);
++  self->need_random_access = TRUE;
+   NEW_DATA_UNLOCK (self);
+ }
+ 
+@@ -172,6 +190,12 @@
+ }
+ 
+ void
++gst_media_source_track_buffer_clear_eos (GstMediaSourceTrackBuffer * self)
++{
++  g_atomic_int_set (&self->eos, FALSE);
++}
++
++void
+ gst_media_source_track_buffer_eos (GstMediaSourceTrackBuffer * self)
+ {
+   g_return_if_fail (GST_IS_MEDIA_SOURCE_TRACK_BUFFER (self));
+@@ -210,7 +234,19 @@
+ {
+   g_return_val_if_fail (GST_IS_MEDIA_SOURCE_TRACK_BUFFER (self),
+       GST_CLOCK_TIME_NONE);
+-  return gst_media_source_sample_map_get_highest_end_time (self->samples);
++  NEW_DATA_LOCK (self);
++  GstClockTime result = gst_media_source_sample_map_get_highest_end_time (self->samples);
++  NEW_DATA_UNLOCK (self);
++  return result;
++}
++
++GstClockTime
++gst_media_source_track_buffer_get_highest_start_time (GstMediaSourceTrackBuffer * self)
++{
++  NEW_DATA_LOCK (self);
++  GstClockTime result = gst_media_source_sample_map_get_highest_start_time (self->samples);
++  NEW_DATA_UNLOCK (self);
++  return result;
+ }
+ 
+ typedef struct
+@@ -242,7 +278,8 @@
+     acc->current_range.end = end;
+   }
+ 
+-  GstClockTime gap_tolerance = MAX (GST_SECOND / 10, acc->max_duration * 2);
++  /* Allow only nanosecond rounding, never join explicitly removed frames. */
++  GstClockTime gap_tolerance = 1;
+   GstClockTime gap = MAX (0, GST_CLOCK_DIFF (range->end, start));
+ 
+   if (range->end == 0 || gap <= gap_tolerance) {
+--- a/gstmseeventqueue.c
++++ b/gstmseeventqueue.c
+@@ -34,7 +34,7 @@
+   GstObject parent_instance;
+ 
+   GstMseEventQueueCallback callback;
+-  gpointer user_data;
++  GWeakRef owner;
+ 
+   GstTask *task;
+   GRecMutex lock;
+@@ -47,11 +47,12 @@
+ gst_mse_event_queue_new (GstMseEventQueueCallback callback, gpointer user_data)
+ {
+   g_return_val_if_fail (callback != NULL, NULL);
++  g_return_val_if_fail (GST_IS_OBJECT (user_data), NULL);
+ 
+   GstMseEventQueue *self = g_object_new (GST_TYPE_MSE_EVENT_QUEUE, NULL);
+ 
+   self->callback = callback;
+-  self->user_data = user_data;
++  g_weak_ref_set (&self->owner, user_data);
+ 
+   gst_task_start (self->task);
+ 
+@@ -75,6 +76,7 @@
+   GstMseEventQueue *self = GST_MSE_EVENT_QUEUE (obj);
+ 
+   gst_task_join (self->task);
++  g_weak_ref_clear (&self->owner);
+   g_rec_mutex_clear (&self->lock);
+   gst_clear_object (&self->task);
+   gst_clear_object (&self->queue);
+@@ -93,6 +95,14 @@
+ }
+ 
+ static void
++release_dispatch_owner (GstObject * owner, gpointer unused)
++{
++  /* Release the reference transferred by task_func. The async invocation also
++   * owns a reference, so its final release happens on this safe worker. */
++  gst_object_unref (owner);
++}
++
++static void
+ task_func (GstMseEventQueue * self)
+ {
+   GstTask *task = self->task;
+@@ -102,7 +112,15 @@
+     gst_task_stop (task);
+     return;
+   }
+-  self->callback (item, self->user_data);
++  GstObject *owner = g_weak_ref_get (&self->owner);
++  if (owner) {
++    /* Signal emission can take the owner's last external reference. Keeping
++     * this reference through the callback avoids destroying the owner (and
++     * joining this queue) from its own GstTask. Transfer its release off-task.
++     * A weak lookup also suppresses callbacks once owner disposal has begun. */
++    self->callback (item, owner);
++    gst_object_call_async (owner, release_dispatch_owner, NULL);
++  }
+   if (item->destroy) {
+     item->destroy (item);
+   }
+@@ -118,6 +136,7 @@
+ void
+ gst_mse_event_queue_init (GstMseEventQueue * self)
+ {
++  g_weak_ref_init (&self->owner, NULL);
+   self->queue = gst_data_queue_new (never_full, NULL, NULL, NULL);
+   self->task = gst_task_new ((GstTaskFunction) task_func, self, NULL);
+   g_rec_mutex_init (&self->lock);
+--- a/gstmsesrc.c
++++ b/gstmsesrc.c
+@@ -600,7 +600,9 @@
+ gst_mse_src_set_duration (GstMseSrc * self, GstClockTime duration)
+ {
+   g_return_if_fail (GST_IS_MSE_SRC (self));
+-
++  if (self->duration == duration) {
++    return;
++  }
+   self->duration = duration;
+ 
+   gst_element_foreach_src_pad (GST_ELEMENT (self),
+@@ -967,6 +969,7 @@
+ pad_task (GstMseSrcPad * pad)
+ {
+   GstMseSrc *self = NULL;
++  GstMiniObject *object = NULL;
+   gboolean flushing = await_pad_linked_or_flushing (pad);
+   if (flushing) {
+     GST_TRACE_OBJECT (pad, "pad is flushing");
+@@ -977,7 +980,7 @@
+ 
+   GstMediaSourceTrack *track = pad->track;
+ 
+-  GstMiniObject *object = gst_media_source_track_pop (track);
++  object = gst_media_source_track_pop (track);
+ 
+   if (object == NULL) {
+     GST_DEBUG_OBJECT (pad, "nothing was popped from track, must be flushing");
+@@ -986,8 +989,8 @@
+   }
+ 
+   if (!g_atomic_int_get (&pad->sent_stream_start)) {
+-    const gchar *track_id = gst_media_source_track_get_id (track);
+-    GstEvent *event = gst_event_new_stream_start (track_id);
++    const gchar *stream_id = gst_stream_get_stream_id (pad->stream);
++    GstEvent *event = gst_event_new_stream_start (stream_id);
+     gst_event_set_group_id (event, self->group_id);
+     gst_event_set_stream (event, pad->stream);
+     if (!gst_pad_push_event (GST_PAD (pad), event)) {
+@@ -1039,7 +1042,7 @@
+ 
+     if (!gst_caps_is_equal (pad->most_recent_caps, sample_caps)) {
+       gst_caps_replace (&pad->most_recent_caps, sample_caps);
+-      GstEvent *event = gst_event_new_caps (gst_caps_ref (sample_caps));
++      GstEvent *event = gst_event_new_caps (sample_caps);
+       if (!gst_pad_push_event (GST_PAD (pad), event)) {
+         GST_ERROR_OBJECT (pad, "failed to push new caps");
+         goto pause;
+@@ -1091,10 +1094,12 @@
+     g_assert_not_reached ();
+   }
+ 
++  gst_clear_mini_object (&object);
+   gst_clear_object (&self);
+   return;
+ 
+ pause:
++  gst_clear_mini_object (&object);
+   if (!g_atomic_int_get (&pad->flushing)) {
+     gst_pad_pause_task (GST_PAD (pad));
+   }
+@@ -1149,6 +1154,29 @@
+ {
+   GstMseSrc *self = GST_MSE_SRC (parent);
+   switch (GST_QUERY_TYPE (query)) {
++    case GST_QUERY_CAPS:{
++      /* A dynamic pad can be queried before it has pushed sticky events.
++       * Advertise the parser's known format rather than forcing URI bins to
++       * typefind elementary AAC/H264 data without their container headers. */
++      GstCaps *caps = gst_pad_get_current_caps (GST_PAD (pad));
++      if (caps == NULL) {
++        GstCaps *initial = gst_media_source_track_get_initial_caps (pad->track);
++        if (GST_IS_CAPS (initial)) {
++          caps = gst_caps_ref (initial);
++        }
++      }
++      if (caps == NULL) {
++        break;
++      }
++      GstCaps *filter;
++      gst_query_parse_caps (query, &filter);
++      GstCaps *result = filter ? gst_caps_intersect_full (filter, caps,
++          GST_CAPS_INTERSECT_FIRST) : gst_caps_ref (caps);
++      gst_query_set_caps_result (query, result);
++      gst_caps_unref (result);
++      gst_caps_unref (caps);
++      return TRUE;
++    }
+     case GST_QUERY_POSITION:{
+       GstClockTime position = pad->segment.position;
+       GstFormat fmt;
+@@ -1359,8 +1387,9 @@
+     all_received_init_segment &= gst_source_buffer_has_init_segment (buf);
+     gst_object_unref (buf);
+   }
++  gst_object_unref (buffers);
+   if (!all_received_init_segment) {
+-    return;
++    goto done;
+   }
+   set_ready_state (self, MAX (self->ready_state,
+           GST_MSE_SRC_READY_STATE_HAVE_METADATA));
+--- a/gstsourcebuffer-private.h
++++ b/gstsourcebuffer-private.h
+@@ -44,6 +44,9 @@
+     GstSourceBufferCallbacks *callbacks, gpointer user_data, GError ** error);
+ 
+ GST_MSE_PRIVATE
++void gst_source_buffer_end_stream (GstSourceBuffer * self);
++
++GST_MSE_PRIVATE
+ void gst_source_buffer_teardown (GstSourceBuffer * self);
+ 
+ GST_MSE_PRIVATE
+@@ -58,6 +61,15 @@
+     GstClockTime start, GstClockTime end);
+ 
+ GST_MSE_PRIVATE
++GstClockTime gst_source_buffer_get_highest_start_time (GstSourceBuffer * self);
++
++GST_MSE_PRIVATE
++GstClockTime gst_source_buffer_get_highest_end_time (GstSourceBuffer * self);
++
++GST_MSE_PRIVATE
++GstClockTime gst_source_buffer_get_initial_duration (GstSourceBuffer * self);
++
++GST_MSE_PRIVATE
+ GstClockTime gst_source_buffer_get_duration (GstSourceBuffer * self);
+ 
+ GST_MSE_PRIVATE
+--- a/gstsourcebuffer.c
++++ b/gstsourcebuffer.c
+@@ -123,6 +123,13 @@
+ 
+ typedef struct
+ {
++  gboolean valid;
++  GstClockTimeDiff dts;
++  GstClockTime duration;
++} TrackTiming;
++
++typedef struct
++{
+   const GstClockTime time;
+   gboolean buffered;
+ } IsBufferedAccumulator;
+@@ -148,12 +155,21 @@
+   GstClockTime append_window_end;
+   gchar *content_type;
+   gboolean generate_timestamps;
+-  GstClockTime timestamp_offset;
++  GstClockTimeDiff timestamp_offset;
++  GstClockTimeDiff group_start;
++  GstClockTimeDiff group_end;
++  gboolean group_start_valid;
++  GHashTable *track_timings;
+   gboolean updating;
++  gboolean aborting;
++  gboolean parser_eos;
+   gboolean errored;
+   gsize size_limit;
+   gsize size;
+   GstBuffer *pending_data;
++  gboolean pending_remove;
++  GstClockTime remove_start;
++  GstClockTime remove_end;
+   GCond pending_data_cond;
+   AppendToBufferTask *append_to_buffer_task;
+   GstAppendPipeline *append_pipeline;
+@@ -214,7 +230,6 @@
+ 
+ static GArray *get_buffered_unlocked (GstSourceBuffer * self);
+ static inline gboolean is_removed_unlocked (GstSourceBuffer * self);
+-static void reset_parser_state_unlocked (GstSourceBuffer * self);
+ static void append_error_unlocked (GstSourceBuffer * self);
+ 
+ static void seek_track_buffer_unlocked (GstMediaSourceTrack * track,
+@@ -247,6 +262,7 @@
+ static void on_eos (GstAppendPipeline * pipeline, GstMediaSourceTrack * track,
+     gpointer user_data);
+ static void on_error (GstAppendPipeline * pipeline, gpointer user_data);
++static void on_append_complete (GstAppendPipeline * pipeline, gpointer user_data);
+ static void on_new_sample (GstAppendPipeline * pipeline,
+     GstMediaSourceTrack * track, GstSample * sample, gpointer user_data);
+ static void on_received_init_segment (GstAppendPipeline * pipeline,
+@@ -319,6 +335,7 @@
+ 
+   GstAppendPipelineCallbacks callbacks = {
+     .duration_changed = on_duration_changed,
++    .append_complete = on_append_complete,
+     .eos = on_eos,
+     .error = on_error,
+     .new_sample = on_new_sample,
+@@ -326,7 +343,7 @@
+   };
+   GError *append_pipeline_error = NULL;
+   self->append_pipeline =
+-      gst_append_pipeline_new (&callbacks, self, &append_pipeline_error);
++      gst_append_pipeline_new (&callbacks, self, content_type, &append_pipeline_error);
+   if (append_pipeline_error) {
+     g_propagate_prefixed_error (error, append_pipeline_error,
+         "failed to create source buffer");
+@@ -399,6 +416,7 @@
+ 
+   g_clear_pointer (&self->content_type, g_free);
+ 
++  g_hash_table_unref (self->track_timings);
+   g_hash_table_unref (self->track_buffers);
+   g_hash_table_unref (self->track_feeds);
+   g_mutex_clear (&self->tracks_lock);
+@@ -569,7 +587,7 @@
+       "Timestamp Offset",
+       "The next media segment appended to the current Source Buffer"
+       " will have its start timestamp increased by this amount",
+-      0, G_MAXINT64, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
++      G_MININT64, G_MAXINT64, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+ 
+   /**
+    * GstSourceBuffer:updating:
+@@ -687,7 +705,7 @@
+ {
+   GstSourceBuffer *self = GST_SOURCE_BUFFER (user_data);
+ 
+-  if (GST_IS_MEDIA_SOURCE_TRACK (track)) {
++  if (!g_atomic_int_get (&self->aborting) && GST_IS_MEDIA_SOURCE_TRACK (track)) {
+     TRACKS_LOCK (self);
+     GST_DEBUG_OBJECT (self, "got EOS event on %" GST_PTR_FORMAT, track);
+     GstMediaSourceTrackBuffer *buffer = get_track_buffer_unlocked (self, track);
+@@ -702,7 +720,9 @@
+   GstSourceBuffer *self = GST_SOURCE_BUFFER (user_data);
+ 
+   GST_OBJECT_LOCK (self);
+-  append_error_unlocked (self);
++  if (!g_atomic_int_get (&self->aborting)) {
++    append_error_unlocked (self);
++  }
+   GST_OBJECT_UNLOCK (self);
+ }
+ 
+@@ -792,6 +812,50 @@
+ }
+ 
+ static gboolean
++shift_timestamp (GstClockTime * timestamp, GstClockTimeDiff offset)
++{
++  if (!GST_CLOCK_TIME_IS_VALID (*timestamp)) {
++    return FALSE;
++  }
++  if (offset < 0) {
++    guint64 magnitude = ((guint64) -(offset + 1)) + 1;
++    if (*timestamp < magnitude) {
++      return FALSE;
++    }
++    *timestamp -= magnitude;
++  } else {
++    if (*timestamp >= GST_CLOCK_TIME_NONE - (guint64) offset) {
++      return FALSE;
++    }
++    *timestamp += offset;
++  }
++  return TRUE;
++}
++
++static gboolean
++shift_decode_timestamp (GstBuffer * buffer, GstClockTimeDiff offset)
++{
++  GstClockTime timestamp = GST_BUFFER_DTS (buffer);
++  if (!GST_CLOCK_TIME_IS_VALID (timestamp)) {
++    return FALSE;
++  }
++  if (offset < 0) {
++    guint64 magnitude = ((guint64) -(offset + 1)) + 1;
++    if (timestamp < magnitude) {
++      GstClockTimeDiff *signed_dts = g_new (GstClockTimeDiff, 1);
++      guint64 difference = magnitude - timestamp;
++      *signed_dts = difference == ((guint64) G_MAXINT64) + 1 ?
++          G_MININT64 : -(GstClockTimeDiff) difference;
++      gst_mini_object_set_qdata (GST_MINI_OBJECT_CAST (buffer),
++          gst_mse_signed_dts_quark (), signed_dts, g_free);
++      GST_BUFFER_DTS (buffer) = GST_CLOCK_TIME_NONE;
++      return TRUE;
++    }
++  }
++  return shift_timestamp (&GST_BUFFER_DTS (buffer), offset);
++}
++
++static gboolean
+ is_within_append_window_unlocked (GstSourceBuffer * self, GstSample * sample)
+ {
+   GstBuffer *buffer = gst_sample_get_buffer (sample);
+@@ -807,6 +871,71 @@
+   }
+ 
+   return end <= self->append_window_end;
++}
++
++static void
++reset_group_timing_unlocked (GstSourceBuffer * self)
++{
++  GHashTableIter iter;
++  g_hash_table_iter_init (&iter, self->track_timings);
++  for (gpointer value; g_hash_table_iter_next (&iter, NULL, &value);) {
++    ((TrackTiming *) value)->valid = FALSE;
++  }
++  TRACKS_LOCK (self);
++  g_hash_table_iter_init (&iter, self->track_buffers);
++  for (gpointer value; g_hash_table_iter_next (&iter, NULL, &value);) {
++    gst_media_source_track_buffer_require_random_access (value);
++  }
++  TRACKS_UNLOCK (self);
++}
++
++static gboolean
++map_signed_timestamp (GstClockTime original, GstClockTimeDiff offset,
++    GstClockTimeDiff * mapped)
++{
++  if (!GST_CLOCK_TIME_IS_VALID (original) || original > G_MAXINT64 ||
++      (offset > 0 && original > (guint64) (G_MAXINT64 - offset))) {
++    return FALSE;
++  }
++  *mapped = (GstClockTimeDiff) original + offset;
++  return TRUE;
++}
++
++static gboolean
++prepare_timeline_unlocked (GstSourceBuffer * self, GstBuffer * buffer,
++    TrackTiming * timing, GstClockTimeDiff * pts, GstClockTimeDiff * dts)
++{
++  while (TRUE) {
++    if (self->append_mode == GST_SOURCE_BUFFER_APPEND_MODE_SEQUENCE &&
++        self->group_start_valid) {
++      GstClockTime original = GST_BUFFER_PTS (buffer);
++      if (!GST_CLOCK_TIME_IS_VALID (original) || original > G_MAXINT64 ||
++          self->group_start < G_MININT64 + (GstClockTimeDiff) original) {
++        return FALSE;
++      }
++      self->timestamp_offset = self->group_start - (GstClockTimeDiff) original;
++      self->group_end = self->group_start;
++      self->group_start_valid = FALSE;
++      reset_group_timing_unlocked (self);
++    }
++    if (!map_signed_timestamp (GST_BUFFER_PTS (buffer), self->timestamp_offset, pts) ||
++        !map_signed_timestamp (GST_BUFFER_DTS (buffer), self->timestamp_offset, dts)) {
++      return FALSE;
++    }
++    guint64 delta = (guint64) *dts - (guint64) timing->dts;
++    if (timing->valid && (*dts < timing->dts ||
++            (delta > timing->duration && delta - timing->duration > timing->duration))) {
++      if (self->append_mode == GST_SOURCE_BUFFER_APPEND_MODE_SEQUENCE) {
++        self->group_start = self->group_end;
++        self->group_start_valid = TRUE;
++      } else {
++        self->group_end = *pts;
++      }
++      reset_group_timing_unlocked (self);
++      continue;
++    }
++    return TRUE;
++  }
+ }
+ 
+ static void
+@@ -821,21 +950,58 @@
+   g_return_if_fail (processed_init_segment);
+ #endif
+ 
++  /* Never alter parser-owned buffers: they can outlive this append. */
++  GstSample *adjusted = gst_sample_copy (sample);
++  GstBuffer *buffer = gst_buffer_copy (gst_sample_get_buffer (sample));
++  gst_sample_set_buffer (adjusted, buffer);
++  gst_buffer_unref (buffer);
++
+   GST_OBJECT_LOCK (self);
+-  gboolean is_within_window = is_within_append_window_unlocked (self, sample);
+-  GST_OBJECT_UNLOCK (self);
+-
++  if (g_atomic_int_get (&self->aborting) ||
++      g_atomic_int_get (&self->errored) || is_removed_unlocked (self)) {
++    GST_OBJECT_UNLOCK (self);
++    gst_sample_unref (adjusted);
++    return;
++  }
++  TrackTiming *timing = g_hash_table_lookup (self->track_timings, track);
++  if (timing == NULL) {
++    timing = g_new0 (TrackTiming, 1);
++    g_hash_table_insert (self->track_timings, track, timing);
++  }
++  GstClockTimeDiff previous_offset = self->timestamp_offset;
++  GstClockTimeDiff pts = 0, dts = 0;
++  gboolean valid = prepare_timeline_unlocked (self, buffer, timing, &pts, &dts) &&
++      pts >= 0 && GST_BUFFER_DURATION (buffer) <= G_MAXINT64 &&
++      pts <= G_MAXINT64 - (GstClockTimeDiff) GST_BUFFER_DURATION (buffer) &&
++      shift_timestamp (&GST_BUFFER_PTS (buffer), self->timestamp_offset) &&
++      shift_decode_timestamp (buffer, self->timestamp_offset);
++  gboolean is_within_window = valid &&
++      is_within_append_window_unlocked (self, adjusted);
+   TRACKS_LOCK (self);
++  GstMediaSourceTrackBuffer *track_buffer =
++      get_track_buffer_unlocked (self, track);
+   if (is_within_window) {
+-    GstMediaSourceTrackBuffer *track_buffer =
+-        get_track_buffer_unlocked (self, track);
+-    GST_TRACE_OBJECT (self, "new sample on %s with %" GST_PTR_FORMAT,
+-        gst_media_source_track_get_id (track), gst_sample_get_buffer (sample));
+-    gst_media_source_track_buffer_add (track_buffer, sample);
+-    TrackFeedTask *feed = get_track_feed_unlocked (self, track);
+-    start_track_feed (feed);
++    if (gst_media_source_track_buffer_add (track_buffer, adjusted)) {
++      timing->valid = TRUE;
++      timing->dts = dts;
++      timing->duration = GST_BUFFER_DURATION (buffer);
++      self->group_end = MAX (self->group_end, pts + (GstClockTimeDiff) timing->duration);
++      if (self->generate_timestamps) {
++        self->timestamp_offset = pts + (GstClockTimeDiff) timing->duration;
++      }
++      TrackFeedTask *feed = get_track_feed_unlocked (self, track);
++      start_track_feed (feed);
++    }
++  } else {
++    gst_media_source_track_buffer_require_random_access (track_buffer);
+   }
+   TRACKS_UNLOCK (self);
++  gboolean offset_changed = previous_offset != self->timestamp_offset;
++  GST_OBJECT_UNLOCK (self);
++  if (offset_changed) {
++    g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_TIMESTAMP_OFFSET]);
++  }
++  gst_sample_unref (adjusted);
+ }
+ 
+ static void
+@@ -870,8 +1036,8 @@
+ {
+   GHashTableIter iter;
+   g_hash_table_iter_init (&iter, self->track_buffers);
+-  gboolean enabled =
+-      self->append_mode == GST_SOURCE_BUFFER_APPEND_MODE_SEQUENCE;
++  /* Timeline mapping belongs to the SourceBuffer, shared across tracks. */
++  gboolean enabled = FALSE;
+   for (gpointer value; g_hash_table_iter_next (&iter, NULL, &value);) {
+     GstMediaSourceTrackBuffer *buffer = GST_MEDIA_SOURCE_TRACK_BUFFER (value);
+     gst_media_source_track_buffer_process_init_segment (buffer, enabled);
+@@ -932,6 +1098,8 @@
+   self->append_window_end = GST_CLOCK_TIME_NONE;
+   self->content_type = NULL;
+   self->timestamp_offset = 0;
++  self->track_timings = g_hash_table_new_full ((GHashFunc) track_buffer_hash,
++      (GEqualFunc) track_buffer_equal, NULL, g_free);
+   self->updating = FALSE;
+   self->errored = FALSE;
+   self->size_limit = DEFAULT_BUFFER_SIZE;
+@@ -1103,6 +1271,10 @@
+     open_parent_unlocked (self);
+   }
+ 
++  if (mode != self->append_mode && mode == GST_SOURCE_BUFFER_APPEND_MODE_SEQUENCE) {
++    self->group_start = self->group_end;
++    self->group_start_valid = TRUE;
++  }
+   self->append_mode = mode;
+ 
+   GST_OBJECT_UNLOCK (self);
+@@ -1178,7 +1350,7 @@
+     goto error;
+   }
+ 
+-  if (!GST_CLOCK_TIME_IS_VALID (start) || start <= self->append_window_end) {
++  if (!GST_CLOCK_TIME_IS_VALID (start) || start >= self->append_window_end) {
+     g_set_error (error,
+         GST_MEDIA_SOURCE_ERROR, GST_MEDIA_SOURCE_ERROR_TYPE,
+         "append window start must be between zero and append window end");
+@@ -1486,7 +1658,36 @@
+     GstClockTime end, GError ** error)
+ {
+   g_return_val_if_fail (GST_IS_SOURCE_BUFFER (self), FALSE);
++  GST_OBJECT_LOCK (self);
++  if (is_removed_unlocked (self) || is_updating (self)) {
++    g_set_error (error, GST_MEDIA_SOURCE_ERROR,
++        GST_MEDIA_SOURCE_ERROR_INVALID_STATE, "source buffer is removed or updating");
++    goto error;
++  }
++  GstMediaSource *source = get_media_source_unlocked (self);
++  GstClockTime duration = gst_media_source_get_duration (source);
++  gst_object_unref (source);
++  if (!GST_CLOCK_TIME_IS_VALID (start) || start >= end ||
++      (!GST_CLOCK_TIME_IS_VALID (duration) && !self->processed_init_segment) ||
++      (GST_CLOCK_TIME_IS_VALID (duration) && start > duration)) {
++    g_set_error (error, GST_MEDIA_SOURCE_ERROR,
++        GST_MEDIA_SOURCE_ERROR_TYPE, "invalid removal range");
++    goto error;
++  }
++  if (is_ended_unlocked (self)) {
++    open_parent_unlocked (self);
++  }
++  self->remove_start = start;
++  self->remove_end = end;
++  self->pending_remove = TRUE;
++  set_updating (self);
++  schedule_event_unlocked (self, ON_UPDATE_START);
++  g_cond_signal (&self->pending_data_cond);
++  GST_OBJECT_UNLOCK (self);
+   return TRUE;
++error:
++  GST_OBJECT_UNLOCK (self);
++  return FALSE;
+ }
+ 
+ /**
+@@ -1549,16 +1750,11 @@
+     gst_media_source_open (parent);
+     gst_clear_object (&parent);
+   }
+-  TRACKS_LOCK (self);
+-  GHashTableIter iter;
+-  g_hash_table_iter_init (&iter, self->track_buffers);
+-  for (gpointer value; g_hash_table_iter_next (&iter, NULL, &value);) {
+-    GstMediaSourceTrackBuffer *buffer = value;
+-    gst_media_source_track_buffer_set_group_start (buffer, offset);
+-  }
+-  TRACKS_UNLOCK (self);
+-
+-  self->timestamp_offset = offset;
++  self->timestamp_offset = (GstClockTimeDiff) offset;
++  if (self->append_mode == GST_SOURCE_BUFFER_APPEND_MODE_SEQUENCE) {
++    self->group_start = self->timestamp_offset;
++    self->group_start_valid = TRUE;
++  }
+ 
+   GST_OBJECT_UNLOCK (self);
+ 
+@@ -1641,25 +1837,22 @@
+ }
+ 
+ static void
+-reset_parser_state_unlocked (GstSourceBuffer * self)
+-{
++append_error_unlocked (GstSourceBuffer * self)
++{
++  if (is_errored (self) || is_removed_unlocked (self))
++    return;
++
++  /* This can run on the parser's own task. Never reset/join that task here.
++   * A decode error is terminal for this buffer: discard unprocessed input and
++   * reset coded-frame state now; disposal stops and releases the parser later. */
++  set_errored (self);
+   clear_pending_data_unlocked (self);
+-  if (gst_append_pipeline_reset (self->append_pipeline)) {
+-    clear_errored (self);
+-  } else {
+-    set_errored (self);
+-  }
+-}
+-
+-static void
+-append_error_unlocked (GstSourceBuffer * self)
+-{
+-  reset_parser_state_unlocked (self);
++  reset_group_timing_unlocked (self);
++  if (self->append_mode == GST_SOURCE_BUFFER_APPEND_MODE_SEQUENCE) {
++    self->group_start = self->group_end;
++    self->group_start_valid = TRUE;
++  }
+   clear_updating (self);
+-
+-  if (is_removed_unlocked (self)) {
+-    return;
+-  }
+ 
+   schedule_event_unlocked (self, ON_ERROR);
+   schedule_event_unlocked (self, ON_UPDATE_END);
+@@ -1678,6 +1871,18 @@
+   schedule_event_unlocked (self, ON_UPDATE_END);
+ }
+ 
++static void
++on_append_complete (GstAppendPipeline * pipeline, gpointer user_data)
++{
++  GstSourceBuffer *self = GST_SOURCE_BUFFER (user_data);
++  GST_OBJECT_LOCK (self);
++  if (!g_atomic_int_get (&self->aborting) && is_updating (self) &&
++      !is_removed_unlocked (self) && !is_errored (self)) {
++    append_successful_unlocked (self, is_ended_unlocked (self));
++  }
++  GST_OBJECT_UNLOCK (self);
++}
++
+ static gboolean
+ encountered_bad_bytes_unlocked (GstSourceBuffer * self)
+ {
+@@ -1687,7 +1892,7 @@
+ static GstBuffer *
+ await_pending_data_unlocked (GstSourceBuffer * self)
+ {
+-  if (self->pending_data == NULL) {
++  if (self->pending_data == NULL && !self->pending_remove) {
+     guint64 deadline = g_get_monotonic_time () + G_TIME_SPAN_SECOND;
+     g_cond_wait_until (&self->pending_data_cond, GST_OBJECT_GET_LOCK (self),
+         deadline);
+@@ -1750,10 +1955,25 @@
+ 
+   GstBuffer *pending_data = await_pending_data_unlocked (self);
+ 
+-  if (is_removed_unlocked (self)) {
+-    append_successful_unlocked (self, TRUE);
++  if (is_removed_unlocked (self))
+     goto done;
+-  }
++
++  if (self->pending_remove) {
++    self->pending_remove = FALSE;
++    TRACKS_LOCK (self);
++    GHashTableIter iter;
++    g_hash_table_iter_init (&iter, self->track_buffers);
++    for (gpointer value; g_hash_table_iter_next (&iter, NULL, &value);) {
++      gst_media_source_track_buffer_remove_range (value,
++          self->remove_start, self->remove_end);
++    }
++    TRACKS_UNLOCK (self);
++    append_successful_unlocked (self, is_ended_unlocked (self));
++    goto done;
++  }
++
++  if (is_errored (self))
++    goto done;
+ 
+   if (encountered_bad_bytes_unlocked (self)) {
+     append_error_unlocked (self);
+@@ -1762,12 +1982,12 @@
+ 
+   if (!GST_IS_BUFFER (pending_data)) {
+     GST_TRACE_OBJECT (self, "no pending data");
+-    append_successful_unlocked (self, is_ended_unlocked (self));
+     goto done;
+   }
+ 
+   GstFlowReturn result = gst_append_pipeline_append (self->append_pipeline,
+       pending_data);
++  pending_data = NULL; /* append takes ownership even on failure */
+ 
+   if (result != GST_FLOW_OK) {
+     GST_ERROR_OBJECT (self, "failed to append: %s", gst_flow_get_name (result));
+@@ -1775,9 +1995,10 @@
+     goto done;
+   }
+ 
+-  append_successful_unlocked (self, is_ended_unlocked (self));
++  /* The parser task completes the append after consuming its samples. */
+ 
+ done:
++  gst_clear_buffer (&pending_data);
+   GST_OBJECT_UNLOCK (self);
+ }
+ 
+@@ -1896,7 +2117,7 @@
+ schedule_event_unlocked (GstSourceBuffer * self, SourceBufferEvent event)
+ {
+   g_return_if_fail (event < N_SIGNALS);
+-  if (is_removed_unlocked (self)) {
++  if (is_removed_unlocked (self) && event != ON_ABORT && event != ON_UPDATE_END) {
+     return;
+   }
+   SourceBufferEventItem item = {
+@@ -1928,6 +2149,40 @@
+  * Returns: `TRUE` on success, `FALSE` otherwise
+  * Since: 1.24
+  */
++static gboolean
++flush_source_buffer_parser (GstSourceBuffer * self, GError ** error)
++{
++  GST_OBJECT_LOCK (self);
++  g_atomic_int_set (&self->aborting, TRUE);
++  clear_pending_data_unlocked (self);
++  GST_OBJECT_UNLOCK (self);
++
++  gboolean success = gst_append_pipeline_flush (self->append_pipeline);
++
++  GST_OBJECT_LOCK (self);
++  if (success) {
++    g_atomic_int_set (&self->parser_eos, FALSE);
++    reset_group_timing_unlocked (self);
++    if (self->append_mode == GST_SOURCE_BUFFER_APPEND_MODE_SEQUENCE) {
++      self->group_start = self->group_end;
++      self->group_start_valid = TRUE;
++    }
++    TRACKS_LOCK (self);
++    GHashTableIter iter;
++    g_hash_table_iter_init (&iter, self->track_buffers);
++    for (gpointer value; g_hash_table_iter_next (&iter, NULL, &value);) {
++      gst_media_source_track_buffer_clear_eos (value);
++    }
++    TRACKS_UNLOCK (self);
++  } else {
++    g_set_error (error, GST_MEDIA_SOURCE_ERROR,
++        GST_MEDIA_SOURCE_ERROR_INVALID_STATE, "failed to flush append parser");
++  }
++  g_atomic_int_set (&self->aborting, FALSE);
++  GST_OBJECT_UNLOCK (self);
++  return success;
++}
++
+ gboolean
+ gst_source_buffer_append_buffer (GstSourceBuffer * self, GstBuffer * buf,
+     GError ** error)
+@@ -1935,10 +2190,27 @@
+   g_return_val_if_fail (GST_IS_SOURCE_BUFFER (self), FALSE);
+   g_return_val_if_fail (GST_IS_BUFFER (buf), FALSE);
+ 
++  if (g_atomic_int_get (&self->parser_eos)) {
++    GST_OBJECT_LOCK (self);
++    gboolean allowed = !is_removed_unlocked (self) && !is_updating (self) &&
++        !g_atomic_int_get (&self->aborting);
++    GST_OBJECT_UNLOCK (self);
++    if (!allowed) {
++      g_set_error (error, GST_MEDIA_SOURCE_ERROR,
++          GST_MEDIA_SOURCE_ERROR_INVALID_STATE, "source buffer cannot resume");
++      gst_buffer_unref (buf);
++      return FALSE;
++    }
++    if (!flush_source_buffer_parser (self, error)) {
++      gst_buffer_unref (buf);
++      return FALSE;
++    }
++  }
+   GST_OBJECT_LOCK (self);
+   TRACKS_LOCK (self);
+ 
+-  if (is_removed_unlocked (self) || is_updating (self)) {
++  if (is_removed_unlocked (self) || is_updating (self) ||
++      g_atomic_int_get (&self->aborting)) {
+     g_set_error (error,
+         GST_MEDIA_SOURCE_ERROR, GST_MEDIA_SOURCE_ERROR_INVALID_STATE,
+         "source buffer is removed or still updating");
+@@ -2009,14 +2281,38 @@
+ gst_source_buffer_abort (GstSourceBuffer * self, GError ** error)
+ {
+   g_return_val_if_fail (GST_IS_SOURCE_BUFFER (self), FALSE);
+-  if (gst_append_pipeline_eos (self->append_pipeline) == GST_FLOW_OK) {
+-    return TRUE;
+-  } else {
+-    g_set_error (error,
+-        GST_MEDIA_SOURCE_ERROR, GST_MEDIA_SOURCE_ERROR_INVALID_STATE,
+-        "failed to abort source buffer");
++  GST_OBJECT_LOCK (self);
++  if (is_removed_unlocked (self) || is_ended_unlocked (self) ||
++      self->pending_remove || g_atomic_int_get (&self->aborting)) {
++    g_set_error (error, GST_MEDIA_SOURCE_ERROR,
++        GST_MEDIA_SOURCE_ERROR_INVALID_STATE, "source buffer cannot abort in this state");
++    GST_OBJECT_UNLOCK (self);
+     return FALSE;
+   }
++  gboolean was_updating = is_updating (self);
++  clear_updating (self);
++  g_atomic_int_set (&self->aborting, TRUE);
++  self->append_window_start = 0;
++  self->append_window_end = GST_CLOCK_TIME_NONE;
++  GST_OBJECT_UNLOCK (self);
++
++  if (!flush_source_buffer_parser (self, error)) {
++    return FALSE;
++  }
++  GST_OBJECT_LOCK (self);
++  if (was_updating) {
++    schedule_event_unlocked (self, ON_ABORT);
++    schedule_event_unlocked (self, ON_UPDATE_END);
++  }
++  GST_OBJECT_UNLOCK (self);
++  return TRUE;
++}
++
++void
++gst_source_buffer_end_stream (GstSourceBuffer * self)
++{
++  g_atomic_int_set (&self->parser_eos, TRUE);
++  gst_append_pipeline_eos (self->append_pipeline);
+ }
+ 
+ gboolean
+@@ -2157,20 +2453,89 @@
+   return buffered;
+ }
+ 
++static GstClockTime
++get_timestamp_bound (GstSourceBuffer * self, gboolean end)
++{
++  GstClockTime highest = GST_CLOCK_TIME_NONE;
++  TRACKS_LOCK (self);
++  GHashTableIter iter;
++  g_hash_table_iter_init (&iter, self->track_buffers);
++  for (gpointer value; g_hash_table_iter_next (&iter, NULL, &value);) {
++    GstClockTime current = end ?
++        gst_media_source_track_buffer_get_highest_end_time (value) :
++        gst_media_source_track_buffer_get_highest_start_time (value);
++    if (GST_CLOCK_TIME_IS_VALID (current)) {
++      highest = GST_CLOCK_TIME_IS_VALID (highest) ? MAX (highest, current) : current;
++    }
++  }
++  TRACKS_UNLOCK (self);
++  return highest;
++}
++
++GstClockTime
++gst_source_buffer_get_highest_start_time (GstSourceBuffer * self)
++{
++  return get_timestamp_bound (self, FALSE);
++}
++
++GstClockTime
++gst_source_buffer_get_highest_end_time (GstSourceBuffer * self)
++{
++  return get_timestamp_bound (self, TRUE);
++}
++
++GstClockTime
++gst_source_buffer_get_initial_duration (GstSourceBuffer * self)
++{
++  return gst_append_pipeline_get_duration (self->append_pipeline);
++}
++
+ GstClockTime
+ gst_source_buffer_get_duration (GstSourceBuffer * self)
+ {
+   g_return_val_if_fail (GST_IS_SOURCE_BUFFER (self), GST_CLOCK_TIME_NONE);
+-  return gst_append_pipeline_get_duration (self->append_pipeline);
++  GstClockTime duration = gst_append_pipeline_get_duration (self->append_pipeline);
++  TRACKS_LOCK (self);
++  GHashTableIter iter;
++  g_hash_table_iter_init (&iter, self->track_buffers);
++  for (gpointer key, value; g_hash_table_iter_next (&iter, &key, &value);) {
++    GArray *ranges = gst_media_source_track_buffer_get_ranges (value);
++    for (guint i = 0; i < ranges->len; i++) {
++      GstClockTime end = g_array_index (ranges, GstMediaSourceRange, i).end;
++      duration = GST_CLOCK_TIME_IS_VALID (duration) ? MAX (duration, end) : end;
++    }
++    g_array_unref (ranges);
++  }
++  TRACKS_UNLOCK (self);
++  return duration;
+ }
+ 
+ void
+ gst_source_buffer_teardown (GstSourceBuffer * self)
+ {
+   GST_OBJECT_LOCK (self);
+-  reset_parser_state_unlocked (self);
+-  clear_updating (self);
+-  GST_OBJECT_UNLOCK (self);
++  g_atomic_int_set (&self->aborting, TRUE);
++  clear_pending_data_unlocked (self);
++  self->pending_remove = FALSE;
++  if (is_updating (self)) {
++    clear_updating (self);
++    schedule_event_unlocked (self, ON_ABORT);
++    schedule_event_unlocked (self, ON_UPDATE_END);
++  }
++  GST_OBJECT_UNLOCK (self);
++
++  /* Callbacks acquire this object's lock. Join them without either the buffer
++   * or its parent's lock held, and never restart a removed parser. */
++  append_to_buffer_task_stop (self->append_to_buffer_task);
++  gst_task_join (self->append_to_buffer_task->task);
++  gst_append_pipeline_stop (self->append_pipeline);
++
++  /* Feed tasks temporarily own the buffer while waiting for more samples.
++   * Waiting for dispose to stop them would retain the buffer indefinitely. */
++  GHashTableIter iter;
++  g_hash_table_iter_init (&iter, self->track_feeds);
++  for (gpointer value; g_hash_table_iter_next (&iter, NULL, &value);)
++    stop_track_feed (value);
+ }
+ 
+ GPtrArray *

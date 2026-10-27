@@ -1,0 +1,53 @@
+<!doctype html><meta charset=utf-8><title>SVG use instance context</title>
+<style>
+body{margin:0;background:white}.tile{position:absolute;width:60px;height:60px}
+.outside .scope-paint,.host-scope rect{fill:red}.inside .child,.sheet-paint,.source-green{fill:rgb(20,180,90)}
+.variable{fill:var(--paint,red)}.variable-stop{stop-color:var(--paint,red)}.source-red{fill:red}
+</style><style id=mutable-sheet>.sheet-mut{fill:red}</style>
+<svg width="0" height="0" style="position:absolute;fill:red"><defs>
+ <g class=outside><g id=scoped><rect class=scope-paint width="60" height="60"/></g></g>
+ <g id=plain><rect width="60" height="60"/></g>
+ <g id=inside class=inside><rect class=child width="60" height="60"/></g>
+ <g id=current><rect fill=currentColor width="60" height="60"/></g>
+ <g id=variable><rect class=variable width="60" height="60"/></g>
+ <g id=gradient><defs><linearGradient id=local-gradient><stop class=variable-stop offset="0"/><stop class=variable-stop offset="1"/></linearGradient></defs><rect fill="url(#local-gradient)" width="60" height="60"/></g>
+ <g id=nested><use href="#current"/></g>
+ <g id=clipped><defs><clipPath id=local-clip><rect width="20" height="60"/></clipPath></defs><rect clip-path="url(#local-clip)" width="60" height="60"/></g>
+ <g id=source-mut><rect id=source-mut-rect class=source-red width="60" height="60"/></g>
+ <g id=sheet-mut><rect class=sheet-mut width="60" height="60"/></g>
+ <g id=script-inert><foreignObject width="0" height="0"><script>window.svgSourceScript=(window.svgSourceScript||0)+1;</script></foreignObject><rect width="60" height="60"/></g>
+ <g id=append-target></g>
+</defs></svg>
+<svg class=tile style="left:20px;top:20px"><use href="#scoped" fill="rgb(20,180,90)"/></svg>
+<svg class="tile host-scope" style="left:100px;top:20px"><use href="#plain" fill="rgb(20,180,90)"/></svg>
+<svg class=tile style="left:180px;top:20px"><use href="#inside"/></svg>
+<svg class=tile style="left:260px;top:20px"><use href="#current" color="rgb(20,180,90)"/></svg>
+<svg class=tile style="left:340px;top:20px"><use href="#current" color="rgb(30,90,220)"/></svg>
+<svg class=tile style="left:420px;top:20px"><use href="#variable" style="--paint:rgb(20,180,90)"/></svg>
+<svg class=tile style="left:20px;top:120px"><use href="#variable" style="--paint:rgb(30,90,220)"/></svg>
+<svg class=tile style="left:100px;top:120px"><use href="#gradient" style="--paint:rgb(20,180,90)"/></svg>
+<svg class=tile style="left:180px;top:120px"><use href="#gradient" style="--paint:rgb(30,90,220)"/></svg>
+<svg class=tile style="left:260px;top:120px"><use href="#nested" color="rgb(20,180,90)"/></svg>
+<svg class=tile style="left:340px;top:120px;fill:red"><defs><g id=local-plain><rect width="60" height="60"/></g></defs><use href="#local-plain" fill="rgb(20,180,90)"/></svg>
+<svg class=tile style="left:420px;top:120px"><defs><g id=local-sheet><rect class=sheet-paint width="60" height="60"/></g></defs><use href="#local-sheet"/></svg>
+<svg class=tile style="left:20px;top:220px"><use href="#clipped" fill="rgb(20,180,90)"/></svg>
+<svg class=tile style="left:100px;top:220px"><use href="#source-mut"/></svg>
+<svg class=tile style="left:180px;top:220px"><use href="#sheet-mut"/></svg>
+<svg class=tile style="left:260px;top:220px"><use href="#script-inert" fill="rgb(20,180,90)"/></svg>
+<svg class=tile style="left:340px;top:220px"><use id=host-mut href="#plain" fill=red /></svg>
+<svg class=tile style="left:420px;top:220px"><use href="#append-target"/></svg>
+<script>
+addEventListener('load',()=>setTimeout(()=>{
+ document.getElementById('source-mut-rect').setAttribute('class','source-green');
+ document.getElementById('mutable-sheet').textContent='.sheet-mut{fill:rgb(20,180,90)}';
+ document.getElementById('host-mut').setAttribute('fill','rgb(20,180,90)');
+ const rect=document.createElementNS('http://www.w3.org/2000/svg','rect');for(const [key,value]of Object.entries({width:60,height:60,fill:'rgb(20,180,90)'}))rect.setAttribute(key,value);document.getElementById('append-target').append(rect);
+ setTimeout(()=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[
+  {name:'source script executes once',passed:window.svgSourceScript===1},
+  {name:'source style attribute is untouched',passed:document.querySelector('#scoped rect').getAttribute('style')===null},
+  {name:'source IDs are untouched',passed:document.querySelectorAll('#local-gradient').length===1&&document.querySelectorAll('#current').length===1},
+  {name:'host href is untouched',passed:document.getElementById('host-mut').getAttribute('href')==='#plain'},
+  {name:'source class mutation applies natively',passed:getComputedStyle(document.getElementById('source-mut-rect')).fill==='rgb(20, 180, 90)'}
+ ]})}),1000);
+},1000));
+</script>

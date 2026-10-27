@@ -69,6 +69,8 @@ use crate::dom::keyboardevent::KeyboardEvent;
 use crate::dom::node::focus::FocusTrigger;
 use crate::dom::node::{self, Node, NodeTraits};
 use crate::dom::pointerevent::{PointerEvent, PointerId};
+#[cfg(feature = "webxr")]
+use crate::dom::xrsession::{InlinePointerAction, ScreenPointerSample};
 use crate::dom::types::{
     CompositionEvent, Element, Event, EventTarget, GlobalScope, HTMLAnchorElement, HTMLElement,
     HTMLLabelElement, MouseEvent, Touch, TouchEvent, TouchList, WheelEvent, Window,
@@ -76,6 +78,7 @@ use crate::dom::types::{
 use crate::dom::window::scrolling_box::{ScrollAxisState, ScrollRequirement, ScrollingBoxAxis};
 use crate::drag::drag_gesture::DragGesture;
 use crate::realms::enter_auto_realm;
+mod pen;
 
 /// A data structure used for tracking the current click count. This can be
 /// reset to 0 if a mouse button event happens at a sufficient distance or time
@@ -86,7 +89,7 @@ use crate::realms::enter_auto_realm;
 /// > events. This MUST be a non-negative integer indicating the number of consecutive
 /// > clicks of a pointing device button within a specific time. The delay after which
 /// > the count resets is specific to the environment configuration.
-#[derive(Default, JSTraceable, MallocSizeOf)]
+#[derive(Clone, Default, JSTraceable, MallocSizeOf)]
 struct ClickCountingInfo {
     time: Option<Instant>,
     #[no_trace]
@@ -198,9 +201,13 @@ pub(crate) struct DocumentEventHandler {
     #[no_trace]
     active_keyboard_modifiers: Cell<Modifiers>,
     /// Map from touch identifier to pointer ID for active touch points
-    active_pointer_ids: DomRefCell<FxHashMap<i32, i32>>,
+    // Stored primary status is fixed for the contact lifetime. A secondary
+    // contact is not promoted when the primary one leaves. The last bool is pen.
+    active_pointer_ids: DomRefCell<FxHashMap<i32, (i32, bool, bool)>>,
     /// Counter for generating unique pointer IDs for touch inputs
     next_touch_pointer_id: Cell<i32>,
+    pen_pointers: DomRefCell<FxHashMap<i32, pen::PenPointer>>,
+    pen_clicks: DomRefCell<FxHashMap<i32, pen::PenClickState>>,
     /// A map holding information about currently registered access key handlers.
     access_key_handlers: DomRefCell<FxHashMap<NoTrace<Code>, Dom<HTMLElement>>>,
     /// Map from pointer ID to pending pointer capture target override element.
@@ -237,6 +244,8 @@ impl DocumentEventHandler {
             active_keyboard_modifiers: Default::default(),
             active_pointer_ids: Default::default(),
             next_touch_pointer_id: Cell::new(1),
+            pen_pointers: Default::default(),
+            pen_clicks: Default::default(),
             access_key_handlers: Default::default(),
             pending_pointer_capture: Default::default(),
             pointer_capture_target: Default::default(),
@@ -350,6 +359,12 @@ impl DocumentEventHandler {
                 InputEvent::MouseButton(mouse_button_event) => {
                     let publish=mouse_button_event.action==MouseButtonAction::Up && mouse_button_event.button==MouseButton::Primary;
                     self.handle_native_mouse_button_event(cx, mouse_button_event, &event);
+                    #[cfg(feature = "webxr")]
+                    if publish {
+                        // Also retire gestures when mouseup had no valid DOM hit.
+                        self.window.inline_xr_pointer_event(cx, PointerId::Mouse as i32,
+                            InlinePointerAction::End, None);
+                    }
                     if publish {
                         let document=self.window.Document();
                         let focused=document.focus_handler().focused_area().dom_anchor(&document);
@@ -379,6 +394,7 @@ impl DocumentEventHandler {
                     InputEventResult::default()
                 },
                 InputEvent::Touch(touch_event) => self.handle_touch_event(cx, touch_event, &event),
+                InputEvent::Pen(pen_event) => self.handle_pen_event(cx, pen_event, &event),
                 InputEvent::Wheel(wheel_event) => {
                     let result = self.handle_wheel_event(cx, wheel_event, &event);
                     input_event_outcomes.extend(
@@ -479,6 +495,10 @@ impl DocumentEventHandler {
         input_event: &ConstellationInputEvent,
         mouse_leave_event: &MouseLeftViewportEvent,
     ) {
+        #[cfg(feature = "webxr")]
+        if !mouse_leave_event.is_compatibility_event {
+            self.window.inline_xr_pointer_event(cx, PointerId::Mouse as i32, InlinePointerAction::Cancel, None);
+        }
         if let Some(current_hover_target) = self.current_hover_target.get() {
             let current_hover_target = current_hover_target.upcast::<Node>();
             for element in current_hover_target
@@ -503,10 +523,12 @@ impl DocumentEventHandler {
                 );
 
                 // Fire pointerout before mouseout
-                mouse_out_event
-                    .to_pointer_hover_event(cx, "pointerout")
-                    .upcast::<Event>()
-                    .fire(cx, current_hover_target.upcast());
+                if !mouse_leave_event.is_compatibility_event {
+                    mouse_out_event
+                        .to_pointer_hover_event(cx, "pointerout")
+                        .upcast::<Event>()
+                        .fire(cx, current_hover_target.upcast());
+                }
 
                 mouse_out_event
                     .upcast::<Event>()
@@ -611,10 +633,15 @@ impl DocumentEventHandler {
     }
 
     /// <https://w3c.github.io/uievents/#handle-native-mouse-move>
-    fn handle_native_mouse_move_event(
+    fn handle_native_mouse_move_event(&self, cx: &mut JSContext, input_event: &ConstellationInputEvent) {
+        self.handle_mouse_move_event_with_target(cx, input_event, None);
+    }
+
+    fn handle_mouse_move_event_with_target(
         &self,
         cx: &mut JSContext,
         input_event: &ConstellationInputEvent,
+        capture_target: Option<&Element>,
     ) {
         let is_compatibility_event_for_touch = input_event.is_compatibility_event_for_touch();
 
@@ -639,12 +666,14 @@ impl DocumentEventHandler {
         // with the actual element under the pointer. Boundary events for hover
         // transitions are suppressed while pointer capture is active: per spec,
         // pointer events are retargeted to the capture element.
-        let Some(hit_test_result) = self
+        let Some(mut hit_test_result) = self
             .window
             .hit_test_from_input_event(hit_test_flags, input_event)
         else {
             return;
         };
+
+        Self::retarget_pen_mouse_hit(&mut hit_test_result, capture_target);
 
         {
             let mut maybe_drag_gesture = self.drag_gesture.borrow_mut();
@@ -817,8 +846,17 @@ impl DocumentEventHandler {
 
         if !is_compatibility_event_for_touch {
             let pointer_event = mouse_event.to_pointer_event(cx, Atom::from("pointermove"));
+            #[cfg(feature = "webxr")]
+            let screen_sample = if self.window.has_inline_xr_pointer(pointer_id) {
+                ScreenPointerSample::from_hit(&hit_test_result)
+                    .filter(|sample| sample.targets(&pointer_target))
+            } else { None };
             pointer_event.upcast::<Event>().set_composed(true);
             pointer_event.upcast::<Event>().fire(cx, &pointer_target);
+            #[cfg(feature = "webxr")]
+            self.window.inline_xr_pointer_event(cx, pointer_id,
+                if input_event.primary_button_is_pressed() { InlinePointerAction::Move } else { InlinePointerAction::Cancel },
+                screen_sample.as_ref());
 
             // Process pending pointer capture after firing event, but skip if we just
             // released a disconnected capture to avoid immediately re-capturing.
@@ -940,11 +978,16 @@ impl DocumentEventHandler {
 
     /// <https://w3c.github.io/uievents/#mouseevent-algorithms>
     /// Handles native mouse down, mouse up, mouse click.
-    fn handle_native_mouse_button_event(
+    fn handle_native_mouse_button_event(&self, cx: &mut JSContext, mouse_button_event: MouseButtonEvent, input_event: &ConstellationInputEvent) {
+        self.handle_mouse_button_event_with_target(cx, mouse_button_event, input_event, None);
+    }
+
+    fn handle_mouse_button_event_with_target(
         &self,
         cx: &mut JSContext,
         mouse_button_event: MouseButtonEvent,
         input_event: &ConstellationInputEvent,
+        capture_target: Option<&Element>,
     ) {
         let is_compatibility_event_for_touch = input_event.is_compatibility_event_for_touch();
 
@@ -966,10 +1009,12 @@ impl DocumentEventHandler {
             HitTestFlags::empty()
         };
         // Ignore all incoming events without a hit test.
-        let Some(hit_test_result) = self.window.hit_test_from_input_event(flags, input_event)
+        let Some(mut hit_test_result) = self.window.hit_test_from_input_event(flags, input_event)
         else {
             return;
         };
+
+        Self::retarget_pen_mouse_hit(&mut hit_test_result, capture_target);
 
         debug!(
             "{:?}: at {:?}",
@@ -1089,8 +1134,18 @@ impl DocumentEventHandler {
                     self.mouse_button_state
                         .set(input_event.pressed_mouse_buttons);
 
+                    #[cfg(feature = "webxr")]
+                    let screen_sample = if self.window.has_inline_xr_sessions() {
+                        ScreenPointerSample::from_hit(&hit_test_result)
+                            .filter(|sample| sample.targets(&pointer_target))
+                    } else { None };
                     let pointer_event_result =
                         pointer_event.upcast::<Event>().fire(cx, &pointer_target);
+                    #[cfg(feature = "webxr")]
+                    if mouse_button_event.button == MouseButton::Primary {
+                        self.window.inline_xr_pointer_event(cx, pointer_id,
+                            InlinePointerAction::Down { primary: true }, screen_sample.as_ref());
+                    }
 
                     // Process pending pointer capture after firing event, but skip if we just
                     // released a disconnected capture to avoid immediately re-capturing.
@@ -1133,12 +1188,25 @@ impl DocumentEventHandler {
 
                 // Step 9. If mbutton is the secondary mouse button, then
                 // Maybe show context menu with native, target.
-                if let MouseButton::Secondary = mouse_button_event.button {
+                if let MouseButton::Secondary = mouse_button_event.button && !mouse_button_event.pointer_manages_activation {
                     self.maybe_show_context_menu(cx, node.upcast(), &hit_test_result, input_event);
                 }
             },
             // https://w3c.github.io/pointerevents/#dfn-handle-native-mouse-up
             MouseButtonAction::Up => {
+                #[cfg(feature = "webxr")]
+                let xr_release = !is_compatibility_event_for_touch &&
+                    mouse_button_event.button == MouseButton::Primary &&
+                    self.window.has_inline_xr_pointer(PointerId::Mouse as i32);
+                #[cfg(not(feature = "webxr"))]
+                let xr_release = false;
+                let mut deferred_pointer_up = None;
+                #[cfg(feature = "webxr")]
+                if xr_release {
+                    let sample = ScreenPointerSample::from_hit(&hit_test_result);
+                    self.window.inline_xr_pointer_event(cx, PointerId::Mouse as i32,
+                        InlinePointerAction::Select, sample.as_ref());
+                }
                 if !is_compatibility_event_for_touch {
                     // Step 6. Dispatch pointerup event.
                     let mouse_button_state = self.mouse_button_state.get();
@@ -1172,23 +1240,14 @@ impl DocumentEventHandler {
                         .map(DomRoot::upcast::<EventTarget>)
                         .unwrap_or_else(|| DomRoot::from_ref(node.upcast::<EventTarget>()));
 
-                    pointer_event.upcast::<Event>().fire(cx, &pointer_target);
-
-                    // Update button state after firing event, so setPointerCapture/releasePointerCapture
-                    // work during the pointerup handler (pointer is still "active").
-                    self.mouse_button_state
-                        .set(input_event.pressed_mouse_buttons);
-
-                    // Process pending pointer capture after decrementing button count, but skip
-                    // if we just released a disconnected capture to avoid immediately re-capturing.
-                    // https://w3c.github.io/pointerevents/#process-pending-pointer-capture
-                    if !released_disconnected {
-                        self.process_pending_pointer_capture(cx, pointer_id, "mouse", true);
-                    }
-
-                    // Implicitly release pointer capture when last button was released
-                    if exactly_one_button {
-                        self.implicit_release_pointer_capture(cx, pointer_id, "mouse", true);
+                    if xr_release && exactly_one_button {
+                        // Transient XR input brackets click with select/selectend;
+                        // pointerup follows removal of the transient source.
+                        deferred_pointer_up = Some((pointer_event, pointer_target,
+                            released_disconnected, exactly_one_button));
+                    } else {
+                        self.finish_mouse_pointer_release(cx, &pointer_event, &pointer_target,
+                            input_event.pressed_mouse_buttons, released_disconnected, exactly_one_button);
                     }
                 }
 
@@ -1214,7 +1273,30 @@ impl DocumentEventHandler {
                     &hit_test_result,
                     &element,
                 );
+                #[cfg(feature = "webxr")]
+                if xr_release {
+                    self.window.inline_xr_pointer_event(cx, PointerId::Mouse as i32,
+                        InlinePointerAction::End, None);
+                }
+                if let Some((event, target, released, last_button)) = deferred_pointer_up {
+                    self.finish_mouse_pointer_release(cx, &event, &target,
+                        input_event.pressed_mouse_buttons, released, last_button);
+                }
             },
+        }
+    }
+
+    fn finish_mouse_pointer_release(&self, cx: &mut JSContext, event: &PointerEvent,
+        target: &EventTarget, buttons: MouseButtons, released_disconnected: bool, last_button: bool) {
+        event.upcast::<Event>().fire(cx, target);
+        // Capture operations in pointerup handlers still see an active pointer.
+        self.mouse_button_state.set(buttons);
+        let id = PointerId::Mouse as i32;
+        if !released_disconnected {
+            self.process_pending_pointer_capture(cx, id, "mouse", true);
+        }
+        if last_button {
+            self.implicit_release_pointer_capture(cx, id, "mouse", true);
         }
     }
 
@@ -1228,6 +1310,10 @@ impl DocumentEventHandler {
         hit_test_result: &HitTestResult,
         element: &Element,
     ) {
+        if event.pointer_manages_activation {
+            self.last_mouse_button_down_point.take();
+            return;
+        }
         if event.button != MouseButton::Primary {
             return;
         }
@@ -1353,7 +1439,7 @@ impl DocumentEventHandler {
         // Ignore all incoming events without a hit test.
         let Some(hit_test_result) = self.window.hit_test_from_input_event(flags, input_event)
         else {
-            self.update_active_touch_points_when_early_return(event);
+            self.update_active_touch_points_when_early_return(cx, event);
             return Default::default();
         };
 
@@ -1364,7 +1450,7 @@ impl DocumentEventHandler {
             .inclusive_ancestors(ShadowIncluding::Yes)
             .find_map(DomRoot::downcast::<Element>)
         else {
-            self.update_active_touch_points_when_early_return(event);
+            self.update_active_touch_points_when_early_return(cx, event);
             return Default::default();
         };
 
@@ -1407,8 +1493,16 @@ impl DocumentEventHandler {
         };
 
         // Get or create pointer ID for this touch
-        let pointer_id = self.get_or_create_pointer_id_for_touch(identifier);
-        let is_primary = self.is_primary_pointer(pointer_id);
+        let (pointer_id, is_primary) = if matches!(event.event_type, TouchEventType::Down) {
+            self.get_or_create_pointer_id_for_touch(identifier, event.pointer_type, event.is_primary)
+        } else {
+            let Some((id, primary, _)) = self.active_pointer_ids.borrow().get(&identifier).copied() else {
+                // A native cancellation can retire a contact before a delayed
+                // release arrives. Do not allocate a new pointer for that release.
+                return Default::default();
+            };
+            (id, primary)
+        };
 
         // For touch devices (which don't support hover), fire pointerover/pointerenter
         // <https://w3c.github.io/pointerevents/#mapping-for-devices-that-do-not-support-hover>
@@ -1467,58 +1561,98 @@ impl DocumentEventHandler {
             event.is_cancelable(),
             Some(hit_test_result.point_in_node),
         );
-        pointer_event.upcast::<Event>().fire(cx, &pointer_target);
+        #[cfg(feature = "webxr")]
+        let xr_release = matches!(event.event_type, TouchEventType::Up) &&
+            self.window.has_inline_xr_pointer(pointer_id);
+        #[cfg(not(feature = "webxr"))]
+        let xr_release = false;
 
-        // Process pending pointer capture after firing event, but skip if we just
-        // released a disconnected capture (to avoid immediately re-capturing).
-        // Also skip for pointercancel: per spec, process pending only runs for
-        // pointerdown, pointermove, and pointerup, not pointercancel.
-        // https://w3c.github.io/pointerevents/#process-pending-pointer-capture
-        if !released_disconnected && !matches!(event.event_type, TouchEventType::Cancel) {
-            self.process_pending_pointer_capture(cx, pointer_id, pointer_type, is_primary);
+        #[cfg(feature = "webxr")]
+        let screen_sample = if self.window.has_inline_xr_pointer(pointer_id) ||
+            (matches!(event.event_type, TouchEventType::Down) && self.window.has_inline_xr_sessions())
+        {
+            ScreenPointerSample::from_hit(&hit_test_result)
+                .filter(|sample| sample.targets(&pointer_target))
+        } else {
+            None
+        };
+        #[cfg(feature = "webxr")]
+        match event.event_type {
+            TouchEventType::Up if xr_release => self.window.inline_xr_pointer_event(
+                cx, pointer_id, InlinePointerAction::Select, screen_sample.as_ref()),
+            TouchEventType::Cancel => self.window.inline_xr_pointer_event(
+                cx, pointer_id, InlinePointerAction::Cancel, None),
+            _ => {},
         }
 
-        // Implicitly release pointer capture on pointerup or pointercancel
-        // For pointercancel, this fires lostpointercapture after the pointercancel event.
-        if matches!(
-            event.event_type,
-            TouchEventType::Up | TouchEventType::Cancel
-        ) {
-            self.implicit_release_pointer_capture(cx, pointer_id, pointer_type, is_primary);
+        // Transient XR actions bracket click and retire before pointerup. Keep
+        // ordinary touch dispatch unchanged when no XR source owns the contact.
+        let dispatch_pointer = |cx: &mut JSContext| {
+            pointer_event.upcast::<Event>().fire(cx, &pointer_target);
+
+            // Process pending pointer capture after firing event, but skip if we just
+            // released a disconnected capture (to avoid immediately re-capturing).
+            // Also skip for pointercancel: per spec, process pending only runs for
+            // pointerdown, pointermove, and pointerup, not pointercancel.
+            // https://w3c.github.io/pointerevents/#process-pending-pointer-capture
+            if !released_disconnected && !matches!(event.event_type, TouchEventType::Cancel) {
+                self.process_pending_pointer_capture(cx, pointer_id, pointer_type, is_primary);
+            }
+
+            // Implicitly release pointer capture on pointerup or pointercancel
+            // For pointercancel, this fires lostpointercapture after the pointercancel event.
+            if matches!(
+                event.event_type,
+                TouchEventType::Up | TouchEventType::Cancel
+            ) {
+                self.implicit_release_pointer_capture(cx, pointer_id, pointer_type, is_primary);
+            }
+
+            // For touch devices, fire pointerout/pointerleave after pointerup/pointercancel
+            // <https://w3c.github.io/pointerevents/#mapping-for-devices-that-do-not-support-hover>
+            if matches!(
+                event.event_type,
+                TouchEventType::Up | TouchEventType::Cancel
+            ) {
+                // Fire pointerout
+                let pointer_out = pointer_touch.to_pointer_event(
+                    cx,
+                    window,
+                    "pointerout",
+                    pointer_id,
+                    is_primary,
+                    pointer_type,
+                    input_event.active_keyboard_modifiers,
+                    true, // cancelable
+                    Some(hit_test_result.point_in_node),
+                );
+                pointer_out.upcast::<Event>().fire(cx, &current_target);
+
+                // Fire pointerleave hierarchically (from target to topmost ancestor)
+                self.fire_pointer_event_for_touch(
+                    cx,
+                    &element,
+                    &pointer_touch,
+                    pointer_id,
+                    "pointerleave",
+                    is_primary,
+                    pointer_type,
+                    input_event,
+                    &hit_test_result,
+                );
+            }
+
+        };
+        if !xr_release {
+            dispatch_pointer(cx);
         }
-
-        // For touch devices, fire pointerout/pointerleave after pointerup/pointercancel
-        // <https://w3c.github.io/pointerevents/#mapping-for-devices-that-do-not-support-hover>
-        if matches!(
-            event.event_type,
-            TouchEventType::Up | TouchEventType::Cancel
-        ) {
-            // Fire pointerout
-            let pointer_out = pointer_touch.to_pointer_event(
-                cx,
-                window,
-                "pointerout",
-                pointer_id,
-                is_primary,
-                pointer_type,
-                input_event.active_keyboard_modifiers,
-                true, // cancelable
-                Some(hit_test_result.point_in_node),
-            );
-            pointer_out.upcast::<Event>().fire(cx, &current_target);
-
-            // Fire pointerleave hierarchically (from target to topmost ancestor)
-            self.fire_pointer_event_for_touch(
-                cx,
-                &element,
-                &pointer_touch,
-                pointer_id,
-                "pointerleave",
-                is_primary,
-                pointer_type,
-                input_event,
-                &hit_test_result,
-            );
+        #[cfg(feature = "webxr")]
+        match event.event_type {
+            TouchEventType::Down => self.window.inline_xr_pointer_event(cx, pointer_id,
+                InlinePointerAction::Down { primary: is_primary }, screen_sample.as_ref()),
+            TouchEventType::Move => self.window.inline_xr_pointer_event(cx, pointer_id,
+                InlinePointerAction::Move, screen_sample.as_ref()),
+            _ => {},
         }
 
         let (touch_dispatch_target, changed_touch) = match event.event_type {
@@ -1529,7 +1663,7 @@ impl DocumentEventHandler {
                     .safe_borrow_mut(cx.no_gc())
                     .push(Dom::from_ref(&*pointer_touch));
                 self.set_active_element(cx.no_gc(), &element);
-                (current_target, pointer_touch)
+                (current_target.clone(), pointer_touch.clone())
             },
             _ => {
                 // From <https://w3c.github.io/touch-events/#dfn-touchend>:
@@ -1631,6 +1765,7 @@ impl DocumentEventHandler {
         // Generate the compatibility mouse events synchronously as part of
         // `touchend`, before the embedder is told the touch event was handled.
         let synthesizes_mouse_events = matches!(event.event_type, TouchEventType::Up) &&
+            is_primary &&
             event.can_synthesize_mouse_events &&
             self.touch_sequence_click_allowed.get() &&
             !flags.contains(EventFlags::Canceled) &&
@@ -1648,6 +1783,14 @@ impl DocumentEventHandler {
             self.click_counting_info
                 .safe_borrow_mut(cx.no_gc())
                 .reset_click_count();
+        }
+
+        #[cfg(feature = "webxr")]
+        if xr_release {
+            self.window.inline_xr_pointer_event(cx, pointer_id, InlinePointerAction::End, None);
+        }
+        if xr_release {
+            dispatch_pointer(cx);
         }
 
         flags.into()
@@ -1702,25 +1845,28 @@ impl DocumentEventHandler {
     ///
     /// When a touchup or touchcancel occurs at that touch point,
     /// a warning is triggered: Received touchup/touchcancel event for a non-active touch point.
-    fn update_active_touch_points_when_early_return(&self, event: EmbedderTouchEvent) {
-        match event.event_type {
-            TouchEventType::Down | TouchEventType::Move => {},
-            TouchEventType::Up | TouchEventType::Cancel => {
-                let mut active_touch_points = self.active_touch_points.borrow_mut();
-                if let Some(index) = active_touch_points
-                    .iter()
-                    .position(|t| t.Identifier() == event.touch_id.0)
-                {
-                    active_touch_points.swap_remove(index);
-                    self.remove_pointer_id_for_touch(event.touch_id.0);
-                } else {
-                    warn!(
-                        "Received {:?} for a non-active touch point {}",
-                        event.event_type, event.touch_id.0
-                    );
-                }
-            },
+    fn update_active_touch_points_when_early_return(&self, cx: &mut JSContext, event: EmbedderTouchEvent) {
+        let pointer = self.active_pointer_ids.borrow().get(&event.touch_id.0).copied();
+        #[cfg(feature = "webxr")]
+        if !matches!(event.event_type, TouchEventType::Down) && let Some((id, _, _)) = pointer {
+            self.window.inline_xr_pointer_event(cx, id, InlinePointerAction::Cancel, None);
         }
+        if !matches!(event.event_type, TouchEventType::Up | TouchEventType::Cancel) {
+            return;
+        }
+        {
+            let mut points = self.active_touch_points.borrow_mut();
+            if let Some(index) = points.iter().position(|point| point.Identifier() == event.touch_id.0) {
+                points.swap_remove(index);
+            }
+        }
+        if let Some((id, primary, pen)) = pointer {
+            // Capture events invoke author code; no touch/map borrow may span them.
+            self.implicit_release_pointer_capture(cx, id, if pen { "pen" } else { "touch" }, primary);
+        }
+        self.remove_pointer_id_for_touch(event.touch_id.0);
+        self.unset_active_element(cx.no_gc());
+        self.touch_sequence_click_allowed.set(false);
     }
 
     /// The entry point for all key processing for web content
@@ -1973,7 +2119,7 @@ impl DocumentEventHandler {
                     axis_bounds,
                     button_bounds,
                     supported_haptic_effects,
-                    false,
+                    None,
                 );
 
                 // Step 3.3. Set navigator.[[gamepads]][gamepad.index] to gamepad.
@@ -2352,34 +2498,22 @@ impl DocumentEventHandler {
 
     /// Get or create a pointer ID for the given touch identifier.
     /// Returns the pointer ID to use for this touch.
-    fn get_or_create_pointer_id_for_touch(&self, touch_id: i32) -> i32 {
-        let mut active_pointer_ids = self.active_pointer_ids.borrow_mut();
-
-        if let Some(&pointer_id) = active_pointer_ids.get(&touch_id) {
-            return pointer_id;
+    fn get_or_create_pointer_id_for_touch(&self, touch_id: i32, kind: TouchPointerType, primary: Option<bool>) -> (i32, bool) {
+        let mut active = self.active_pointer_ids.borrow_mut();
+        if let Some(&(id, primary, _)) = active.get(&touch_id) {
+            return (id, primary);
         }
-
-        let pointer_id = self.next_touch_pointer_id.get();
-        active_pointer_ids.insert(touch_id, pointer_id);
-        self.next_touch_pointer_id.set(pointer_id + 1);
-        pointer_id
+        let pen = matches!(kind, TouchPointerType::Pen);
+        let primary = primary.unwrap_or_else(|| !active.values().any(|entry| entry.2 == pen));
+        let id = self.next_touch_pointer_id.get();
+        active.insert(touch_id, (id, primary, pen));
+        self.next_touch_pointer_id.set(id + 1);
+        (id, primary)
     }
 
     /// Remove the pointer ID mapping for the given touch identifier.
     fn remove_pointer_id_for_touch(&self, touch_id: i32) {
         self.active_pointer_ids.borrow_mut().remove(&touch_id);
-    }
-
-    /// Check if this is the primary pointer (for touch events).
-    /// The first touch to make contact is the primary pointer.
-    fn is_primary_pointer(&self, pointer_id: i32) -> bool {
-        // For touch, the primary pointer is the one with the smallest pointer ID
-        // that is still active.
-        self.active_pointer_ids
-            .borrow()
-            .values()
-            .min()
-            .is_some_and(|primary_pointer| *primary_pointer == pointer_id)
     }
 
     /// Fire pointerenter events hierarchically from topmost ancestor to target element.
@@ -2531,16 +2665,17 @@ impl DocumentEventHandler {
             !self.mouse_button_state.get().is_empty()
         } else {
             // Touch pointers are tracked in active_pointer_ids
-            self.active_pointer_ids
+            self.pen_pointers.borrow().values().any(|pen|pen.pointer_id==pointer_id) || self.active_pointer_ids
                 .borrow()
                 .values()
-                .any(|&id| id == pointer_id)
+                .any(|&(id, _, _)| id == pointer_id)
         }
     }
 
     /// Set the pending pointer capture target override for a pointer.
     /// <https://w3c.github.io/pointerevents/#setting-pointer-capture>
     pub(crate) fn set_pending_pointer_capture(&self, pointer_id: i32, element: &Element) {
+        if self.pen_pointers.borrow().values().any(|pen|pen.pointer_id==pointer_id && pen.buttons==0) {return;}
         self.pending_pointer_capture
             .borrow_mut()
             .insert(pointer_id, Dom::from_ref(element));
@@ -2648,6 +2783,9 @@ impl DocumentEventHandler {
         is_primary: bool,
         target: &EventTarget,
     ) {
+        if pointer_type=="pen" && let Some(event)=self.pen_event_for_pointer(cx,event_type,pointer_id) {
+            event.upcast::<Event>().fire(cx,target);return;
+        }
         let pointer_event = PointerEvent::new(
             cx,
             &self.window,
@@ -2698,6 +2836,10 @@ impl DocumentEventHandler {
         target: &Element,
         related_target: Option<&Element>,
     ) {
+        if pointer_type=="pen" && let Some(event)=self.pen_event_for_pointer(cx,event_type,pointer_id) {
+            event.upcast::<Event>().set_related_target(related_target.map(|target|target.upcast()));
+            event.upcast::<Event>().fire(cx,target.upcast());return;
+        }
         let pointer_event = PointerEvent::new(
             cx,
             &self.window,
@@ -2746,6 +2888,9 @@ impl DocumentEventHandler {
         old_target: &Element,
         new_target: &Element,
     ) {
+        if pointer_type == "pen" && self.pen_capture_boundary_transition(cx, pointer_id, old_target, new_target) {
+            return;
+        }
         if pointer_type != "mouse" {
             return;
         }
@@ -2820,7 +2965,7 @@ impl DocumentEventHandler {
                 );
                 // Boundary events: transition hover from released capture
                 // target back to the actual hover target.
-                if let Some(hover_target) = self.current_hover_target.get() {
+                if let Some(hover_target) = self.capture_hover_target(pointer_id,pointer_type) {
                     self.fire_pointer_capture_boundary_transition(
                         cx,
                         pointer_id,
@@ -2860,6 +3005,7 @@ impl DocumentEventHandler {
         pointer_type: &str,
         is_primary: bool,
     ) {
+        if pointer_type == "pen" && self.process_pen_pending_capture(cx, pointer_id) {return;}
         let pending = self
             .pending_pointer_capture
             .borrow()
@@ -2886,7 +3032,7 @@ impl DocumentEventHandler {
                 if pointer_is_active {
                     // Boundary events: transition hover from current hover target
                     // to the new capture target, before firing gotpointercapture.
-                    if let Some(hover_target) = self.current_hover_target.get() {
+                    if let Some(hover_target) = self.capture_hover_target(pointer_id,pointer_type) {
                         self.fire_pointer_capture_boundary_transition(
                             cx,
                             pointer_id,
@@ -2964,7 +3110,7 @@ impl DocumentEventHandler {
                 );
                 // Boundary events: transition hover from released capture
                 // target back to the actual hover target.
-                if let Some(hover_target) = self.current_hover_target.get() {
+                if let Some(hover_target) = self.capture_hover_target(pointer_id,pointer_type) {
                     self.fire_pointer_capture_boundary_transition(
                         cx,
                         pointer_id,

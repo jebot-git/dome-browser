@@ -6,6 +6,7 @@ use dom_struct::dom_struct;
 use js::context::JSContext;
 use net_traits::{ResourceFetchTiming, ResourceTimingType};
 use script_bindings::reflector::reflect_dom_object;
+use servo_base::cross_process_instant::CrossProcessInstant;
 
 use super::performanceresourcetiming::{InitiatorType, PerformanceResourceTiming};
 use crate::dom::bindings::codegen::Bindings::PerformanceBinding::DOMHighResTimeStamp;
@@ -29,7 +30,10 @@ pub(crate) struct PerformanceNavigationTiming {
 }
 
 impl PerformanceNavigationTiming {
-    fn new_inherited(document: &Document) -> PerformanceNavigationTiming {
+    fn new_inherited(
+        document: &Document,
+        time_origin: CrossProcessInstant,
+    ) -> PerformanceNavigationTiming {
         PerformanceNavigationTiming {
             performanceresourcetiming: PerformanceResourceTiming::new_inherited(
                 document.url(),
@@ -38,6 +42,7 @@ impl PerformanceNavigationTiming {
                     .resource_fetch_timing()
                     .as_ref()
                     .unwrap_or(&ResourceFetchTiming::new(ResourceTimingType::None)),
+                time_origin,
             ),
             document: Dom::from_ref(document),
             nav_type: NavigationTimingType::Navigate,
@@ -49,9 +54,13 @@ impl PerformanceNavigationTiming {
         global: &GlobalScope,
         document: &Document,
     ) -> DomRoot<PerformanceNavigationTiming> {
+        let time_origin = global.performance(cx).time_origin();
         reflect_dom_object(
             cx,
-            Box::new(PerformanceNavigationTiming::new_inherited(document)),
+            Box::new(PerformanceNavigationTiming::new_inherited(
+                document,
+                time_origin,
+            )),
             global,
         )
     }

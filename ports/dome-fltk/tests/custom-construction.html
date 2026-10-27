@@ -1,0 +1,89 @@
+<!doctype html><meta charset="utf-8"><title>Custom element construction context</title>
+<script>
+const checks = [];
+function check(name, passed) { checks.push({name, passed:!!passed}); }
+let expectedErrors = 0;
+addEventListener('error', e => {
+  if (e.message.includes('expected-construction-failure')) { expectedErrors++; e.preventDefault(); }
+});
+</script>
+<body><late-probe id="late"></late-probe><script>
+// Inspect the document before the first Window.customElements getter access.
+const initialRegistry = document.customElementRegistry;
+const late = document.getElementById('late');
+check('document has its global registry before getter access', initialRegistry instanceof CustomElementRegistry);
+check('parser-created candidate captures the initial registry', !!initialRegistry && late.customElementRegistry === initialRegistry);
+const globalRegistry = customElements;
+check('Window getter returns the already-created registry', globalRegistry === initialRegistry);
+class LateProbe extends HTMLElement { constructor() { super(); } }
+globalRegistry.define('late-probe', LateProbe);
+check('late definition upgrades parser-created candidate', late instanceof LateProbe);
+
+const detachedDocument = document.implementation.createHTMLDocument();
+const registry = new CustomElementRegistry();
+let calls = 0;
+class ScopedElement extends HTMLElement { constructor() { super(); calls++; } }
+registry.define('scoped-item', ScopedElement);
+const authored = detachedDocument.createElement('scoped-item');
+registry.initialize(authored);
+check('scoped constructor runs for inactive-document element', calls === 1);
+check('scoped upgrade retains the original node', authored instanceof ScopedElement);
+check('scoped upgrade preserves owner document', authored.ownerDocument === detachedDocument);
+check('scoped upgrade retains its registry', authored.customElementRegistry === registry);
+document.body.append(authored);
+check('adoption retains scoped registry', authored.customElementRegistry === registry);
+check('adoption does not reconstruct element', calls === 1);
+let directError;
+try { new ScopedElement(); } catch (e) { directError = e; }
+check('successful upgrade restores constructor map', directError instanceof TypeError);
+check('failed direct construction does not reach code after super', calls === 1);
+
+const registryA = new CustomElementRegistry();
+const registryB = new CustomElementRegistry();
+const a = detachedDocument.createElement('nested-item');
+const b = detachedDocument.createElement('nested-item');
+registryA.initialize(a); registryB.initialize(b);
+let nesting = false;
+const order = [];
+// Deliberately reenter before super to exercise the constructor-map algorithm.
+class NestedElement extends HTMLElement {
+  constructor() {
+    if (!nesting) { nesting = true; registryB.upgrade(b); nesting = false; }
+    super();
+    order.push(this === a ? 'outer' : this === b ? 'inner' : 'unexpected');
+  }
+}
+registryA.define('nested-item', NestedElement);
+registryB.define('nested-item', NestedElement);
+registryA.upgrade(a);
+check('reentrant scoped upgrades construct both original nodes', a instanceof NestedElement && b instanceof NestedElement);
+check('inner constructor completes before outer', order.join(',') === 'inner,outer');
+check('reentrant upgrade preserves distinct registries', a.customElementRegistry === registryA && b.customElementRegistry === registryB);
+let nestedError;
+try { new NestedElement(); } catch (e) { nestedError = e; }
+check('reentrant upgrade restores previous map on exit', nestedError instanceof TypeError);
+
+const failureRegistry = new CustomElementRegistry();
+let failureCalls = 0;
+class FailedElement extends HTMLElement {
+  constructor() { super(); failureCalls++; throw new Error('expected-construction-failure'); }
+}
+failureRegistry.define('failed-item', FailedElement);
+const failed = detachedDocument.createElement('failed-item');
+failureRegistry.initialize(failed);
+check('throwing scoped constructor reaches authored body once', failureCalls === 1);
+let failureError;
+try { new FailedElement(); } catch (e) { failureError = e; }
+check('throwing upgrade restores map before later construction', failureError instanceof TypeError && failureCalls === 1);
+check('failed element remains in its original registry', failed.customElementRegistry === failureRegistry);
+
+class GlobalElement extends HTMLElement { constructor() { super(); } }
+customElements.define('global-item', GlobalElement);
+const globalElement = new GlobalElement();
+check('direct global construction records registry', globalElement.customElementRegistry === customElements);
+check('direct global construction uses current document', globalElement.ownerDocument === document);
+setTimeout(() => {
+  check('one scoped constructor failure produces one error event', expectedErrors === 1);
+  fetch('/report', {method:'POST', body:JSON.stringify({checks, calls, order, failureCalls, expectedErrors})});
+}, 50);
+</script>

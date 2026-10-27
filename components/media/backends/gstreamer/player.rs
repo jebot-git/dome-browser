@@ -32,6 +32,7 @@ use super::BACKEND_BASE_TIME;
 use crate::media_stream::GStreamerMediaStream;
 use crate::media_stream_source::{ServoMediaStreamSrc, register_servo_media_stream_src};
 use crate::render::GStreamerRender;
+use crate::player_signals::PlayerSignals;
 use crate::source::{ServoSrc, register_servo_src};
 
 const DEFAULT_MUTED: bool = false;
@@ -120,12 +121,15 @@ impl AsRef<[f32]> for GStreamerAudioChunk {
 enum PlayerSource {
     Seekable(ServoSrc),
     Stream(ServoMediaStreamSrc),
+    #[cfg(feature = "native-mse")]
+    Mse(gstreamer_mse::MseSrc),
 }
 
 struct PlayerInner {
     player: gstreamer_play::Play,
-    signal_adapter: gstreamer_play::PlaySignalAdapter,
     source: Option<PlayerSource>,
+    #[cfg(feature = "native-mse")]
+    media_source: Option<Arc<dyn servo_media_player::MediaSourceInput>>,
     video_sink: gstreamer_app::AppSink,
     input_size: u64,
     seekable: bool,
@@ -216,9 +220,16 @@ impl PlayerInner {
 
     pub fn stop(&mut self) -> Result<(), PlayerError> {
         self.player.stop();
+        // AppSrc callbacks capture the ServoSrc for seek handling. Release
+        // them explicitly rather than retaining the source through itself.
+        if let Some(PlayerSource::Seekable(source)) = &self.source {
+            source.set_callbacks(gstreamer_app::AppSrcCallbacks::builder().build());
+        }
         self.paused.set(true);
         self.can_resume.set(false);
         self.last_metadata = None;
+        #[cfg(feature = "native-mse")]
+        if let Some(input) = &self.media_source { input.detach(); }
         self.source = None;
         Ok(())
     }
@@ -262,9 +273,12 @@ impl PlayerInner {
         if self.stream_type != StreamType::Seekable {
             return Err(PlayerError::NonSeekableStream);
         }
+        if !time.is_finite() || time < 0. || time * 1_000_000_000. >= u64::MAX as f64 {
+            return Err(PlayerError::SeekOutOfRange);
+        }
         if let Some(ref metadata) = self.last_metadata &&
             let Some(ref duration) = metadata.duration &&
-            duration < &time::Duration::new(time as u64, 0)
+            duration.as_secs_f64() < time
         {
             gstreamer::warning!(self.cat, obj = &self.player, "Trying to seek out of range");
             return Err(PlayerError::SeekOutOfRange);
@@ -308,6 +322,8 @@ impl PlayerInner {
     }
 
     pub fn buffered(&self) -> Vec<Range<f64>> {
+        #[cfg(feature = "native-mse")]
+        if let Some(input) = &self.media_source { return input.buffered(); }
         let mut buffered_ranges = vec![];
 
         let Some(duration) = self
@@ -343,6 +359,8 @@ impl PlayerInner {
     }
 
     pub fn seekable(&self) -> Vec<Range<f64>> {
+        #[cfg(feature = "native-mse")]
+        if let Some(input) = &self.media_source { return input.seekable(); }
         // if the servosrc is seekable, we should return the duration of the media
         if let Some(metadata) = self.last_metadata.as_ref() &&
             metadata.is_seekable &&
@@ -440,7 +458,10 @@ pub struct GStreamerPlayer {
     context_id: ClientContextId,
     /// Channel to communicate with the owner GStreamerBackend instance.
     backend_chan: Arc<Mutex<Sender<BackendMsg>>>,
-    inner: RefCell<Option<Arc<Mutex<PlayerInner>>>>,
+    inner: RefCell<Option<Arc<Mutex<Option<PlayerInner>>>>>,
+    signals: RefCell<Option<PlayerSignals>>,
+    #[cfg(feature = "native-mse")]
+    media_source: RefCell<Option<Arc<dyn servo_media_player::MediaSourceInput>>>,
     observer: Arc<Mutex<GenericCallback<PlayerEvent>>>,
     audio_renderer: Option<Arc<Mutex<dyn AudioRenderer>>>,
     video_renderer: Option<Arc<Mutex<dyn VideoFrameRenderer>>>,
@@ -479,6 +500,9 @@ impl GStreamerPlayer {
             context_id: *context_id,
             backend_chan,
             inner: RefCell::new(None),
+            signals: RefCell::new(None),
+            #[cfg(feature = "native-mse")]
+            media_source: RefCell::new(None),
             observer: Arc::new(Mutex::new(observer)),
             audio_renderer,
             video_renderer,
@@ -505,13 +529,18 @@ impl GStreamerPlayer {
             }
         }
 
+        #[cfg(feature = "native-mse")]
+        let media_source = self.media_source.borrow().clone();
         let player = gstreamer_play::Play::default();
-        let signal_adapter = gstreamer_play::PlaySignalAdapter::new_sync_emit(&player);
         let pipeline = player.pipeline();
+
+        let download_buffering = self.download_buffering_enabled.load(Ordering::Relaxed);
+        #[cfg(feature = "native-mse")]
+        let download_buffering = download_buffering && media_source.is_none();
 
         // FIXME(#282): The progressive downloading breaks playback on Windows and Android.
         if !cfg!(any(target_os = "windows", target_os = "android")) &&
-            self.download_buffering_enabled.load(Ordering::Relaxed)
+            download_buffering
         {
             // Set player to perform progressive downloading. This will make the
             // player store the downloaded media in a local temporary file for
@@ -628,6 +657,8 @@ impl GStreamerPlayer {
                 "servosrc://".to_value()
             },
         };
+        #[cfg(feature = "native-mse")]
+        let uri = if media_source.is_some() { "mse://servo-media-source".to_value() } else { uri };
         player.set_property("uri", &uri);
 
         // No video_renderers no video
@@ -635,10 +666,13 @@ impl GStreamerPlayer {
             player.set_video_track_enabled(false);
         }
 
-        *self.inner.borrow_mut() = Some(Arc::new(Mutex::new(PlayerInner {
+        let (signal_adapter, signals) = PlayerSignals::new(&player)?;
+        *self.signals.borrow_mut() = Some(signals);
+        *self.inner.borrow_mut() = Some(Arc::new(Mutex::new(Some(PlayerInner {
             player,
-            signal_adapter: signal_adapter.clone(),
             source: None,
+            #[cfg(feature = "native-mse")]
+            media_source,
             video_sink,
             input_size: 0,
             seekable: true,
@@ -652,7 +686,7 @@ impl GStreamerPlayer {
             last_metadata: None,
             cat: gstreamer::DebugCategory::get("servoplayer").unwrap(),
             enough_data: Arc::new(AtomicBool::new(false)),
-        })));
+        }))));
 
         let inner = self.inner.borrow();
         let inner = inner.as_ref().unwrap();
@@ -668,11 +702,18 @@ impl GStreamerPlayer {
             let _ = notify!(observer, PlayerEvent::Error(error.to_string()));
         });
 
-        let inner_clone = inner.clone();
+        // Callbacks borrow the optional state. Teardown takes PlayerInner out
+        // under this lock, so outstanding callback Arcs cannot own the player.
+        let inner_clone = Arc::downgrade(inner);
         let observer = self.observer.clone();
         // Handle `state-changed` signal.
         signal_adapter.connect_state_changed(move |_, play_state| {
-            inner_clone.lock().unwrap().play_state = play_state;
+            let Some(inner_clone) = inner_clone.upgrade() else { return; };
+            {
+                let mut state = inner_clone.lock().unwrap();
+                let Some(inner) = state.as_mut() else { return; };
+                inner.play_state = play_state;
+            }
 
             let state = match play_state {
                 gstreamer_play::PlayState::Buffering => Some(PlaybackState::Buffering),
@@ -701,14 +742,16 @@ impl GStreamerPlayer {
         });
 
         // Handle `media-info-updated` signal.
-        let inner_clone = inner.clone();
+        let inner_clone = Arc::downgrade(inner);
         let observer = self.observer.clone();
         signal_adapter.connect_media_info_updated(move |_, info| {
+            let Some(inner_clone) = inner_clone.upgrade() else { return; };
             let Ok(metadata) = metadata_from_media_info(info) else {
                 return;
             };
 
-            let mut inner = inner_clone.lock().unwrap();
+            let mut state = inner_clone.lock().unwrap();
+            let Some(inner) = state.as_mut() else { return; };
 
             if inner.last_metadata.as_ref() == Some(&metadata) {
                 return;
@@ -745,9 +788,10 @@ impl GStreamerPlayer {
         });
 
         // Handle `duration-changed` signal.
-        let inner_clone = inner.clone();
+        let inner_clone = Arc::downgrade(inner);
         let observer = self.observer.clone();
         signal_adapter.connect_duration_changed(move |_, duration| {
+            let Some(inner_clone) = inner_clone.upgrade() else { return; };
             let duration = duration.map(|duration| {
                 time::Duration::new(
                     duration.seconds(),
@@ -755,7 +799,8 @@ impl GStreamerPlayer {
                 )
             });
 
-            let mut inner = inner_clone.lock().unwrap();
+            let mut state = inner_clone.lock().unwrap();
+            let Some(inner) = state.as_mut() else { return; };
             if let Some(ref mut metadata) = inner.last_metadata &&
                 metadata.duration != duration
             {
@@ -798,7 +843,7 @@ impl GStreamerPlayer {
             };
 
             // Set video_sink callbacks.
-            inner.lock().unwrap().video_sink.set_callbacks(
+            inner.lock().unwrap().as_ref().unwrap().video_sink.set_callbacks(
                 gstreamer_app::AppSinkCallbacks::builder()
                     .new_preroll({
                         let render_sample = render_sample.clone();
@@ -822,8 +867,9 @@ impl GStreamerPlayer {
         };
 
         let (receiver, error_handler_id) = {
-            let inner_clone = inner.clone();
-            let inner = inner.lock().unwrap();
+            let inner_clone = Arc::downgrade(inner);
+            let state = inner.lock().unwrap();
+            let inner = state.as_ref().unwrap();
             let pipeline = inner.player.pipeline();
 
             let (sender, receiver) = mpsc::channel();
@@ -833,9 +879,22 @@ impl GStreamerPlayer {
             let is_ready_clone = self.is_ready.clone();
             let observer = self.observer.clone();
             pipeline.connect("source-setup", false, move |args| {
+                let Some(inner_clone) = inner_clone.upgrade() else { return None; };
                 let source = args[1].get::<gstreamer::Element>().unwrap();
 
-                let mut inner = inner_clone.lock().unwrap();
+                let mut state = inner_clone.lock().unwrap();
+                let Some(inner) = state.as_mut() else { return None; };
+                #[cfg(feature = "native-mse")]
+                if let Some(input) = &inner.media_source {
+                    let input = input.as_any().downcast_ref::<crate::mse::SharedSession>()
+                        .expect("MSE input backend was validated before setup");
+                    let mse_src = source.dynamic_cast::<gstreamer_mse::MseSrc>()
+                        .expect("mse URI must create an MseSrc");
+                    input.attach(&mse_src);
+                    inner.set_src(PlayerSource::Mse(mse_src));
+                    is_ready_clone.call_once(|| { let _ = sender.lock().unwrap().send(Ok(())); });
+                    return None;
+                }
                 let source = match inner.stream_type {
                     StreamType::Seekable => {
                         let servosrc = source
@@ -932,7 +991,7 @@ impl GStreamerPlayer {
 
         let result = receiver.recv().unwrap();
         glib::signal::signal_handler_disconnect(
-            &inner.lock().unwrap().signal_adapter,
+            &signal_adapter,
             error_handler_id,
         );
         result
@@ -948,7 +1007,7 @@ macro_rules! inner_player_proxy_getter {
 
             let inner = self.inner.borrow();
             let inner = inner.as_ref().unwrap().lock().unwrap();
-            inner.$fn_name()
+            inner.as_ref().unwrap().$fn_name()
         }
     };
 }
@@ -959,7 +1018,7 @@ macro_rules! inner_player_proxy {
             self.setup()?;
             let inner = self.inner.borrow();
             let mut inner = inner.as_ref().unwrap().lock().unwrap();
-            inner.$fn_name()
+            inner.as_mut().unwrap().$fn_name()
         }
     };
 
@@ -968,7 +1027,7 @@ macro_rules! inner_player_proxy {
             self.setup()?;
             let inner = self.inner.borrow();
             let mut inner = inner.as_ref().unwrap().lock().unwrap();
-            inner.$fn_name($arg1)
+            inner.as_mut().unwrap().$fn_name($arg1)
         }
     };
 
@@ -977,12 +1036,25 @@ macro_rules! inner_player_proxy {
             self.setup()?;
             let inner = self.inner.borrow();
             let mut inner = inner.as_ref().unwrap().lock().unwrap();
-            inner.$fn_name($arg1, $arg2)
+            inner.as_mut().unwrap().$fn_name($arg1, $arg2)
         }
     };
 }
 
 impl Player for GStreamerPlayer {
+    #[cfg(feature = "native-mse")]
+    fn set_media_source(&self, input: Arc<dyn servo_media_player::MediaSourceInput>) -> Result<(), PlayerError> {
+        if self.inner.borrow().is_some() || self.stream_type != StreamType::Seekable {
+            return Err(PlayerError::SetStreamFailed);
+        }
+        if !input.as_any().is::<crate::mse::SharedSession>() {
+            return Err(PlayerError::Backend("MediaSource input belongs to another backend".into()));
+        }
+        self.download_buffering_enabled.store(false, Ordering::Relaxed);
+        *self.media_source.borrow_mut() = Some(input);
+        Ok(())
+    }
+
     inner_player_proxy!(play, ());
     inner_player_proxy!(pause, ());
     inner_player_proxy_getter!(paused, bool, DEFAULT_PAUSED);
@@ -1045,7 +1117,19 @@ impl MediaInstance for GStreamerPlayer {
 
 impl Drop for GStreamerPlayer {
     fn drop(&mut self) {
-        let _ = self.stop();
+        // Remove callback access before stopping. A callback may retain the Arc,
+        // but it cannot retain PlayerInner or move player destruction onto a
+        // streaming thread. Do not initialize an unused player during Drop.
+        if let Some(state) = self.inner.get_mut().take() {
+            let inner = state.lock().unwrap().take();
+            if let Some(mut inner) = inner {
+                let _ = inner.stop();
+                drop(inner);
+            }
+        }
+        if let Some(signals) = self.signals.get_mut().take() {
+            signals.join();
+        }
         let (tx_ack, rx_ack) = mpsc::channel();
         let _ = self
             .backend_chan
@@ -1057,5 +1141,43 @@ impl Drop for GStreamerPlayer {
                 tx_ack,
             });
         let _ = rx_ack.recv();
+    }
+}
+
+#[cfg(test)]
+mod lifetime_tests {
+    use servo_media_player::context::{GlApi, GlContext, NativeDisplay};
+
+    use super::*;
+
+    struct Headless;
+    impl PlayerGLContext for Headless {
+        fn get_gl_context(&self) -> GlContext { GlContext::Unknown }
+        fn get_native_display(&self) -> NativeDisplay { NativeDisplay::Headless }
+        fn get_gl_api(&self) -> GlApi { GlApi::None }
+    }
+
+    #[test]
+    fn teardown_removes_player_from_outstanding_callback_state() {
+        gstreamer::init().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            while let Ok(BackendMsg::Shutdown { tx_ack, .. }) = receiver.recv() {
+                let _ = tx_ack.send(());
+            }
+        });
+        let backend = Arc::new(Mutex::new(sender));
+        let observer = GenericCallback::new(|_| {}).unwrap();
+        let player = GStreamerPlayer::new(0, &ClientContextId::build(1, 1), backend.clone(),
+            StreamType::Seekable, observer, None, None, Box::new(Headless));
+        player.set_input_size(1).unwrap();
+        let callback_state = player.inner.borrow().as_ref().unwrap().clone();
+        let weak = callback_state.lock().unwrap().as_ref().unwrap().player.downgrade();
+        drop(player);
+        assert!(callback_state.lock().unwrap().is_none());
+        assert!(weak.upgrade().is_none());
+        drop(callback_state);
+        drop(backend);
+        shutdown.join().unwrap();
     }
 }

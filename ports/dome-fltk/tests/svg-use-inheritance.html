@@ -1,0 +1,23 @@
+<!doctype html><meta charset=utf-8><title>SVG use inherited paint</title>
+<style>
+body{margin:0;background:white}.tile{position:absolute;top:20px;width:60px;height:60px}
+.css-fill{fill:rgb(20,180,90)}.css-current{fill:currentColor}.css-variable{fill:var(--paint,red)}.css-inherit{fill:inherit}
+</style>
+<svg width="0" height="0" style="position:absolute;fill:red"><defs>
+ <g id="plain"><rect width="60" height="60"/></g>
+ <g id="current"><rect width="60" height="60" fill="currentColor"/></g>
+ <g id="sheet"><rect class="css-fill" width="60" height="60"/></g>
+ <g id="sheet-current"><rect class="css-current" width="60" height="60"/></g>
+ <g id="sheet-variable"><rect class="css-variable" width="60" height="60"/></g>
+ <g id="sheet-parent" class="css-fill"><rect width="60" height="60"/></g>
+ <g id="sheet-inherit"><rect class="css-inherit" width="60" height="60"/></g>
+</defs></svg>
+<svg class="tile" style="left:20px"><use href="#plain" fill="rgb(20,180,90)"/></svg>
+<svg class="tile" style="left:100px"><use href="#current" color="rgb(20,180,90)"/></svg>
+<svg class="tile" style="left:180px"><use href="#sheet" fill="red"/></svg>
+<svg class="tile" style="left:260px"><use href="#sheet-current" color="rgb(20,180,90)"/></svg>
+<svg class="tile" style="left:340px"><use href="#sheet-variable" style="--paint:rgb(20,180,90)"/></svg>
+<svg class="tile" style="left:420px"><use href="#plain" style="fill:rgb(20,180,90)"/></svg>
+<svg class="tile" style="left:500px"><use href="#sheet-parent" fill="red"/></svg>
+<svg class="tile" style="left:580px"><use href="#sheet-inherit" fill="rgb(20,180,90)"/></svg>
+<script>addEventListener('load',()=>setTimeout(()=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[{name:'SVG use inheritance fixture completes',passed:true}]})}),500));</script>

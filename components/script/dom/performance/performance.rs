@@ -13,7 +13,6 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::cformat;
 use script_bindings::codegen::GenericBindings::PerformanceBinding::PerformanceMarkOptions;
 use script_bindings::codegen::GenericBindings::PerformanceEntryBinding::PerformanceEntryMethods;
-use script_bindings::codegen::GenericBindings::PerformanceMarkBinding::PerformanceMarkMethods;
 use script_bindings::codegen::GenericBindings::WindowBinding::WindowMethods;
 use script_bindings::codegen::GenericUnionTypes::StringOrPerformanceMeasureOptions;
 use script_bindings::reflector::reflect_dom_object;
@@ -183,6 +182,14 @@ impl Performance {
 
     pub(crate) fn time_origin(&self) -> CrossProcessInstant {
         self.time_origin
+    }
+
+    /// A replaced initial about:blank document stops observing entries, while
+    /// references to its Performance object and buffered entries remain valid.
+    pub(crate) fn detach_document_timeline(&self) {
+        for observer in self.observers.borrow_mut().drain(..) {
+            observer.observer.entries_mut().clear();
+        }
     }
 
     pub(crate) fn to_dom_high_res_time_stamp(
@@ -600,8 +607,9 @@ impl PerformanceMethods<crate::DomTypeHolder> for Performance {
         mark_options: &PerformanceMarkOptions,
     ) -> Fallible<DomRoot<PerformanceMark>> {
         // Step 1. Run the PerformanceMark constructor and let entry be the newly created object.
-        let entry =
-            PerformanceMark::Constructor(cx, &self.global(), None, mark_name, mark_options)?;
+        let entry = PerformanceMark::construct(
+            cx, &self.global(), None, mark_name, mark_options, self.time_origin,
+        )?;
 
         // Step 2. Queue a PerformanceEntry entry.
         // Step 3. Add entry to the performance entry buffer. (This is done in queue_entry itself)
@@ -752,6 +760,7 @@ impl PerformanceMethods<crate::DomTypeHolder> for Performance {
             measure_name,
             start_time,
             end_time - start_time,
+            self.time_origin,
         );
 
         // Step 9. Set entry’s detail attribute as follows:

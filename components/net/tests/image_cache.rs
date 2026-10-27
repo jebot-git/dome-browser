@@ -787,3 +787,100 @@ fn test_svg_not_rasterize_zero_size() {
             .is_none()
     );
 }
+
+// Inline SVG snapshot replacement must keep the last completed frame paintable
+// until its replacement is ready, then release every resource of the old source.
+#[test]
+fn test_svg_snapshot_replacement_retains_then_retires_completed_frame() {
+    let (cache, key_receiver) = create_test_image_cache();
+    let origin = mock_origin();
+    let svg_id = Uuid::new_v4();
+    let size = webrender_api::units::DeviceIntSize::new(100, 100);
+    let mut completed = Vec::new();
+    for generation in 0..2 {
+        let url =
+            ServoUrl::parse(&format!("http://example.com/snapshot-{generation}.svg")).unwrap();
+        let ImageCacheResult::ReadyForRequest(id) =
+            cache.get_cached_image_status(url.clone(), &origin, None)
+        else {
+            panic!("Expected a new snapshot request");
+        };
+        cache.notify_pending_response(
+            id,
+            FetchResponseMsg::ProcessResponse(
+                create_request_id(),
+                Ok(create_test_metadata(Some(mime::IMAGE_SVG))),
+            ),
+        );
+        cache.notify_pending_response(
+            id,
+            FetchResponseMsg::ProcessResponseChunk(create_request_id(), svg_image_bytes().into()),
+        );
+        cache.notify_pending_response(
+            id,
+            FetchResponseMsg::ProcessResponseEOF(create_request_id(), Ok(()), create_timing()),
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            handle_pending_key_requests(&cache, &key_receiver);
+            if matches!(
+                cache.get_cached_image_status(url.clone(), &origin, None),
+                ImageCacheResult::Available(ImageOrMetadataAvailable::ImageAvailable { .. })
+            ) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "SVG decode timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        cache.rasterize_vector_image(id, size, Some(svg_id));
+        if let Some((_, previous_id)) = completed.last() {
+            assert!(
+                cache.get_rasterized_vector_image(*previous_id).is_some(),
+                "Starting a replacement must not blank the completed frame"
+            );
+        }
+        loop {
+            handle_pending_key_requests(&cache, &key_receiver);
+            if cache.get_rasterized_vector_image(id).is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "SVG rasterization timed out"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        completed.push((url, id));
+    }
+    cache.evict_svg_snapshot(&completed[0].0, &origin);
+    assert!(cache.get_rasterized_vector_image(completed[0].1).is_none());
+    assert!(cache.get_rasterized_vector_image(completed[1].1).is_some());
+    cache.evict_svg_snapshot(&completed[1].0, &origin);
+    assert!(cache.get_rasterized_vector_image(completed[1].1).is_none());
+}
+
+#[test]
+fn test_svg_snapshot_eviction_releases_pending_load_listener() {
+    let (cache, _key_receiver) = create_test_image_cache();
+    let origin = mock_origin();
+    let url = ServoUrl::parse("http://example.com/pending-snapshot.svg").unwrap();
+    let ImageCacheResult::ReadyForRequest(id) =
+        cache.get_cached_image_status(url.clone(), &origin, None)
+    else {
+        panic!("Expected a new snapshot request");
+    };
+    let (sender, receiver) = unbounded();
+    cache.add_listener(create_test_listener(id, sender));
+    cache.evict_svg_snapshot(&url, &origin);
+    assert!(matches!(
+        receiver.recv_timeout(Duration::from_secs(1)),
+        Ok(ImageResponse::FailedToLoadOrDecode)
+    ));
+    let ImageCacheResult::ReadyForRequest(next_id) =
+        cache.get_cached_image_status(url.clone(), &origin, None)
+    else {
+        panic!("Eviction must release the pending URL entry");
+    };
+    assert_ne!(id, next_id);
+    cache.evict_svg_snapshot(&url, &origin);
+}

@@ -1,0 +1,19 @@
+<!doctype html><meta charset="utf-8"><title>Network document local image boundary</title>
+<style>html,body{margin:0;background:white}.case{position:absolute;top:0;width:80px;height:80px;background:red}</style>
+<script>
+(async()=>{
+ const localContext=location.protocol==='file:';
+ const config=await fetch('/local-fixture-config.json').then(r=>r.json()),SVG='http://www.w3.org/2000/svg',checks=[],diagnostics={localContext,events:{}},pixel_cases=[];
+ const cases=[{name:'html-local',local:true,svg:false},{name:'svg-local',local:true,svg:true},{name:'http-html-positive',local:false,svg:false},{name:'http-svg-positive',local:false,svg:true}];
+ await Promise.all(cases.map(async(spec,index)=>{
+  const root=spec.svg?document.createElementNS(SVG,'svg'):document.createElement('div');root.classList.add('case');root.style.left=index*85+'px';
+  if(spec.svg){root.setAttribute('width',80);root.setAttribute('height',80);const red=document.createElementNS(SVG,'rect');red.setAttribute('width',80);red.setAttribute('height',80);red.setAttribute('fill','red');root.append(red)}
+  const image=spec.svg?document.createElementNS(SVG,'image'):document.createElement('img');image.setAttribute('width',80);image.setAttribute('height',80);
+  const result=new Promise(resolve=>{image.onload=()=>resolve('load');image.onerror=()=>resolve('error');setTimeout(()=>resolve('timeout'),4000)});
+  image.setAttribute(spec.svg?'href':'src',spec.local?config.localImage:'/svg-image.svg?name=local-boundary-positive');root.append(image);document.documentElement.append(root);
+  const event=await result;diagnostics.events[spec.name]=event;checks.push({name:spec.name+' enforces document/file boundary',passed:event===(spec.local&&!localContext?'error':'load')});
+  pixel_cases.push({name:spec.name,x:index*85+20,y:20,expected:spec.local&&!localContext?'not-green':'green'});
+ }));
+ fetch('/report',{method:'POST',body:JSON.stringify({checks,diagnostics,pixel_cases,scope:'Remote HTTP document must not display a synthetic file URL resource; same-origin HTTP image is the positive control. All local content is generated inside the private fixture directory.'})});
+})().catch(error=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[{name:'fixture completed',passed:false,error:String(error)}]})}));
+</script>

@@ -1,0 +1,64 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>SVG gradient-stop cascade and repaint</title>
+<style>
+body { margin: 0; background: white }
+.panel { position: absolute; width: 100px; height: 100px }
+svg { display: block; margin: 10px; width: 80px; height: 80px }
+#sheet stop, #priority stop { stop-color: rgb(20,180,90) !important }
+#inline stop { stop-color: red !important }
+#not-inherited linearGradient { stop-color: red; stop-opacity: 0 }
+#inherit linearGradient { stop-color: rgb(20,180,90); stop-opacity: 1 }
+#inherit stop { stop-color: inherit; stop-opacity: inherit }
+#current { color: rgb(20,180,90) }
+#current stop { stop-color: currentColor }
+#opacity stop { stop-color: rgb(20,180,90); stop-opacity: .5 }
+#alpha stop { stop-color: rgba(20,180,90,.5); stop-opacity: .5 }
+#negative stop { stop-color: rgb(20,180,90); stop-opacity: -1 }
+#high stop { stop-color: rgb(20,180,90); stop-opacity: 2 }
+#percent stop { stop-color: rgb(20,180,90); stop-opacity: 50% }
+#dynamic-color { --paint: red }
+#dynamic-color stop { stop-color: var(--paint) }
+#dynamic-opacity stop { stop-color: rgb(20,180,90) }
+</style>
+<style id="dynamic-sheet">#dynamic-opacity stop { stop-opacity: 1 }</style>
+<script>
+const cases = [
+ ['attribute', 'stop-color="rgb(20,180,90)"'],
+ ['sheet', 'stop-color="red"'],
+ ['priority', 'style="stop-color:red"'],
+ ['inline', 'style="stop-color:rgb(20,180,90) !important"'],
+ ['not-inherited', ''],
+ ['inherit', ''],
+ ['current', ''],
+ ['opacity', ''],
+ ['opacity-attribute', 'stop-color="rgb(20,180,90)" stop-opacity=".5"'],
+ ['alpha', ''],
+ ['negative', ''],
+ ['high', ''],
+ ['percent', ''],
+ ['dynamic-color', ''],
+ ['dynamic-opacity', '']
+];
+for (const [index, [id, attrs]] of cases.entries()) {
+ document.write(`<div class="panel" id="${id}" style="left:${index%8*100}px;top:${Math.floor(index/8)*100}px"><svg viewBox="0 0 80 80"><defs><linearGradient id="gradient-${id}"><stop offset="0" ${attrs}/><stop offset="1" ${attrs}/></linearGradient></defs><rect width="80" height="80" fill="url(#gradient-${id})"/></svg></div>`);
+}
+let phase = -1;
+async function advance() {
+ const requested = await (await fetch('/phase')).json();
+ if (requested !== phase) {
+  phase = requested;
+  document.getElementById('dynamic-color').style.setProperty('--paint', phase === 1 ? 'rgb(20,180,90)' : 'red');
+  document.getElementById('dynamic-sheet').sheet.cssRules[0].style.stopOpacity = phase === 1 ? '.5' : '1';
+  await new Promise(resolve => setTimeout(resolve, 400));
+  const values = cases.map(([id]) => {
+   const style = getComputedStyle(document.querySelector('#'+id+' stop'));
+   return {id, color: style.stopColor, opacity: style.stopOpacity};
+  });
+  await fetch('/report', {method:'POST', body:JSON.stringify({phase, values,
+    supports: CSS.supports('stop-color', 'red') && CSS.supports('stop-opacity', '.5')})});
+ }
+ setTimeout(advance, 100);
+}
+window.addEventListener('load', advance);
+</script>

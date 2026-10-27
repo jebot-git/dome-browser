@@ -283,6 +283,7 @@ impl FakeXRDeviceMethods<crate::DomTypeHolder> for FakeXRDevice {
             id,
             supports_grip: true,
             profiles,
+            gamepad: Some(webxr_api::mock_gamepad_layout(&supported_buttons)),
             hand_support: None,
         };
 

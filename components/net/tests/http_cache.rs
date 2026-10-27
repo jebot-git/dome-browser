@@ -349,3 +349,121 @@ async fn http_cache_do_not_evict_unfinished_requests() {
     println!("cache {:?}", cache);
     assert!(result.is_some());
 }
+
+#[tokio::test]
+async fn credentialless_does_not_reuse_a_credentialed_http_cache_entry() {
+    use net_traits::policy_container::{EmbedderPolicyValue, PolicyContainer};
+    use net_traits::request::{InsecureRequestsPolicy, Origin, RequestClient, RequestMode};
+    use std::sync::Arc;
+    let source = ServoUrl::parse("https://owner.test").unwrap();
+    let url = ServoUrl::parse("https://resource.test/asset").unwrap();
+    let producer = RequestBuilder::new(
+        None,
+        UrlWithBlobClaim::new(url.clone(), None),
+        Referrer::NoReferrer,
+    )
+    .origin(source.origin())
+    .build();
+    let mut reader = producer.clone();
+    reader.mode = RequestMode::NoCors;
+    let mut policy = PolicyContainer::default();
+    policy.embedder_policy.value = EmbedderPolicyValue::Credentialless;
+    reader.client = Some(RequestClient {
+        preloaded_resources: Default::default(),
+        cookie_site: None,
+        cookie_client_is_null: false,
+        policy_container: Arc::new(policy),
+        origin: Origin::Origin(source.origin()),
+        is_nested_browsing_context: false,
+        insecure_requests_policy: InsecureRequestsPolicy::DoNotUpgrade,
+        has_trustworthy_ancestor_origin: true,
+    });
+    for credentialed in [true, false] {
+        let cache = HttpCache::new(HttpCacheAssignment::Public);
+        let mut response = Response::new(
+            url.clone(),
+            ResourceFetchTiming::new(ResourceTimingType::Resource),
+        );
+        response.headers.insert(
+            CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=3600"),
+        );
+        *response.body.lock() = ResponseBody::Done(vec![1, 2, 3]);
+        response.request_includes_credentials = credentialed;
+        cache.store(&producer, &response).await;
+        assert_eq!(
+            cache
+                .construct_response_freshness(&reader, &mut None)
+                .await
+                .is_some(),
+            !credentialed
+        );
+        assert!(
+            cache
+                .construct_response_freshness(&producer, &mut None)
+                .await
+                .is_some()
+        );
+    }
+}
+
+#[tokio::test]
+async fn revalidation_updates_the_cached_credential_flag() {
+    use net_traits::policy_container::{EmbedderPolicyValue, PolicyContainer};
+    use net_traits::request::{InsecureRequestsPolicy, Origin, RequestClient, RequestMode};
+    use std::sync::Arc;
+    let owner = ServoUrl::parse("https://owner.test").unwrap();
+    let url = ServoUrl::parse("https://resource.test/revalidated").unwrap();
+    let producer = RequestBuilder::new(
+        None,
+        UrlWithBlobClaim::new(url.clone(), None),
+        Referrer::NoReferrer,
+    )
+    .origin(owner.origin())
+    .build();
+    let cache = HttpCache::new(HttpCacheAssignment::Public);
+    let mut response = Response::new(
+        url.clone(),
+        ResourceFetchTiming::new(ResourceTimingType::Resource),
+    );
+    response.headers.insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=3600"),
+    );
+    *response.body.lock() = ResponseBody::Done(vec![1, 2, 3]);
+    response.request_includes_credentials = false;
+    cache.store(&producer, &response).await;
+    let mut resources = cache.get_or_guard(CacheKey::new(&producer)).await;
+    let mut validation = Response::new(url, ResourceFetchTiming::new(ResourceTimingType::Resource));
+    validation.status = StatusCode::NOT_MODIFIED.into();
+    validation.request_includes_credentials = true;
+    let refreshed = refresh(
+        &producer,
+        validation,
+        &mut None,
+        resources.try_as_mut().unwrap(),
+    )
+    .unwrap();
+    assert!(refreshed.request_includes_credentials);
+    drop(resources);
+    let mut reader = producer.clone();
+    reader.mode = RequestMode::NoCors;
+    let mut policy = PolicyContainer::default();
+    policy.embedder_policy.value = EmbedderPolicyValue::Credentialless;
+    reader.client = Some(RequestClient {
+        preloaded_resources: Default::default(),
+        cookie_site: None,
+        cookie_client_is_null: false,
+        policy_container: Arc::new(policy),
+        origin: Origin::Origin(owner.origin()),
+        is_nested_browsing_context: false,
+        insecure_requests_policy: InsecureRequestsPolicy::DoNotUpgrade,
+        has_trustworthy_ancestor_origin: true,
+    });
+    assert!(
+        cache
+            .construct_response_freshness(&reader, &mut None)
+            .await
+            .is_none()
+    );
+}

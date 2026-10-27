@@ -1,0 +1,37 @@
+<!doctype html><meta charset="utf-8"><title>SVG modern paint regression</title>
+<style>
+body {margin:0;background:white;color:black;--paint:rgb(20,180,90)}
+svg {position:absolute;top:5px;width:60px;height:60px}
+#rgb {left:5px} #current {left:85px;color:oklab(.8 0 0)}
+#modern {left:165px} #attribute {left:245px} #css {left:325px}
+#gradient {left:405px} #stroke {left:485px} #fallback {left:565px}
+#alpha {left:645px} #nested {left:725px} #invalid {left:805px} #unset {left:885px}
+#css rect {fill:var(--paint)}
+</style>
+<svg id="rgb"><rect width="60" height="60" fill="rgb(190,190,190)"/></svg>
+<svg id="current"><rect width="60" height="60" fill="currentColor"/></svg>
+<svg id="modern"><rect width="60" height="60" style="fill:oklab(.8 0 0)"/></svg>
+<svg id="attribute"><rect width="60" height="60" fill="var(--paint)"/></svg>
+<svg id="css"><rect width="60" height="60"/></svg>
+<svg id="gradient"><defs><linearGradient id="g"><stop stop-color="oklab(.8 0 0)"/><stop offset="1" stop-color="oklch(.8 0 0)"/></linearGradient></defs><rect width="60" height="60" fill="url(#g)"/></svg>
+<svg id="stroke"><rect x="10" y="10" width="40" height="40" fill="none" style="stroke:oklab(.8 0 0);stroke-width:20px"/></svg>
+<svg id="fallback"><rect width="60" height="60" style="fill:url(#missing) oklab(.8 0 0)"/></svg>
+<svg id="alpha"><rect width="60" height="60" style="fill:oklab(.8 0 0 / .5)"/></svg>
+<svg id="nested"><rect width="60" height="60" fill="var(--missing,var(--paint))"/></svg>
+<svg id="invalid" style="fill:var(--paint)"><rect width="60" height="60" fill="initial junk"/></svg>
+<svg id="unset" style="fill:var(--paint)"><rect width="60" height="60" fill="var(--missing)"/></svg>
+<script>
+addEventListener('load',()=>{
+ const measure=()=>[...document.querySelectorAll('svg')].map(svg=>{
+  const s=getComputedStyle(svg.querySelector('rect'));return{id:svg.id,fill:s.fill,stroke:s.stroke,color:s.color};
+ });
+ const initial=measure();
+ setTimeout(()=>{
+  if(new URL(location.href).searchParams.has('mutate'))document.body.style.setProperty('--paint','rgb(220,40,80)');
+  setTimeout(()=>fetch('/report',{method:'POST',body:JSON.stringify({
+   checks:[{name:'all paint cases constructed',passed:document.querySelectorAll('svg').length===12}],
+   initial,styles:measure()
+  })}),700);
+ },300);
+});
+</script>

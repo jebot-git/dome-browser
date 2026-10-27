@@ -36,6 +36,13 @@ impl CrossProcessInstant {
         }
     }
 
+    /// Construct from the CLOCK_MONOTONIC nanosecond domain used by this
+    /// platform implementation, for explicitly converted local device clocks.
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
+    pub fn from_monotonic_nanos(value: u64) -> Option<Self> {
+        (value <= i64::MAX as u64).then_some(Self { value })
+    }
+
     /// Some unspecified time epoch. This is mainly useful for converting DOM's `timeOrigin` into a
     /// `DOMHighResolutionTimestamp`. See <https://w3c.github.io/hr-time/#sec-time-origin>.
     pub fn epoch() -> Self {

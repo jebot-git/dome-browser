@@ -7,10 +7,11 @@ use std::cell::{Cell, Ref, RefCell};
 use cssparser::Parser;
 use dom_struct::dom_struct;
 use fonts::{
-    FontContext, FontContextWebFontMethods, FontFaceRuleInfo, FontTemplate, LowercaseFontFamilyName,
+    FontContext, FontContextWebFontMethods, FontData, FontFaceRuleInfo, FontTemplate, LowercaseFontFamilyName,
 };
 use js::context::JSContext;
 use js::rust::HandleObject;
+use js::jsapi::JSTracer;
 use script_bindings::cell::DomRefCell;
 use script_bindings::domstring::TracedDOMString;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_proto};
@@ -32,13 +33,28 @@ use crate::dom::bindings::codegen::UnionTypes::StringOrArrayBufferViewOrArrayBuf
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
-use crate::dom::bindings::root::{DomRoot, MutNullableDom};
+use crate::dom::bindings::root::DomRoot;
+use crate::dom::bindings::weakref::{WeakRef, WeakRefVec};
+use crate::dom::bindings::trace::JSTraceable;
+use uuid::Uuid;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::css::fontfaceset::FontFaceSet;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::node::NodeTraits;
 use crate::dom::promise::{Promise, RootedPromise, TracedPromise};
 use crate::dom::window::Window;
+
+/// Weak observers must not keep another document alive. Sweep dead native
+/// references during tracing, without introducing strong JavaScript edges.
+#[derive(MallocSizeOf)]
+struct AssociatedFontFaceSets(DomRefCell<WeakRefVec<FontFaceSet>>);
+
+#[expect(unsafe_code)]
+unsafe impl JSTraceable for AssociatedFontFaceSets {
+    unsafe fn trace(&self, _: *mut JSTracer) {
+        self.0.borrow_mut().retain_alive();
+    }
+}
 
 /// <https://drafts.csswg.org/css-font-loading/#fontface-interface>
 #[dom_struct]
@@ -50,12 +66,10 @@ pub struct FontFace {
     #[no_trace = "Does not contain managed objects"]
     descriptors: DomRefCell<FontFaceDescriptors>,
 
-    /// A reference to the [`FontFaceSet`] that this `FontFace` is a member of, if it has been
-    /// added to one. `None` otherwise. The spec suggests that a `FontFace` can be a member of
-    /// multiple `FontFaceSet`s, but this doesn't seem to be the case in practice, as the
-    /// `FontFaceSet` constructor is not exposed on the global scope.
-    font_face_set: MutNullableDom<FontFaceSet>,
-
+    /// Sets are observers, not owners of each other or their documents.
+    font_face_sets: AssociatedFontFaceSets,
+    #[no_trace]
+    script_id: Uuid,
     /// This holds the [`FontTemplate`] resulting from loading this `FontFace`, to be used when the
     /// `FontFace` is added to the global `FontFaceSet` and thus the `[FontContext]`.
     //
@@ -251,7 +265,8 @@ impl FontFace {
             cx,
             Box::new(Self {
                 reflector: Reflector::new(),
-                font_face_set: MutNullableDom::default(),
+                font_face_sets: AssociatedFontFaceSets(DomRefCell::new(WeakRefVec::new())),
+            script_id: Uuid::new_v4(),
                 font_status_promise: font_status_promise.to_traced(),
                 family_name: DomRefCell::default(),
                 urls: Default::default(),
@@ -292,7 +307,8 @@ impl FontFace {
             // Set font face’s corresponding attributes to the serialization of the parsed values.
             descriptors: DomRefCell::new(serialize_parsed_descriptors(descriptors)),
 
-            font_face_set: MutNullableDom::default(),
+            font_face_sets: AssociatedFontFaceSets(DomRefCell::new(WeakRefVec::new())),
+            script_id: Uuid::new_v4(),
             family_name: DomRefCell::new(family_name.traced()),
             urls: DomRefCell::new(urls),
             template: RefCell::default(),
@@ -336,7 +352,8 @@ impl FontFace {
             reflector: Reflector::new(),
             status: Cell::new(FontFaceLoadStatus::Loading),
             descriptors: DomRefCell::new(descriptors),
-            font_face_set: MutNullableDom::default(),
+            font_face_sets: AssociatedFontFaceSets(DomRefCell::new(WeakRefVec::new())),
+            script_id: Uuid::new_v4(),
             family_name: DomRefCell::new(family_name.traced()),
             urls: DomRefCell::new(src),
             template: RefCell::default(),
@@ -417,9 +434,7 @@ impl FontFace {
         self.status.set(FontFaceLoadStatus::Loading);
 
         // Step 3.2 For each FontFaceSet font face is in:
-        if let Some(font_face_set) = self.font_face_set.get() {
-            font_face_set.handle_font_face_status_changed(cx, self);
-        }
+        self.notify_associated_sets(cx);
 
         // Asynchronously, attempt to parse the data in it as a font. When this is completed,
         // successfully or not, queue a task to run the following steps synchronously:
@@ -437,18 +452,12 @@ impl FontFace {
         if let Some(template) = result {
             // Step 1. If the load was successful, font face now represents the parsed font; fulfill font face’s
             // [[FontStatusPromise]] with font face, and set its status attribute to "loaded".
-            self.font_status_promise.resolve_native(cx, &self);
             self.status.set(FontFaceLoadStatus::Loaded);
             *self.template.borrow_mut() = Some(template);
+            self.font_status_promise.resolve_native(cx, &self);
 
             // For each FontFaceSet font face is in:
-            if let Some(font_face_set) = self.font_face_set.get() {
-                // Add font face to the FontFaceSet’s [[LoadedFonts]] list.
-                // Remove font face from the FontFaceSet’s [[LoadingFonts]] list.
-                // If font was the last item in that list (and so the list is now empty),
-                // switch the FontFaceSet to loaded.
-                font_face_set.handle_font_face_status_changed(cx, self);
-            }
+            self.notify_associated_sets(cx);
         } else {
             // Step 2. Otherwise, reject font face’s [[FontStatusPromise]] with a DOMException named "SyntaxError"
             // and set font face’s status attribute to "error".
@@ -457,18 +466,35 @@ impl FontFace {
             self.status.set(FontFaceLoadStatus::Error);
 
             // For each FontFaceSet font face is in:
-            if let Some(font_face_set) = self.font_face_set.get() {
-                // Add font face to the FontFaceSet’s [[FailedFonts]] list.
-                // Remove font face from the FontFaceSet’s [[LoadingFonts]] list.
-                // If font was the last item in that list (and so the list is now empty),
-                // switch the FontFaceSet to loaded.
-                font_face_set.handle_font_face_status_changed(cx, self);
-            }
+            self.notify_associated_sets(cx);
         }
     }
 
-    pub(super) fn set_associated_font_face_set(&self, font_face_set: &FontFaceSet) {
-        self.font_face_set.set(Some(font_face_set));
+    pub(super) fn set_associated_font_face_set(&self, set: &FontFaceSet) {
+        let mut members = self.font_face_sets.0.borrow_mut();
+        members.retain_alive();
+        if !members.iter().filter_map(WeakRef::root).any(|member| std::ptr::eq(&*member, set)) {
+            members.push(WeakRef::new(set));
+        }
+    }
+
+    pub(super) fn remove_associated_font_face_set(&self, set: &FontFaceSet) {
+        self.font_face_sets.0.borrow_mut().retain(|weak| {
+            weak.root().is_some_and(|member| !std::ptr::eq(&*member, set))
+        });
+    }
+
+    fn notify_associated_sets(&self, cx: &mut JSContext) {
+        let members: Vec<_> = self.font_face_sets.0.borrow().iter().filter_map(WeakRef::root).collect();
+        for member in members {
+            member.handle_font_face_status_changed(cx, self);
+        }
+    }
+
+    pub(super) fn script_id(&self) -> Uuid { self.script_id }
+
+    pub(super) fn retained_data(&self) -> Option<FontData> {
+        self.template.borrow().as_ref().and_then(|(_, template)| template.script_font_data.clone())
     }
 
     pub(super) fn template(&self) -> Option<(LowercaseFontFamilyName, FontTemplate)> {
@@ -495,7 +521,7 @@ impl FontFace {
         Ok(())
     }
 
-    fn font_face_rule(&self, global: &GlobalScope) -> Fallible<FontFaceRule> {
+    pub(super) fn font_face_rule(&self, global: &GlobalScope) -> Fallible<FontFaceRule> {
         // TODO: We should not have to parse the descriptors over and over again here.
         // We can probably store them on the `FontFace` instead.
         parse_font_face_descriptors(
@@ -697,14 +723,7 @@ impl FontFaceMethods<crate::DomTypeHolder> for FontFace {
                         }
                     }
 
-                    if let Some(font_face_set) = font_face.font_face_set.get() {
-                        // For each FontFaceSet font face is in: ...
-                        //
-                        // This implements steps 5.1.1, 5.1.2, 5.2.1 and 5.2.2 - these
-                        // take care of changing the status of the `FontFaceSet` in which this
-                        // `FontFace` is a member, for both failed and successful load.
-                        font_face_set.handle_font_face_status_changed(cx, &font_face);
-                    }
+                    font_face.notify_associated_sets(cx);
                 }));
             },
         );
@@ -737,9 +756,7 @@ impl FontFaceMethods<crate::DomTypeHolder> for FontFace {
         // See <https://github.com/w3c/csswg-drafts/issues/13235>:
         // All browsers switch the FontFaceSet to loading, but this is currently missing
         // from the specification.
-        if let Some(font_face_set) = self.font_face_set.get() {
-            font_face_set.handle_font_face_status_changed(cx, self);
-        }
+        self.notify_associated_sets(cx);
 
         self.font_status_promise.root(cx)
     }

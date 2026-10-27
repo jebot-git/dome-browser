@@ -43,10 +43,9 @@ use layout_api::{
 };
 use malloc_size_of::MallocSizeOfOps;
 use metrics::{InteractiveFlag, InteractiveWindow, ProgressiveWebMetrics};
-use net_traits::CookieSource::NonHTTP;
 use net_traits::CoreResourceMsg::{GetCookieStringForUrl, SetCookiesForUrl};
 use net_traits::image_cache::ImageCache;
-use net_traits::policy_container::PolicyContainer;
+use net_traits::policy_container::{EmbedderPolicyValue, PolicyContainer};
 use net_traits::pub_domains::is_pub_domain;
 use net_traits::request::{
     InsecureRequestsPolicy, PreloadId, PreloadKey, PreloadedResources, RequestBuilder,
@@ -329,8 +328,8 @@ impl RefreshRedirectDue {
         // automatic features browsing context flag set,
         // then navigate document's node navigable to urlRecord using document,
         // with historyHandling set to "replace".
-        if self.from_meta_element &&
-            window.Document().has_active_sandboxing_flag(
+        if self.from_meta_element
+            && window.Document().has_active_sandboxing_flag(
                 SandboxingFlagSet::SANDBOXED_AUTOMATIC_FEATURES_BROWSING_CONTEXT_FLAG,
             )
         {
@@ -491,6 +490,7 @@ pub(crate) struct Document {
     /// List of stylesheets associated with nodes in this document. |None| if the list needs to be refreshed.
     #[custom_trace]
     stylesheets: DomRefCell<DocumentStylesheetSet<ServoStylesheetInDocument>>,
+    cosmetic_filters: DomRefCell<super::cosmetic_filtering::CosmeticFilterState>,
     stylesheet_list: MutNullableDom<StyleSheetList>,
     ready_state: Cell<DocumentReadyState>,
     /// The script element that is currently executing.
@@ -536,6 +536,15 @@ pub(crate) struct Document {
     /// Information on elements needing restyle to ship over to layout when the
     /// time comes.
     pending_restyles: DomRefCell<FxHashMap<Dom<Element>, NoTrace<PendingRestyle>>>,
+    /// Connected SVG mutations can affect resources reused in other viewports.
+    svg_use_snapshots_dirty: Cell<bool>,
+    /// Renderer-only clones must not upgrade custom elements or load resources
+    /// as part of the active document. Separate from observable template docs.
+    svg_snapshot_document: MutNullableDom<Document>,
+    /// Marks renderer-private documents, including for scoped-registry clones.
+    is_svg_snapshot_document: Cell<bool>,
+    /// Internal fragment ownership handoff preserves already-selected registries.
+    is_registry_fragment_document: Cell<bool>,
     /// A collection of reasons that the [`Document`] needs to be restyled at the next
     /// opportunity for a reflow. If this is empty, then the [`Document`] does not need to
     /// be restyled.
@@ -552,6 +561,8 @@ pub(crate) struct Document {
     #[no_trace]
     #[conditional_malloc_size_of]
     policy_container: DomRefCell<StdArc<PolicyContainer>>,
+    #[no_trace]
+    container_embedder_policy: Cell<EmbedderPolicyValue>,
     /// <https://html.spec.whatwg.org/multipage/#map-of-preloaded-resources>
     #[no_trace]
     preloaded_resources: DomRefCell<PreloadedResources>,
@@ -812,6 +823,12 @@ pub(crate) struct Document {
     /// <https://html.spec.whatwg.org/multipage/#concept-document-internal-ancestor-origin-objects-list>
     #[no_trace]
     internal_ancestor_origin_objects_list: RefCell<Option<Vec<ImmutableOrigin>>>,
+    /// Unmasked cookie-site context. Referrer-policy ancestor lists cannot be
+    /// used here: their opaque entries are intentional information hiding.
+    #[no_trace]
+    cookie_site: DomRefCell<Option<ImmutableOrigin>>,
+    navigation_cookie_same_site: Cell<bool>,
+    protocol_state: DomRefCell<Option<String>>,
 
     /// A vector of weak references to Range instances that are live on
     /// this document.
@@ -824,6 +841,10 @@ pub(crate) struct Document {
 }
 
 impl Document {
+    pub(super) fn cosmetic_filter_state(&self) -> &DomRefCell<super::cosmetic_filtering::CosmeticFilterState> {
+        &self.cosmetic_filters
+    }
+
     pub(crate) fn module_map(
         &self,
     ) -> &DomRefCell<HashMapTracedValues<ModuleRequest, ModuleStatus>> {
@@ -1102,8 +1123,8 @@ impl Document {
         // > A Document d is said to be fully active when d is the active document of a
         // > navigable navigable, and either navigable is a top-level traversable or
         // > navigable's container document is fully active.
-        self.is_active() &&
-            (self.window.is_top_level() || self.activity.get() == DocumentActivity::FullyActive)
+        self.is_active()
+            && (self.window.is_top_level() || self.activity.get() == DocumentActivity::FullyActive)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#nav-document>
@@ -1113,9 +1134,9 @@ impl Document {
         // The first two checks stand in for when the document is not the active session history
         // entry's document, as when that happens they will be false. The session history entry
         // is not really implemented in script in the same way the specification says.
-        self.browsing_context().is_some() &&
-            !self.window_detached() &&
-            self.activity.get() != DocumentActivity::Inactive
+        self.browsing_context().is_some()
+            && !self.window_detached()
+            && self.activity.get() != DocumentActivity::Inactive
     }
 
     #[inline]
@@ -1158,6 +1179,7 @@ impl Document {
         self.title_changed();
         self.notify_embedder_favicon();
         self.dirty_all_nodes(cx.no_gc());
+        self.reset_cosmetic_filters(cx);
         self.window().resume(cx);
         media.resume(&client_context_id);
 
@@ -1182,7 +1204,7 @@ impl Document {
                 // Step 4.6.2 Set document's page showing flag to true.
                 document.page_showing.set(true);
                 // Step 4.6.3 Update the visibility state of document to "visible".
-                document.update_visibility_state(cx, DocumentVisibilityState::Visible);
+                document.update_webview_visibility(cx);
                 // Step 4.6.4 Fire a page transition event named pageshow at document's relevant
                 // global object with true.
                 let event = PageTransitionEvent::new(
@@ -1240,6 +1262,7 @@ impl Document {
 
     pub(crate) fn set_url(&self, url: ServoUrl) {
         *self.url.borrow_mut() = url;
+        self.queue_cosmetic_filter_reset();
     }
 
     pub(crate) fn about_base_url(&self) -> Option<ServoUrl> {
@@ -1264,8 +1287,8 @@ impl Document {
 
         // Step 2: If document's URL matches about:blank and document's about base URL is
         // non-null, then return document's about base URL.
-        if document_url.matches_about_blank() &&
-            let Some(about_base_url) = self.about_base_url()
+        if document_url.matches_about_blank()
+            && let Some(about_base_url) = self.about_base_url()
         {
             return about_base_url;
         }
@@ -1305,8 +1328,8 @@ impl Document {
         // FIXME: This should check the dirty bit on the document,
         // not the document element. Needs some layout changes to make
         // that workable.
-        if let Some(root) = self.get_document_element_unrooted(no_gc) &&
-            root.has_dirty_descendants()
+        if let Some(root) = self.get_document_element_unrooted(no_gc)
+            && root.has_dirty_descendants()
         {
             condition.insert(RestyleReason::DOMChanged);
         }
@@ -1972,7 +1995,7 @@ impl Document {
         // > A Document document is render-blocked if both of the following are true:
         // > document's render-blocking element set is non-empty,
         // > or document allows adding render-blocking elements.
-        self.render_blocking_element_count() > 0
+        self.render_blocking_element_count() > 0 || self.cosmetic_filter_render_blocked()
         // TODO: add `allows_adding_render_blocking_elements` which currently breaks for empty iframes
         // > The current high resolution time given document's relevant global object
         // has not exceeded an implementation-defined timeout value.
@@ -1987,6 +2010,25 @@ impl Document {
         // FIXME(emilio): Use the DocumentStylesheetSet invalidation stuff.
         if let Some(element) = self.GetDocumentElement() {
             element.upcast::<Node>().dirty(no_gc, NodeDamage::Style);
+        }
+    }
+
+    pub(crate) fn note_svg_resource_mutation(&self) {
+        self.svg_use_snapshots_dirty.set(true);
+    }
+
+    pub(crate) fn invalidate_svg_use_snapshots_if_needed(&self, cx: &mut JSContext) {
+        if !self.svg_use_snapshots_dirty.replace(false) &&
+            !self.stylesheets_changed_since_last_reflow()
+        {
+            return;
+        }
+        // Batch resource invalidation once per reflow, not once per attribute.
+        // Private serialization clones are detached and cannot set this flag.
+        for node in self.upcast::<Node>().traverse_preorder(ShadowIncluding::Yes) {
+            if let Some(svg) = node.downcast::<crate::dom::svg::svgsvgelement::SVGSVGElement>() {
+                svg.invalidate_cached_serialized_subtree_and_rasterization_result(cx.no_gc());
+            }
         }
     }
 
@@ -2062,6 +2104,14 @@ impl Document {
 
     pub(crate) fn policy_container(&self) -> Ref<'_, StdArc<PolicyContainer>> {
         self.policy_container.borrow()
+    }
+
+    pub(crate) fn container_embedder_policy(&self) -> EmbedderPolicyValue {
+        self.container_embedder_policy.get()
+    }
+
+    pub(crate) fn set_container_embedder_policy(&self, value: EmbedderPolicyValue) {
+        self.container_embedder_policy.set(value);
     }
 
     pub(crate) fn set_policy_container(&self, policy_container: StdArc<PolicyContainer>) {
@@ -2241,8 +2291,8 @@ impl Document {
         // to fire an event named hashchange at document's relevant global object, using HashChangeEvent,
         // with the oldURL attribute initialized to the serialization of oldURL
         // and the newURL attribute initialized to the serialization of entry's URL.
-        if old_url.as_url()[Position::BeforeFragment..] !=
-            new_url.as_url()[Position::BeforeFragment..]
+        if old_url.as_url()[Position::BeforeFragment..]
+            != new_url.as_url()[Position::BeforeFragment..]
         {
             let window = Trusted::new(self.owner_window().deref());
             let old_url = old_url.to_string();
@@ -2823,8 +2873,8 @@ impl Document {
 
     /// Step 7 of <https://html.spec.whatwg.org/multipage/#the-end>
     fn wait_until_asap_scripts_have_executed(&self) {
-        if self.current_the_end_loading_phase.get() !=
-            TheEndLoadingPhase::ProcessingAsSoonAsPossibleScripts
+        if self.current_the_end_loading_phase.get()
+            != TheEndLoadingPhase::ProcessingAsSoonAsPossibleScripts
         {
             return;
         }
@@ -2857,8 +2907,8 @@ impl Document {
 
     /// Step 8 of <https://html.spec.whatwg.org/multipage/#the-end>
     pub(crate) fn wait_until_load_blockers_have_resolved(&self, cx: &mut JSContext) {
-        if self.current_the_end_loading_phase.get() !=
-            TheEndLoadingPhase::WaitingForLoadEventBlockers
+        if self.current_the_end_loading_phase.get()
+            != TheEndLoadingPhase::WaitingForLoadEventBlockers
         {
             return;
         }
@@ -2871,8 +2921,8 @@ impl Document {
                 .navigation_timing
                 .top_level_dom_complete
                 .get()
-                .is_none() &&
-                loader.is_only_blocked_by_iframes()
+                .is_none()
+                && loader.is_only_blocked_by_iframes()
             {
                 update_with_current_instant(&self.navigation_timing.top_level_dom_complete);
             }
@@ -3103,6 +3153,33 @@ impl Document {
         self.ancestor_origins_list.get()
     }
 
+    pub(crate) fn navigation_cookie_same_site(&self) -> bool { self.navigation_cookie_same_site.get() }
+    pub(crate) fn protocol_state(&self) -> Option<String> { self.protocol_state.borrow().clone() }
+    pub(crate) fn set_protocol_state(&self, state: Option<String>) { *self.protocol_state.borrow_mut() = state; }
+    pub(crate) fn set_navigation_cookie_same_site(&self, same_site: bool) { self.navigation_cookie_same_site.set(same_site); }
+    pub(crate) fn cookie_source(&self) -> net_traits::CookieSource {
+        if self.cookie_site().is_some() { net_traits::CookieSource::NonHTTP }
+        else { net_traits::CookieSource::NonHTTPCrossSite }
+    }
+
+    pub(crate) fn initialize_cookie_site(&self) {
+        let origin = self.origin().immutable().clone();
+        let site = if !origin.is_tuple() {
+            None
+        } else if self.window().is_top_level() {
+            Some(origin)
+        } else {
+            self.window().window_proxy().parent_cookie_site().filter(|site|
+                net_traits::pub_domains::is_same_site(site, &origin))
+        };
+        *self.cookie_site.borrow_mut() = site;
+    }
+
+    pub(crate) fn cookie_site(&self) -> Option<ImmutableOrigin> {
+        self.cookie_site.borrow().clone().filter(|site|
+            net_traits::pub_domains::is_same_site(site, self.origin().immutable()))
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#concept-document-internal-ancestor-origin-objects-list>
     pub(crate) fn set_internal_ancestor_origin_objects_list(
         &self,
@@ -3172,6 +3249,27 @@ impl Document {
     pub(crate) fn set_custom_element_registry(&self, registry: &CustomElementRegistry) {
         self.document_or_shadow_root
             .set_custom_element_registry(Some(registry));
+    }
+
+    fn flatten_element_creation_options(
+        &self,
+        options: &StringOrElementCreationOptions,
+    ) -> Fallible<(Option<DomRoot<CustomElementRegistry>>, Option<LocalName>)> {
+        let mut registry = self.custom_element_registry();
+        let mut is = None;
+        if let StringOrElementCreationOptions::ElementCreationOptions(options) = options {
+            is = options.is.as_ref().map(LocalName::from);
+            if let Some(override_registry) = &options.customElementRegistry {
+                if is.is_some() { return Err(Error::NotSupported(None)); }
+                registry = override_registry.clone();
+            }
+            if registry.as_ref().is_some_and(|registry| {
+                !registry.is_scoped() && self.custom_element_registry().as_deref() != Some(&**registry)
+            }) {
+                return Err(Error::NotSupported(None));
+            }
+        }
+        Ok((registry, is))
     }
 
     /// <https://dom.spec.whatwg.org/#effective-global-custom-element-registry>
@@ -3269,10 +3367,10 @@ impl Document {
         if !self.is_fully_active() {
             return false;
         }
-        if !self.window().layout_blocked() &&
-            (!self.restyle_reason(no_gc).is_empty() ||
-                self.window().layout().needs_new_display_list() ||
-                self.window().layout().needs_accessibility_update())
+        if !self.window().layout_blocked()
+            && (!self.restyle_reason(no_gc).is_empty()
+                || self.window().layout().needs_new_display_list()
+                || self.window().layout().needs_accessibility_update())
         {
             return true;
         }
@@ -3846,8 +3944,8 @@ impl Document {
             _ => {
                 // Step 9.1: If document's unload counter is greater than 0 or
                 // document's ignore-destructive-writes counter is greater than 0, then return.
-                if self.is_prompting_or_unloading() ||
-                    self.ignore_destructive_writes_counter.get() > 0
+                if self.is_prompting_or_unloading()
+                    || self.ignore_destructive_writes_counter.get() > 0
                 {
                     return Ok(());
                 }
@@ -4206,6 +4304,7 @@ impl Document {
             iframes: IFrameCollection::new(),
             shared_style_locks,
             stylesheets: DomRefCell::new(DocumentStylesheetSet::new()),
+            cosmetic_filters: Default::default(),
             stylesheet_list: MutNullableDom::new(None),
             // https://html.spec.whatwg.org/multipage/#current-document-readiness
             // > Each Document has a current document readiness, a string, initially "complete".
@@ -4227,13 +4326,21 @@ impl Document {
             target_base_element: Default::default(),
             ancestor_origins_list: Default::default(),
             internal_ancestor_origin_objects_list: Default::default(),
+            cookie_site: Default::default(),
+            navigation_cookie_same_site: Cell::new(true),
+            protocol_state: Default::default(),
             appropriate_template_contents_owner_document: Default::default(),
             pending_restyles: DomRefCell::new(FxHashMap::default()),
+            svg_use_snapshots_dirty: Cell::new(false),
+            svg_snapshot_document: Default::default(),
+            is_svg_snapshot_document: Cell::new(false),
+            is_registry_fragment_document: Cell::new(false),
             needs_restyle: Cell::new(RestyleReason::DOMChanged),
             origin: DomRefCell::new(origin),
             referrer,
             target_element: MutNullableDom::new(None),
             policy_container: DomRefCell::new(StdArc::new(PolicyContainer::default())),
+            container_embedder_policy: Cell::new(EmbedderPolicyValue::UnsafeNone),
             preloaded_resources: Default::default(),
             ignore_destructive_writes_counter: Default::default(),
             ignore_opens_during_unload_counter: Default::default(),
@@ -4265,10 +4372,14 @@ impl Document {
             declarative_refresh: Default::default(),
             resize_observers: Default::default(),
             fonts: Default::default(),
-            // TODO: This is intended to workaround the issue where `visibilityState`
-            // is always hidden. This should really be hooked with system visibility
-            // which involves more work.
-            visibility_state: Cell::new(DocumentVisibilityState::Visible),
+            visibility_state: Cell::new(if has_browsing_context &&
+                activity == DocumentActivity::FullyActive &&
+                !window.webview_state().hidden.get()
+            {
+                DocumentVisibilityState::Visible
+            } else {
+                DocumentVisibilityState::Hidden
+            }),
             status_code,
             is_initial_about_blank: Cell::new(is_initial_about_blank),
             allow_declarative_shadow_roots: Cell::new(allow_declarative_shadow_roots),
@@ -4333,8 +4444,8 @@ impl Document {
     pub(crate) fn insecure_requests_policy(&self) -> InsecureRequestsPolicy {
         if let Some(csp_list) = self.get_csp_list().as_ref() {
             for policy in &csp_list.0 {
-                if policy.contains_a_directive_whose_name_is("upgrade-insecure-requests") &&
-                    policy.disposition == PolicyDisposition::Enforce
+                if policy.contains_a_directive_whose_name_is("upgrade-insecure-requests")
+                    && policy.disposition == PolicyDisposition::Enforce
                 {
                     return InsecureRequestsPolicy::Upgrade;
                 }
@@ -4533,6 +4644,13 @@ impl Document {
             let node = document.upcast::<Node>();
             node.set_owner_doc(&document);
         }
+        // Window-associated documents need their global registry before any
+        // parser-created element can capture it. Inert author/template/snapshot
+        // documents intentionally keep a null registry.
+        if has_browsing_context == HasBrowsingContext::Yes {
+            let registry = CustomElementRegistry::new(cx, window);
+            document.set_custom_element_registry(&registry);
+        }
         document
     }
 
@@ -4722,6 +4840,60 @@ impl Document {
             })
     }
 
+    pub(crate) fn is_registry_fragment_document(&self) -> bool {
+        self.is_registry_fragment_document.get()
+    }
+
+    pub(crate) fn mark_registry_fragment_document(&self) {
+        self.is_registry_fragment_document.set(true);
+    }
+
+    pub(crate) fn is_svg_snapshot_document(&self) -> bool {
+        self.is_svg_snapshot_document.get()
+    }
+
+    /// An inactive, registry-free owner for private SVG rasterization trees.
+    pub(crate) fn svg_snapshot_document(&self, cx: &mut JSContext) -> DomRoot<Document> {
+        let document = self.svg_snapshot_document.or_init(|| {
+            let document = Document::new(
+                cx,
+                self.window(),
+                HasBrowsingContext::No,
+                Some(self.url()),
+                Some(self.base_url()),
+                MutableOrigin::new(ImmutableOrigin::new_opaque()),
+                if self.is_html_document {
+                    IsHTMLDocument::HTMLDocument
+                } else {
+                    IsHTMLDocument::NonHTMLDocument
+                },
+                None,
+                None,
+                DocumentActivity::Inactive,
+                DocumentLoader::new(&self.loader()),
+                None,
+                None,
+                false,
+                self.allow_declarative_shadow_roots(),
+                Some(self.insecure_requests_policy()),
+                self.has_trustworthy_ancestor_or_current_origin(),
+                self.custom_element_reaction_stack.clone(),
+                self.creation_sandboxing_flag_set(),
+                self.pipeline_id(),
+                self.image_cache.clone(),
+            );
+            document.appropriate_template_contents_owner_document.set(Some(&document));
+            document.is_svg_snapshot_document.set(true);
+            document
+        });
+        // Preserve URL parsing context after history/base changes without
+        // scheduling active-document navigation or cosmetic-filtering work.
+        *document.url.borrow_mut() = self.base_url();
+        *document.about_base_url.borrow_mut() = Some(self.base_url());
+        document.quirks_mode.set(self.quirks_mode());
+        document
+    }
+
     pub(crate) fn get_element_by_id(&self, no_gc: &NoGC, id: &Atom) -> Option<DomRoot<Element>> {
         self.id_map.get(no_gc, self.upcast(), id)
     }
@@ -4757,8 +4929,8 @@ impl Document {
             entry.hint.insert(RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
         }
 
-        if vtable_for(el.upcast()).attribute_affects_presentational_hints(attr) ||
-            el.check_style_on_self_or_eager_pseudos(|style| {
+        if vtable_for(el.upcast()).attribute_affects_presentational_hints(attr)
+            || el.check_style_on_self_or_eager_pseudos(|style| {
                 if let Some(ref attribute_references) = style.attribute_references {
                     return attribute_references.contains_key(attr.local_name());
                 }
@@ -5245,6 +5417,31 @@ impl Document {
         *self.declarative_refresh.borrow_mut() = Some(refresh);
     }
 
+    /// Set initial visibility timing after this document is associated with its
+    /// Window. Inert documents do not create entries in their owner's timeline.
+    pub(crate) fn queue_initial_visibility_entry(&self, cx: &mut JSContext) {
+        let performance = self.window.Performance(cx);
+        let entry = VisibilityStateEntry::new(
+            cx,
+            &self.global(),
+            self.visibility_state.get(),
+            performance.time_origin(),
+        );
+        performance.queue_entry(entry.upcast::<PerformanceEntry>());
+    }
+
+    /// Update an active document from its WebView's visibility. Session-history
+    /// documents stay hidden even when another document in that WebView is shown.
+    pub(crate) fn update_webview_visibility(&self, cx: &mut JSContext) {
+        let visible = self.has_browsing_context && self.is_fully_active() &&
+            !self.window.webview_state().hidden.get();
+        self.update_visibility_state(cx, if visible {
+            DocumentVisibilityState::Visible
+        } else {
+            DocumentVisibilityState::Hidden
+        });
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#visibility-state>
     fn update_visibility_state(
         &self,
@@ -5284,6 +5481,9 @@ impl Document {
             geolocation.handle_visibility_change(visibility_state);
         }
 
+        #[cfg(feature = "webxr")]
+        self.window.update_inline_xr_visibility(cx, visibility_state == DocumentVisibilityState::Hidden);
+
         // <https://www.w3.org/TR/gamepad/#handling-visibility-change>
         #[cfg(feature = "gamepad")]
         if visibility_state == DocumentVisibilityState::Hidden {
@@ -5319,8 +5519,8 @@ impl Document {
     }
 
     pub(crate) fn has_trustworthy_ancestor_or_current_origin(&self) -> bool {
-        self.has_trustworthy_ancestor_origin.get() ||
-            self.origin().immutable().is_potentially_trustworthy()
+        self.has_trustworthy_ancestor_origin.get()
+            || self.origin().immutable().is_potentially_trustworthy()
     }
 
     pub(crate) fn highlight_dom_node(&self, node: Option<&Node>) {
@@ -5479,6 +5679,7 @@ impl Document {
     pub(crate) fn create_element(&self, cx: &mut JSContext, name: &str) -> DomRoot<Element> {
         let element_options =
             StringOrElementCreationOptions::ElementCreationOptions(ElementCreationOptions {
+                customElementRegistry: None,
                 is: None,
             });
         self.CreateElement(cx, name.into(), element_options)
@@ -5939,13 +6140,8 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
         };
         let name = QualName::new(None, ns, LocalName::from(local_name));
 
-        let is = match options {
-            StringOrElementCreationOptions::String(_) => None,
-            StringOrElementCreationOptions::ElementCreationOptions(options) => {
-                options.is.as_ref().map(LocalName::from)
-            },
-        };
-        Ok(Element::create(
+        let (registry, is) = self.flatten_element_creation_options(&options)?;
+        Ok(Element::create_with_registry(
             cx,
             name,
             is,
@@ -5953,6 +6149,7 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
             ElementCreator::ScriptCreated,
             CustomElementCreationMode::Synchronous,
             None,
+            registry.as_deref(),
         ))
     }
 
@@ -5973,15 +6170,10 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
         // Step 2. Let is be null.
         // Step 3. If options is a dictionary and options["is"] exists, then set is to it.
         let name = QualName::new(prefix, namespace, local_name);
-        let is = match options {
-            StringOrElementCreationOptions::String(_) => None,
-            StringOrElementCreationOptions::ElementCreationOptions(options) => {
-                options.is.as_ref().map(LocalName::from)
-            },
-        };
+        let (registry, is) = self.flatten_element_creation_options(&options)?;
 
         // Step 4. Return the result of creating an element given document, localName, namespace, prefix, is, and true.
-        Ok(Element::create(
+        Ok(Element::create_with_registry(
             cx,
             name,
             is,
@@ -5989,6 +6181,7 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
             ElementCreator::ScriptCreated,
             CustomElementCreationMode::Synchronous,
             None,
+            registry.as_deref(),
         ))
     }
 
@@ -6461,8 +6654,8 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
 
         let node = new_body.upcast::<Node>();
         match node.type_id() {
-            NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLBodyElement)) |
-            NodeTypeId::Element(ElementTypeId::HTMLElement(
+            NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLBodyElement))
+            | NodeTypeId::Element(ElementTypeId::HTMLElement(
                 HTMLElementTypeId::HTMLFrameSetElement,
             )) => {},
             _ => {
@@ -6533,8 +6726,8 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
     fn Links(&self, cx: &mut JSContext) -> DomRoot<HTMLCollection> {
         self.links.or_init(|| {
             HTMLCollection::new_with_filter_fn(cx, &self.window, self.upcast(), |element, _| {
-                (element.is::<HTMLAnchorElement>() || element.is::<HTMLAreaElement>()) &&
-                    element.has_attribute(&local_name!("href"))
+                (element.is::<HTMLAnchorElement>() || element.is::<HTMLAreaElement>())
+                    && element.has_attribute(&local_name!("href"))
             })
         })
     }
@@ -6665,6 +6858,8 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
             return Err(Error::Security(Some("Document's origin is opaque".into())));
         }
 
+        if !self.global().cookies_allowed() { return Ok(DOMString::new()); }
+
         let url = self.url();
         let (tx, rx) =
             profile_generic_channel::channel(self.global().time_profiler_chan().clone()).unwrap();
@@ -6672,7 +6867,7 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
             .window
             .as_global_scope()
             .resource_threads()
-            .send(GetCookieStringForUrl(url, tx, NonHTTP));
+            .send(GetCookieStringForUrl(url, tx, self.cookie_source()));
         let cookies = rx.recv().unwrap();
         Ok(cookies.map_or(DOMString::new(), DOMString::from))
     }
@@ -6687,11 +6882,13 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
             return Err(Error::Security(Some("Document's origin is opaque".into())));
         }
 
+        if !self.global().cookies_allowed() { return Ok(()); }
+
         if !cookie.is_valid_for_cookie() {
             return Ok(());
         }
 
-        let cookies = if let Some(cookie) = Cookie::parse(cookie.to_string()).ok().map(Serde) {
+        let cookies = if let Some(cookie) = net_traits::parse_cookie_string(cookie.to_string()).ok().map(Serde) {
             vec![cookie]
         } else {
             vec![]
@@ -6701,7 +6898,7 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
             .window
             .as_global_scope()
             .resource_threads()
-            .send(SetCookiesForUrl(self.url(), cookies, NonHTTP));
+            .send(SetCookiesForUrl(self.url(), cookies, self.cookie_source()));
         Ok(())
     }
 
@@ -6781,8 +6978,8 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
                         elem.get_name().as_ref() == Some(&self.name)
                     },
                     HTMLElementTypeId::HTMLImageElement => elem.get_name().is_some_and(|name| {
-                        name == *self.name ||
-                            !name.is_empty() && elem.get_id().as_ref() == Some(&self.name)
+                        name == *self.name
+                            || !name.is_empty() && elem.get_id().as_ref() == Some(&self.name)
                     }),
                     // TODO handle <embed> and <object>; these depend on whether the element is
                     // “exposed”, a concept that doesn’t fully make sense until embed/object
@@ -7452,9 +7649,9 @@ fn is_named_element_with_name_attribute(elem: &Element) -> bool {
         _ => return false,
     };
     match type_ {
-        HTMLElementTypeId::HTMLFormElement |
-        HTMLElementTypeId::HTMLIFrameElement |
-        HTMLElementTypeId::HTMLImageElement => true,
+        HTMLElementTypeId::HTMLFormElement
+        | HTMLElementTypeId::HTMLIFrameElement
+        | HTMLElementTypeId::HTMLImageElement => true,
         // TODO handle <embed> and <object>; these depend on whether the element is
         // “exposed”, a concept that doesn’t fully make sense until embed/object
         // behaviour is actually implemented

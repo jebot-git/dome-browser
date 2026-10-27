@@ -1,0 +1,37 @@
+<!doctype html><meta charset="utf-8"><title>reportError preserves arbitrary thrown values</title>
+<script>
+async function checkValue(name){
+ let conversions=0;
+ const values={
+  symbol:()=>Symbol('report-error-symbol'),
+  throwing:()=>({[Symbol.toPrimitive](){conversions++;throw new Error('conversion sentinel')}}),
+  nonprimitive:()=>({[Symbol.toPrimitive](){conversions++;return {}}}),
+  nullprototype:()=>Object.create(null),
+  revoked:()=>{const pair=Proxy.revocable({},{});pair.revoke();return pair.proxy},
+  control:()=>new TypeError('ordinary error control'),
+  undefined:()=>undefined
+ };
+ const value=values[name]();let captured=null;const checks=[];
+ addEventListener('error',event=>{captured=event;event.preventDefault()},{once:true});
+ let returned=false,exception=null;
+ try{reportError(value);returned=true}catch(error){exception=String(error)}
+ checks.push({name:'reportError returns without throwing',passed:returned,error:exception});
+ checks.push({name:'error event preserves the original value',passed:captured!==null&&captured.error===value});
+ checks.push({name:'error extraction does not call conversion hooks',passed:conversions===0});
+ checks.push({name:'error event has a non-empty message',passed:captured!==null&&typeof captured.message==='string'&&captured.message.length>0});
+ await new Promise(resolve=>setTimeout(resolve,30));
+ checks.push({name:'event loop continues after reporting',passed:true});
+ return {checks,case:name,conversions,message:captured?.message};
+}
+(async()=>{
+ const query=new URLSearchParams(location.search),name=query.get('case')||'symbol';
+ let result;
+ if(query.get('scope')==='worker'){
+  const url=URL.createObjectURL(new Blob(['onmessage=async event=>postMessage(await ('+checkValue.toString()+')(event.data));'],{type:'text/javascript'}));
+  const worker=new Worker(url);
+  try{result=await new Promise((resolve,reject)=>{worker.onmessage=event=>resolve(event.data);worker.onerror=event=>{event.preventDefault();reject(new Error(event.message))};worker.postMessage(name)})}
+  finally{worker.terminate();URL.revokeObjectURL(url)}
+ }else result=await checkValue(name);
+ await fetch('/report',{method:'POST',body:JSON.stringify(result)});
+})().catch(async error=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[{name:'fixture completion',passed:false,error:String(error)}]})}));
+</script>

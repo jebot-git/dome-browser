@@ -2,10 +2,18 @@
 mod adblocking;
 mod compatibility;
 mod downloads;
+mod external_media;
+mod external_links;
 mod wallet;
 mod storage;
+mod cookie_settings;
+mod memory_diagnostics;
+mod native_touch;
+mod native_pen;
 mod ui;
 mod xr;
+mod smallnet;
+mod identities;
 use servo::{
     Code, EmbedderControl, InputEvent, Key, KeyState, KeyboardEvent, LoadStatus, Location,
     Modifiers, MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey,
@@ -75,9 +83,12 @@ struct Services {
     wallet: RefCell<wallet::Wallet>,
     active: Cell<usize>,
     downloads: downloads::Downloads,
+    external_player: external_media::Handoff,
+    external_links: external_links::Handoff,
+    xr_focus: xr::Focus,
 }
 impl servo::ServoDelegate for Services {
-    fn load_web_resource(&self, load: servo::WebResourceLoad) { self.blocker.borrow_mut().intercept(load, None); }
+    fn load_web_resource(&self, load: servo::WebResourceLoad) { self.blocker.borrow_mut().intercept(load); }
 }
 struct PageState {
     dirty: Cell<bool>,
@@ -86,17 +97,22 @@ struct PageState {
     history: Cell<(usize, usize)>,
     changed: Cell<bool>,
     loaded: Cell<bool>,
+    protocol_notice: RefCell<Option<String>>,
     history_recorded: RefCell<String>,
     closed: Cell<bool>,
     pending: RefCell<Vec<servo::CreateNewWebViewRequest>>,
+    pending_external: RefCell<Option<(Url, Option<Url>)>>,
     tab: usize,
     services: Rc<Services>,
     permissions: Rc<RefCell<std::collections::HashSet<String>>>,
 }
 impl WebViewDelegate for PageState {
-    fn load_web_resource(&self, view: WebView, load: servo::WebResourceLoad) {
-        let origin=view.url().map(|u|u.origin().ascii_serialization());
-        self.services.blocker.borrow_mut().intercept(load, origin.as_deref());
+    fn cosmetic_filters(&self, _: WebView, request: servo::CosmeticFilterRequest) -> Vec<String> {
+        self.services.blocker.borrow().cosmetic_filters(request)
+    }
+
+    fn load_web_resource(&self, _: WebView, load: servo::WebResourceLoad) {
+        self.services.blocker.borrow_mut().intercept(load);
     }
     fn manage_login(&self, view: WebView, details: servo::LoginFormDetails) -> Option<servo::AuthenticationResponse> {
         if self.services.active.get()!=self.tab || view.url()?.origin().ascii_serialization()!=details.origin {return None}
@@ -118,28 +134,31 @@ impl WebViewDelegate for PageState {
         self.changed.set(true)
     }
     fn notify_load_status_changed(&self, _: WebView, status: LoadStatus) {
+        if status==LoadStatus::Started {self.protocol_notice.borrow_mut().take();}
         self.loaded.set(status == LoadStatus::Complete);
-        ui::status(if self.loaded.get() {
-            "Ready"
-        } else {
-            "Loading…"
-        });
+        if self.loaded.get() {ui::status(self.protocol_notice.borrow().as_deref().unwrap_or("Ready"));}
+        else {ui::status("Loading…");}
     }
     fn notify_closed(&self, _: WebView) {
         self.closed.set(true)
     }
-    fn notify_cursor_changed(&self, _: WebView, cursor: servo::Cursor) {
-        let s = format!("{cursor:?}");
-        unsafe {
-            ui::browser_ui_cursor(if s == "Pointer" {
-                1
-            } else if s == "Text" {
-                2
-            } else {
-                0
-            })
-        }
+    fn screen_geometry(&self, _: WebView) -> Option<servo::ScreenGeometry> {
+        Some(ui::screen_geometry())
     }
+    fn notify_cursor_changed(&self, _: WebView, cursor: servo::Cursor) {
+        let kind = match format!("{cursor:?}").as_str() {
+            "Pointer" => 1,
+            "Text" | "VerticalText" => 2,
+            "SeResize" | "NwResize" | "NwseResize" => 3,
+            "NResize" | "SResize" | "NsResize" => 4,
+            "EResize" | "WResize" | "EwResize" => 5,
+            "NeResize" | "SwResize" | "NeswResize" => 6,
+            "Move" | "AllScroll" => 7,
+            _ => 0,
+        };
+        unsafe { ui::browser_ui_cursor(kind) }
+    }
+
     fn notify_fullscreen_state_changed(&self, _: WebView, enabled: bool) {
         unsafe { ui::browser_ui_fullscreen(enabled as i32) }
     }
@@ -149,6 +168,14 @@ impl WebViewDelegate for PageState {
     fn notify_crashed(&self, _: WebView, reason: String, _: Option<String>) {
         ui::status(&format!("Page stopped: {reason}"));
         eprintln!("PAGE_CRASH {reason}");
+    }
+    fn request_navigation(&self, view: WebView, request: servo::NavigationRequest) {
+        if external_links::handles(&request.url) {
+            if self.services.active.get()==self.tab && self.pending_external.borrow().is_none() {
+                *self.pending_external.borrow_mut()=Some((request.url.clone(),view.url()));
+            }
+            request.deny();
+        }
     }
     fn request_create_new(&self, _: WebView, request: servo::CreateNewWebViewRequest) {
         self.pending.borrow_mut().push(request);
@@ -313,10 +340,11 @@ impl WebViewDelegate for PageState {
                     .collect();
                 let info = menu.element_info();
                 let mut extra = Vec::new();
-                if let Some(url) = &info.link_url { extra.push(("Save Link", url.clone(), false)); }
+                if let Some(url) = &info.link_url { extra.push(("Save Link", url.clone(), 0));
+                    extra.push(("Open link in external player", url.clone(), 2)); }
                 if let Some(url) = &info.image_url {
-                    extra.push(("Save Image", url.clone(), false));
-                    extra.push(("Copy Image", url.clone(), true));
+                    extra.push(("Save Image", url.clone(), 0));
+                    extra.push(("Copy Image", url.clone(), 1));
                 }
                 let native_start = choices.len();
                 choices.extend(extra.iter().map(|(label, _, _)| ((*label).to_owned(), None)));
@@ -337,9 +365,12 @@ impl WebViewDelegate for PageState {
                 {
                     if let Some(action) = action { menu.select(*action); }
                     else {
-                        let (_, url, copy) = &extra[selected as usize - native_start];
-                        self.services.downloads.start(&view, url.clone(), *copy);
-                        ui::status(if *copy { "Copying image…" } else { "Saving file…" });
+                        let (_, url, action) = &extra[selected as usize - native_start];
+                        if *action == 2 { launch_external_player(&self.services, url.as_str()); }
+                        else {
+                            self.services.downloads.start(&view, url.clone(), *action == 1, Some(menu.id()));
+                            ui::status(if *action == 1 { "Copying image…" } else { "Saving file…" });
+                        }
                         menu.dismiss();
                     }
                 } else {
@@ -403,9 +434,11 @@ fn state(id: usize, permissions: Rc<RefCell<std::collections::HashSet<String>>>,
         history: Cell::new((0, 0)),
         changed: Cell::new(true),
         loaded: Cell::new(false),
+        protocol_notice: RefCell::new(None),
         history_recorded: RefCell::new(String::new()),
         closed: Cell::new(false),
         pending: RefCell::new(Vec::new()),
+        pending_external: RefCell::new(None),
         tab: id,
         services,
         permissions,
@@ -430,10 +463,15 @@ fn parse_url(text: &str) -> Result<Url, url::ParseError> {
     Ok(url)
 }
 fn activate(tabs: &[Tab], index: usize) {
+    tabs[index].state.services.xr_focus.set(tabs[index].view.id(), true);
     tabs[index].state.services.active.set(tabs[index].state.tab);
     for (i, tab) in tabs.iter().enumerate() {
         if i == index {
-            tab.view.show();
+            if unsafe { ui::browser_ui_visible() != 0 } {
+                tab.view.show();
+            } else {
+                tab.view.hide();
+            }
             tab.view
                 .notify_theme_change(if unsafe { ui::browser_ui_light() } != 0 {
                     Theme::Light
@@ -522,7 +560,8 @@ fn session(tabs: &[Tab], active: usize) -> storage::Session {
         version: 1,
         tabs: tabs.iter().map(|t| {
             let url = t.state.url.borrow().clone();
-            storage::SavedTab { url: if storage::restorable(&url) { url } else { "about:blank".into() }, zoom: t.zoom }
+            let protocol_state=if url.starts_with("scroll://") && t.view.url().is_none_or(|committed|committed.as_str()==url) {t.view.protocol_state()}else{None};
+            storage::SavedTab { url: storage::persistent_url(&url).unwrap_or_else(||"about:blank".into()), zoom: t.zoom, protocol_state }
         }).collect(),
         active,
     }
@@ -539,12 +578,49 @@ fn restore(servo: &servo::Servo, saved: &storage::Session, software: bool,
         let view = WebViewBuilder::new(servo, ctx.clone())
             .user_content_manager(compatibility::manager(servo))
             .clipboard_delegate(Rc::new(Clipboard)).url(Url::parse(&item.url)?)
+            .protocol_state(item.protocol_state.clone())
             .delegate(state.clone()).build();
         view.set_page_zoom(item.zoom);
         tabs.push(Tab { view, context: ctx, state, zoom: item.zoom });
     }
     Ok(tabs)
 }
+fn launch_external_player(services: &Services, target: &str) {
+    match services.external_player.launch(target) {
+        Ok(()) => ui::status("Opened in external player"),
+        Err(error) => ui::status(&format!("Cannot open external player: {error}")),
+    }
+}
+
+fn open_media_externally(tab: &Tab) {
+    let Some(page) = tab.view.url() else { return; };
+    let state = tab.state.clone();
+    tab.view.evaluate_javascript(include_str!("external-media.js"), move |result| {
+        if state.closed.get() || state.services.active.get() != state.tab ||
+            *state.url.borrow() != page.as_str() { return; }
+        let media = match result {
+            Ok(servo::JSValue::String(text)) => external_media::candidates(&text).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        if media.len() == 1 {
+            launch_external_player(&state.services, &media[0].url);
+        } else if media.is_empty() {
+            // Websites may reject playback before creating a media element.
+            // Let the external player's website extractor handle that page.
+            launch_external_player(&state.services, page.as_str());
+        } else {
+            let mut labels: Vec<String> = media.iter().map(|item| item.label()).collect();
+            labels.push("This page (player website support)".into());
+            let selected = unsafe { ui::browser_ui_select(
+                ui::c(&serde_json::to_string(&labels).unwrap()).as_ptr(), 30, 100) };
+            if let Ok(index) = usize::try_from(selected) {
+                if let Some(item) = media.get(index) { launch_external_player(&state.services, &item.url); }
+                else if index == media.len() { launch_external_player(&state.services, page.as_str()); }
+            }
+        }
+    });
+}
+
 fn prompt(message: &str, value: &str) -> Option<String> {
     ui::string(unsafe { ui::browser_ui_prompt(ui::c(message).as_ptr(), ui::c(value).as_ptr()) })
 }
@@ -625,9 +701,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
             .map(|d| d.join("dome-browser"))
     }).ok_or("Set HOME or use --profile")?;
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    if unsafe { ui::browser_ui_open(ui::c(parse_url(&target)?.as_str()).as_ptr()) } == 0 {
+    let supplied_url=parse_url(&target)?;
+    if external_links::handles(&supplied_url) {
+        external_links::launch_once(&supplied_url)?;
         return Ok(());
+    }
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    match unsafe { ui::browser_ui_open(ui::c(parse_url(&target)?.as_str()).as_ptr()) } {
+        0 => return Ok(()),
+        1 => {},
+        _ => return Err("Could not activate the existing Dome Browser instance. Close it and try again.".into()),
     }
     std::fs::create_dir_all(&profile)?;
     // Different session buses must not write the same profile concurrently.
@@ -646,7 +729,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else { None };
     let services=Rc::new(Services { blocker:RefCell::new(adblocking::Blocker::load(&profile)?),
-        wallet:RefCell::new(wallet::Wallet::new(&profile)?),active:Cell::new(0),downloads:downloads::Downloads::new() });
+        wallet:RefCell::new(wallet::Wallet::new(&profile)?),active:Cell::new(0),downloads:downloads::Downloads::new(),
+        external_player:external_media::Handoff::new(&profile),external_links:external_links::Handoff::new(), xr_focus: xr::Focus::default() });
     let mut history_writable = screenshot.is_none();
     let mut history = match storage::History::load(&profile.join("hs.txt")) {
         Ok(history) => history,
@@ -657,6 +741,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     unsafe { ui::browser_ui_history(ui::c(&serde_json::to_string(&history.urls)?).as_ptr()); }
     let initial = context(software)?;
     let mut prefs = servo::Preferences::default();
+    // Use smaller sweep batches for native DOM churn. SpiderMonkey continues
+    // to scale the threshold with retained live allocations.
+    prefs.js_mem_gc_malloc_threshold_base_mb = 8;
+    let mut third_party_cookies_blocked = match cookie_settings::third_party_blocked(&profile) {
+        Ok(blocked) => blocked,
+        Err(e) => { eprintln!("COOKIE POLICY: {e}; blocking third-party cookies"); true },
+    };
+    prefs.network_cookie_block_third_party = third_party_cookies_blocked;
+    prefs.network_cosmetic_filtering_enabled = true;
+    unsafe { ui::browser_ui_cookie_policy(i32::from(third_party_cookies_blocked)); }
     prefs.dom_notification_enabled = true;
     // GitHub's component runtime requires these implemented Servo APIs.
     prefs.dom_intersection_observer_enabled = true;
@@ -664,6 +758,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The compiled storage implementation is needed by modern web clients,
     // including Discord's libdiscore loader. Data stays in the locked profile.
     prefs.dom_indexeddb_enabled = true;
+    prefs.dom_cache_enabled = true;
     // Keyboard editing in contenteditable hosts is gated with execCommand.
     prefs.dom_exec_command_enabled = true;
     prefs.dom_webxr_glwindow_enabled = false;
@@ -675,18 +770,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut opts = servo::Opts::default();
     opts.config_dir = Some(profile.clone());
     opts.multiprocess = false;
+    if std::env::var_os("DOME_BROWSER_GC_PROFILE").is_some_and(|value| value == "1") {
+        opts.debug.extend_from_string("gc-profile")?;
+    }
     if let Some(directory) = &opts.config_dir {
         std::fs::create_dir_all(directory)?;
     }
     let wake = Arc::new(AtomicBool::new(true));
+    let smallnet = smallnet::Smallnet::with_profile(wake.clone(), &profile);
     let servo = ServoBuilder::default()
         .opts(opts)
         .preferences(prefs)
         .event_loop_waker(Box::new(Waker(wake.clone())))
+        .protocol_registry(smallnet.registry())
         .build();
     servo.setup_logging();
     servo.set_delegate(services.clone());
-    servo.register_webxr_registry(Box::new(xr::Registry::new(initial.connection())));
+    servo.register_webxr_registry(Box::new(xr::Registry::new(initial.connection(), services.xr_focus.clone())));
     let permissions = Rc::new(RefCell::new(std::collections::HashSet::new()));
     let first = state(0, permissions.clone(), services.clone());
     *first.url.borrow_mut() = parse_url(&target)?.to_string();
@@ -713,9 +813,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     activate(&tabs, active);
     let start = Instant::now();
     let mut captures = 0;
+    // Local diagnostic output is disabled unless explicitly requested.
+    let layout_capture = std::env::var_os("DOME_BROWSER_LAYOUT_CAPTURE").map(PathBuf::from);
+    let layout_capture_delay = Duration::from_millis(
+        std::env::var("DOME_BROWSER_LAYOUT_CAPTURE_DELAY_MS").ok()
+            .and_then(|value| value.parse::<u64>().ok()).unwrap_or(15_000).min(120_000));
+    let layout_capture_count = std::env::var("DOME_BROWSER_LAYOUT_CAPTURE_COUNT").ok()
+        .and_then(|value| value.parse::<u32>().ok()).unwrap_or(1).clamp(1,24);
+    let layout_capture_interval = Duration::from_millis(
+        std::env::var("DOME_BROWSER_LAYOUT_CAPTURE_INTERVAL_MS").ok()
+            .and_then(|value| value.parse::<u64>().ok()).unwrap_or(5_000).clamp(1_000,120_000));
+    let mut layout_capture_completed = 0;
+    let mut layout_capture_requested = layout_capture.is_none();
+    let mut memory_capture = memory_diagnostics::Capture::from_environment();
+    let mut native_touches = native_touch::Touches::default();
+    let mut native_pens = native_pen::Pens::default();
     let mut running = true;
+    let mut window_visible = unsafe { ui::browser_ui_visible() != 0 };
+    let mut cosmetic_generation: i64 = 0;
+    let mut cosmetic_refresh = false;
     let mut filter_update: Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>> = None;
+    let mut smallnet_form: Option<(smallnet::Prompt, Vec<u8>)> = None;
     while running {
+        let prompt_owner = format!("{:?}", tabs[active].view.id());
+        if smallnet_form.as_ref().is_some_and(|(request, _)| request.is_closed() || !request.belongs_to(&prompt_owner)) {
+            unsafe { ui::browser_ui_smallnet_form_close(); }
+            smallnet_form.take();
+        }
+        if let Some((_, output)) = smallnet_form.as_mut() {
+            let result = unsafe { ui::browser_ui_smallnet_form_poll(output.as_mut_ptr().cast(), output.len()) };
+            if result != 0 {
+                let (request, mut output) = smallnet_form.take().unwrap();
+                let answer = if result == 1 { ui::string(output.as_ptr().cast()) } else { None };
+                output.fill(0);
+                request.respond(answer);
+            }
+        }
+        while let Some(message)=smallnet.next_notice(&prompt_owner) {
+            if std::env::var_os("DOME_BROWSER_TRACE").is_some() {eprintln!("SMALLNET_NOTICE {message}");}
+            ui::status(&message);*tabs[active].state.protocol_notice.borrow_mut()=Some(message);
+        }
+        while smallnet_form.is_none() {
+            let Some(request) = smallnet.next_prompt(&prompt_owner) else { break; };
+            if let Some(form) = &request.form {
+                if unsafe { ui::browser_ui_smallnet_form_open(ui::c(form).as_ptr()) } != 0 {
+                    smallnet_form = Some((request, vec![0; 8 * 1024 * 1024 + 1]));
+                } else { request.respond(None); }
+            } else {
+                let answer = prompt(&request.message, "");
+                request.respond(answer);
+            }
+        }
+        if let Some((url,source))=tabs[active].state.pending_external.take() {
+            if source==tabs[active].view.url() && ui::ask("Open default application",
+                &format!("Open the default {} application for this page's link?",external_links::label(&url))) {
+                services.external_links.launch(url);
+            }
+        }
+        while let Ok(result)=services.external_links.receiver.try_recv() {
+            match result { Ok(())=>ui::status("Link opened in the default application"),Err(message)=>ui::status(message) }
+        }
+        while let Ok(success) = services.external_player.receiver.try_recv() {
+            if !success { ui::status("External player could not play this media or page"); }
+        }
         while let Ok(result) = services.downloads.receiver.try_recv() {
             match result {
                 downloads::Completion::Saved(path) => ui::status(&format!("Saved to {}", path.display())),
@@ -734,10 +894,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 0.03
             });
         }
+        let visible = unsafe { ui::browser_ui_visible() != 0 };
+        if visible != window_visible {
+            window_visible = visible;
+            if visible {
+                tabs[active].view.show();
+            } else {
+                native_touches.cancel_all();
+                native_pens.cancel_all();
+                tabs[active].view.hide();
+            }
+        }
         let mut event = ui::Event::default();
         while unsafe { ui::browser_ui_poll(&mut event) } != 0 {
+            let touch_available = unsafe { ui::browser_ui_visible()!=0 && ui::browser_ui_page_focused()!=0 };
+            native_touches.reconcile(&tabs[active].view,touch_available);
+            native_pens.reconcile(&tabs[active].view,unsafe {ui::browser_ui_visible()!=0});
             if std::env::var_os("DOME_BROWSER_TRACE").is_some()
-                && [5, 6, 7, 15, 16].contains(&event.kind)
+                && [1, 5, 6, 7, 15, 16].contains(&event.kind)
             {
                 eprintln!(
                     "BROWSER_ACTION {} {} active={} tabs={}",
@@ -749,10 +923,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             match event.kind {
                 41 => if let Some(url) = tabs[active].view.url() {
-                    services.downloads.start(&tabs[active].view, url, false);
+                    services.downloads.start(&tabs[active].view, url, false, None);
                     ui::status("Saving file…");
                 },
+                42 => open_media_externally(&tabs[active]),
+                43 => {
+                    let current = services.external_player.player().ok()
+                        .map(|path| path.to_string_lossy().into_owned()).unwrap_or_default();
+                    if let Some(path) = prompt("External player executable (absolute path)", &current) {
+                        match services.external_player.configure(&path) {
+                            Ok(()) => ui::status("External player saved"),
+                            Err(error) => ui::status(&format!("Cannot set external player: {error}")),
+                        }
+                    }
+                },
                 1 => match parse_url(&event.text()) {
+                    Ok(url) if external_links::handles(&url) => { services.external_links.launch(url); tabs[active].state.changed.set(true); },
                     Ok(url) => { *tabs[active].state.url.borrow_mut() = url.to_string(); tabs[active].view.load(url) },
                     Err(e) => ui::status(&e.to_string()),
                 },
@@ -764,6 +950,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 4 => tabs[active].view.reload(),
                 5 => {
+                    let url=parse_url(&event.text())?;
+                    if external_links::handles(&url) { services.external_links.launch(url); continue; }
                     let ctx = context(software)?;
                     let s = state(next_id, permissions.clone(), services.clone());
                     *s.url.borrow_mut() = parse_url(&event.text())?.to_string();
@@ -794,7 +982,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     activate(&tabs, active);
                 },
                 7 => {
-                    active = if event.a < 0 {
+                    active = if event.a == -2 {
+                        (active + tabs.len() - 1) % tabs.len()
+                    } else if event.a < 0 {
                         (active + 1) % tabs.len()
                     } else {
                         (event.a as usize).min(tabs.len() - 1)
@@ -805,7 +995,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     running = false;
                     break;
                 },
-                9 => tabs[active].view.set_focused(event.a != 0),
+                9 => {
+                    if event.a==0 {native_touches.cancel_all();native_pens.cancel_contacts();}
+                    tabs[active].view.set_focused(event.a != 0);
+                    services.xr_focus.set(tabs[active].view.id(), event.a != 0);
+                },
                 10 => {
                     tabs[active].view.resize(ui::dimensions());
                     tabs[active].state.dirty.set(true);
@@ -947,16 +1141,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         unsafe { ui::browser_ui_history(ui::c("[]").as_ptr()); }
                     }
                 },
+                47 => native_touches.handle(&event,&tabs[active].view,touch_available),
+                48 => native_pens.handle(&event,&tabs[active].view,unsafe {ui::browser_ui_visible()!=0}),
                 40 => {tabs[active].view.notify_input_event(InputEvent::EditingAction(servo::ClipboardAction::PastePrimary));},
-                50 => match services.blocker.borrow_mut().toggle() {Ok(())=>ui::status("Ad-blocking setting changed"),Err(e)=>ui::status(&e.to_string())},
+                44 => match cookie_settings::edit(&profile) {
+                    Ok(true) => ui::status("ck.txt saved; cookie access will reload the edited records"),
+                    Ok(false) => {},
+                    Err(e) => ui::status(&format!("Cookies: {e}")),
+                },
+                45 => if ui::ask("Delete cookies", "Delete all cookies in this profile? Sites may sign you out.") {
+                    servo.site_data_manager().clear_cookies(None);
+                    ui::status("Cookies deleted");
+                },
+                46 => {
+                    let blocked = !third_party_cookies_blocked;
+                    match cookie_settings::set_third_party_blocked(&profile, blocked) {
+                        Ok(()) => {
+                            third_party_cookies_blocked = blocked;
+                            servo.set_preference("network_cookie_block_third_party", servo::PrefValue::Bool(blocked));
+                            ui::status(if blocked { "Third-party cookies blocked" } else { "Third-party cookies allowed" });
+                        },
+                        Err(e) => ui::status(&format!("Cannot save cookie policy: {e}")),
+                    }
+                    unsafe { ui::browser_ui_cookie_policy(i32::from(third_party_cookies_blocked)); }
+                },
+                50 => match services.blocker.borrow_mut().toggle() {Ok(())=>{cosmetic_refresh=true;ui::status("Ad-blocking setting changed")},Err(e)=>ui::status(&e.to_string())},
                 51 => {
                     if let Some(url)=tabs[active].view.url().filter(|u|matches!(u.scheme(),"http"|"https")) {
                         let origin=url.origin().ascii_serialization();
-                        match services.blocker.borrow_mut().allow_site(&origin) {Ok(())=>ui::status("Site exception changed; reload the page to apply"),Err(e)=>ui::status(&e.to_string())}
+                        match services.blocker.borrow_mut().allow_site(&origin) {Ok(())=>{cosmetic_refresh=true;ui::status("Site exception changed")},Err(e)=>ui::status(&e.to_string())}
                     }
                 },
                 52 => match adblocking::Blocker::load(&profile) {
-                    Ok(mut blocker)=>{blocker.blocked=services.blocker.borrow().blocked;*services.blocker.borrow_mut()=blocker;ui::status("Filter lists reloaded");},
+                    Ok(mut blocker)=>{blocker.blocked=services.blocker.borrow().blocked;*services.blocker.borrow_mut()=blocker;cosmetic_refresh=true;ui::status("Filter lists reloaded");},
                     Err(e)=>ui::status(&format!("Cannot reload filters: {e}")),
                 },
                 53 => if filter_update.is_none() {
@@ -973,6 +1190,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {},
             }
         }
+        native_touches.reconcile(&tabs[active].view,unsafe {ui::browser_ui_visible()!=0 && ui::browser_ui_page_focused()!=0});
+        native_pens.reconcile(&tabs[active].view,unsafe {ui::browser_ui_visible()!=0});
         if !running {
             break;
         }
@@ -981,9 +1200,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match result.and_then(|lists|serde_json::to_string(&lists).map_err(|_|"Invalid filter lists".into()))
                 .and_then(|text|storage::write(&profile.join("filterlists.json"),&text).map_err(|e|e.to_string()))
                 .and_then(|_|adblocking::Blocker::load(&profile).map_err(|e|e.to_string())) {
-                Ok(mut blocker)=>{blocker.blocked=services.blocker.borrow().blocked;*services.blocker.borrow_mut()=blocker;ui::status("Official filter lists updated");},
+                Ok(mut blocker)=>{blocker.blocked=services.blocker.borrow().blocked;*services.blocker.borrow_mut()=blocker;cosmetic_refresh=true;ui::status("Official filter lists updated");},
                 Err(e)=>ui::status(&e),
             }
+        }
+        if cosmetic_refresh {
+            cosmetic_refresh = false;
+            cosmetic_generation = cosmetic_generation.wrapping_add(1);
+            servo.set_preference("network_cosmetic_filter_generation", servo::PrefValue::Int(cosmetic_generation));
         }
         tabs[active]
             .context
@@ -1092,6 +1316,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 captures += 1;
             }
         }
+        memory_capture.update(&servo, start.elapsed());
+        if !layout_capture_requested && start.elapsed() >= layout_capture_delay + layout_capture_interval * layout_capture_completed {
+            if let Some(path) = layout_capture.as_ref() {
+                let index = layout_capture_completed;
+                layout_capture_completed += 1;
+                layout_capture_requested = layout_capture_completed >= layout_capture_count;
+                let path = if index == 0 { path.clone() } else { path.with_extension(format!("{index}.json")) };
+                tabs[active].view.evaluate_javascript(include_str!("layout-diagnostics.js"), move |result| {
+                    let data = match result {
+                        Ok(servo::JSValue::String(text)) => text,
+                        other => serde_json::json!({"error":format!("{other:?}")}).to_string(),
+                    };
+                    if let Err(error) = storage::write(&path, &data) {
+                        eprintln!("LAYOUT_CAPTURE: {error}");
+                    }
+                });
+            }
+        }
         if let Some(path) = screenshot.as_ref() {
             if tabs[active].state.loaded.get()
                 && captures > 0
@@ -1109,6 +1351,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    smallnet_form.take();
+    unsafe { ui::browser_ui_smallnet_form_close(); }
     if history_writable {
         if let Err(e) = history.save(&profile.join("hs.txt")) { eprintln!("HISTORY: final save failed: {e}"); }
     }
@@ -1117,6 +1361,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("SESSION: final save failed: {e}");
         }
     }
+    native_touches.cancel_all();
+    native_pens.cancel_all();
     drop(tabs);
     drop(servo);
     unsafe {

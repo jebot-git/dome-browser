@@ -470,6 +470,8 @@ impl DedicatedWorkerGlobalScope {
                     preloaded_resources: PreloadedResources::default(),
                     policy_container,
                     origin: Origin::Origin(origin.clone()),
+                    cookie_site: init.cookie_site.clone(),
+                    cookie_client_is_null: false,
                     is_nested_browsing_context,
                     insecure_requests_policy,
                     has_trustworthy_ancestor_origin: current_global_ancestor_trustworthy,
@@ -744,8 +746,8 @@ impl DedicatedWorkerGlobalScope {
     }
 
     fn has_animation_frame_callbacks(&self) -> bool {
-        !self.animation_frame_list.borrow().is_empty() ||
-            !self.current_animation_frame_list.borrow().is_empty()
+        !self.animation_frame_list.borrow().is_empty()
+            || !self.current_animation_frame_list.borrow().is_empty()
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-animationframeprovider-requestanimationframe>
@@ -805,8 +807,8 @@ impl DedicatedWorkerGlobalScope {
 
     /// <https://html.spec.whatwg.org/multipage/#run-the-animation-frame-callbacks>
     pub(crate) fn run_the_animation_frame_callbacks(&self, cx: &mut JSContext) {
-        if !self.animation_frame_provider_supported() ||
-            self.upcast::<WorkerGlobalScope>().is_closing()
+        if !self.animation_frame_provider_supported()
+            || self.upcast::<WorkerGlobalScope>().is_closing()
         {
             return;
         }
@@ -1030,7 +1032,13 @@ impl DedicatedWorkerGlobalScope {
             );
 
             // Step 7.2.3. If notHandled is true, then report exception for workerObject's relevant global object with omitError set to true.
-            if event.upcast::<Event>().fire(cx, worker.upcast::<EventTarget>()) {
+            let not_handled = event.upcast::<Event>().fire(cx, worker.upcast::<EventTarget>());
+            log::debug!(
+                "Worker owner error event handled={}: {}",
+                !not_handled,
+                error_info.message
+            );
+            if not_handled {
                 global.report_an_error(cx, error_info, HandleValue::null());
             }
         }));

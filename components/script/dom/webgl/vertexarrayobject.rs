@@ -3,18 +3,19 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::Cell;
+use std::rc::{Rc, Weak};
 
 use script_bindings::cell::{DomRefCell, Ref};
 use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{
-    ActiveAttribInfo, WebGLCommand, WebGLError, WebGLResult, WebGLVersion, WebGLVertexArrayId,
+    ActiveAttribInfo, WebGLCommand, WebGLError, WebGLResult, WebGLVersion, WebGLVertexArrayId, WebGLMsgSender,
 };
 
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants2;
 use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderingContextConstants as constants;
 use crate::dom::bindings::root::{Dom, MutNullableDom};
-use crate::dom::webgl::webglbuffer::WebGLBuffer;
-use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
+use crate::dom::webgl::webglbuffer::{DroppableWebGLBuffer, WebGLBuffer};
+use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext, send_webgl_cleanup_command};
 
 #[derive(JSTraceable, MallocSizeOf)]
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
@@ -26,6 +27,11 @@ pub(crate) struct VertexArrayObject {
     is_deleted: Cell<bool>,
     vertex_attribs: DomRefCell<Box<[VertexAttribData]>>,
     element_array_buffer: MutNullableDom<WebGLBuffer>,
+    #[conditional_malloc_size_of]
+    element_cleanup: DomRefCell<Option<Rc<DroppableWebGLBuffer>>>,
+    #[no_trace]
+    #[ignore_malloc_size_of = "Non-owning native context channel"]
+    cleanup_sender: Weak<WebGLMsgSender>,
 }
 
 impl VertexArrayObject {
@@ -38,6 +44,8 @@ impl VertexArrayObject {
             is_deleted: Default::default(),
             vertex_attribs: DomRefCell::new(vec![Default::default(); max_vertex_attribs].into()),
             element_array_buffer: Default::default(),
+            element_cleanup: Default::default(),
+            cleanup_sender: context.cleanup_sender(),
         }
     }
 
@@ -56,21 +64,25 @@ impl VertexArrayObject {
         }
         self.is_deleted.set(true);
 
-        if let Some(context) = self.context.root() {
-            context.send_with_fallibility(
-                WebGLCommand::DeleteVertexArray(self.id.unwrap()),
-                operation_fallibility,
-            );
-        }
+        send_webgl_cleanup_command(&self.cleanup_sender, WebGLCommand::DeleteVertexArray(self.id.unwrap()), operation_fallibility);
+        self.release_buffers(operation_fallibility);
+    }
 
-        for attrib_data in &**self.vertex_attribs.borrow() {
-            if let Some(buffer) = attrib_data.buffer() {
+    fn release_buffers(&self, operation_fallibility: Operation) {
+        // GC can finalize buffers before their VAO. Only native shared state is
+        // touched here; the traced DOM fields must not be dereferenced in Drop.
+        for attrib in &mut **self.vertex_attribs.borrow_mut() {
+            if let Some(buffer) = attrib.cleanup_buffer.take() {
                 buffer.decrement_attached_counter(operation_fallibility);
             }
         }
-        if let Some(buffer) = self.element_array_buffer.get() {
+        if let Some(buffer) = self.element_cleanup.borrow_mut().take() {
             buffer.decrement_attached_counter(operation_fallibility);
         }
+    }
+
+    pub(crate) fn sync_element_array_buffer_cleanup(&self) {
+        *self.element_cleanup.borrow_mut() = self.element_array_buffer.get().map(|buffer| buffer.cleanup_handle());
     }
 
     pub(crate) fn ever_bound(&self) -> bool {
@@ -174,6 +186,7 @@ impl VertexArrayObject {
             kind,
             stride: stride as u8,
             offset: offset as u32,
+            cleanup_buffer: buffer.as_ref().map(|b| b.cleanup_handle()),
             buffer: buffer.map(|b| Dom::from_ref(&*b)),
             divisor: data.divisor,
         };
@@ -198,6 +211,7 @@ impl VertexArrayObject {
                 b.decrement_attached_counter(Operation::Infallible);
             }
             attrib.buffer = None;
+            attrib.cleanup_buffer = None;
         }
         if self
             .element_array_buffer
@@ -206,6 +220,7 @@ impl VertexArrayObject {
         {
             buffer.decrement_attached_counter(Operation::Infallible);
             self.element_array_buffer.set(None);
+            self.element_cleanup.borrow_mut().take();
         }
     }
 
@@ -264,6 +279,8 @@ impl Drop for VertexArrayObject {
     fn drop(&mut self) {
         if self.id.is_some() {
             self.delete(Operation::Fallible);
+        } else {
+            self.release_buffers(Operation::Fallible);
         }
     }
 }
@@ -298,6 +315,8 @@ pub(crate) struct VertexAttribData {
     pub(crate) stride: u8,
     pub(crate) offset: u32,
     pub(crate) buffer: Option<Dom<WebGLBuffer>>,
+    #[conditional_malloc_size_of]
+    cleanup_buffer: Option<Rc<DroppableWebGLBuffer>>,
     pub(crate) divisor: u32,
 }
 
@@ -312,6 +331,7 @@ impl Default for VertexAttribData {
             stride: 0,
             offset: 0,
             buffer: None,
+            cleanup_buffer: None,
             divisor: 0,
         }
     }

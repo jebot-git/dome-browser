@@ -1,0 +1,33 @@
+<!doctype html>
+<html class="reftest-wait">
+<meta charset="utf-8">
+<title>Inline SVG repaint after computed paint changes</title>
+<link rel="help" href="https://www.w3.org/TR/SVG2/painting.html#SpecifyingPaint">
+<link rel="match" href="svg-computed-paint-restyle-ref.html">
+<meta name="assert" content="Inline SVG paint reflects inherited color, selector, CSSOM and inherited custom-property changes after initial layout.">
+<style>
+body { margin: 0 }
+div { display: inline-block; vertical-align: top; width: 100px; height: 100px }
+svg { display: block; width: 100px; height: 100px }
+#inherited { color: red }
+#selector rect { fill: red }
+#selector.active rect { fill: green }
+#variable { --paint: red }
+#variable rect { fill: var(--paint) }
+</style>
+<style id="sheet">#cssom rect { fill: red }</style>
+<div id="inherited"><svg><rect width="100" height="100" fill="currentColor"/></svg></div><div id="selector"><svg><rect width="100" height="100"/></svg></div><div id="cssom"><svg><rect width="100" height="100"/></svg></div><div id="variable"><svg><rect width="100" height="100"/></svg></div>
+<script>
+window.addEventListener('load', () => {
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    document.getElementById('inherited').style.color = 'green';
+    document.getElementById('selector').classList.add('active');
+    document.getElementById('sheet').sheet.cssRules[0].style.fill = 'green';
+    document.getElementById('variable').style.setProperty('--paint', 'green');
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      document.documentElement.classList.remove('reftest-wait');
+    }));
+  }));
+});
+</script>
+</html>

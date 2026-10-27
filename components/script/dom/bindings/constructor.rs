@@ -55,6 +55,7 @@ use crate::dom::element::{Element, ElementCreator};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::window::Window;
+use crate::event_loop::script_thread::ScriptThread;
 
 /// <https://html.spec.whatwg.org/multipage/#htmlconstructor>
 fn html_constructor(
@@ -67,9 +68,6 @@ fn html_constructor(
 ) -> Result<(), ()> {
     let window = global.downcast::<Window>().unwrap();
     let document = window.Document();
-
-    // Step 1. Let registry be current global object's custom element registry.
-    let registry = window.CustomElements(cx);
 
     // Step 2 https://html.spec.whatwg.org/multipage/#htmlconstructor
     // The custom element definition cannot use an element interface as its constructor
@@ -90,8 +88,12 @@ fn html_constructor(
 
     // Step 3. Let definition be the item in registry's custom element definition set with constructor
     // equal to NewTarget. If there is no such item, then throw a TypeError.
-    rooted!(&in(cx) let new_target = call_args.new_target().to_object());
-    let definition = match registry.lookup_definition_by_constructor(new_target.handle()) {
+    let registry = ScriptThread::custom_element_reaction_stack()
+        .active_constructor_registry(new_target_unwrapped.handle())
+        .unwrap_or_else(|| Some(window.CustomElements(cx)));
+    let definition = match registry.as_deref().and_then(|registry| {
+        registry.lookup_definition_by_constructor(new_target_unwrapped.handle())
+    }) {
         Some(definition) => definition,
         None => {
             throw_dom_exception(
@@ -175,6 +177,8 @@ fn html_constructor(
             };
 
             // Step 7.2-7.5 are performed in the generated caller code.
+
+            element.set_custom_element_registry(registry.as_deref(), cx.no_gc());
 
             // Step 7.6 Set element's custom element state to "custom".
             element.set_custom_element_state(CustomElementState::Custom, cx.no_gc());

@@ -1,0 +1,61 @@
+<!doctype html><meta charset=utf-8><title>Inline pointer integration</title>
+<style>body{margin:10px;background:#203040;color:white;font:16px monospace}canvas{display:inline-block;width:300px;height:150px;border:8px solid orange;padding:12px;margin:15px;touch-action:none}#other{width:150px}#spacer{height:30px}</style>
+<h1>Inline canvas pointers</h1><div id=spacer></div><canvas id=canvas width=600 height=300></canvas><canvas id=other width=150 height=150></canvas>
+<script>
+'use strict';
+const canvas=document.getElementById('canvas'),other=document.getElementById('other');
+let order=0,nextSource=0,nextFrame=0,sessionList=[],latest=[],retired=[],endOnStart=false,immersiveOnSpace=false,immersiveSession=null;
+const identities=new WeakMap();
+const frameIdentities=new WeakMap();
+const frameId=f=>{if(!frameIdentities.has(f))frameIdentities.set(f,++nextFrame);return frameIdentities.get(f);};
+const sourceId=s=>{if(!identities.has(s))identities.set(s,++nextSource);return identities.get(s);};
+const record=(type,data={})=>fetch('/event',{method:'POST',body:JSON.stringify({order:++order,type,data})});
+const failure=e=>record('error',{message:String(e),stack:e?.stack});
+function describe(s){return {id:sourceId(s),mode:s.targetRayMode,handedness:s.handedness,grip:s.gripSpace===null,hand:s.hand===null,gamepad:s.gamepad===null,profiles:[...s.profiles],frozen:Object.isFrozen(s.profiles)};}
+function pose(frame,source,viewer){const p=frame.getPose(source.targetRaySpace,viewer);if(!p)return null;const m=p.transform.matrix;return {position:[m[12],m[13],m[14]],direction:[-m[8],-m[9],-m[10]]};}
+async function command(value){
+ if(value?.op==='synthetic'){canvas.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerId:77,button:0,buttons:1}));canvas.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerId:77,button:0}));canvas.click();record('command',{op:value.op});}
+ if(value?.op==='rotate'){canvas.style.transform='rotate(20deg) scale(0.8)';record('command',{op:value.op});}
+ if(value?.op==='reset'){canvas.style.transform='';record('command',{op:value.op});}
+ if(value?.op==='fov'){sessionList[0].updateRenderState({inlineVerticalFieldOfView:Math.PI/3});record('command',{op:value.op});}
+ if(value?.op==='swap'){sessionList[0].updateRenderState({baseLayer:sessionList[0].otherLayer});record('command',{op:value.op});}
+ if(value?.op==='restore-output'){sessionList[0].updateRenderState({baseLayer:sessionList[0].originalLayer,inlineVerticalFieldOfView:Math.PI/2});record('command',{op:value.op});}
+ if(value?.op==='prepare-immersive'){immersiveOnSpace=true;record('command',{op:value.op});}
+ if(value?.op==='end-immersive'){await immersiveSession.end();record('command',{op:value.op});}
+ if(value?.op==='end-on-start'){endOnStart=true;record('command',{op:value.op});}
+ if(value?.op==='remove'){canvas.remove();record('command',{op:value.op});}
+}
+addEventListener('keydown',async e=>{
+ if(immersiveOnSpace&&e.isTrusted&&(e.code==='Space'||e.key===' ')){
+  e.preventDefault();immersiveOnSpace=false;
+  try{immersiveSession=await navigator.xr.requestSession('immersive-vr');record('immersive-ready',{lengths:sessionList.map(s=>s.inputSources.length)});}catch(error){failure(error);}
+ }
+});
+(async()=>{
+ const gl=canvas.getContext('webgl'),otherGl=other.getContext('webgl');
+ for(let index=0;index<3;index++){
+  const session=await navigator.xr.requestSession('inline'),viewer=await session.requestReferenceSpace('viewer');sessionList.push(session);
+  session.otherLayer=new XRWebGLLayer(session,otherGl);
+  session.originalLayer=new XRWebGLLayer(session,gl);
+  session.updateRenderState({baseLayer:index===2?session.otherLayer:session.originalLayer});
+  retired[index]=[];
+  session.addEventListener('inputsourceschange',e=>{retired[index].push(...e.removed);record('sources',{index,added:[...e.added].map(describe),removed:[...e.removed].map(describe),length:session.inputSources.length,trusted:e.isTrusted});});
+  for(const name of ['selectstart','select','selectend'])session.addEventListener(name,e=>{
+   let viewerError='';try{e.frame.getViewerPose(viewer);}catch(error){viewerError=error.name;}
+   let pointerPose=null,poseError='';try{pointerPose=pose(e.frame,e.inputSource,viewer);}catch(error){poseError=error.name;}
+   record('selection',{index,name,source:describe(e.inputSource),length:session.inputSources.length,pose:pointerPose,poseError,trusted:e.isTrusted,frameSession:e.frame.session===session,frameId:frameId(e.frame),viewerError,time:e.frame.predictedDisplayTime});
+   if(name==='selectstart'&&endOnStart&&index===0){endOnStart=false;Promise.all([session.end(),session.end()]).then(()=>record('reentrant-end',{index})).catch(failure);}
+  });
+  session.addEventListener('end',()=>record('ended',{index}));
+  function tick(time,frame){
+   latest[index]={length:session.inputSources.length,poses:[...session.inputSources].map(s=>({id:sourceId(s),pose:pose(frame,s,viewer)})),retired:retired[index].map(s=>pose(frame,s,viewer)),frames:(latest[index]?.frames||0)+1};
+   const context=index===2?otherGl:gl;context.clearColor(0.1,0.3,0.9,1);context.clear(context.COLOR_BUFFER_BIT);
+   session.requestAnimationFrame(tick);
+  }session.requestAnimationFrame(tick);
+ }
+ for(const type of ['pointerdown','pointerup','click'])canvas.addEventListener(type,e=>record('dom',{name:type,trusted:e.isTrusted}));
+ setInterval(async()=>{try{const response=await record('heartbeat',{latest,rect:canvas.getBoundingClientRect().toJSON(),other:other.getBoundingClientRect().toJSON(),viewport:[innerWidth,innerHeight],ratio:devicePixelRatio,visibility:document.visibilityState});await command(await response.json());}catch(e){failure(e);}},100);
+ record('ready');
+})().catch(failure);
+addEventListener('error',e=>failure(e.error||e.message));
+</script>

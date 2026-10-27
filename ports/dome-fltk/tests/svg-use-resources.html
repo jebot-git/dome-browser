@@ -1,0 +1,28 @@
+<!doctype html><meta charset=utf-8><title>SVG document paint resources</title>
+<style>body{margin:0;background:white}.tile{position:absolute;top:20px;width:60px;height:60px}.paint-stop{stop-color:var(--paint,red)}</style>
+<svg width="0" height="0" style="position:absolute;--paint:rgb(20,180,90)"><defs>
+ <linearGradient id="source-gradient"><stop class="paint-stop" offset="0"/><stop class="paint-stop" offset="1"/></linearGradient>
+ <linearGradient id="red-gradient"><stop stop-color="red" offset="0"/><stop stop-color="red" offset="1"/></linearGradient>
+ <linearGradient id="linked-gradient" href="#source-gradient" xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="#red-gradient"/>
+ <linearGradient id="resource-猫"><stop stop-color="rgb(20,180,90)" offset="0"/><stop stop-color="rgb(20,180,90)" offset="1"/></linearGradient>
+ <linearGradient id="cycle-gradient" href="#cycle-gradient"/>
+ <pattern id="base-pattern" width="10" height="10" patternUnits="userSpaceOnUse"><rect width="10" height="10" fill="rgb(20,180,90)"/></pattern>
+ <pattern id="linked-pattern" href="#base-pattern"/>
+ <g id="linked-shape"><rect width="60" height="60" fill="url(#linked-gradient)"/></g>
+ <g id="pattern-shape"><rect width="60" height="60" fill="url(#linked-pattern)"/></g>
+ <g id="encoded-shape"><rect width="60" height="60" fill="url(#resource-%E7%8C%AB)"/></g>
+ <g id="context-shape"><rect width="60" height="60" fill="url(#source-gradient)"/></g>
+ <g id="external-shape"><rect width="60" height="60" fill="url(/not-found#source-gradient) rgb(20,180,90)"/></g>
+ <g id="cycle-shape"><rect width="60" height="60" fill="url(#cycle-gradient) rgb(20,180,90)"/></g>
+</defs></svg>
+<svg class=tile style="left:20px"><use href="#linked-shape"/></svg>
+<svg class=tile style="left:100px"><use href="#pattern-shape"/></svg>
+<svg class=tile style="left:180px"><use href="#encoded-shape"/></svg>
+<svg class=tile style="left:260px"><use href="#context-shape" style="--paint:blue"/></svg>
+<svg class=tile style="left:340px"><use href="#external-shape"/></svg>
+<svg class=tile style="left:420px"><use href="#cycle-shape"/></svg>
+<script>addEventListener('load',()=>setTimeout(()=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[
+{name:'original modern gradient href unchanged',passed:document.getElementById('linked-gradient').getAttribute('href')==='#source-gradient'},
+{name:'original legacy gradient href unchanged',passed:document.getElementById('linked-gradient').getAttributeNS('http://www.w3.org/1999/xlink','href')==='#red-gradient'},
+{name:'original resource IDs unchanged',passed:document.querySelectorAll('#source-gradient').length===1}
+]})}),500));</script>

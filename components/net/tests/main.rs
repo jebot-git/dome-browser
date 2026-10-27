@@ -5,16 +5,23 @@
 #![cfg(test)]
 #![expect(dead_code)]
 
+mod blob_trust;
 mod cookie;
+mod cookie_file;
+mod cookie_policy;
+mod cookie_samesite;
 mod cookie_http_state;
+mod query_removal;
 mod data_loader;
 mod decoder;
 mod fetch;
+mod native_stream;
 
 fn fetch(request: Request, dc: Option<Sender<DevtoolsControlMsg>>) -> Response {
     fetch_with_context(request, &mut new_fetch_context(dc, None))
 }
 mod file_loader;
+mod file_policy;
 mod filemanager_thread;
 mod hsts;
 mod http_cache;

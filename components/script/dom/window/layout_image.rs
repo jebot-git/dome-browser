@@ -30,6 +30,7 @@ struct LayoutImageContext {
     cache: Arc<dyn ImageCache>,
     doc: Trusted<Document>,
     url: ServoUrl,
+    report_timing: bool,
 }
 
 impl FetchResponseListener for LayoutImageContext {
@@ -72,7 +73,12 @@ impl FetchResponseListener for LayoutImageContext {
             self.id,
             FetchResponseMsg::ProcessResponseEOF(request_id, response.clone(), timing.clone()),
         );
-        network_listener::submit_timing(cx, global, &self, &response, &timing);
+        // Renderer-generated images are implementation details, not resources
+        // requested by page CSS. Do not expose their serialized content or
+        // allocate a PerformanceResourceTiming for each private snapshot.
+        if self.report_timing {
+            network_listener::submit_timing(cx, global, &self, &response, &timing);
+        }
         self.doc.root().finish_load(LoadType::Image(self.url), cx);
     }
 
@@ -113,6 +119,7 @@ pub(crate) fn fetch_image_for_layout(
         cache,
         doc: Trusted::new(&document),
         url: url.clone(),
+        report_timing: matches!(is_internal_request, InternalRequest::No),
     };
 
     let global = node.owner_global();

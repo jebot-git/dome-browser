@@ -1,0 +1,57 @@
+{
+  "html5ever": {
+    "version": "0.40.1",
+    "files": {
+      "Cargo.lock": "084cb9bfc747432c7c41daefa87948ba3c531a793875c2aae9f0ec900785cc48",
+      "Cargo.toml": "2cca05f975c94b15888d64aa15fd8355bd07f03738b41ac8d5c5e923b4dfedf6",
+      "Cargo.toml.orig": "843b72c46f17c45eb127e10abc642d75911ca08048d908a3638415f47070eba3",
+      "LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "LICENSE-MIT": "86dd7f026f916daf7511e39951ad8ea8cf55a8db67ae64060dacf829761c18f3",
+      "README.md": "0f0989d8abaf2539dc05d6b0dc5851dc432c6badae34d9bd23b76c56991ea254",
+      "benches/html5ever.rs": "848ca1aac420dd2dd9a7ca19e3fc9ec7737b47e5ea328e5021688eba5270066a",
+      "data/bench/lipsum-zh.html": "fafe3ed44b07f9cdb0a3ca5c010a3a73cc2534b64605593e71cc70a8cf8e27e4",
+      "data/bench/lipsum.html": "f37900ddb4ee463b9aa3191297bc1a4320b94bc72ee630de01882b50eb241740",
+      "data/bench/medium-fragment.html": "d21ab12c5e538ae48af6df7ee7d7939c6fe3b2d1e36b5874a3bbb957847ddba0",
+      "data/bench/small-fragment.html": "3825226a96ac919b0a69ae98e8547a5430214b16e56497570d382720af2bfca3",
+      "data/bench/strong.html": "5adb31981cca062df929353c60dfa1c7fb91170b5a389a13c8be6555a4cf107d",
+      "data/bench/tiny-fragment.html": "9cc2d58507945020d4d206738c8f166a618dc15161609935ab1975b913967edf",
+      "examples/arena.rs": "485dae462d5edfdf786f14018c525d214567877c61f5b4417a3ff6926b0a8e31",
+      "examples/noop-tokenize.rs": "79c1d34c8c941e3e6b6a1953455d0502fdc56195a7d932cdd7665a0011a9da9a",
+      "examples/noop-tree-builder.rs": "c87386e9f4b83cd52d7ffa8ff22cc0dd54f5f0b54398e7d41fb7a6352d9bfa72",
+      "examples/print-tree-actions.rs": "d04287c1a129fe7c18ff621cfe1a69c5411fa905733f895af420d948e80ec65d",
+      "examples/tokenize.rs": "fbf13646df42d4536691c62422b073e80b3f5cacfbc47294130c265134e21337",
+      "src/driver.rs": "760eca0d36fcb90c07858102928aa41efea9adb1eac2df74b972352c2b8c21b3",
+      "src/encoding.rs": "629eeb1fa96f34686eb729c78918a9aa4d50ea5fa506f383491cfd6a1c1d0e1c",
+      "src/lib.rs": "4b9193c2483083e52713aaa71689c18eeada669cbca3c1e08097a02141e2582b",
+      "src/macros.rs": "9d964d34792195764fc7d53c7bfdec3ba468ee7708ab4dd0891a37c211f96977",
+      "src/serialize/mod.rs": "1f9a5d0077b63d97b508589d44581a48b12a112ebe3865701931e3b28e716c0b",
+      "src/tokenizer/char_ref/mod.rs": "e753058cb7ab64c63bb13e2156c583bdc60a8468efe6b9c64b8768c6effadf8f",
+      "src/tokenizer/interface.rs": "cdab80709a6e27663b9a349a607cf85da93fcc9ee3b3a54cf97ee635a9ae7cf4",
+      "src/tokenizer/mod.rs": "387fef55aea53cf08c2b45192ab8f9f211e993e9dc76ec5031422777bf06773f",
+      "src/tokenizer/states.rs": "35ea888082a92b77a428af263224169b05ff5740bd519efdace90e44858a0b7d",
+      "src/tree_builder/data.rs": "256c72e7d368b0be3d1f473c7b36907b6f6b602aff7d1441b9be109fea3375b1",
+      "src/tree_builder/mod.rs": "d69954162f05710cb62fb660666956ec5daa0878e26ba5df9f25db56d3284a36",
+      "src/tree_builder/rules.rs": "877f811266d9d1098f07892473e583b8218d01c0895c8c2d08e40acaec98aa6d",
+      "src/tree_builder/tag_sets.rs": "5f1e1adffe46f4af0fe063d5847cf1e0fcc03312ca2e3b0062945a341b836716",
+      "src/tree_builder/types.rs": "85d2b3f8221faa9cbb561ad1dba8443ad4ed988b8a544511d3e01c28cdc8992f",
+      "src/util/str.rs": "48ca91feaa5e352cafb1743f996f57e6209c34851da6400488fb2fede2593161",
+      "tests/driver.rs": "ed917e950d7d43ade5e6eb63961bf40c77729d1df074d9f8cee5575daa9d2826"
+    }
+  },
+  "markup5ever": {
+    "version": "0.40.0",
+    "files": {
+      "Cargo.lock": "167b1acefea9cafd6e23f6047616b69b034c58a86f950f94bca974aa7f9085e9",
+      "Cargo.toml": "f1ab59f3cf6edf8c3d8ae1f8b2aed1e076d0c4a798bdf494be21c4ec0afeb37f",
+      "Cargo.toml.orig": "eb5b6f8e08ca88767d271c6fa89b6484fe310f23bbe44cf717b818527e3afa63",
+      "LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "LICENSE-MIT": "86dd7f026f916daf7511e39951ad8ea8cf55a8db67ae64060dacf829761c18f3",
+      "interface/mod.rs": "0197c378a17f19d31ae1cf91f64e1d9cdd9f8e877b24ac2f76ab0cc534a3f082",
+      "interface/tree_builder.rs": "139026eb80fe1c063592509104125bed1cae024e85c98be5c613b9a5ce528ab1",
+      "lib.rs": "4043ce4ca34ec2ca62ac1a078df937197802f2d025c22be5041d91023033847c",
+      "serialize.rs": "871f613fdc4e9e8508cf12bf74087d4c39a5e19c5701324961e7e13491c0b7ac",
+      "util/buffer_queue.rs": "5d0bcdd8b2d0e4aa7c7c881c44ae66258e384a00f3faeadfc4dc7086a1a63f97",
+      "util/smallcharset.rs": "97ee1244744875deba3664c4c6eb638ddd69c68c4699899dbac4df26c3efcac8"
+    }
+  }
+}

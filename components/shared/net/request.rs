@@ -220,6 +220,10 @@ pub struct RequestClient {
     pub policy_container: Arc<PolicyContainer>,
     /// <https://html.spec.whatwg.org/multipage/#concept-settings-object-origin>
     pub origin: Origin,
+    /// Schemeful site for cookies; None means cross-site ancestry or an unknown client.
+    pub cookie_site: Option<ImmutableOrigin>,
+    /// A navigation explicitly initiated by the browser has a null cookie client.
+    pub cookie_client_is_null: bool,
     /// <https://html.spec.whatwg.org/multipage/#nested-browsing-context>
     pub is_nested_browsing_context: bool,
     /// <https://w3c.github.io/webappsec-upgrade-insecure-requests/#insecure-requests-policy>
@@ -428,6 +432,9 @@ impl RequestHeadersSize for HeaderMap {
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct RequestBuilder {
     pub id: RequestId,
+    /// Opaque state supplied by a native protocol navigation, never HTTP headers.
+    #[serde(default)]
+    pub protocol_state: Option<String>,
 
     pub preload_id: Option<PreloadId>,
 
@@ -476,6 +483,8 @@ pub struct RequestBuilder {
 
     /// <https://fetch.spec.whatwg.org/#request-keepalive-flag>
     pub keep_alive: bool,
+    /// Native Beacon API provenance for privacy filtering; keepalive fetch is not a beacon.
+    pub is_beacon: bool,
 
     /// <https://fetch.spec.whatwg.org/#concept-request-credentials-mode>
     pub credentials_mode: CredentialsMode,
@@ -520,6 +529,17 @@ pub struct RequestBuilder {
 }
 
 impl RequestBuilder {
+    pub fn cookie_context(&self) -> crate::CookieContext {
+        let urls = if self.url_list.is_empty() { vec![self.url.url()] } else {
+            self.url_list.iter().map(|url| url.url()).collect()
+        };
+        cookie_context(self.client.as_ref(), urls.into_iter(), &self.mode, self.destination, &self.method)
+    }
+
+    pub fn is_first_party_for_cookies(&self) -> bool {
+        cookie_context_is_first_party(&self.mode, self.destination, self.client.as_ref(), &self.url)
+    }
+
     pub fn new(
         webview_id: Option<WebViewId>,
         url: UrlWithBlobClaim,
@@ -527,6 +547,7 @@ impl RequestBuilder {
     ) -> RequestBuilder {
         RequestBuilder {
             id: RequestId::default(),
+            protocol_state: None,
             preload_id: None,
             method: Method::GET,
             url,
@@ -542,6 +563,7 @@ impl RequestBuilder {
             cache_mode: CacheMode::Default,
             use_cors_preflight: false,
             keep_alive: false,
+            is_beacon: false,
             credentials_mode: CredentialsMode::CredentialsSameOrigin,
             use_url_credentials: false,
             origin: Origin::Client,
@@ -617,6 +639,12 @@ impl RequestBuilder {
     /// <https://fetch.spec.whatwg.org/#use-cors-preflight-flag>
     pub fn use_cors_preflight(mut self, use_cors_preflight: bool) -> RequestBuilder {
         self.use_cors_preflight = use_cors_preflight;
+        self
+    }
+
+    /// Mark a request created by the native Beacon API, independently of keepalive.
+    pub fn is_beacon(mut self, is_beacon: bool) -> RequestBuilder {
+        self.is_beacon = is_beacon;
         self
     }
 
@@ -736,6 +764,7 @@ impl RequestBuilder {
             self.target_webview_id,
         );
         request.preload_id = self.preload_id;
+        request.protocol_state = self.protocol_state;
         request.initiator = self.initiator;
         request.method = self.method;
         request.headers = self.headers;
@@ -749,6 +778,7 @@ impl RequestBuilder {
         request.mode = self.mode;
         request.use_cors_preflight = self.use_cors_preflight;
         request.keep_alive = self.keep_alive;
+        request.is_beacon = self.is_beacon;
         request.credentials_mode = self.credentials_mode;
         request.use_url_credentials = self.use_url_credentials;
         request.cache_mode = self.cache_mode;
@@ -786,6 +816,7 @@ pub struct Request {
     /// messages to the correct listeners. This is a UUID that is generated when a request
     /// is being built.
     pub id: RequestId,
+    pub protocol_state: Option<String>,
     pub preload_id: Option<PreloadId>,
     /// <https://fetch.spec.whatwg.org/#concept-request-method>
     pub method: Method,
@@ -810,6 +841,8 @@ pub struct Request {
     pub target_webview_id: Option<WebViewId>,
     /// <https://fetch.spec.whatwg.org/#request-keepalive-flag>
     pub keep_alive: bool,
+    /// Native Beacon API provenance for privacy filtering; keepalive fetch is not a beacon.
+    pub is_beacon: bool,
     /// <https://fetch.spec.whatwg.org/#request-service-workers-mode>
     pub service_workers_mode: ServiceWorkersMode,
     /// <https://fetch.spec.whatwg.org/#concept-request-initiator>
@@ -858,7 +891,41 @@ pub struct Request {
     pub is_internal_request: InternalRequest,
 }
 
+
+fn cookie_context(client: Option<&RequestClient>, urls: impl Iterator<Item = ServoUrl>, mode: &RequestMode, destination: Destination, method: &Method) -> crate::CookieContext {
+    let same_site = match client {
+        None => true,
+        Some(client) if client.cookie_client_is_null => true,
+        Some(client) => client.cookie_site.as_ref().is_some_and(|site|
+            urls.into_iter().all(|url| is_same_site(site, &url.origin()))),
+    };
+    crate::CookieContext { same_site, top_level_navigation: *mode == RequestMode::Navigate &&
+        destination == Destination::Document && client.is_none_or(|client| !client.is_nested_browsing_context),
+        safe_method: matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE) }
+}
+
+fn cookie_context_is_first_party(mode: &RequestMode, destination: Destination, client: Option<&RequestClient>, url: &ServoUrl) -> bool {
+    if *mode == RequestMode::Navigate && destination == Destination::Document &&
+        client.is_none_or(|client| !client.is_nested_browsing_context) {
+        return true;
+    }
+    client.and_then(|client| client.cookie_site.as_ref())
+        .is_some_and(|site| is_same_site(site, &url.origin()))
+}
+
 impl Request {
+    pub fn cookie_context(&self) -> crate::CookieContext {
+        cookie_context(self.client.as_ref(), self.url_list.iter().map(|url| url.url()),
+            &self.mode, self.destination, &self.method)
+    }
+
+    /// User cookie policy is separate from Fetch credentials and HTTP authentication.
+    /// A top-level navigation establishes its own first-party context. Embedded
+    /// navigations and subresources retain the client's ancestor-aware site.
+    pub fn is_first_party_for_cookies(&self) -> bool {
+        cookie_context_is_first_party(&self.mode, self.destination, self.client.as_ref(), &self.current_url())
+    }
+
     pub fn new(
         id: RequestId,
         url: UrlWithBlobClaim,
@@ -869,6 +936,7 @@ impl Request {
     ) -> Request {
         Request {
             id,
+            protocol_state: None,
             preload_id: None,
             method: Method::GET,
             local_urls_only: false,
@@ -880,6 +948,7 @@ impl Request {
             client: None,
             traversable_for_user_prompts: TraversableForUserPrompts::Client,
             keep_alive: false,
+            is_beacon: false,
             service_workers_mode: ServiceWorkersMode::All,
             initiator: Initiator::None,
             destination: Destination::None,
@@ -936,6 +1005,33 @@ impl Request {
         self.url_list.last().unwrap().clone()
     }
 
+    /// Apply a privacy filter's query removal without changing transport or
+    /// security scope. Retained fields must be a byte-exact ordered subsequence;
+    /// origin, credentials, path and fragment are immutable for this operation.
+    pub fn remove_query_parameters(&mut self, proposed: &ServoUrl) -> bool {
+        let current = self.current_url();
+        if !matches!(current.scheme(), "http" | "https") { return false; }
+        let mut current_base = current.clone();
+        current_base.as_mut_url().set_query(None);
+        let mut proposed_base = proposed.clone();
+        proposed_base.as_mut_url().set_query(None);
+        if current_base != proposed_base { return false; }
+        if let Some(query) = proposed.query() {
+            let Some(original) = current.query() else { return false; };
+            let mut fields = original.split('&');
+            if !query.split('&').all(|field| fields.any(|original| original == field)) {
+                return false;
+            }
+        }
+        self.current_url_mut().as_mut_url().set_query(proposed.query());
+        // WebSocket transport uses its original WS(S) URL after Fetch's HTTP(S)
+        // processing. Keep its query synchronized, retaining the HSTS handling.
+        if let RequestMode::WebSocket { original_url, .. } = &mut self.mode {
+            original_url.as_mut_url().set_query(proposed.query());
+        }
+        true
+    }
+
     /// <https://fetch.spec.whatwg.org/#concept-request-current-url>
     pub fn current_url_mut(&mut self) -> &mut ServoUrl {
         self.url_list.last_mut().unwrap()
@@ -945,11 +1041,11 @@ impl Request {
     pub fn is_navigation_request(&self) -> bool {
         matches!(
             self.destination,
-            Destination::Document |
-                Destination::Embed |
-                Destination::Frame |
-                Destination::IFrame |
-                Destination::Object
+            Destination::Document
+                | Destination::Embed
+                | Destination::Frame
+                | Destination::IFrame
+                | Destination::Object
         )
     }
 
@@ -957,20 +1053,20 @@ impl Request {
     pub fn is_subresource_request(&self) -> bool {
         matches!(
             self.destination,
-            Destination::Audio |
-                Destination::AudioWorklet |
-                Destination::Font |
-                Destination::Image |
-                Destination::Json |
-                Destination::Manifest |
-                Destination::PaintWorklet |
-                Destination::Script |
-                Destination::Style |
-                Destination::Text |
-                Destination::Track |
-                Destination::Video |
-                Destination::Xslt |
-                Destination::None
+            Destination::Audio
+                | Destination::AudioWorklet
+                | Destination::Font
+                | Destination::Image
+                | Destination::Json
+                | Destination::Manifest
+                | Destination::PaintWorklet
+                | Destination::Script
+                | Destination::Style
+                | Destination::Text
+                | Destination::Track
+                | Destination::Video
+                | Destination::Xslt
+                | Destination::None
         )
     }
 
@@ -1048,6 +1144,19 @@ impl Request {
     }
 
     /// <https://fetch.spec.whatwg.org/#concept-request-tainted-origin>
+    pub fn coep_allows_credentials(&self) -> bool {
+        use crate::policy_container::EmbedderPolicyValue;
+        if self.mode != RequestMode::NoCors
+            || self.client.as_ref().is_none_or(|client| {
+                client.policy_container.embedder_policy.value != EmbedderPolicyValue::Credentialless
+            })
+        {
+            return true;
+        }
+        matches!(&self.origin, Origin::Origin(origin) if *origin == self.current_url().origin())
+            && self.redirect_taint_for_request() == RedirectTaint::SameOrigin
+    }
+
     pub fn redirect_taint_for_request(&self) -> RedirectTaint {
         // Step 1. Assert: request’s origin is not "client".
         let Origin::Origin(request_origin) = &self.origin else {
@@ -1070,8 +1179,8 @@ impl Request {
 
             // Step 4.2. If url’s origin is not same site with lastURL’s origin and
             // request’s origin is not same site with lastURL’s origin, then return "cross-site".
-            if !is_same_site(&url.origin(), &last_url.origin()) &&
-                !is_same_site(request_origin, &last_url.origin())
+            if !is_same_site(&url.origin(), &last_url.origin())
+                && !is_same_site(request_origin, &last_url.origin())
             {
                 return RedirectTaint::CrossSite;
             }
@@ -1167,9 +1276,9 @@ pub fn is_cors_safelisted_request_content_type(value: &[u8]) -> bool {
     match value_mime_result {
         Err(_) => false, // step 3
         Ok(value_mime) => match (value_mime.type_(), value_mime.subtype()) {
-            (mime::APPLICATION, mime::WWW_FORM_URLENCODED) |
-            (mime::MULTIPART, mime::FORM_DATA) |
-            (mime::TEXT, mime::PLAIN) => true,
+            (mime::APPLICATION, mime::WWW_FORM_URLENCODED)
+            | (mime::MULTIPART, mime::FORM_DATA)
+            | (mime::TEXT, mime::PLAIN) => true,
             _ => false, // step 4
         },
     }
@@ -1214,8 +1323,8 @@ fn validate_range_header(value: &str) -> bool {
         let start = parts.next();
         let end = parts.next();
 
-        if let Some(start) = start &&
-            let Ok(start_num) = start.parse::<u64>()
+        if let Some(start) = start
+            && let Ok(start_num) = start.parse::<u64>()
         {
             return match end {
                 Some(e) if !e.is_empty() => {

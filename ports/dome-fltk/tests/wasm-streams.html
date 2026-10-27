@@ -1,0 +1,108 @@
+<!doctype html><meta charset="utf-8"><title>Native WASM Response stream regressions</title>
+<h1>WASM Response streams</h1>
+<script>
+const bytes = new Uint8Array([0,97,115,109,1,0,0,0]);
+const init = {headers:{'Content-Type':'application/wasm'}};
+const results = [];
+function assert(condition, message) { if (!condition) throw new Error(message); }
+async function test(name, body) {
+ try {
+  await Promise.race([body(), new Promise((_,reject)=>setTimeout(()=>reject(new Error('timeout')),1500))]);
+  results.push({name, passed:true});
+ } catch (error) { results.push({name, passed:false, error:String(error)}); }
+}
+async function rejects(promise, type) {
+ let failed = false;
+ try { await promise; } catch (error) { failed = true; assert(error instanceof type, 'Wrong rejection: '+error); }
+ assert(failed, 'Expected rejection');
+}
+(async()=>{
+ await test('network stream compiles and marks body used',async()=>{
+  const response = await fetch('/stream.wasm');
+  assert(await WebAssembly.compileStreaming(response) instanceof WebAssembly.Module,'No module');
+  assert(response.bodyUsed,'Body was not consumed');
+ });
+ await test('already buffered network response compiles',async()=>{
+  const response = await fetch('/stream.wasm');
+  await new Promise(resolve=>setTimeout(resolve,500));
+  assert(await WebAssembly.compileStreaming(response) instanceof WebAssembly.Module,'No module');
+ });
+ await test('constructed Response compiles',async()=>{
+  const response = new Response(bytes,init);
+  assert(await WebAssembly.compileStreaming(response) instanceof WebAssembly.Module,'No module');
+  assert(response.bodyUsed,'Body was not consumed');
+ });
+ await test('cloned response compiles independently',async()=>{
+  const response = await fetch('/stream.wasm'); const clone = response.clone();
+  assert(await WebAssembly.compileStreaming(clone) instanceof WebAssembly.Module,'No module');
+  assert(clone.bodyUsed && !response.bodyUsed,'Wrong clone body state');
+  assert(new Uint8Array(await response.arrayBuffer()).join()===bytes.join(),'Original body changed');
+ });
+ await test('JavaScript stream compiles through its reader',async()=>{
+  let index=0;
+  const response = new Response(new ReadableStream({pull(controller){
+   if(index<bytes.length)controller.enqueue(bytes.slice(index,index+=4));else controller.close();
+  }}),init);
+  assert(await WebAssembly.compileStreaming(response) instanceof WebAssembly.Module,'No module');
+ });
+ await test('stream failure preserves exact rejection value',async()=>{
+  const reason={source:'wasm-stream-test'};
+  const response = new Response(new ReadableStream({start(controller){controller.error(reason)}}),init);
+  let caught=false;
+  try {await WebAssembly.compileStreaming(response)}catch(error){caught=true;assert(error===reason,'Rejection identity lost')}
+  assert(caught,'Missing rejection');
+ });
+ await test('null body rejects with CompileError',()=>rejects(WebAssembly.compileStreaming(new Response(null,init)),WebAssembly.CompileError));
+ await test('wrong MIME rejects with TypeError',()=>rejects(WebAssembly.compileStreaming(new Response(bytes)),TypeError));
+ await test('MIME parameters are rejected',async()=>{
+  for(const type of ['application/wasm;','application/wasm; charset=utf-8','application/wasm, application/wasm'])
+   await rejects(WebAssembly.compileStreaming(new Response(bytes,{headers:{'Content-Type':type}})),TypeError);
+ });
+ await test('MIME permits case and HTTP space variations',async()=>{
+  assert(await WebAssembly.compileStreaming(new Response(bytes,{headers:{'Content-Type':' \tApplication/WASM\t '}})) instanceof WebAssembly.Module,'No module');
+ });
+ await test('non-success response rejects with TypeError',()=>rejects(WebAssembly.compileStreaming(new Response(bytes,{...init,status:404})),TypeError));
+ await test('locked body rejects with TypeError',async()=>{
+  const response=new Response(bytes,init);const reader=response.body.getReader();
+  await rejects(WebAssembly.compileStreaming(response),TypeError);reader.releaseLock();
+ });
+ await test('used body rejects with TypeError',async()=>{
+  const response=new Response(bytes,init);await response.arrayBuffer();await rejects(WebAssembly.compileStreaming(response),TypeError);
+ });
+ await test('instantiateStreaming consumes a constructed response',async()=>{
+  const result=await WebAssembly.instantiateStreaming(new Response(bytes,init));
+  assert(result.module instanceof WebAssembly.Module && result.instance instanceof WebAssembly.Instance,'No instance');
+ });
+ await test('worker consumes bodies and terminates with an unfinished stream',async()=>{
+  const source=`onmessage=async()=>{try{
+   const bytes=new Uint8Array([0,97,115,109,1,0,0,0]);const init={headers:{'Content-Type':'application/wasm'}};
+   const response=new Response(bytes,init);const module=await WebAssembly.compileStreaming(response);
+   if(!(module instanceof WebAssembly.Module)||!response.bodyUsed)throw new Error('Worker body not consumed');
+   const reason={worker:true};let caught=false;
+   try{await WebAssembly.compileStreaming(new Response(new ReadableStream({start(c){c.error(reason)}}),init))}catch(error){caught=error===reason}
+   if(!caught)throw new Error('Worker rejection identity lost');
+   WebAssembly.compileStreaming(new Response(new ReadableStream({start(){}}),init)).catch(()=>{});
+   postMessage({ok:true});
+  }catch(error){postMessage({error:String(error)})}}`;
+  const objectURL=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));const worker=new Worker(objectURL);
+  try{const result=await new Promise((resolve,reject)=>{worker.onmessage=event=>resolve(event.data);worker.onerror=reject;worker.postMessage('start')});assert(result.ok,JSON.stringify(result))}
+  finally{worker.terminate();URL.revokeObjectURL(objectURL)}
+ });
+ await test('idle worker is explicitly terminated',async()=>{
+  const objectURL=URL.createObjectURL(new Blob(["onmessage=()=>postMessage('ready')"],{type:'text/javascript'}));const worker=new Worker(objectURL);
+  try{await new Promise((resolve,reject)=>{worker.onmessage=resolve;worker.onerror=reject;worker.postMessage('start')});await new Promise(resolve=>setTimeout(resolve,100))}
+  finally{worker.terminate();URL.revokeObjectURL(objectURL)}
+ });
+ if(typeof caches!=='undefined')await test('cache round trip remains compilable',async()=>{
+  const cache=await caches.open('__dome_wasm_fixture__');
+  await cache.put('/cached-module.wasm',new Response(bytes,init));
+  assert(await WebAssembly.compileStreaming(await cache.match('/cached-module.wasm')) instanceof WebAssembly.Module,'No cached module');
+  await caches.delete('__dome_wasm_fixture__');
+ });
+ document.body.append(JSON.stringify(results));
+ await fetch('/report',{method:'POST',body:JSON.stringify({checks:results})});
+ // This intentionally unfinished stream must be terminated during native close.
+ WebAssembly.compileStreaming(new Response(new ReadableStream({start(){}}),init)).catch(()=>{});
+ await fetch('/pending',{method:'POST',body:'ready'});
+})();
+</script>

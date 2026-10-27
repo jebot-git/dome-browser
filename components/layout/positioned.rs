@@ -661,13 +661,19 @@ impl IndependentFormattingContext {
             self.inline_content_sizes(layout_context, &constraint_space)
                 .sizes
         };
-        let inline_size = inline_axis_solver.computed_sizes.resolve(
+        let ratio_inline_size = preferred_aspect_ratio.filter(|_| !is_table_or_replaced)
+            .map(|ratio| crate::sizing::AspectRatioSizing::from_opposite(
+                ratio, LogicalAxis::Inline, &block_axis_solver.computed_sizes, block_stretch_size,
+            ));
+        let inline_size = inline_axis_solver.computed_sizes.resolve_with_aspect_ratio(
             LogicalAxis::Inline,
             inline_axis_solver.automatic_size(),
             Au::zero,
             Some(inline_stretch_size),
             get_inline_content_size,
             is_table,
+            ratio_inline_size,
+            !style.establishes_scroll_container(self.base.base_fragment_info.flags),
         );
 
         let containing_block_for_children = ContainingBlock {

@@ -16,6 +16,7 @@ use script_bindings::cformat;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_proto};
 use script_bindings::str::DOMString;
 use servo_url::ServoUrl;
+use storage_traits::cache_storage::{CachedResponse, CachedResponseMetadata, CachedResponseType};
 use url::Position;
 
 use crate::dom::RootedPromise;
@@ -37,7 +38,6 @@ use crate::fetch::body::{
     BodyMixin, BodyType, Extractable, ExtractedBody, body_text_stream,
     clone_body_stream_for_dom_body, consume_body,
 };
-use crate::runtime::script_runtime::StreamConsumer;
 
 #[dom_struct]
 pub(crate) struct Response {
@@ -58,8 +58,11 @@ pub(crate) struct Response {
     /// The stream that receives network delivered bytes for Fetch responses.
     /// This must remain stable even if `body_stream` is replaced by `tee()` branches during `clone()`.
     fetch_body_stream: MutNullableDom<ReadableStream>,
-    #[ignore_malloc_size_of = "StreamConsumer"]
-    stream_consumer: DomRefCell<Option<StreamConsumer>>,
+    /// Opaque filtered responses keep their internal body for Cache storage,
+    /// independently of the null Body visible to JavaScript.
+    cache_body_stream: MutNullableDom<ReadableStream>,
+    #[no_trace]
+    cache_internal_metadata: DomRefCell<Option<CachedResponseMetadata>>,
     /// FIXME: This should be removed.
     redirected: Cell<bool>,
 }
@@ -75,7 +78,8 @@ impl Response {
             url_list: DomRefCell::new(vec![]),
             body_stream: MutNullableDom::new(body_stream),
             fetch_body_stream: MutNullableDom::new(body_stream),
-            stream_consumer: DomRefCell::new(None),
+            cache_body_stream: Default::default(),
+            cache_internal_metadata: Default::default(),
             redirected: Cell::new(false),
         }
     }
@@ -356,6 +360,15 @@ impl ResponseMethods<crate::DomTypeHolder> for Response {
             .borrow_mut()
             .clone_from(&self.url_list.borrow());
 
+        new_response.redirected.set(self.redirected.get());
+        *new_response.cache_internal_metadata.borrow_mut() =
+            self.cache_internal_metadata.borrow().clone();
+        clone_body_stream_for_dom_body(
+            cx,
+            &self.cache_body_stream,
+            &new_response.cache_body_stream,
+        )?;
+
         // Step 3. Return the result of creating a Response object,
         // given clonedResponse, this’s headers’s guard, and this’s relevant realm.
         clone_body_stream_for_dom_body(cx, &self.body_stream, &new_response.body_stream)?;
@@ -460,8 +473,8 @@ fn initialize_response(
 
         // 6.3 If body’s type is non-null and response’s header list does not contain `Content-Type`,
         // then append (`Content-Type`, body’s type) to response’s header list.
-        if let Some(content_type_contents) = &body.content_type &&
-            !response
+        if let Some(content_type_contents) = &body.content_type
+            && !response
                 .Headers(cx)
                 .Has(ByteString::new(b"Content-Type".to_vec()))
                 .unwrap()
@@ -506,6 +519,10 @@ impl Response {
 
     pub(crate) fn set_status(&self, status: &HttpStatus) {
         self.status.borrow_mut().clone_from(status);
+        if is_null_body_status(status.raw_code()) {
+            self.body_stream.set(None);
+            self.fetch_body_stream.set(None);
+        }
     }
 
     pub(crate) fn set_final_url(&self, final_url: ServoUrl) {
@@ -530,14 +547,16 @@ impl Response {
                 *self.url_list.borrow_mut() = vec![];
                 *self.status.borrow_mut() = HttpStatus::new_error();
                 self.set_headers(cx, None);
+                self.cache_body_stream
+                    .set(self.body_stream.get().as_deref());
                 self.body_stream.set(None);
-                self.fetch_body_stream.set(None);
             },
             DOMResponseType::Opaqueredirect => {
                 *self.status.borrow_mut() = HttpStatus::new_error();
                 self.set_headers(cx, None);
+                self.cache_body_stream
+                    .set(self.body_stream.get().as_deref());
                 self.body_stream.set(None);
-                self.fetch_body_stream.set(None);
             },
             DOMResponseType::Default => {},
             DOMResponseType::Basic => {},
@@ -545,15 +564,8 @@ impl Response {
         }
     }
 
-    pub(crate) fn set_stream_consumer(&self, sc: Option<StreamConsumer>) {
-        *self.stream_consumer.borrow_mut() = sc;
-    }
-
     pub(crate) fn stream_chunk(&self, cx: &mut js::context::JSContext, chunk: Bytes) {
-        // Note, are these two actually mutually exclusive?
-        if let Some(stream_consumer) = self.stream_consumer.borrow().as_ref() {
-            stream_consumer.consume_chunk(&chunk);
-        } else if let Some(body) = self.fetch_body_stream.get() {
+        if let Some(body) = self.fetch_body_stream.get() {
             body.enqueue_native(cx, chunk.to_vec());
         }
     }
@@ -562,9 +574,157 @@ impl Response {
         if let Some(body) = self.fetch_body_stream.get() {
             body.controller_close_native(cx);
         }
-        let stream_consumer = self.stream_consumer.borrow_mut().take();
-        if let Some(stream_consumer) = stream_consumer {
-            stream_consumer.stream_end();
+    }
+}
+
+impl Response {
+    pub(crate) fn set_cache_metadata(&self, metadata: &net_traits::Metadata) {
+        *self.cache_internal_metadata.borrow_mut() = Some(CachedResponseMetadata {
+            request_includes_credentials: metadata.request_includes_credentials,
+            url: Some(metadata.final_url.clone()),
+            status: metadata.status.raw_code(),
+            status_text: metadata.status.message().to_vec(),
+            headers: metadata
+                .headers
+                .as_ref()
+                .map(|headers| {
+                    headers
+                        .iter()
+                        .map(|(name, value)| (name.to_string(), value.as_bytes().to_vec()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            redirected: metadata.redirected,
+        });
+    }
+
+    pub(crate) fn cache_record(&self, cx: &mut js::context::JSContext) -> CachedResponse {
+        let kind = match self.Type() {
+            DOMResponseType::Default => CachedResponseType::Default,
+            DOMResponseType::Basic => CachedResponseType::Basic,
+            DOMResponseType::Cors => CachedResponseType::Cors,
+            DOMResponseType::Opaque => CachedResponseType::Opaque,
+            DOMResponseType::Opaqueredirect => CachedResponseType::OpaqueRedirect,
+            DOMResponseType::Error => CachedResponseType::Error,
+        };
+        CachedResponse {
+            kind,
+            metadata: CachedResponseMetadata {
+                request_includes_credentials: self
+                    .cache_internal_metadata
+                    .borrow()
+                    .as_ref()
+                    .map_or(true, |metadata| metadata.request_includes_credentials),
+                url: self.url.borrow().clone(),
+                status: self.Status(),
+                status_text: self.StatusText().to_vec(),
+                headers: self
+                    .Headers(cx)
+                    .get_headers_list()
+                    .iter()
+                    .map(|(name, value)| (name.to_string(), value.as_bytes().to_vec()))
+                    .collect(),
+                redirected: self.Redirected(),
+            },
+            internal_metadata: self.cache_internal_metadata.borrow().clone(),
+            body: None,
         }
+    }
+
+    pub(crate) fn body_for_cache(
+        &self,
+        cx: &mut js::context::JSContext,
+    ) -> Fallible<Option<DomRoot<ReadableStream>>> {
+        if let Some(stream) = self.cache_body_stream.get() {
+            // The opaque public body is null and remains unused. Store a clone
+            // of its private response body; never expose or consume the original.
+            let branches = stream.tee(cx, true)?;
+            self.cache_body_stream.set(Some(&branches[0]));
+            return Ok(Some(branches[1].clone()));
+        }
+        if self.is_unusable() {
+            return Err(Error::Type(
+                c"Response body is disturbed or locked".to_owned(),
+            ));
+        }
+        Ok(self.body_stream.get())
+    }
+
+    pub(crate) fn from_cache_record(
+        cx: &mut js::context::JSContext,
+        global: &GlobalScope,
+        record: CachedResponse,
+    ) -> Fallible<DomRoot<Self>> {
+        // Opaque responses are rechecked against the reader's current policy.
+        // A response stored without COEP must not bypass a later require-corp context.
+        if record.kind == CachedResponseType::Opaque {
+            use net_traits::cross_origin_resource_policy::{
+                CrossOriginResourcePolicy, ForNavigation, cross_origin_resource_policy_check,
+            };
+            let metadata = record.internal_metadata.as_ref().ok_or_else(|| {
+                Error::Type(c"Opaque cached response has no internal metadata".to_owned())
+            })?;
+            let mut headers = HyperHeaders::new();
+            for (name, value) in &metadata.headers {
+                let name = http::header::HeaderName::from_bytes(name.as_bytes())
+                    .map_err(|_| Error::Operation(Some("Invalid stored header name".into())))?;
+                let value = http::header::HeaderValue::from_bytes(value)
+                    .map_err(|_| Error::Operation(Some("Invalid stored header value".into())))?;
+                headers.append(name, value);
+            }
+            if cross_origin_resource_policy_check(
+                &net_traits::request::Origin::Origin(global.origin().immutable().clone()),
+                &global.request_client(None),
+                metadata.url.as_ref(),
+                &headers,
+                metadata.request_includes_credentials,
+                ForNavigation::No,
+            ) == CrossOriginResourcePolicy::Blocked
+            {
+                return Err(Error::Type(
+                    c"Cached response blocked by cross-origin resource policy".to_owned(),
+                ));
+            }
+        }
+        let response = Self::new(cx, global);
+        let kind = match record.kind {
+            CachedResponseType::Default => DOMResponseType::Default,
+            CachedResponseType::Basic => DOMResponseType::Basic,
+            CachedResponseType::Cors => DOMResponseType::Cors,
+            CachedResponseType::Opaque => DOMResponseType::Opaque,
+            CachedResponseType::OpaqueRedirect => DOMResponseType::Opaqueredirect,
+            CachedResponseType::Error => DOMResponseType::Error,
+        };
+        *response.response_type.borrow_mut() = kind;
+        *response.status.borrow_mut() = if record.metadata.status == 0 {
+            HttpStatus::new_error()
+        } else {
+            HttpStatus::new_raw(record.metadata.status, record.metadata.status_text)
+        };
+        *response.url.borrow_mut() = record.metadata.url;
+        response.redirected.set(record.metadata.redirected);
+        let mut headers = HyperHeaders::new();
+        for (name, value) in record.metadata.headers {
+            let name = http::header::HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| Error::Operation(Some("Invalid stored header name".into())))?;
+            let value = http::header::HeaderValue::from_bytes(&value)
+                .map_err(|_| Error::Operation(Some("Invalid stored header value".into())))?;
+            headers.append(name, value);
+        }
+        response.Headers(cx).set_headers(headers);
+        response.Headers(cx).set_guard(Guard::Immutable);
+        *response.cache_internal_metadata.borrow_mut() = record.internal_metadata;
+        if let Some(bytes) = record.body {
+            let stream = ReadableStream::new_from_bytes(cx, global, bytes)?;
+            if matches!(
+                kind,
+                DOMResponseType::Opaque | DOMResponseType::Opaqueredirect
+            ) {
+                response.cache_body_stream.set(Some(&stream));
+            } else if kind != DOMResponseType::Error {
+                response.body_stream.set(Some(&stream));
+            }
+        }
+        Ok(response)
     }
 }

@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::rc::Rc;
+
 use cssparser::{Parser, UnicodeRange};
 use dom_struct::dom_struct;
 use fonts::FontFaceRuleInfo;
@@ -16,7 +18,7 @@ use script_bindings::codegen::GenericBindings::FontFaceBinding::{
     FontFaceLoadStatus, FontFaceMethods,
 };
 use script_bindings::like::Setlike;
-use script_bindings::reflector::reflect_dom_object_with_proto;
+use script_bindings::reflector::reflect_weak_referenceable_dom_object_with_proto;
 use servo_arc::Arc as ServoArc;
 use style::font_face::FamilyName;
 use style::properties::shorthands::font;
@@ -37,7 +39,7 @@ use crate::dom::document::Document;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::fontface::FontFace;
 use crate::dom::globalscope::GlobalScope;
-use crate::dom::promise::{Promise, RootedPromise, TracedPromise};
+use crate::dom::promise::{Promise, RootedPromise, TracedPromise, wait_for_all_promise};
 use crate::dom::promisenativehandler::Callback;
 use crate::dom::types::PromiseNativeHandler;
 use crate::dom::window::Window;
@@ -69,15 +71,19 @@ impl FontFaceSet {
         proto: Option<HandleObject>,
     ) -> DomRoot<Self> {
         let promise = Promise::new(cx, global);
-        reflect_dom_object_with_proto(
+        reflect_weak_referenceable_dom_object_with_proto(
             cx,
-            Box::new(FontFaceSet::new_inherited(&promise)),
+            Rc::new(FontFaceSet::new_inherited(&promise)),
             global,
             proto,
         )
     }
 
     pub(super) fn handle_font_face_status_changed(&self, cx: &mut JSContext, font_face: &FontFace) {
+        // Deleting a loading face must prevent its later completion from
+        // re-installing it in this document.
+        if !self.contains_face(font_face) { return; }
+
         match font_face.Status() {
             FontFaceLoadStatus::Loading => {
                 self.switch_to_loading(cx);
@@ -92,7 +98,7 @@ impl FontFaceSet {
                     .expect("A loaded web font should have a template");
                 window
                     .font_context()
-                    .add_template_to_font_context(family_name, template);
+                    .install_script_font(font_face.script_id(), family_name, template, font_face.retained_data());
                 window.Document().dirty_all_nodes(cx.no_gc());
             },
             _ => {},
@@ -121,12 +127,19 @@ impl FontFaceSet {
     }
 
     /// Removes a face from the set's set entries.
-    fn delete_face(&self, target: &FontFace) -> bool {
-        let mut set_entries = self.set_entries.borrow_mut();
-        let Some(index) = set_entries.iter().position(|face| &**face == target) else {
-            return false;
-        };
-        set_entries.remove(index);
+    fn delete_face(&self, cx: &mut JSContext, target: &FontFace) -> bool {
+        {
+            let mut entries = self.set_entries.borrow_mut();
+            let Some(index) = entries.iter().position(|face| &**face == target) else {
+                return false;
+            };
+            entries.remove(index);
+        }
+        target.remove_associated_font_face_set(self);
+        if let Some(window) = DomRoot::downcast::<Window>(self.global()) {
+            window.font_context().remove_script_font(target.script_id());
+            window.Document().dirty_all_nodes(cx.no_gc());
+        }
         true
     }
 
@@ -171,24 +184,14 @@ impl FontFaceSet {
         &self,
         removed_font_face_rules: &[ServoArc<FontFaceRuleInfo>],
     ) {
-        let entries = self.set_entries.borrow_mut();
-        for removed_font_face_rule in removed_font_face_rules {
-            let Some(matching_font_face_object) = entries
-                .iter()
-                .find(|entry| entry.is_connected_to_font_face_rule(removed_font_face_rule))
-            else {
-                if cfg!(debug_assertions) {
-                    unreachable!("Removed @font-face that was not previously present");
-                }
-                log::warn!("Removed @font-face that was not previously present");
-                continue;
-            };
-
-            // https://drafts.csswg.org/css-font-loading/#font-face-css-connection:
-            // > If a @font-face rule is removed from the document, its corresponding FontFace object is no longer CSS-connected.
-            // > The connection is not restorable by any means.
-            matching_font_face_object.disconnect_from_css();
-        }
+        self.set_entries.borrow_mut().retain(|entry| {
+            let removed = removed_font_face_rules.iter()
+                .any(|rule| entry.is_connected_to_font_face_rule(rule));
+            if removed {
+                entry.disconnect_from_css();
+            }
+            !removed
+        });
     }
 
     /// Uses the font matching rules to select font faces within `self` that can be used to
@@ -199,9 +202,7 @@ impl FontFaceSet {
     fn query_fonts(&self, target_family: &FamilyName, sample_text: &str) -> Vec<DomRoot<FontFace>> {
         let mut matching_fonts = Vec::default();
         for font in self.set_entries.borrow().iter() {
-            let font_face_rule = font.css_font_face_rule();
-            let Some(font_face_rule) = font_face_rule.as_ref() else {
-                // FIXME: Don't ignore font faces that are not css-connected here.
+            let Ok(font_face_rule) = font.font_face_rule(&self.global()) else {
                 continue;
             };
 
@@ -314,7 +315,8 @@ impl FontFaceSetMethods<crate::DomTypeHolder> for FontFaceSet {
     }
 
     /// <https://drafts.csswg.org/css-font-loading/#dom-fontfaceset-delete>
-    fn Delete(&self, to_delete: &FontFace) -> bool {
+    fn Delete(&self, cx: &mut JSContext, to_delete: &FontFace) -> bool {
+        self.flush_author_font_set(cx);
         // Step 1. If font is CSS-connected, return false and exit this algorithm immediately.
         if to_delete.is_css_connected() {
             return false;
@@ -325,7 +327,7 @@ impl FontFaceSetMethods<crate::DomTypeHolder> for FontFaceSet {
         // TODO: Step 4. If font is present in the FontFaceSet’s [[LoadingFonts]] list, remove it. If font was the last
         // item in that list (and so the list is now empty), switch the FontFaceSet to loaded.
         // Step 5. Return deleted.
-        self.delete_face(to_delete)
+        self.delete_face(cx, to_delete)
     }
 
     /// <https://drafts.csswg.org/css-font-loading/#dom-fontfaceset-clear>
@@ -334,7 +336,9 @@ impl FontFaceSetMethods<crate::DomTypeHolder> for FontFaceSet {
 
         // Step 1. Remove all non-CSS-connected items from the FontFaceSet’s set entries,
         // its [[LoadedFonts]] list, and its [[FailedFonts]] list.
-        self.set_entries.borrow_mut().clear();
+        let removed: Vec<_> = self.set_entries.borrow().iter()
+            .filter(|face| !face.is_css_connected()).map(|face| face.as_rooted()).collect();
+        for face in removed { self.delete_face(cx, &face); }
 
         // TODO Step 2. If the FontFaceSet’s [[LoadingFonts]] list is non-empty, remove all items from it,
         // then switch the FontFaceSet to loaded.
@@ -346,25 +350,19 @@ impl FontFaceSetMethods<crate::DomTypeHolder> for FontFaceSet {
         // promise be a newly-created promise object.
         let load_promise = Promise::new(cx, &self.global());
 
-        // Step 2. Return promise. Complete the rest of these steps asynchronously.
         #[derive(MallocSizeOf, JSTraceable)]
         #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
-        struct LoadPromiseFulfillmentHandler {
-            /// The font faces that this should wait on.
-            ///
-            /// (Our current implementation waits for `document.fonts.ready` instead)
-            font_face_objects: Vec<Dom<FontFace>>,
-
-            load_promise: TracedPromise,
+        struct ForwardLoadResult {
+            target: TracedPromise,
+            reject: bool,
         }
-        impl Callback for LoadPromiseFulfillmentHandler {
-            fn callback(&self, cx: &mut CurrentRealm, _: Handle<Value>) {
-                let font_face_objects: Vec<DomRoot<FontFace>> = self
-                    .font_face_objects
-                    .iter()
-                    .map(|font_face| font_face.as_rooted())
-                    .collect();
-                self.load_promise.resolve_native(cx, &font_face_objects);
+        impl Callback for ForwardLoadResult {
+            fn callback(&self, cx: &mut CurrentRealm, value: Handle<Value>) {
+                if self.reject {
+                    self.target.reject(cx, value);
+                } else {
+                    self.target.resolve(cx, value);
+                }
             }
         }
 
@@ -385,6 +383,7 @@ impl FontFaceSetMethods<crate::DomTypeHolder> for FontFaceSet {
                     log::error!("FontFaceSet should not be exposed to non-window globals");
                     return;
                 };
+                this.flush_author_font_set(cx);
                 let document = window.Document();
 
                 // Step 3. Find the matching font faces from font face set using the font and text
@@ -396,31 +395,25 @@ impl FontFaceSetMethods<crate::DomTypeHolder> for FontFaceSet {
                     return;
                 };
 
-                // Step 4.1. For all of the font faces in the font face list, call their load()
-                // method.
-                // Step 4.2. Resolve promise with the result of waiting for all of the
-                // [[FontStatusPromise]]s of each font face in the font face list, in order.
-                //
-                // TODO: These steps are not implemented. Instead we wait until all fonts
-                // are loaded by resolving the returned promise when
-                // `document.fonts.ready` is resolved. The return list of fonts will not
-                // be correct, but any code that waits on the promise will have
-                // conservatively consistent behavior. This is important for preventing
-                // intermittent results in WPT tests.
+                // Start exactly the matched faces and preserve their ordered
+                // results and rejection reason. Unrelated document font loads
+                // must not delay or fulfill this request.
+                let individual = font_face_objects.iter()
+                    .map(|face| face.Load(cx)).collect();
                 let global = this.global();
                 let handler = PromiseNativeHandler::new(
-                    cx,
-                    &global,
-                    Some(Box::new(LoadPromiseFulfillmentHandler {
-                        font_face_objects: font_face_objects.into_iter().map(|font_face| font_face.as_traced()).collect(),
-                        load_promise: load_promise.to_traced(),
+                    cx, &global,
+                    Some(Box::new(ForwardLoadResult {
+                        target: load_promise.to_traced(), reject: false,
                     })),
-                    None,
+                    Some(Box::new(ForwardLoadResult {
+                        target: load_promise.to_traced(), reject: true,
+                    })),
                 );
-
-                let ready_promise = this.Ready(cx);
                 let mut realm = enter_auto_realm(cx, &*global);
-                ready_promise.append_native_handler(&mut realm.current_realm(), &handler);
+                let mut current_realm = realm.current_realm();
+                let all = wait_for_all_promise(&mut current_realm, &global, individual);
+                all.append_native_handler(&mut current_realm, &handler);
             }));
 
         // Step 2. Return promise. Complete the rest of these steps asynchronously.
@@ -465,13 +458,13 @@ impl Setlike for FontFaceSet {
     #[inline(always)]
     fn clear(&self, cx: &mut JSContext) {
         self.flush_author_font_set(cx);
-        self.set_entries.borrow_mut().clear();
+        self.Clear(cx);
     }
 
     #[inline(always)]
     fn delete(&self, cx: &mut JSContext, to_delete: Self::Key) -> bool {
         self.flush_author_font_set(cx);
-        self.delete_face(&to_delete)
+        !to_delete.is_css_connected() && self.delete_face(cx, &to_delete)
     }
 }
 

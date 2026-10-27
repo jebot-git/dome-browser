@@ -315,8 +315,11 @@ impl Event {
         // > input event in a Document document, the user agent must perform
         // > the following activation notification steps before dispatching the event:
         if self.is_an_activation_triggering_input_event() {
-            // TODO: it is not quite clear what does the spec mean by in a `Document`. https://github.com/whatwg/html/issues/12126
-            if let Some(document) = target.downcast::<Node>().map(|node| node.owner_doc()) {
+            // XR input targets an XRSession rather than a Node. Its relevant
+            // Window still identifies the Document receiving the interaction.
+            let document = target.downcast::<Node>().map(|node| node.owner_doc())
+                .or_else(|| target.global().downcast::<Window>().map(|window| window.Document()));
+            if let Some(document) = document.filter(|document| document.is_fully_active()) {
                 UserActivation::handle_user_activation_notification(&document);
             }
             // From <https://w3c.github.io/event-timing/#set-event-timing-entry-duration>:
@@ -802,6 +805,10 @@ impl Event {
 
         // > and whose type is one of:
         let event_type = self.Type();
+        #[cfg(feature = "webxr")]
+        if event_type=="select" && self.downcast::<crate::dom::types::XRInputSourceEvent>().is_some() {
+            return true;
+        }
         match_domstring_ascii!(event_type,
             // > - "keydown", provided the key is neither the Esc key nor a shortcut key reserved by the user agent;
             "keydown" => self.downcast::<KeyboardEvent>().expect("`Event` with type `keydown` should be a `KeyboardEvent` interface").key() != Key::Named(NamedKey::Escape),

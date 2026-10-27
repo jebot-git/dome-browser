@@ -202,6 +202,7 @@ pub struct Preferences {
     // feature: Storage API | #43976 | Web/API/Storage_API
     pub dom_storage_manager_api_enabled: bool,
     // feature: ServiceWorker | #36538 | Web/API/Service_Worker_API
+    pub dom_cache_enabled: bool,
     pub dom_serviceworker_enabled: bool,
     pub dom_serviceworker_timeout_seconds: i64,
     // feature: SharedWorker | #7458 | Web/API/SharedWorker
@@ -356,6 +357,12 @@ pub struct Preferences {
     /// associated with multiple IP addresses, this timeout will be divided equally among
     /// each IP address.
     pub network_connection_timeout: u64,
+    /// Block cookie access outside the top-level document's schemeful site.
+    pub network_cookie_block_third_party: bool,
+    /// Enable native cosmetic filtering through the embedder.
+    pub network_cosmetic_filtering_enabled: bool,
+    /// Refresh document filter state when the embedder changes its lists or policy.
+    pub network_cosmetic_filter_generation: i64,
     pub network_enforce_tls_enabled: bool,
     pub network_enforce_tls_localhost: bool,
     pub network_enforce_tls_onion: bool,
@@ -474,6 +481,7 @@ impl Preferences {
             dom_sanitizer_enabled: false,
             dom_script_asynch: true,
             dom_storage_manager_api_enabled: false,
+            dom_cache_enabled: false,
             dom_serviceworker_enabled: false,
             dom_serviceworker_timeout_seconds: 60,
             dom_sharedworker_enabled: true,
@@ -584,6 +592,9 @@ impl Preferences {
             media_glvideo_enabled: false,
             media_testing_enabled: false,
             network_connection_timeout: 15,
+            network_cookie_block_third_party: false,
+            network_cosmetic_filtering_enabled: false,
+            network_cosmetic_filter_generation: 0,
             network_enforce_tls_enabled: false,
             network_enforce_tls_localhost: false,
             network_enforce_tls_onion: false,

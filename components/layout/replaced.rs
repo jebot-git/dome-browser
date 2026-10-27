@@ -155,11 +155,14 @@ pub(crate) struct VideoInfo {
 #[derive(Debug, MallocSizeOf)]
 pub(crate) enum ReplacedContentKind {
     Image(ImageInfo),
+    ImageFallback(Box<crate::image_fallback::ImageFallback>),
     IFrame(IFrameInfo),
     Canvas(CanvasInfo),
     Video(VideoInfo),
     SVGElement {
         vector_image: Option<VectorImage>,
+        completed_image: Option<VectorImage>,
+        snapshot_pending: bool,
         has_viewbox: bool,
         foreign_objects: crate::svg_foreign_object::ForeignObjects,
     },
@@ -167,9 +170,22 @@ pub(crate) enum ReplacedContentKind {
 }
 
 impl ReplacedContents {
+    pub(crate) fn from_alt_text(node: ServoLayoutNode<'_>, context: &LayoutContext, text: String) -> Self {
+        Self {
+            base_fragment_info: node.into(),
+            kind: ReplacedContentKind::ImageFallback(Box::new(
+                crate::image_fallback::ImageFallback::new(node, context, text),
+            )),
+            is_content_replacement: false,
+            selected: Arc::new(AtomicBool::new(node.replaced_is_selected())),
+            selected_style: SharedStyle::new(node.selected_style(&context.style_context)),
+            natural_size: NaturalSizes::empty(),
+        }
+    }
+
     pub fn for_element(node: ServoLayoutNode<'_>, context: &LayoutContext) -> Option<Self> {
-        if let Some(ref data_attribute_string) = node.as_typeless_object_with_data_attribute() &&
-            let Some(url) = try_to_parse_image_data_url(data_attribute_string)
+        if let Some(ref data_attribute_string) = node.as_typeless_object_with_data_attribute()
+            && let Some(url) = try_to_parse_image_data_url(data_attribute_string)
         {
             return Self::from_image_url(node, context, &ComputedUrl::Valid(ServoArc::new(url)));
         }
@@ -330,9 +346,29 @@ impl ReplacedContents {
             _ => unreachable!("SVG element can't contain a raster image."),
         });
 
+        let completed_image = svg_data
+            .completed_source
+            .and_then(|source| {
+                context
+                    .image_resolver
+                    .get_cached_image_for_url(
+                        node.opaque(),
+                        source,
+                        LayoutImageDestination::BoxTreeConstruction,
+                        InternalRequest::Yes,
+                    )
+                    .ok()
+            })
+            .and_then(|image| match image {
+                Image::Vector(image) => Some(image),
+                _ => None,
+            });
+
         (
             ReplacedContentKind::SVGElement {
                 vector_image,
+                completed_image,
+                snapshot_pending: svg_data.snapshot_pending,
                 has_viewbox: svg_data.view_box.is_some(),
                 foreign_objects: crate::svg_foreign_object::ForeignObjects::construct(
                     node, context,
@@ -346,8 +382,8 @@ impl ReplacedContents {
         // If the `content` property is a single image URL, non-replaced boxes
         // and images get replaced with the given image.
         if let Content::Items(GenericContentItems { items, .. }) =
-            node.style(&context.style_context).get_content() &&
-            let [GenericContentItem::Image(image)] = items.as_slice()
+            node.style(&context.style_context).get_content()
+            && let [GenericContentItem::Image(image)] = items.as_slice()
         {
             // Invalid images are treated as zero-sized.
             let mut replaced_contents = Self::from_image(node, context, image)
@@ -437,7 +473,8 @@ impl ReplacedContents {
 
     #[inline]
     fn is_broken_image(&self) -> bool {
-        matches!(&self.kind, ReplacedContentKind::Image(image_info) if image_info.showing_broken_image_icon)
+        matches!(&self.kind, ReplacedContentKind::ImageFallback(_)) ||
+            matches!(&self.kind, ReplacedContentKind::Image(image_info) if image_info.showing_broken_image_icon)
     }
 
     #[inline]
@@ -533,6 +570,7 @@ impl ReplacedContents {
 
         let base = BaseFragment::new(self.base_fragment_info, rect);
         match &self.kind {
+            ReplacedContentKind::ImageFallback(fallback) => fallback.fragments(layout_context, size),
             ReplacedContentKind::Image(image_info) => image_info
                 .image
                 .as_ref()
@@ -603,8 +641,8 @@ impl ReplacedContents {
                 }))]
             },
             ReplacedContentKind::Canvas(canvas_info) => {
-                if self.natural_size.width == Some(Au::zero()) ||
-                    self.natural_size.height == Some(Au::zero())
+                if self.natural_size.width == Some(Au::zero())
+                    || self.natural_size.height == Some(Au::zero())
                 {
                     return vec![];
                 }
@@ -629,22 +667,24 @@ impl ReplacedContents {
             },
             ReplacedContentKind::SVGElement {
                 vector_image,
+                completed_image,
+                snapshot_pending,
                 has_viewbox,
                 foreign_objects,
             } => {
-                let Some(vector_image) = vector_image else {
+                let Some(size_image) = vector_image.as_ref().or(completed_image.as_ref()) else {
                     return foreign_objects.fragments(layout_context, rect);
                 };
 
                 if !has_viewbox {
                     base.set_rect(
                         PhysicalSize::new(
-                            vector_image
+                            size_image
                                 .metadata
                                 .width
                                 .try_into()
                                 .map_or(MAX_AU, Au::from_px),
-                            vector_image
+                            size_image
                                 .metadata
                                 .height
                                 .try_into()
@@ -662,14 +702,28 @@ impl ReplacedContents {
                 );
 
                 let tag = self.base_fragment_info.tag.unwrap();
-                let mut fragments: Vec<Fragment> = layout_context
-                    .image_resolver
-                    .rasterize_vector_image(
-                        vector_image.id,
-                        raster_size,
-                        tag.node,
-                        vector_image.svg_id,
-                    )
+                let image = vector_image
+                    .as_ref()
+                    .and_then(|image| {
+                        layout_context.image_resolver.rasterize_vector_image(
+                            image.id,
+                            raster_size,
+                            tag.node,
+                            if *snapshot_pending {
+                                image.svg_id
+                            } else {
+                                None
+                            },
+                        )
+                    })
+                    .or_else(|| {
+                        completed_image.as_ref().and_then(|image| {
+                            layout_context
+                                .image_resolver
+                                .completed_vector_raster(image.id)
+                        })
+                    });
+                let mut fragments: Vec<Fragment> = image
                     .and_then(|image| image.id)
                     .map(|image_key| {
                         Fragment::Image(Arc::new(ImageFragment {
@@ -779,7 +833,10 @@ impl ReplacedContents {
             LogicalAxis::Block,
             preferred_aspect_ratio,
             &|| SizeConstraint::Definite(inline_size),
-            &|| self.fallback_block_size(writing_mode),
+            &|| match &self.kind {
+                ReplacedContentKind::ImageFallback(fallback) => fallback.block_size(layout_context, inline_size),
+                _ => self.fallback_block_size(writing_mode),
+            },
         );
         let size = LogicalVec2 {
             inline: inline_size,
@@ -801,6 +858,7 @@ impl ReplacedContents {
 
     pub(crate) fn subtree_size(&self) -> usize {
         match &self.kind {
+            ReplacedContentKind::ImageFallback(fallback) => fallback.subtree_size(),
             ReplacedContentKind::SVGElement {
                 foreign_objects, ..
             } => foreign_objects.subtree_size(),
@@ -809,6 +867,10 @@ impl ReplacedContents {
     }
 
     pub(crate) fn attached_to_tree(&self, parent: crate::dom::WeakLayoutBox) {
+        if let ReplacedContentKind::ImageFallback(fallback) = &self.kind {
+            fallback.attached_to_tree(parent);
+            return;
+        }
         if let ReplacedContentKind::SVGElement {
             foreign_objects, ..
         } = &self.kind
@@ -822,8 +884,8 @@ impl ReplacedContents {
     pub(crate) fn set_selection(&self, selected: bool) -> bool {
         // Only build a display list if the value changed and if this isn't an `<iframe>`
         // or `<audio>` element as they do not paint a selection tint.
-        self.selected.swap(selected, Ordering::Relaxed) != selected &&
-            !matches!(
+        self.selected.swap(selected, Ordering::Relaxed) != selected
+            && !matches!(
                 self.kind,
                 ReplacedContentKind::Audio | ReplacedContentKind::IFrame(..)
             )
@@ -833,9 +895,26 @@ impl ReplacedContents {
 impl ComputeInlineContentSizes for ReplacedContents {
     fn compute_inline_content_sizes(
         &self,
-        _: &LayoutContext,
+        context: &LayoutContext,
         constraint_space: &ConstraintSpace,
     ) -> InlineContentSizesResult {
+        if let ReplacedContentKind::ImageFallback(fallback) = &self.kind {
+            let intrinsic = fallback.inline_sizes(context);
+            if constraint_space.preferred_aspect_ratio.is_none() ||
+                !constraint_space.block_size.is_definite()
+            {
+                return intrinsic;
+            }
+            return InlineContentSizesResult {
+                sizes: self.content_size(
+                    LogicalAxis::Inline,
+                    constraint_space.preferred_aspect_ratio,
+                    &|| constraint_space.block_size,
+                    &|| intrinsic.sizes.max_content,
+                ).into(),
+                depends_on_block_constraints: true,
+            };
+        }
         let inline_content_size = self.content_size(
             LogicalAxis::Inline,
             constraint_space.preferred_aspect_ratio,

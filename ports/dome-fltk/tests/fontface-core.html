@@ -1,0 +1,37 @@
+<!doctype html><meta charset=utf-8><title>FontFaceSet loading and CSS membership</title>
+<style id=cssfaces>@font-face{font-family:CoreCss;src:url('/font-api.ttf?css')}#sample{font:16px CoreCss,monospace}</style><div id=sample>Font sample</div>
+<script>
+addEventListener('load',async()=>{
+ const checks=[];const check=(name,passed,error='')=>checks.push({name,passed,error});
+ const test=async(name,fn)=>{try{await fn();check(name,true)}catch(e){check(name,false,String(e))}};
+ const expect=(value,message)=>{if(!value)throw Error(message)};
+ const deadline=p=>Promise.race([p,new Promise((_,reject)=>setTimeout(()=>reject(Error('operation timed out')),8000))]);
+ try{
+ check('FontFace exposed initially',typeof FontFace==='function');
+ const config=await(await fetch('/config.json')).json();const fonts=document.fonts;await deadline(fonts.ready);
+ const css=[...fonts].find(f=>f.family==='CoreCss');check('CSS face enumerated',!!css);
+ fonts.clear();check('clear preserves CSS face',!!css&&fonts.has(css));check('delete rejects CSS face',!!css&&!fonts.delete(css));
+ const one=new FontFace('CoreOne','url(/font-api.ttf?one)');fonts.add(one);check('add returns same set',fonts.add(one)===fonts);check('duplicate add is idempotent',[...fonts].filter(f=>f===one).length===1);
+ await test('load starts unused script face',async()=>{const result=await deadline(fonts.load('16px CoreOne'));expect(result.length===1&&result[0]===one&&one.status==='loaded',JSON.stringify({length:result.length,status:one.status}))});
+ const two=new FontFace('CoreTwo','url(/font-api.ttf?two)');fonts.add(two);
+ await test('load returns family order',async()=>{const result=await deadline(fonts.load('16px CoreTwo, CoreOne'));expect(result.length===2&&result[0]===two&&result[1]===one,'wrong matched order')});
+ const ascii=new FontFace('CoreRange','url(/font-api.ttf?ascii)',{unicodeRange:'U+0041'}),other=new FontFace('CoreRange','url(/font-api.ttf?other)',{unicodeRange:'U+4E00'});fonts.add(ascii);fonts.add(other);
+ await test('load uses script unicode ranges',async()=>{const result=await deadline(fonts.load('16px CoreRange','A'));expect(result.length===1&&result[0]===ascii&&ascii.status==='loaded'&&other.status==='unloaded','incorrect range matching')});
+ const failure=new FontFace('CoreFailure','url(/not-found?font-api-failure)');fonts.add(failure);
+ await test('load propagates matched failure',async()=>{let rejected=false;try{await deadline(fonts.load('16px CoreFailure'))}catch(e){rejected=e.name==='NetworkError'}expect(rejected&&failure.status==='error','failed face did not reject')});
+ await test('invalid shorthand rejects SyntaxError',async()=>{let rejected=false;try{await fonts.load('not a font')}catch(e){rejected=e.name==='SyntaxError'}expect(rejected,'invalid shorthand accepted')});
+ const slow=new FontFace('CoreSlow','url(/font-api.ttf?delay=2&slow)');let slowDone=false;fonts.add(slow);const slowLoad=slow.load().then(()=>slowDone=true,()=>slowDone=true);
+ await test('unmatched load does not wait for unrelated face',async()=>{const result=await deadline(fonts.load('16px CoreMissing'));expect(result.length===0&&!slowDone&&slow.status==='loading','unrelated load delayed unmatched result')});await deadline(slowLoad);
+ const cors=new FontFace('CoreCors',`url(${config.crossOrigin}/font-api.ttf?cors=1)`);
+ await test('cross-origin font accepts CORS response',async()=>{await deadline(cors.load());expect(cors.status==='loaded','CORS load failed')});
+ const noCors=new FontFace('CoreNoCors',`url(${config.crossOrigin}/font-api.ttf?no-cors)`);
+ await test('cross-origin font without CORS rejects',async()=>{let rejected=false;try{await deadline(noCors.load())}catch(e){rejected=e.name==='NetworkError'}expect(rejected&&noCors.status==='error','missing CORS accepted')});
+ cssfaces.remove();check('removed CSS face leaves set',!fonts.has(css));check('CSS removal retains script face',fonts.has(one));
+ const meta=document.createElement('meta');meta.httpEquiv='Content-Security-Policy';meta.content="font-src 'none'";document.head.append(meta);
+ const blocked=new FontFace('CoreCsp','url(/font-api.ttf?csp-blocked)');
+ await test('font-src none blocks URL FontFace load',async()=>{let rejected=false;try{await deadline(blocked.load())}catch(e){rejected=e.name==='NetworkError'}expect(rejected&&blocked.status==='error','CSP font load accepted')});
+ await test('buffer font parses supplied bytes without Fetch',async()=>{const bytes=await(await fetch('/font-api.ttf?buffer-fetch')).arrayBuffer();const face=new FontFace('CoreBinary',bytes);await deadline(face.loaded);expect(face.status==='loaded','buffer font failed');fonts.add(face);expect(fonts.has(face),'buffer add failed');expect(fonts.delete(face)&&!fonts.has(face),'buffer delete failed')});
+ }catch(e){check('fixture completes',false,String(e))}
+ fetch('/report',{method:'POST',body:JSON.stringify({checks})});
+});
+</script>

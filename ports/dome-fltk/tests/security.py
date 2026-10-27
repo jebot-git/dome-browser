@@ -41,7 +41,7 @@ if os.environ.get('DOME_SECURITY_BUS')!='1':
 from Xlib import X, XK, display, protocol
 from Xlib.ext import xtest
 source=Path(__file__).resolve().parents[3]
-artifacts=source.parent/'artifacts/browser-security-tests';artifacts.mkdir(parents=True,exist_ok=True)
+artifacts=Path(os.environ.get('DOME_BROWSER_TEST_OUTPUT',source.parent/'artifacts/browser-security-tests'));artifacts.mkdir(parents=True,exist_ok=True)
 checks=[];events=[];hits=[]
 def check(ok,name):
     assert ok,name

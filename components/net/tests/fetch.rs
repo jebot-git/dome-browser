@@ -239,13 +239,17 @@ fn test_file() {
         .unwrap();
     let url = ServoUrl::from_file_path(path.clone()).unwrap();
 
+    // This is an explicitly authorized local document, not a web-page request.
+    let origin = url.origin();
+    let mut policy = net_traits::policy_container::PolicyContainer::default();
+    policy.local_file_origin = Some(origin.clone());
     let request = RequestBuilder::new(
         Some(TEST_WEBVIEW_ID),
         UrlWithBlobClaim::new(url.clone(), None),
         Referrer::NoReferrer,
     )
-    .origin(url.origin())
-    .policy_container(Default::default())
+    .origin(origin)
+    .policy_container(Arc::new(policy))
     .build();
 
     let mut context = new_fetch_context(None, None);
@@ -1609,4 +1613,63 @@ fn test_fetch_request_intercepted() {
         STATUS_MESSAGE,
         "The status_message was not set correctly!"
     );
+}
+
+#[test]
+fn test_interception_top_level_context_is_not_inferred_from_initiator() {
+    use net_traits::request::{InsecureRequestsPolicy, Origin, RequestClient};
+
+    // Use the shared test runtime, including when this test runs in isolation.
+    let _ = create_generic_embedder_proxy::<net::embedder::NetToEmbedderMsg>();
+
+    let source = ServoUrl::parse("http://sub.site.example:8181/frame").unwrap();
+    let top = ServoUrl::parse("http://site.example:8282/page").unwrap();
+    let target = ServoUrl::parse("http://target.example:8383/resource").unwrap();
+    // Source origin and no-referrer must never stand in for missing ancestry.
+    // A main navigation establishes its target context, while a nested document
+    // navigation retains the parent's context even with Document destination.
+    for (has_client, cookie_site, destination, mode, nested, expected, main_frame) in [
+        (true, Some(top.origin()), Destination::Script, RequestMode::NoCors, true, Some("http://site.example:8282"), false),
+        (true, None, Destination::Script, RequestMode::NoCors, true, None, false),
+        (true, Some(ImmutableOrigin::new_opaque()), Destination::Script, RequestMode::NoCors, true, None, false),
+        (false, None, Destination::Script, RequestMode::NoCors, false, None, false),
+        (true, Some(top.origin()), Destination::Document, RequestMode::Navigate, false, Some("http://target.example:8383"), true),
+        (true, Some(top.origin()), Destination::Document, RequestMode::Navigate, true, Some("http://site.example:8282"), false),
+        (false, None, Destination::Document, RequestMode::Navigate, false, Some("http://target.example:8383"), true),
+    ] {
+        let (proxy, receiver) = create_generic_embedder_proxy_and_receiver();
+        let responder = std::thread::spawn(move || {
+            let net::embedder::NetToEmbedderMsg::WebResourceRequested(_, request, sender) = receiver.recv().unwrap() else {
+                panic!("Expected intercepted request");
+            };
+            sender.send(embedder_traits::WebResourceResponseMsg::Start(
+                embedder_traits::WebResourceResponse::new(request.url.clone().into_url()),
+            )).unwrap();
+            sender.send(embedder_traits::WebResourceResponseMsg::FinishLoad).unwrap();
+            request
+        });
+        let mut builder = RequestBuilder::new(
+            Some(TEST_WEBVIEW_ID), UrlWithBlobClaim::from_url_without_having_claimed_blob(target.clone()), Referrer::NoReferrer,
+        ).origin(source.origin()).destination(destination).mode(mode);
+        if has_client {
+            builder = builder.client(RequestClient {
+                preloaded_resources: Default::default(),
+                policy_container: Default::default(),
+                origin: Origin::Origin(source.origin()),
+                cookie_site,
+                cookie_client_is_null: false,
+                is_nested_browsing_context: nested,
+                insecure_requests_policy: InsecureRequestsPolicy::DoNotUpgrade,
+                has_trustworthy_ancestor_origin: false,
+            });
+        }
+        let mut context = new_fetch_context(None, Some(proxy));
+        let response = fetch_with_context(builder.build(), &mut context);
+        assert!(!response.is_network_error());
+        let intercepted = responder.join().unwrap();
+        assert_eq!(intercepted.top_level_origin.as_deref(), expected);
+        assert_eq!(intercepted.is_for_main_frame, main_frame);
+        assert!(intercepted.referrer_url.is_none());
+        assert_eq!(intercepted.initiator_origin.as_deref(), Some("http://sub.site.example:8181"));
+    }
 }

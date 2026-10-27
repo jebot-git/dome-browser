@@ -20,7 +20,7 @@ import time
 signal.pthread_sigmask(signal.SIG_SETMASK, [])
 port = Path(__file__).resolve().parents[1]
 source = port.parents[1]
-artifacts = source.parent / 'artifacts/servo-browser-tests'
+artifacts = Path(os.environ.get('DOME_BROWSER_TEST_OUTPUT', source.parent / 'artifacts/servo-browser-tests'))
 artifacts.mkdir(exist_ok=True)
 
 if '--services' in sys.argv:
@@ -267,6 +267,15 @@ with tempfile.TemporaryDirectory(prefix='servo-browser-test-') as temporary:
         second=subprocess.run([str(binary),origin+'/second.html'],env=env,capture_output=True,timeout=15)
         check(second.returncode==0,'a second launch forwards its URL to the existing browser')
         wait(lambda:'Second page' in str(main.get_wm_name()))
+        click(main,500,300)
+        key(main,'Tab',control=True,shift=True);wait(lambda:'Servo FLTK integration test' in str(main.get_wm_name()))
+        check(True,'Ctrl+Shift+Tab selects the previous tab from page focus')
+        key(main,'Tab',control=True,shift=True);wait(lambda:'Second page' in str(main.get_wm_name()))
+        check(True,'Ctrl+Shift+Tab wraps from the first tab to the last')
+        key(main,'l',control=True)
+        key(main,'Tab',control=True,shift=True);wait(lambda:'Servo FLTK integration test' in str(main.get_wm_name()))
+        key(main,'Tab',control=True);wait(lambda:'Second page' in str(main.get_wm_name()))
+        check(True,'Both tab bindings work from the native location field')
         key(main,'w',control=True);wait(lambda:'Servo FLTK integration test' in str(main.get_wm_name()))
         check(True,'Ctrl+W closes the new tab and restores the previous page')
         notification_file=root/'notifications.jsonl'

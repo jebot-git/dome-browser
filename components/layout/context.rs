@@ -18,7 +18,6 @@ use net_traits::image_cache::{
 use net_traits::request::InternalRequest;
 use parking_lot::{Mutex, RwLock};
 use pixels::RasterImage;
-use script::layout_dom::ServoLayoutNode;
 use servo_base::id::PainterId;
 use servo_url::{ImmutableOrigin, ServoUrl};
 use style::context::SharedStyleContext;
@@ -70,10 +69,11 @@ impl LayoutContext<'_> {
     }
 
     pub(crate) fn should_parallelize_layout(&self, jobs: impl Iterator<Item = usize>) -> bool {
-        self.allow_parallel_layout &&
-            jobs.filter(|job| *job >= self.parallelism_job_size_minimum)
-                .count() >=
-                self.parallelism_job_count_minimum
+        self.allow_parallel_layout
+            && jobs
+                .filter(|job| *job >= self.parallelism_job_size_minimum)
+                .count()
+                >= self.parallelism_job_count_minimum
     }
 }
 
@@ -122,7 +122,8 @@ pub(crate) struct ImageResolver {
     pub pending_rasterization_images: Mutex<Vec<PendingRasterizationImage>>,
 
     /// A list of `SVGSVGElement`s encountered during layout that are not
-    /// serialized yet. This is needed to support inline SVGs as they are treated
+    /// serialized yet or whose computed paint has changed. This is needed to
+    /// support inline SVGs as they are treated
     /// as replaced elements and the layout is responsible for triggering the
     /// network load for the corresponding serialized data: urls (similar to
     /// background images).
@@ -262,7 +263,9 @@ impl ImageResolver {
         let result = self
             .image_cache
             .rasterize_vector_image(image_id, size, svg_id);
-        if result.is_none() {
+        if result.is_none() || svg_id.is_some() {
+            // A coalesced inline snapshot also needs completion acknowledgement
+            // when its exact URL/raster was already cached.
             self.pending_rasterization_images
                 .lock()
                 .push(PendingRasterizationImage {
@@ -272,6 +275,10 @@ impl ImageResolver {
                 });
         }
         result
+    }
+
+    pub(crate) fn completed_vector_raster(&self, image_id: PendingImageId) -> Option<RasterImage> {
+        self.image_cache.get_rasterized_vector_image(image_id)
     }
 
     /// Resolve a cached image to a WebRender [`ImageKey`]
@@ -290,7 +297,7 @@ impl ImageResolver {
         }
     }
 
-    pub(crate) fn queue_svg_element_for_serialization(&self, element: ServoLayoutNode<'_>) {
+    pub(crate) fn queue_svg_element_for_serialization<'dom>(&self, element: impl LayoutNode<'dom>) {
         self.pending_svg_elements_for_serialization
             .lock()
             .push(element.opaque().into())

@@ -206,10 +206,10 @@ fn create_http_states(
     let mut hsts_list = HstsList::default();
     // Authentication persistence belongs in the embedder's encrypted wallet.
     let auth_cache = AuthCache::default();
-    let mut cookie_jar = CookieStorage::new(150);
+    let cookie_jar = config_dir.map(|directory| CookieStorage::load_from_profile(directory, 150))
+        .unwrap_or_else(|| CookieStorage::new(150));
     if let Some(config_dir) = config_dir {
         servo_base::read_json_from_file(&mut hsts_list, config_dir, "hsts_list.json");
-        servo_base::read_json_from_file(&mut cookie_jar, config_dir, "cookie_jar.json");
     }
 
     let override_manager = CertificateErrorOverrideManager::new();
@@ -453,20 +453,16 @@ impl ResourceChannelManager {
                 }
             },
             CoreResourceMsg::DeleteCookiesForSites(sites, sender) => {
-                http_state
-                    .cookie_jar
-                    .write()
+                CookieStorage::access(&http_state.cookie_jar)
                     .delete_cookies_for_sites(&sites);
                 let _ = sender.send(());
             },
             CoreResourceMsg::DeleteSessionCookies(sender) => {
-                http_state.cookie_jar.write().clear_session_cookies();
+                CookieStorage::access(&http_state.cookie_jar).clear_session_cookies();
                 let _ = sender.send(());
             },
             CoreResourceMsg::DeleteCookies(request, sender) => {
-                http_state
-                    .cookie_jar
-                    .write()
+                CookieStorage::access(&http_state.cookie_jar)
                     .clear_storage(request.as_ref());
                 if let Some(sender) = sender {
                     let _ = sender.send(());
@@ -474,17 +470,14 @@ impl ResourceChannelManager {
                 return true;
             },
             CoreResourceMsg::DeleteCookie(request, name) => {
-                http_state
-                    .cookie_jar
-                    .write()
+                CookieStorage::access(&http_state.cookie_jar)
                     .delete_cookie_with_name(&request, name);
                 return true;
             },
-            CoreResourceMsg::DeleteCookieAsync(cookie_store_id, url, name) => {
-                http_state
-                    .cookie_jar
-                    .write()
-                    .delete_cookie_with_name(&url, name);
+            CoreResourceMsg::DeleteCookieAsync(cookie_store_id, url, name, source) => {
+                if source != CookieSource::NonHTTPCrossSite {
+                    CookieStorage::access(&http_state.cookie_jar).delete_cookie_with_name(&url, name);
+                }
                 self.send_cookie_response(cookie_store_id, CookieData::Delete(Ok(())));
             },
             CoreResourceMsg::FetchRedirect(request_builder, res_init, sender) => {
@@ -530,12 +523,12 @@ impl ResourceChannelManager {
                 self.send_cookie_response(cookie_store_id, CookieData::Set(Ok(())));
             },
             CoreResourceMsg::GetCookieStringForUrl(url, consumer, source) => {
-                let mut cookie_jar = http_state.cookie_jar.write();
+                let mut cookie_jar = CookieStorage::access(&http_state.cookie_jar);
                 cookie_jar.remove_expired_cookies_for_url(&url);
                 consumer.send_or_ignore(cookie_jar.cookies_for_url(&url, source));
             },
             CoreResourceMsg::GetCookiesForUrl(url, consumer, source) => {
-                let mut cookie_jar = http_state.cookie_jar.write();
+                let mut cookie_jar = CookieStorage::access(&http_state.cookie_jar);
                 cookie_jar.remove_expired_cookies_for_url(&url);
                 let cookies = cookie_jar
                     .cookies_data_for_url(&url, source)
@@ -543,28 +536,28 @@ impl ResourceChannelManager {
                     .collect();
                 consumer.send_or_ignore(cookies);
             },
-            CoreResourceMsg::GetCookieDataForUrlAsync(cookie_store_id, url, name) => {
-                let mut cookie_jar = http_state.cookie_jar.write();
+            CoreResourceMsg::GetCookieDataForUrlAsync(cookie_store_id, url, name, source) => {
+                let mut cookie_jar = CookieStorage::access(&http_state.cookie_jar);
                 cookie_jar.remove_expired_cookies_for_url(&url);
                 let cookie = cookie_jar
-                    .query_cookies(&url, name)
+                    .query_cookies_for_source(&url, name, source)
                     .into_iter()
                     .map(Serde)
                     .next();
                 self.send_cookie_response(cookie_store_id, CookieData::Get(cookie));
             },
-            CoreResourceMsg::GetAllCookieDataForUrlAsync(cookie_store_id, url, name) => {
-                let mut cookie_jar = http_state.cookie_jar.write();
+            CoreResourceMsg::GetAllCookieDataForUrlAsync(cookie_store_id, url, name, source) => {
+                let mut cookie_jar = CookieStorage::access(&http_state.cookie_jar);
                 cookie_jar.remove_expired_cookies_for_url(&url);
                 let cookies = cookie_jar
-                    .query_cookies(&url, name)
+                    .query_cookies_for_source(&url, name, source)
                     .into_iter()
                     .map(Serde)
                     .collect();
                 self.send_cookie_response(cookie_store_id, CookieData::GetAll(cookies));
             },
             CoreResourceMsg::EmbedderGetCookiesForUrl(operation_id, url, source) => {
-                let mut cookie_jar = http_state.cookie_jar.write();
+                let mut cookie_jar = CookieStorage::access(&http_state.cookie_jar);
                 cookie_jar.remove_expired_cookies_for_url(&url);
                 let cookies: Vec<Cookie<'static>> =
                     cookie_jar.cookies_data_for_url(&url, source).collect();
@@ -589,7 +582,7 @@ impl ResourceChannelManager {
                     ));
             },
             CoreResourceMsg::EmbedderClearCookies(operation_id) => {
-                http_state.cookie_jar.write().clear_storage(None);
+                CookieStorage::access(&http_state.cookie_jar).clear_storage(None);
                 http_state
                     .embedder_proxy
                     .send(NetToEmbedderMsg::EmbedderCookieOperationResponse(
@@ -597,7 +590,7 @@ impl ResourceChannelManager {
                     ));
             },
             CoreResourceMsg::EmbedderClearSessionCookies(operation_id) => {
-                http_state.cookie_jar.write().clear_session_cookies();
+                CookieStorage::access(&http_state.cookie_jar).clear_session_cookies();
                 http_state
                     .embedder_proxy
                     .send(NetToEmbedderMsg::EmbedderCookieOperationResponse(
@@ -617,7 +610,7 @@ impl ResourceChannelManager {
                     .insert(origin, mediator_chan);
             },
             CoreResourceMsg::ListCookies(sender) => {
-                let mut cookie_jar = http_state.cookie_jar.write();
+                let mut cookie_jar = CookieStorage::access(&http_state.cookie_jar);
                 cookie_jar.remove_all_expired_cookies();
                 sender.send_or_ignore(cookie_jar.cookie_site_descriptors());
             },
@@ -662,8 +655,7 @@ impl ResourceChannelManager {
             },
             CoreResourceMsg::Exit(sender) => {
                 if let Some(ref config_dir) = self.config_dir {
-                    let jar = http_state.cookie_jar.read();
-                    servo_base::write_json_to_file(&*jar, config_dir, "cookie_jar.json");
+                    drop(CookieStorage::access(&http_state.cookie_jar));
                     let hsts = http_state.hsts_list.read();
                     servo_base::write_json_to_file(&*hsts, config_dir, "hsts_list.json");
                 }
@@ -776,7 +768,7 @@ impl CoreResourceManager {
         http_state: &Arc<HttpState>,
     ) {
         if let Some(cookie) = ServoCookie::new_wrapped(cookie, request, source) {
-            let mut cookie_jar = http_state.cookie_jar.write();
+            let mut cookie_jar = CookieStorage::access(&http_state.cookie_jar);
             cookie_jar.push(cookie, request, source)
         }
     }

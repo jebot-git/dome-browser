@@ -773,6 +773,8 @@ impl WorkletThread {
             preloaded_resources: PreloadedResources::default(),
             policy_container,
             origin: Origin::Origin(origin),
+            cookie_site: global.cookie_site(),
+            cookie_client_is_null: false,
             is_nested_browsing_context: global.is_nested_browsing_context(),
             insecure_requests_policy: global.insecure_requests_policy(),
             has_trustworthy_ancestor_origin: global.has_trustworthy_ancestor_origin(),

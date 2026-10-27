@@ -559,3 +559,22 @@ fn test_sniff_mp4_video_apache_flag_on() {
         ApacheBugFlag::On,
     );
 }
+
+#[test]
+fn xml_suffix_types_keep_their_supplied_type_even_with_image_signature_bytes() {
+    use net_traits::mime_classifier::MediaType;
+    // SVG and other non-application XML types must not be re-sniffed as PNG,
+    // and navigation must select the XML processing path.
+    let png_signature = b"\x89PNG\r\n\x1a\n";
+    let classifier = MimeClassifier::default();
+    for name in ["image/svg+xml", "image/example+xml", "text/example+xml", "application/xhtml+xml", "text/xml", "application/xml"] {
+        let supplied: Mime = name.parse().unwrap();
+        assert!(MimeClassifier::get_media_type(&supplied) == Some(MediaType::Xml), "{name}");
+        for context in [LoadContext::Browsing, LoadContext::Image] {
+            let actual = classifier.classify(context, NoSniffFlag::Off, ApacheBugFlag::Off, &Some(supplied.clone()), png_signature);
+            assert_eq!(actual, supplied, "{name}");
+        }
+    }
+    assert!(MimeClassifier::get_media_type(&mime::IMAGE_PNG) == Some(MediaType::Image));
+    assert!(MimeClassifier::get_media_type(&mime::TEXT_HTML) == Some(MediaType::Html));
+}

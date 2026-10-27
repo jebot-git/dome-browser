@@ -18,7 +18,7 @@ impl Downloads {
         let (sender, receiver) = mpsc::channel();
         Self { sender, receiver }
     }
-    pub fn start(&self, view: &WebView, url: Url, copy_image: bool) {
+    pub fn start(&self, view: &WebView, url: Url, copy_image: bool, context: Option<servo::EmbedderControlId>) {
         let sender = self.sender.clone();
         let directory = if copy_image { None } else {
             match downloads_directory() {
@@ -28,7 +28,7 @@ impl Downloads {
         };
         let mut file: Option<PendingFile> = None;
         let mut bytes = Vec::new();
-        let result = view.download_resource(url, move |event| {
+        let result = view.download_resource_in_context(url, context, move |event| {
             let result: Result<(), String> = (|| {
                 match event {
                     ResourceDownloadEvent::Response { url, content_type, content_disposition } => {
@@ -135,8 +135,8 @@ fn filename(url: &Url, disposition: &str, mime: &str) -> String {
             }
         }
     }
-    let fallback = || url.path_segments().and_then(|mut s| s.next_back())
-        .filter(|s| !s.is_empty()).map(decode_percent).unwrap_or_default();
+    let fallback = || crate::smallnet::download_filename(url).unwrap_or_else(||url.path_segments().and_then(|mut s| s.next_back())
+        .filter(|s| !s.is_empty()).map(decode_percent).unwrap_or_default());
     let candidate = extended.or(plain).unwrap_or_else(fallback);
     let candidate = candidate.rsplit(['/', '\\']).next().unwrap_or("");
     let mut name: String = candidate.chars().filter(|c| !c.is_control()).take(160).collect();
@@ -202,5 +202,17 @@ mod tests {
         drop(pending);
         assert!(!dir.join("partial").exists());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn native_download_names_use_protocol_resource_paths() {
+        for (url,expected) in [
+            ("gopher://host/9report%20test.bin","report test.bin"),
+            ("gopher+://host/0/report.txt%09%09%2Btext%2Fplain","report.txt"),
+            ("ftp://host/pub/report.txt;type=a","report.txt"),
+            ("gemini://host/pub/caf%C3%A9.txt","café.txt"),
+            ("scroll://host/pub/picture.png","picture.png"),
+            ("nex://host/pub/picture.png","picture.png"),
+            ("spartan://host/pub/picture.png","picture.png"),
+        ] {assert_eq!(filename(&Url::parse(url).unwrap(),"","application/octet-stream"),expected);}
     }
 }

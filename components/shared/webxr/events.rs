@@ -28,7 +28,7 @@ pub enum Event {
     /// Input from an input source has changed
     InputChanged(InputId, InputFrame),
     /// Reference space has changed
-    ReferenceSpaceChanged(BaseSpace, RigidTransform3D<f32, ApiSpace, ApiSpace>),
+    ReferenceSpaceChanged(BaseSpace, Option<RigidTransform3D<f32, ApiSpace, ApiSpace>>),
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]

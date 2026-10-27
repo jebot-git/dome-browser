@@ -1,0 +1,38 @@
+<!doctype html><meta charset="utf-8"><title>SVG resource loading controls</title>
+<style>html,body{margin:0;background:white} .case{position:absolute;top:0;width:80px;height:80px;background:red} #html{left:0} #network{left:90px} #external{left:180px} #local{left:270px} #embedded{left:360px}</style>
+<script>
+const events = {};
+function result(id, kind) { events[id] = kind; }
+</script>
+<img id="html" class="case" src="/timing-control.svg?control=html" onload="result('html','load')" onerror="result('html','error')">
+<svg id="network" class="case" xmlns="http://www.w3.org/2000/svg" width="80" height="80">
+ <image href="/timing-control.svg?control=svg-image" width="80" height="80" onload="result('network','load')" onerror="result('network','error')"/>
+</svg>
+<svg id="external" class="case" xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 2 2">
+ <use href="/timing-control.svg?control=svg-use"/>
+</svg>
+<svg id="local" class="case" xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 2 2">
+ <defs><rect id="local-green" width="2" height="2" fill="green"/></defs><use href="#local-green"/>
+</svg>
+<svg id="embedded" class="case" xmlns="http://www.w3.org/2000/svg" width="80" height="80">
+ <image href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='2'%20height='2'%3E%3Crect%20width='2'%20height='2'%20fill='green'/%3E%3C/svg%3E" width="80" height="80" onload="result('embedded','load')" onerror="result('embedded','error')"/>
+</svg>
+<script>
+const detached = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+const corsChecks = [{name:'crossOrigin defaults to null',passed:detached.crossOrigin===null}];
+detached.crossOrigin = 'UsE-CrEdEnTiAlS';
+corsChecks.push({name:'crossOrigin setter reflects attribute',passed:detached.getAttribute('crossorigin')==='UsE-CrEdEnTiAlS' && detached.crossOrigin==='use-credentials'});
+detached.setAttribute('crossorigin','invalid');
+corsChecks.push({name:'invalid crossOrigin reflects anonymous',passed:detached.crossOrigin==='anonymous'});
+detached.crossOrigin = null;
+corsChecks.push({name:'crossOrigin null removes attribute',passed:!detached.hasAttribute('crossorigin') && detached.crossOrigin===null});
+setTimeout(() => fetch('/report', {method:'POST', body:JSON.stringify({
+ checks:[...corsChecks,
+  {name:'HTML image positive control loads',passed:events.html==='load'},
+  {name:'SVG network image delivers load',passed:events.network==='load'},
+  {name:'SVG embedded image delivers load',passed:events.embedded==='load'}
+ ],diagnostics:{events,networkResources:performance.getEntriesByType('resource').map(r=>({name:r.name,initiatorType:r.initiatorType}))},
+ pixel_cases:[{name:'HTML image',x:20,y:20},{name:'SVG network image',x:110,y:20},{name:'external use',x:200,y:20},{name:'local use control',x:290,y:20},{name:'SVG embedded image',x:380,y:20}],
+ scope:'Controlled same-origin SVG resource probe with local and embedded controls; screenshot colors and server requests required in addition to DOM events.'
+})}),1600);
+</script>

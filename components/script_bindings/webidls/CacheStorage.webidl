@@ -3,9 +3,15 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // https://w3c.github.io/ServiceWorker/#cachestorage
-[Pref="dom_serviceworker_enabled", SecureContext, Exposed=(Window,Worker)]
+[Func="CacheStorage::is_enabled", SecureContext, Exposed=(Window,Worker)]
 interface CacheStorage {
+  [NewObject] Promise<(Response or undefined)> match(RequestInfo request, optional MultiCacheQueryOptions options = {});
   [NewObject] Promise<boolean> has(DOMString cacheName);
   [NewObject] Promise<Cache> open(DOMString cacheName);
   [NewObject] Promise<boolean> delete(DOMString cacheName);
+  [NewObject] Promise<sequence<DOMString>> keys();
+};
+
+dictionary MultiCacheQueryOptions : CacheQueryOptions {
+  DOMString cacheName;
 };

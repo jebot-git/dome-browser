@@ -16,6 +16,7 @@ mod dom_traversal;
 mod flexbox;
 pub mod flow;
 mod formatting_contexts;
+mod image_fallback;
 mod fragment_tree;
 pub mod geom;
 mod layout_box_base;

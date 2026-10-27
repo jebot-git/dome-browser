@@ -39,7 +39,7 @@ use profile_traits::generic_callback::GenericCallback as ProfileGenericCallback;
 use rustc_hash::FxHashMap;
 use rustls_pki_types::CertificateDer;
 use serde::{Deserialize, Serialize};
-use servo_base::generic_channel::CallbackSetter;
+use servo_base::generic_channel::{CallbackSetter, GenericCallback};
 use servo_base::id::PipelineId;
 use servo_url::{Host, ServoUrl};
 use tokio::sync::Mutex as TokioMutex;
@@ -55,15 +55,26 @@ use crate::fetch::fetch_params::{
 };
 use crate::filemanager_thread::FileManager;
 use crate::http_loader::{HttpState, determine_requests_referrer, http_fetch, set_default_accept};
-use crate::protocols::{ProtocolRegistry, is_url_potentially_trustworthy};
+use crate::protocols::{ProtocolRegistry, is_claimed_url_potentially_trustworthy, is_url_potentially_trustworthy};
 use crate::request_interceptor::RequestInterceptor;
 use crate::subresource_integrity::is_response_integrity_valid;
 
 pub type Target<'a> = &'a mut (dyn FetchTaskTarget + Send);
 
+struct ProtocolContinuationGuard(Option<GenericCallback<()>>);
+impl Drop for ProtocolContinuationGuard {
+    fn drop(&mut self) {
+        if let Some(callback) = self.0.take() {
+            let _ = callback.send(());
+        }
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 pub enum Data {
     Payload(bytes::Bytes),
+    /// The producer keeps at most one native download chunk in flight.
+    PayloadWithAck(bytes::Bytes, GenericCallback<()>),
     ContentLength(usize),
     Done,
     Cancelled,
@@ -116,6 +127,14 @@ pub struct FetchContext {
 #[derive(Default)]
 pub struct CancellationListener {
     cancelled: AtomicBool,
+}
+
+impl FetchContext {
+    /// Whether the resource load has been cancelled by its owner.
+    /// Custom protocol handlers should observe this while awaiting transport or UI.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation_listener.cancelled()
+    }
 }
 
 impl CancellationListener {
@@ -558,8 +577,7 @@ pub async fn main_fetch(
     // Step 11. If recursive is false, then run the remaining steps in parallel.
     // Not applicable: see fetch_async.
 
-    let current_url = request.current_url();
-    let current_scheme = current_url.scheme();
+    let url_before_interception = request.current_url();
 
     // Intercept the request and maybe override the response.
     context
@@ -568,6 +586,9 @@ pub async fn main_fetch(
         .await
         .intercept_request(request, &mut response, &fetch_params.timing_info)
         .await;
+    let current_url = request.current_url();
+    let current_scheme = current_url.scheme();
+    let query_changed = current_url != url_before_interception;
 
     let mut response = match response {
         Some(response) => response,
@@ -580,16 +601,18 @@ pub async fn main_fetch(
                 false
             };
 
-            // fetchParams’s preloaded response candidate is non-null
-            if let Some((response, preload_id)) =
-                fetch_params.preload_response_candidate.response().await
-            {
+            let preloaded = fetch_params.preload_response_candidate.response().await
+                .and_then(|(response, preload_id)| {
+                    context.preloaded_resources.lock().unwrap().remove(&preload_id);
+                    // A preload may already have been filtered, or may predate a
+                    // policy change. Reuse only the effective requested URL after
+                    // rewriting; a mismatch follows the ordinary Fetch path.
+                    (!query_changed || response.actual_response().url_list.first() == Some(&current_url))
+                        .then_some(response)
+                });
+            // fetchParams’s compatible preloaded response candidate is non-null
+            if let Some(response) = preloaded {
                 response.get_resource_timing().inner().preloaded = true;
-                context
-                    .preloaded_resources
-                    .lock()
-                    .unwrap()
-                    .remove(&preload_id);
                 response
             }
             // request's current URL's origin is same origin with request's origin, and request's
@@ -674,6 +697,24 @@ pub async fn main_fetch(
             }
         },
     };
+
+    // Native protocol redirects must retain the original consumer, including its
+    // streaming acknowledgements. Re-enter Fetch policy before retrieving the
+    // destination instead of buffering it through a DiscardFetch target.
+    if let Some(continuation) = response.custom_redirect.take() {
+        let _completion = ProtocolContinuationGuard(continuation.finished);
+        let request = &mut fetch_params.request;
+        if continuation.count_redirect && request.redirect_count >= 10 {
+            response = Response::network_error(NetworkError::TooManyRedirects);
+        } else if let Ok(claim) = net_traits::blob_url_store::UrlWithBlobClaim::for_url(continuation.url) {
+            if continuation.count_redirect { request.redirect_count += 1; }
+            request.url_list.push(claim);
+            return Box::pin(main_fetch(fetch_params, cache, recursive_flag, target, done_chan, context)).await;
+        } else {
+            response = Response::network_error(NetworkError::UnsupportedScheme);
+        }
+        // Errors still follow the ordinary final response/EOF notifications.
+    }
 
     // Step 13. If recursive is true, then return response.
     if recursive_flag {
@@ -944,6 +985,10 @@ async fn wait_for_response(
                         body.extend(&bytes);
                     }
                     target.process_response_chunk(request, bytes);
+                },
+                Some(Data::PayloadWithAck(bytes, ack)) => {
+                    // Native downloads do not accumulate complete bodies for DevTools.
+                    target.process_response_chunk_with_ack(request, bytes, ack);
                 },
                 Some(Data::Error(network_error)) => {
                     if network_error == NetworkError::DecompressionError {
@@ -1273,7 +1318,7 @@ pub fn should_request_be_blocked_as_mixed_content(
     }
 
     // 1.2. request’s URL is a potentially trustworthy URL.
-    if is_url_potentially_trustworthy(protocol_registry, &request.current_url()) {
+    if is_claimed_url_potentially_trustworthy(protocol_registry, &request.current_url_with_blob_claim()) {
         return false;
     }
 
@@ -1308,7 +1353,16 @@ pub fn should_response_be_blocked_as_mixed_content(
     if response
         .actual_response()
         .url()
-        .is_some_and(|response_url| is_url_potentially_trustworthy(protocol_registry, response_url))
+        .is_some_and(|response_url| {
+            let claimed_url = request.current_url_with_blob_claim();
+            // A plain response URL can reuse only the claim for that exact URL.
+            // Never transfer a request's local/opaque origin to another response.
+            if response_url.scheme() == "blob" && *response_url == claimed_url.url() {
+                is_claimed_url_potentially_trustworthy(protocol_registry, &claimed_url)
+            } else {
+                is_url_potentially_trustworthy(protocol_registry, response_url)
+            }
+        })
     {
         return false;
     }
@@ -1326,7 +1380,7 @@ pub fn should_response_be_blocked_as_mixed_content(
 }
 
 /// <https://fetch.spec.whatwg.org/#bad-port>
-fn is_bad_port(port: u16) -> bool {
+pub fn is_bad_port(port: u16) -> bool {
     static BAD_PORTS: [u16; 83] = [
         0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95,
         101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179,
@@ -1381,7 +1435,7 @@ fn should_upgrade_request_to_potentially_trustworthy(
         // request’s header list if any of the following criteria are met:
         // * request’s URL is not a potentially trustworthy URL
         // * request’s URL's host is not a preloadable HSTS host
-        if !is_url_potentially_trustworthy(&context.protocols, &request.current_url()) ||
+        if !is_claimed_url_potentially_trustworthy(&context.protocols, &request.current_url_with_blob_claim()) ||
             request
                 .current_url()
                 .host_str()
@@ -1447,7 +1501,7 @@ fn should_upgrade_mixed_content_request(
 ) -> bool {
     let url = request.url();
     // Step 1.1 : request’s URL is a potentially trustworthy URL.
-    if is_url_potentially_trustworthy(protocol_registry, &url) {
+    if is_claimed_url_potentially_trustworthy(protocol_registry, &request.url_with_blob_claim()) {
         return false;
     }
 

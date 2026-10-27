@@ -11,11 +11,13 @@ use layout_api::{
 };
 use script::layout_dom::ServoLayoutNode;
 use servo_arc::Arc as ServoArc;
+use style::context::QuirksMode;
 use style::dom::NodeInfo;
 use style::properties::ComputedValues;
 use style::selector_parser::PseudoElement;
 use style::values::generics::counters::{Content, ContentItem};
 use style::values::specified::Quotes;
+use web_atoms::{local_name, ns};
 
 use crate::context::LayoutContext;
 use crate::dom::{BoxSlot, LayoutBox, NodeExt};
@@ -74,6 +76,9 @@ pub(super) enum Contents {
 pub(super) enum NonReplacedContents {
     /// Refers to a DOM subtree, plus `::before` and `::after` pseudo-elements.
     OfElement,
+    /// Alternative text of an image whose request has failed. This is layout
+    /// content, not an author-visible text node.
+    OfImageAltText(String),
     /// Content of a `::before` or `::after` pseudo-element that is being generated.
     /// <https://drafts.csswg.org/css2/generate.html#content>
     OfPseudoElement(Vec<PseudoElementContentItem>),
@@ -83,6 +88,16 @@ pub(super) enum NonReplacedContents {
 pub(super) enum PseudoElementContentItem {
     Text(String),
     Replaced(ReplacedContents),
+}
+
+/// Dimensioned images retain replaced fallback layout in quirks mode.
+pub(super) fn image_has_quirks_dimensions(
+    context: &LayoutContext,
+    style: &ComputedValues,
+) -> bool {
+    let position = style.get_position();
+    context.style_context.quirks_mode() == QuirksMode::Quirks &&
+        (!position.get_width().is_auto() || !position.get_height().is_auto())
 }
 
 /// A reference to a string encountered during box tree construction. This
@@ -297,6 +312,31 @@ impl Contents {
         if is_widget {
             Self::Widget(NonReplacedContents::OfElement)
         } else if let Some(replaced) = ReplacedContents::for_element(node, context) {
+            // HTML's image rendering rules make settled alternative text
+            // non-replaced phrasing content. CSS image replacement still wins.
+            if !replaced.is_content_replacement && node.image_is_ready_for_fallback() {
+                let style = node.style(&context.style_context);
+                if image_has_quirks_dimensions(context, &style) &&
+                    let Some(alt) = node.as_element().and_then(|element| {
+                        element.attribute_as_str(&ns!(), &local_name!("alt"))
+                            .filter(|text| !text.is_empty()).map(str::to_owned)
+                    })
+                {
+                    return Self::Replaced(ReplacedContents::from_alt_text(node, context, alt));
+                }
+                if !image_has_quirks_dimensions(context, &style) &&
+                    let Some(alt) = node.as_element().and_then(|element| {
+                        element.attribute_as_str(&ns!(), &local_name!("alt")).map(str::to_owned)
+                    })
+                {
+                    if alt.is_empty() {
+                        // An image representing nothing has zero natural size,
+                        // rather than inheriting the broken-image icon's size.
+                        return Self::Replaced(ReplacedContents::zero_sized_invalid_image(node, context));
+                    }
+                    return Self::NonReplaced(NonReplacedContents::OfImageAltText(alt));
+                }
+            }
             Self::Replaced(replaced)
         } else {
             Self::NonReplaced(NonReplacedContents::OfElement)
@@ -324,6 +364,11 @@ impl NonReplacedContents {
     ) {
         match self {
             NonReplacedContents::OfElement => traverse_children_of(info, context, handler),
+            NonReplacedContents::OfImageAltText(text) => {
+                traverse_eager_pseudo_element(PseudoElement::Before, info, context, handler);
+                handler.handle_text(info, text.into());
+                traverse_eager_pseudo_element(PseudoElement::After, info, context, handler);
+            },
             NonReplacedContents::OfPseudoElement(items) => {
                 traverse_pseudo_element_contents(info, context, handler, items)
             },

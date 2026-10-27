@@ -35,6 +35,8 @@ unsafe extern "C" {
     pub fn browser_ui_open(url: *const c_char) -> i32;
     pub fn browser_ui_wait(seconds: f64);
     pub fn browser_ui_poll(event: *mut Event) -> i32;
+    pub fn browser_ui_page_focused() -> i32;
+    pub fn browser_ui_visible() -> i32;
     pub fn browser_ui_wake();
     pub fn browser_ui_close();
     pub fn browser_ui_frame(pixels: *const u8, width: u32, height: u32);
@@ -42,12 +44,17 @@ unsafe extern "C" {
     pub fn browser_ui_wallet(json: *const c_char) -> *const c_char;
     pub fn browser_ui_wallet_clear();
     pub fn browser_ui_history(json: *const c_char);
+    pub fn browser_ui_edit_cookies(text: *const c_char) -> *const c_char;
+    pub fn browser_ui_cookie_policy(blocked: i32);
     pub fn browser_ui_tabs(json: *const c_char, active: i32);
     pub fn browser_ui_status(text: *const c_char);
     pub fn browser_ui_cursor(cursor: i32);
     pub fn browser_ui_fullscreen(enabled: i32);
     pub fn browser_ui_ask(title: *const c_char, message: *const c_char) -> i32;
     pub fn browser_ui_prompt(message: *const c_char, value: *const c_char) -> *const c_char;
+    pub fn browser_ui_smallnet_form_open(json: *const c_char) -> i32;
+    pub fn browser_ui_smallnet_form_poll(output: *mut c_char, capacity: usize) -> i32;
+    pub fn browser_ui_smallnet_form_close();
     pub fn browser_ui_password(message: *const c_char) -> *const c_char;
     pub fn browser_ui_color(red: *mut u8, green: *mut u8, blue: *mut u8) -> i32;
     pub fn browser_ui_copy_image(pixels: *const u8, width: i32, height: i32);
@@ -58,6 +65,7 @@ unsafe extern "C" {
     pub fn browser_ui_file(multiple: i32) -> *const c_char;
     pub fn browser_ui_select(json: *const c_char, x: i32, y: i32) -> i32;
     pub fn browser_ui_notification(json: *const c_char);
+    pub fn browser_ui_screen_geometry(values: *mut i32);
     pub fn browser_ui_width() -> i32;
     pub fn browser_ui_height() -> i32;
     pub fn browser_ui_light() -> i32;
@@ -89,5 +97,18 @@ pub fn dimensions() -> dpi::PhysicalSize<u32> {
             browser_ui_width().max(1) as u32,
             browser_ui_height().max(1) as u32,
         )
+    }
+}
+
+pub fn screen_geometry() -> servo::ScreenGeometry {
+    let mut values = [0; 8];
+    unsafe { browser_ui_screen_geometry(values.as_mut_ptr()); }
+    servo::ScreenGeometry {
+        size: servo::DeviceIntSize::new(values[0], values[1]),
+        available_size: servo::DeviceIntSize::new(values[2], values[3]),
+        window_rect: servo::DeviceIntRect::from_origin_and_size(
+            servo::DeviceIntPoint::new(values[4], values[5]),
+            servo::DeviceIntSize::new(values[6], values[7]),
+        ),
     }
 }

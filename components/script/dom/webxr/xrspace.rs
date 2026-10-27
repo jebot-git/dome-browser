@@ -36,7 +36,7 @@ impl XRSpace {
         }
     }
 
-    fn new_inputspace_inner(
+    pub(crate) fn new_inputspace_inner(
         session: &XRSession,
         input: &XRInputSource,
         is_grip_space: bool,
@@ -90,7 +90,15 @@ impl XRSpace {
     /// The reference origin used is common between all
     /// get_pose calls for spaces from the same device, so this can be used to compare
     /// with other spaces
+    pub(crate) fn input_pose_visible(&self) -> bool {
+        self.session.input_poses_visible()
+            && self.input_source.get().is_some_and(|source| source.connected())
+    }
+
     pub(crate) fn get_pose(&self, base_pose: &Frame) -> Option<ApiPose> {
+        if self.input_source.get().is_some() && !self.input_pose_visible() {
+            return None;
+        }
         if let Some(reference) = self.downcast::<XRReferenceSpace>() {
             reference.get_pose(base_pose)
         } else if let Some(joint) = self.downcast::<XRJointSpace>() {
@@ -105,8 +113,7 @@ impl XRSpace {
             let frame = base_pose
                 .inputs
                 .iter()
-                .find(|i| i.id == id)
-                .expect("no input found");
+                .find(|i| i.id == id)?;
             if self.is_grip_space {
                 frame.grip_origin.map(cast_transform)
             } else {

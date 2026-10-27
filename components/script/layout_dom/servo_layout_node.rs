@@ -283,6 +283,10 @@ impl<'dom> LayoutNode<'dom> for ServoLayoutNode<'dom> {
         self.node.showing_broken_image_icon()
     }
 
+    fn image_is_ready_for_fallback(&self) -> bool {
+        self.node.image_is_ready_for_fallback()
+    }
+
     fn image_data(&self) -> Option<(Option<Image>, Option<ImageMetadata>)> {
         self.node.image_data()
     }

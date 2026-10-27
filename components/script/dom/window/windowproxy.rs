@@ -374,7 +374,7 @@ impl WindowProxy {
             None,
             false,
             sandboxing_flag_set,
-        );
+        ).with_cookie_site(document.cookie_site());
         load_data.is_initial_about_blank = true;
         let load_info = AuxiliaryWebViewCreationRequest {
             load_data: load_data.clone(),
@@ -395,6 +395,7 @@ impl WindowProxy {
                 theme: Cell::new(window.webview_theme()),
                 // WebViews start focused by default for now.
                 has_system_focus: Cell::new(true),
+                hidden: Cell::new(false),
             },
             parent_info: None,
             new_pipeline_id: response.new_pipeline_id,
@@ -404,6 +405,7 @@ impl WindowProxy {
             viewport_details: window.viewport_details(),
             user_content_manager_id: response.user_content_manager_id,
             target_snapshot_params: TargetSnapshotParams {
+                container_embedder_policy: Default::default(),
                 sandboxing_flags: sandboxing_flag_set,
                 iframe_element_referrer_policy: ReferrerPolicy::EmptyString,
             },
@@ -623,7 +625,7 @@ impl WindowProxy {
                 Some(target_document.insecure_requests_policy()),
                 has_trustworthy_ancestor_origin,
                 target_document.creation_sandboxing_flag_set_considering_parent_iframe(),
-            );
+            ).with_cookie_site(source_document.cookie_site());
 
             // Handle javascript: URLs specially to report CSP violations to the source window
             // https://html.spec.whatwg.org/multipage/#navigate-to-a-javascript:-url
@@ -909,6 +911,10 @@ impl WindowProxy {
     pub(crate) fn document_origin_and_internal_ancestor_origin_objects_list(
         &self,
     ) -> Option<(OriginSnapshot, Vec<ImmutableOrigin>)> {
+        self.document_origin_details().map(|(origin, ancestors, _)| (origin, ancestors))
+    }
+
+    fn document_origin_details(&self) -> Option<(OriginSnapshot, Vec<ImmutableOrigin>, Option<ImmutableOrigin>)> {
         let pipeline_id = self.currently_active()?;
         let (result_sender, result_receiver) = generic_channel::channel().unwrap();
         self.global()
@@ -919,6 +925,13 @@ impl WindowProxy {
             ))
             .ok()?;
         result_receiver.recv().ok()?
+    }
+
+    pub(crate) fn parent_cookie_site(&self) -> Option<ImmutableOrigin> {
+        if let Some(frame) = self.frame_element() {
+            return frame.owner_document().cookie_site();
+        }
+        self.parent()?.document_origin_details()?.2
     }
 
     /// <https://html.spec.whatwg.org/multipage/#internal-ancestor-origin-objects-list-creation-steps>
@@ -1017,8 +1030,8 @@ impl WindowProxy {
     }
 
     pub(crate) fn set_currently_active(&self, cx: &mut JSContext, window: &Window) {
-        if let Some(pipeline_id) = self.currently_active() &&
-            pipeline_id == window.pipeline_id()
+        if let Some(pipeline_id) = self.currently_active()
+            && pipeline_id == window.pipeline_id()
         {
             return debug!(
                 "Attempt to set the currently active window to the currently active window."
@@ -1398,8 +1411,8 @@ unsafe fn has_or_has_own(
     let window = WindowOrDissimilarOriginWindow::new(cx, target.handle());
 
     let (success, found) = if is_platform_object_same_origin(cx, proxy) {
-        if let Some(array_index) = get_array_index_from_id(id) &&
-            window
+        if let Some(array_index) = get_array_index_from_id(id)
+            && window
                 .window_proxy_for_child_navigable_at_index(array_index)
                 .is_some()
         {
@@ -1470,8 +1483,8 @@ unsafe extern "C" fn get(
 
     // Step 3. If IsPlatformObjectSameOrigin(W) is true, then return ? OrdinaryGet(this, P, Receiver).
     if is_platform_object_same_origin(cx, proxy) {
-        if let Some(index) = get_array_index_from_id(id) &&
-            let Some(window_proxy) = window.window_proxy_for_child_navigable_at_index(index)
+        if let Some(index) = get_array_index_from_id(id)
+            && let Some(window_proxy) = window.window_proxy_for_child_navigable_at_index(index)
         {
             window_proxy.to_jsval(cx, return_value);
             return true;

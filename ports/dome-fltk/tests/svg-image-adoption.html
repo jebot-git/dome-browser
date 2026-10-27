@@ -1,0 +1,26 @@
+<!doctype html><meta charset="utf-8"><title>SVG image document adoption</title>
+<style>html,body{margin:0}iframe{position:absolute;left:0;top:0;border:0;width:80px;height:80px}#source{position:absolute;left:90px;top:0}</style>
+<script>
+(async()=>{
+ const SVG='http://www.w3.org/2000/svg',mode=new URL(location).searchParams.get('mode')||'pending-blocked';
+ const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms)),events=[],checks=[];
+ const root=document.createElementNS(SVG,'svg');root.id='source';root.setAttribute('width',80);root.setAttribute('height',80);document.documentElement.append(root);
+ const image=document.createElementNS(SVG,'image');image.setAttribute('width',80);image.setAttribute('height',80);
+ image.onload=()=>events.push({type:'load',child:image.ownerDocument!==document});image.onerror=()=>events.push({type:'error',child:image.ownerDocument!==document});
+ image.setAttribute('href','/svg-image.svg?name=adoption-'+mode+'&delay='+ (mode.startsWith('loaded')?'0':'650'));
+ root.append(image);
+ if(mode.startsWith('loaded')){for(let n=0;n<100&&!events.length;n++)await wait(20)}else await wait(150);
+ const before=events.slice();
+ if(mode==='detach'){image.remove();await wait(1500)}else{
+  const frame=document.createElement('iframe');const ready=new Promise(resolve=>frame.onload=resolve);
+  frame.srcdoc='<meta http-equiv="Content-Security-Policy" content="img-src '+(mode.endsWith('blocked')?"\'none\'":"\'self\'")+'"><style>html,body{margin:0}</style><svg xmlns="'+SVG+'" width="80" height="80"><rect width="80" height="80" fill="red"/></svg>';
+  document.documentElement.append(frame);await ready;
+  const child=frame.contentDocument;child.querySelector('svg').append(child.adoptNode(image));await wait(1600);
+  checks.push({name:'node belongs to adopting document',passed:image.ownerDocument===child});
+  if(mode.endsWith('blocked'))checks.push({name:'blocked document has no successful image load',passed:!events.slice(before.length).some(e=>e.type==='load')});
+  else checks.push({name:'allowed document loads adopted image',passed:events.slice(before.length).some(e=>e.type==='load')});
+ }
+ checks.push({name:'public href remains original',passed:!image.getAttribute('href').startsWith('data:')});
+ fetch('/report',{method:'POST',body:JSON.stringify({checks,diagnostics:{mode,before,events},pixel_cases:mode==='detach'?[]:[{name:'adopted-image',x:20,y:20,expected:mode.endsWith('blocked')?'not-green':'green'}]})});
+})().catch(error=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[{name:'fixture completed',passed:false,error:String(error)}]})}));
+</script>

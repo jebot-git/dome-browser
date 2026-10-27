@@ -7,6 +7,7 @@
 pub mod async_runtime;
 pub mod connector;
 pub mod cookie;
+mod cookie_file;
 pub mod cookie_storage;
 mod decoder;
 mod devtools;
@@ -37,6 +38,8 @@ pub mod fetch {
 
 /// A module for re-exports of items used in unit tests.
 pub mod test {
+    #[cfg(feature = "test-util")]
+    pub use crate::websocket_loader::{create_handshake_request, websocket_transport_handshake};
     pub use crate::decoder::{BodyStreamError, DECODER_BUFFER_SIZE, map_decode_error};
     pub use crate::hosts::parse_hostsfile;
     pub use crate::http_loader::HttpState;

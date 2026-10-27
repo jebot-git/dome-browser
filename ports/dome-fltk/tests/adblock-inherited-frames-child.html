@@ -1,0 +1,19 @@
+<!doctype html><meta charset=utf-8><base href="__BASE_URL__">
+<style nonce=fixture>.ad,.site-ad,.allowed,.content{display:block!important;width:100px;height:40px;background:red}.allowed,.content{background:lime}</style>
+<div class=ad>Ad</div><div class=site-ad>Host ad</div><div class=allowed>Exception</div><div class=content>Content</div>
+<script nonce=fixture>
+const frameKind='__FRAME_ID__',opaque=['opaque','data','opaque-blob'].includes(frameKind),begun=performance.now();
+let initial;
+function reportWhenSettled(){
+ const sample={frame:frameKind,url:location.href,base:document.baseURI,
+  generic:getComputedStyle(document.querySelector('.ad')).display,
+  site:getComputedStyle(document.querySelector('.site-ad')).display,
+  allowed:getComputedStyle(document.querySelector('.allowed')).display,
+  content:getComputedStyle(document.querySelector('.content')).display};
+ if(!initial)initial={generic:sample.generic,site:sample.site,allowed:sample.allowed,ms:performance.now()-begun};
+ const settled=sample.generic==='none'&&sample.site===(opaque?'block':'none')&&sample.allowed===(opaque?'none':'block');
+ if(!settled&&performance.now()-begun<2000){setTimeout(reportWhenSettled,20);return;}
+ parent.postMessage({...sample,initial,settleMs:performance.now()-begun},'*');
+}
+setTimeout(reportWhenSettled,300);
+</script>

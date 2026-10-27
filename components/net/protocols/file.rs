@@ -9,7 +9,7 @@ use std::pin::Pin;
 
 use headers::{ContentLength, ContentRange, ContentType, HeaderMapExt, Range};
 use http::Method;
-use net_traits::request::Request;
+use net_traits::request::{Destination, Origin, Request, RequestMode};
 use net_traits::response::{Response, ResponseBody};
 use net_traits::{NetworkError, ResourceFetchTiming};
 use tokio::sync::mpsc::unbounded_channel;
@@ -31,6 +31,24 @@ impl ProtocolHandler for FileProtocolHander {
         done_chan: &mut DoneChannel,
         context: &FetchContext,
     ) -> Pin<Box<dyn Future<Output = Response> + Send + 'a>> {
+        // A web page cannot turn a no-CORS image, frame or worker fetch into
+        // filesystem authority. Check before metadata, directory listing or open.
+        // The browser's explicit top-level navigation is the initial grant;
+        // descendant local documents/workers inherit it through native policy.
+        let local_authority = request.policy_container.policy_container()
+            .and_then(|policy| policy.local_file_origin.as_ref())
+            .is_some_and(|local_origin| matches!(&request.origin,
+                Origin::Origin(origin) if origin == local_origin));
+        let browser_navigation = request.mode == RequestMode::Navigate &&
+            request.destination == Destination::Document &&
+            request.client.as_ref().is_some_and(|client| {
+                client.cookie_client_is_null && !client.is_nested_browsing_context
+            });
+        if !local_authority && !browser_navigation {
+            return Box::pin(ready(Response::network_error(
+                NetworkError::ResourceLoadError("Local file access denied".into()),
+            )));
+        }
         let url = request.current_url();
 
         if request.method != Method::GET {

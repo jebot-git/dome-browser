@@ -221,6 +221,8 @@ pub struct Element {
     /// operations may require restyling this element or its descendants.
     selector_flags: AtomicUsize,
     rare_data: DomRefCell<Option<Box<ElementRareData>>>,
+    /// The common global-registry case does not need a rare-data allocation.
+    custom_element_registry_is_global: Cell<bool>,
 
     /// Style data for this node. This is accessed and mutated by style
     /// passes and is used to lay out this node and populate layout data.
@@ -301,6 +303,22 @@ impl Element {
         create_element(cx, name, is, document, creator, mode, proto)
     }
 
+    #[expect(clippy::too_many_arguments)]
+    pub(crate) fn create_with_registry(
+        cx: &mut JSContext,
+        name: QualName,
+        is: Option<LocalName>,
+        document: &Document,
+        creator: ElementCreator,
+        mode: CustomElementCreationMode,
+        proto: Option<HandleObject>,
+        registry: Option<&CustomElementRegistry>,
+    ) -> DomRoot<Element> {
+        crate::dom::element::create::create_element_with_registry(
+            cx, name, is, document, creator, mode, proto, registry,
+        )
+    }
+
     pub(crate) fn new_inherited(
         local_name: LocalName,
         namespace: Namespace,
@@ -336,6 +354,9 @@ impl Element {
             state: Cell::new(state),
             selector_flags: Default::default(),
             rare_data: Default::default(),
+            custom_element_registry_is_global: Cell::new(
+                document.effective_global_custom_element_registry().is_some(),
+            ),
             style_data: Default::default(),
         }
     }
@@ -670,6 +691,23 @@ impl Element {
         delegates_focus: bool,
         slot_assignment_mode: SlotAssignmentMode,
     ) -> Fallible<DomRoot<ShadowRoot>> {
+        let registry = self.owner_document().custom_element_registry();
+        self.attach_shadow_with_registry(cx, is_ua_widget, mode, clonable, serializable,
+            delegates_focus, slot_assignment_mode, registry.as_deref())
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    pub(crate) fn attach_shadow_with_registry(
+        &self,
+        cx: &mut JSContext,
+        is_ua_widget: IsUserAgentWidget,
+        mode: ShadowRootMode,
+        clonable: bool,
+        serializable: bool,
+        delegates_focus: bool,
+        slot_assignment_mode: SlotAssignmentMode,
+        registry: Option<&CustomElementRegistry>,
+    ) -> Fallible<DomRoot<ShadowRoot>> {
         // Step 1. If element’s namespace is not the HTML namespace,
         // then throw a "NotSupportedError" DOMException.
         if self.namespace != ns!(html) {
@@ -782,6 +820,11 @@ impl Element {
 
         // Step 11. Set shadow's serializable to serializable
         shadow_root.set_serializable(serializable);
+
+        shadow_root.set_custom_element_registry(registry);
+        if self.node.is_connected() && let Some(registry) = registry.filter(|registry| registry.is_scoped()) {
+            registry.add_scoped_document(&document);
+        }
 
         // Step 12. Set element’s shadow root to shadow
         self.ensure_rare_data(cx.no_gc()).shadow_root = Some(Dom::from_ref(&*shadow_root));
@@ -1841,10 +1884,22 @@ impl Element {
         registry: Option<&CustomElementRegistry>,
         no_gc: &NoGC,
     ) {
-        self.ensure_rare_data(no_gc).custom_element_registry = registry.map(Dom::from_ref);
+        let global = registry.is_some_and(|registry| !registry.is_scoped() &&
+            self.node.owner_doc().custom_element_registry().as_deref() == Some(registry));
+        self.custom_element_registry_is_global.set(global);
+        if global || registry.is_none() {
+            if let Some(data) = self.rare_data.safe_borrow_mut(no_gc).as_mut() {
+                data.custom_element_registry = None;
+            }
+        } else {
+            self.ensure_rare_data(no_gc).custom_element_registry = registry.map(Dom::from_ref);
+        }
     }
 
     pub(crate) fn custom_element_registry(&self) -> Option<DomRoot<CustomElementRegistry>> {
+        if self.custom_element_registry_is_global.get() {
+            return self.node.owner_doc().effective_global_custom_element_registry();
+        }
         self.rare_data()
             .as_ref()?
             .custom_element_registry
@@ -2777,9 +2832,19 @@ impl Element {
         markup: DOMString,
         cx: &mut JSContext,
     ) -> Fallible<DomRoot<DocumentFragment>> {
+        let registry = if self.is::<HTMLTemplateElement>() { None } else { self.custom_element_registry() };
+        self.parse_fragment_with_registry(markup, cx, registry.as_deref())
+    }
+
+    pub(crate) fn parse_fragment_with_registry(
+        &self,
+        markup: DOMString,
+        cx: &mut JSContext,
+        registry: Option<&CustomElementRegistry>,
+    ) -> Fallible<DomRoot<DocumentFragment>> {
         // Steps 1-2.
         // TODO(#11995): XML case.
-        let new_children = ServoParser::parse_html_fragment(cx, self, markup, false);
+        let new_children = ServoParser::parse_html_fragment_with_registry(cx, self, markup, false, registry);
         // Step 3.
         // See https://github.com/w3c/DOM-Parsing/issues/61.
         let context_document = {
@@ -4315,9 +4380,16 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
         cx: &mut JSContext,
         init: &ShadowRootInit,
     ) -> Fallible<DomRoot<ShadowRoot>> {
+        let document = self.owner_document();
+        let registry = init.customElementRegistry.clone()
+            .unwrap_or_else(|| document.custom_element_registry());
+        if registry.as_ref().is_some_and(|registry| !registry.is_scoped() &&
+            document.custom_element_registry().as_deref() != Some(&**registry)) {
+            return Err(Error::NotSupported(None));
+        }
         // Step 1. Run attach a shadow root with this, init["mode"], init["clonable"], init["serializable"],
         // init["delegatesFocus"], and init["slotAssignment"].
-        let shadow_root = self.attach_shadow(
+        let shadow_root = self.attach_shadow_with_registry(
             cx,
             IsUserAgentWidget::No,
             init.mode,
@@ -4325,6 +4397,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
             init.serializable,
             init.delegatesFocus,
             init.slotAssignment,
+            registry.as_deref(),
         )?;
 
         // Step 2. Return this’s shadow root.
@@ -4962,6 +5035,9 @@ impl VirtualMethods for Element {
         // don't do this, various attribute-dependent htmlcollections (like those
         // generated by getElementsByClassName) might become stale.
         node.rev_version(cx.no_gc());
+        if attr.namespace() == &ns!() && matches!(*attr.local_name(), local_name!("class") | local_name!("id")) {
+            self.owner_document().note_cosmetic_element(Some(self));
+        }
 
         // Notify devtools that the DOM changed
         #[cfg(feature = "devtools")]
@@ -5024,6 +5100,7 @@ impl VirtualMethods for Element {
         }
 
         self.register_current_id_and_name_attribute(cx);
+        self.owner_document().note_cosmetic_element(Some(self));
     }
 
     fn unbind_from_tree(&self, cx: &mut JSContext, context: &UnbindContext) {

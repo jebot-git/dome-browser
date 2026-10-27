@@ -5,17 +5,20 @@
 use std::sync::Arc;
 
 use layout_api::{
-    DangerousStyleElement, DangerousStyleNode, LayoutDamage, LayoutElement, LayoutNode,
+    DangerousStyleElement, DangerousStyleNode, LayoutDamage, LayoutElement, LayoutElementType,
+    LayoutNode, LayoutNodeType,
 };
 use script::layout_dom::ServoLayoutNode;
 use style::context::{SharedStyleContext, StyleContext};
 use style::dom::{NodeInfo, TElement, TNode};
 use style::selector_parser::RestyleDamage;
 use style::traversal::{DomTraversal, recalc_style_at};
+use web_atoms::{local_name, ns};
 
 use crate::BoxTree;
 use crate::context::LayoutContext;
 use crate::dom::{DOMLayoutData, NodeExt};
+use crate::dom_traversal::image_has_quirks_dimensions;
 use crate::layout_root::LayoutRoot;
 
 pub struct RecalcStyle<'a> {
@@ -58,6 +61,21 @@ where
             element_data.damage = RestyleDamage::reconstruct();
         }
 
+        // Inline SVG is rasterized from a snapshot of computed paint. DOM mutation
+        // hooks cannot see inherited or stylesheet-driven changes, so compare paint
+        // during style traversal and refresh only the affected SVG snapshots.
+        let old_svg_style = dangerous_style_element
+            .is_svg_element()
+            .then(|| element_data.styles.get_primary().cloned())
+            .flatten();
+
+        let old_image_quirks_dimensions = layout_element.as_node()
+            .image_is_ready_for_fallback()
+            .then(|| element_data.styles.get_primary().map(|style| {
+                image_has_quirks_dimensions(self.context, style)
+            }))
+            .flatten();
+
         recalc_style_at(
             self,
             context,
@@ -65,6 +83,42 @@ where
             &mut element_data,
             note_child,
         );
+
+        if old_image_quirks_dimensions.is_some_and(|old| {
+            old != image_has_quirks_dimensions(self.context, element_data.styles.primary())
+        }) {
+            // Width/height ordinarily require only layout. Here they also change
+            // an image between replaced content and non-replaced fallback text.
+            element_data.damage |= RestyleDamage::reconstruct();
+        }
+
+        if let Some(old_style) = old_svg_style {
+            let new_style = element_data.styles.primary();
+            if old_style.get_inherited_svg() != new_style.get_inherited_svg()
+                || old_style.get_svg() != new_style.get_svg()
+                || old_style.get_effects().opacity != new_style.get_effects().opacity
+                || old_style.get_box().display != new_style.get_box().display
+                || old_style.get_inherited_box().visibility
+                    != new_style.get_inherited_box().visibility
+                || old_style.get_inherited_text().color != new_style.get_inherited_text().color
+            {
+                // Only read ancestor identities here; their style data may be in
+                // use by another traversal worker. Script evicts and serializes
+                // after the parallel traversal has finished.
+                let mut ancestor = Some(dangerous_style_element);
+                while let Some(element) = ancestor {
+                    let node = element.layout_element().as_node();
+                    if node.type_id()
+                        == Some(LayoutNodeType::Element(LayoutElementType::SVGSVGElement))
+                    {
+                        self.context
+                            .image_resolver
+                            .queue_svg_element_for_serialization(node);
+                    }
+                    ancestor = element.traversal_parent();
+                }
+            }
+        }
     }
 
     #[inline]
@@ -183,7 +237,7 @@ pub(crate) fn compute_damage_and_rebuild_box_tree_below_dirty_root<'dom>(
         return damage_from_parent;
     };
 
-    let (element_damage, is_display_none) = {
+    let (mut element_damage, is_display_none) = {
         let mut element_data = element.element_data_mut();
         (
             LayoutDamage::from(std::mem::take(&mut element_data.damage)),
@@ -202,6 +256,18 @@ pub(crate) fn compute_damage_and_rebuild_box_tree_below_dirty_root<'dom>(
     if is_display_none {
         node.unset_all_boxes();
         return element_damage | damage_from_parent;
+    }
+
+    // Replaced image fallback contains native text outside the DOM child tree.
+    // Reconstruct it on relevant damage so font availability and inherited style
+    // changes cannot retain stale intrinsic measurements or shaped fragments.
+    if !(element_damage | damage_from_parent).is_empty() &&
+        node.image_is_ready_for_fallback() &&
+        image_has_quirks_dimensions(layout_context, &node.style(&layout_context.style_context)) &&
+        element.attribute_as_str(&ns!(), &local_name!("alt"))
+            .is_some_and(|text| !text.is_empty())
+    {
+        element_damage |= LayoutDamage::BoxDamage;
     }
 
     let mut damage_set = ElementDamageSet {
@@ -262,15 +328,15 @@ impl<'a> ElementDamageSet<'a> {
         // first independent formatting context, which should isolate that tree from further
         // box damage.
         let mut damage_for_children = (self.on_element | self.from_parent).only_layout_modes();
-        let rebuild_children = self.on_element.contains(LayoutDamage::BoxDamage) ||
-            (self.from_parent.contains(LayoutDamage::BoxDamage) &&
-                !self.node.isolates_damage_for_damage_propagation());
+        let rebuild_children = self.on_element.contains(LayoutDamage::BoxDamage)
+            || (self.from_parent.contains(LayoutDamage::BoxDamage)
+                && !self.node.isolates_damage_for_damage_propagation());
 
         if rebuild_children {
             damage_for_children.insert(LayoutDamage::BoxDamage);
-        } else if self.from_parent.contains(LayoutDamage::Relayout) &&
-            !self.on_element.contains(LayoutDamage::Relayout) &&
-            self.node.isolates_damage_for_damage_propagation()
+        } else if self.from_parent.contains(LayoutDamage::Relayout)
+            && !self.on_element.contains(LayoutDamage::Relayout)
+            && self.node.isolates_damage_for_damage_propagation()
         {
             // If not rebuilding the boxes for this node, but fragments need to be laid out
             // only because of an ancestor, fragment layout caches should still be valid when
@@ -299,8 +365,8 @@ impl<'a> ElementDamageSet<'a> {
         //
         // In other situations, such as when layout will not run at all or when we are
         // guaranteed that children are undamaged, we can skip traversing children entirely.
-        if has_dirty_descendants ||
-            damage_for_children.intersects(LayoutDamage::BoxDamage | LayoutDamage::Relayout)
+        if has_dirty_descendants
+            || damage_for_children.intersects(LayoutDamage::BoxDamage | LayoutDamage::Relayout)
         {
             for child in self.node.flat_tree_children() {
                 if child.is_element() {
@@ -414,16 +480,16 @@ impl<'a> ElementDamageSet<'a> {
                     base.invalidate_caches(&self);
                     base.mark_fragments_as_descendants_changed();
                 });
-                LayoutDamage::RecalculateOverflow |
-                    LayoutDamage::DescendantCollectedAsLayoutRoot |
-                    LayoutDamage::RecomputeInlineContentSizes
+                LayoutDamage::RecalculateOverflow
+                    | LayoutDamage::DescendantCollectedAsLayoutRoot
+                    | LayoutDamage::RecomputeInlineContentSizes
             },
             BoxDamageAction::InvalidateFragmentTreeAboveLayoutRoot => {
                 // Damage propagation works exactly the same at the point the layout root is collected
                 // and above it. Layout caches are invalidated and damage is adjusted, maybe limited
                 // inline content size recalculation.
-                let mut damage_for_parent = LayoutDamage::RecalculateOverflow |
-                    LayoutDamage::DescendantCollectedAsLayoutRoot;
+                let mut damage_for_parent = LayoutDamage::RecalculateOverflow
+                    | LayoutDamage::DescendantCollectedAsLayoutRoot;
 
                 let mut inline_size_depends_on_content = false;
                 self.node.with_layout_box_base_including_pseudos(|base| {
@@ -475,9 +541,9 @@ impl<'a> ElementDamageSet<'a> {
             return BoxDamageAction::TryRebuild;
         }
 
-        if element_and_children_damage.contains(LayoutDamage::Relayout) &&
-            !self.from_parent.contains(LayoutDamage::Relayout) &&
-            let Ok(layout_root) = LayoutRoot::try_from(self.node)
+        if element_and_children_damage.contains(LayoutDamage::Relayout)
+            && !self.from_parent.contains(LayoutDamage::Relayout)
+            && let Ok(layout_root) = LayoutRoot::try_from(self.node)
         {
             return BoxDamageAction::CollectLayoutRoot(layout_root);
         }
@@ -513,8 +579,8 @@ impl<'a> ElementDamageSet<'a> {
     ) {
         let children_need_inline_content_size_recalculation = self
             .from_children
-            .contains(LayoutDamage::RecomputeInlineContentSizes) &&
-            inline_size_depends_on_content;
+            .contains(LayoutDamage::RecomputeInlineContentSizes)
+            && inline_size_depends_on_content;
         damage_for_parent.set(
             LayoutDamage::RecomputeInlineContentSizes,
             !self.on_element.is_empty() || children_need_inline_content_size_recalculation,

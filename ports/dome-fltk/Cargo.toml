@@ -6,7 +6,8 @@ license = "GPL-3.0-or-later"
 publish = false
 
 [dependencies]
-servo = { workspace = true, features = ["baked-in-resources", "js_jit", "webxr", "clipboard", "webcrypto"] }
+servo-base = { workspace = true }
+servo = { workspace = true, features = ["baked-in-resources", "js_jit", "webxr", "clipboard", "webcrypto", "media-gstreamer"] }
 image = { workspace = true }
 webxr = { workspace = true }
 webxr-api = { workspace = true }
@@ -23,6 +24,17 @@ rustls = { workspace = true, features = ["aws_lc_rs"] }
 adblock = "=0.13.3"
 sha2 = { workspace = true }
 uuid = { workspace = true }
+tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "macros", "fs"] }
+percent-encoding = { workspace = true }
+mime_guess = { workspace = true }
+mime = { workspace = true }
+encoding_rs = { workspace = true }
+tokio-rustls = { workspace = true }
+x509-cert = "=0.2.5"
+language-tags = "=0.3.2"
+base64 = { workspace = true }
+mail-parser = { version = "=1.0.0", features = ["full_encoding"] }
+webpki-roots = { workspace = true }
 
 [build-dependencies]
 cc = { workspace = true }

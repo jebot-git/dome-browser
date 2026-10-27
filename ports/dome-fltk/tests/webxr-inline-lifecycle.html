@@ -1,0 +1,104 @@
+<!doctype html><meta charset=utf-8><title>WebXR inline integration</title>
+<style>body{background:#202830;color:white;font:18px monospace}canvas{width:160px;height:80px}</style>
+<h1>Inline page lifecycle</h1><canvas id=canvas width=160 height=80></canvas>
+<script>
+'use strict';
+let order=0,frames=0,windowFrames=0,sessions=[],ended=0;
+const visibilityNotifications=[];
+const page=location.pathname;
+const report=(type,data={})=>fetch('/event',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({order:++order,type,data:{...data,page}})});
+const fail=e=>report('error',{message:String(e),stack:e.stack});
+const visibilityEntries=()=>performance.getEntriesByType('visibility-state').map(e=>({name:e.name,startTime:e.startTime,duration:e.duration}));
+const snapshot=()=>({document:document.visibilityState,sessions:sessions.map(s=>s.visibilityState),frames,windowFrames,ended,visibilityEntries:visibilityEntries(),visibilityNotifications});
+function child(id){
+ const iframe=document.createElement('iframe');iframe.id=id;
+ iframe.srcdoc=`<!doctype html><canvas id=c width=80 height=40></canvas><script>
+ let session,frames=0;const id=${JSON.stringify(id)};
+ function notify(kind){parent.postMessage({inlineChild:id,kind,document:document.visibilityState,session:session?.visibilityState,frames,visibilityEntries:performance.getEntriesByType('visibility-state').map(e=>({name:e.name,startTime:e.startTime,duration:e.duration}))},parent.location.origin);}
+ document.addEventListener('visibilitychange',()=>notify('document'));
+ (async()=>{session=await navigator.xr.requestSession('inline');session.addEventListener('visibilitychange',()=>notify('session'));const gl=c.getContext('webgl');session.updateRenderState({baseLayer:new XRWebGLLayer(session,gl)});function tick(){frames++;session.requestAnimationFrame(tick);}session.requestAnimationFrame(tick);notify('ready');})().catch(e=>parent.postMessage({inlineChild:id,error:String(e)},parent.location.origin));
+ <\/script>`;
+ document.body.appendChild(iframe);
+}
+addEventListener('message',e=>{if(e.origin===location.origin&&e.data.inlineChild){if(e.data.error)fail(e.data.error);else report('child',e.data);}});
+document.addEventListener('visibilitychange',()=>report('document',snapshot()));
+addEventListener('pageshow',e=>report('pageshow',{persisted:e.persisted,...snapshot()}));
+async function command(value){
+ if(value?.op==='create-hidden-child')child('hidden-child');
+ else if(value?.op==='end-secondary'){await sessions[1].end();report('secondary-ended',snapshot());}
+ else if(value?.op==='cycle-sessions'){
+  for(let n=0;n<32;n++){const session=await navigator.xr.requestSession('inline');await session.end();}
+  report('cycles-ended',{...snapshot(),cycles:32});
+ }
+ else if(value?.op==='navigate')location.href='/replacement';
+}
+(async()=>{
+ const parsed=new DOMParser().parseFromString('<p>Detached document</p>','text/html');
+ report('check',{name:'DOMParser documents without a browsing context start hidden',passed:parsed.hidden&&parsed.visibilityState==='hidden'});
+ const detached=document.implementation.createHTMLDocument('Detached');
+ report('check',{name:'Created HTML documents without a browsing context start hidden',passed:detached.hidden&&detached.visibilityState==='hidden'});
+ const initial=visibilityEntries();
+ report('check',{name:'The initial visibility state has one timestamp-zero performance entry',passed:initial.length===1&&initial[0].name===document.visibilityState&&initial[0].startTime===0&&initial[0].duration===0,entries:initial});
+ const observer=new PerformanceObserver(list=>{
+  const entries=list.getEntries().filter(e=>e.startTime===0);
+  if(entries.length)report('initial-observer',{entries:entries.map(e=>({name:e.name,startTime:e.startTime}))});
+ });observer.observe({type:'visibility-state',buffered:true});
+ const liveObserver=new PerformanceObserver(list=>visibilityNotifications.push(...list.getEntries().map(e=>({name:e.name,startTime:e.startTime,duration:e.duration}))));
+ liveObserver.observe({entryTypes:['visibility-state']});
+ // The first navigation may reuse an initial about:blank Window. Its old
+ // timeline must stay readable without receiving the replacement's entries.
+ const probe=document.createElement('iframe');document.body.appendChild(probe);
+ const oldWindow=probe.contentWindow,oldPerformance=oldWindow.performance;
+ const oldOrigin=oldPerformance.timeOrigin;
+ const oldMark=oldPerformance.mark('initial-blank-mark',{startTime:3});
+ const standaloneMark=new oldWindow.PerformanceMark('standalone',{startTime:4});
+ const oldMeasure=oldPerformance.measure('initial-blank-measure',{start:2,end:9});
+ const oldEntries=oldPerformance.getEntriesByType('visibility-state').map(e=>({name:e.name,startTime:e.startTime,duration:e.duration}));
+ const observed=[];
+ const oldObserver=new oldWindow.PerformanceObserver(list=>observed.push(...list.getEntries().map(e=>e.name)));
+ oldObserver.observe({type:'mark'});
+ await new Promise((resolve,reject)=>{
+  const timeout=setTimeout(()=>reject(new Error('Initial blank replacement timed out')),5000);
+  probe.onload=()=>{clearTimeout(timeout);resolve();};
+  probe.srcdoc='<!doctype html><title>Replacement timeline</title><p>Fixture</p>';
+ });
+ const current=probe.contentWindow.performance;
+ const changedOrigin=current.timeOrigin;
+ current.mark('replacement-mark');await new Promise(resolve=>setTimeout(resolve,50));
+ const verify=(name,passed)=>report('check',{name,passed});
+ verify('Initial blank navigation preserves the Window proxy',oldWindow===probe.contentWindow);
+ verify('Initial blank navigation creates a new Performance object',oldPerformance!==current);
+ verify('Replacement performance has its own time origin',changedOrigin>=oldOrigin&&oldPerformance.timeOrigin===oldOrigin);
+ verify('Replacement performance excludes initial blank marks',JSON.stringify(current.getEntriesByType('mark').map(e=>e.name))==='["replacement-mark"]');
+ verify('The retained initial blank timeline keeps its marks',JSON.stringify(oldPerformance.getEntriesByType('mark').map(e=>e.name))==='["initial-blank-mark"]');
+ verify('Retained mark timestamps survive initial blank replacement',oldMark.startTime===3&&standaloneMark.startTime===4);
+ verify('Retained measure timestamps survive initial blank replacement',oldMeasure.startTime===2&&oldMeasure.duration===7&&current.getEntriesByType('measure').length===0);
+ verify('The retained initial blank visibility entries remain unchanged',JSON.stringify(oldPerformance.getEntriesByType('visibility-state').map(e=>({name:e.name,startTime:e.startTime,duration:e.duration})))===JSON.stringify(oldEntries));
+ verify('Replacement performance starts with one visibility entry',JSON.stringify(current.getEntriesByType('visibility-state').map(e=>({name:e.name,startTime:e.startTime,duration:e.duration})))===JSON.stringify([{name:document.visibilityState,startTime:0,duration:0}]));
+ verify('Initial blank observers do not receive replacement marks',observed.length===0);
+ const retainedMark=oldPerformance.mark('old-after-navigation',{startTime:7});
+ await new Promise(resolve=>setTimeout(resolve,50));
+ verify('Retained performance marks keep their original timeline',retainedMark.startTime===7&&current.getEntriesByName('old-after-navigation').length===0);
+ const retainedMeasure=oldPerformance.measure('old-measure-after-navigation',{start:3,end:8});
+ verify('Retained performance measures keep their original timeline',retainedMeasure.startTime===3&&retainedMeasure.duration===5&&current.getEntriesByName('old-measure-after-navigation').length===0);
+ verify('Detached initial blank observers stop receiving notifications',observed.length===0);
+ oldObserver.disconnect();
+ oldPerformance.mark('after-disconnect');await new Promise(resolve=>setTimeout(resolve,50));
+ verify('Disconnect remains harmless after the initial document is replaced',observed.length===0);
+ probe.remove();
+ report('support',{immersive:await navigator.xr.isSessionSupported('immersive-vr')});
+ const gl=canvas.getContext('webgl');
+ for(let n=0;n<2;n++){
+  const session=await navigator.xr.requestSession('inline');sessions.push(session);
+  session.addEventListener('visibilitychange',e=>report('session',{index:n,eventSession:e.session===session,...snapshot()}));
+  session.addEventListener('end',()=>{ended++;report('ended',{index:n,...snapshot()});});
+  session.updateRenderState({baseLayer:new XRWebGLLayer(session,gl)});
+ }
+ function tick(){frames++;sessions[0].requestAnimationFrame(tick);}sessions[0].requestAnimationFrame(tick);
+ function windowTick(){windowFrames++;requestAnimationFrame(windowTick);}requestAnimationFrame(windowTick);
+ child('initial-child');
+ setInterval(async()=>{try{const response=await report('heartbeat',snapshot());await command(await response.json());}catch(e){fail(e);}},100);
+ report('ready',snapshot());
+})().catch(fail);
+addEventListener('error',e=>fail(e.error||e.message));
+</script>

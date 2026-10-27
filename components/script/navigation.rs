@@ -174,6 +174,11 @@ pub(crate) struct InProgressLoad {
     /// The [`LoadData`] associated with this load.
     #[no_trace]
     pub(crate) load_data: LoadData,
+    cookie_navigation_same_site: bool,
+    /// The initiating cookie context, retained to account for network URL upgrades.
+    #[no_trace]
+    cookie_navigation_client_site: Option<ImmutableOrigin>,
+    cookie_navigation_null_client: bool,
     /// A list of URL to keep track of all the redirects that have happened during
     /// this load.
     #[no_trace]
@@ -208,6 +213,9 @@ impl InProgressLoad {
             navigation_start: CrossProcessInstant::now(),
             controller: Default::default(),
             load_data: new_pipeline_info.load_data,
+            cookie_navigation_same_site: true,
+            cookie_navigation_client_site: None,
+            cookie_navigation_null_client: true,
             url_list: vec![UrlWithBlobClaim::from_url_without_having_claimed_blob(url)],
             user_content_manager_id: new_pipeline_info.user_content_manager_id,
             target_snapshot_params: new_pipeline_info.target_snapshot_params,
@@ -219,7 +227,20 @@ impl InProgressLoad {
         self.webview_state.id
     }
 
-    pub(crate) fn request_builder(&mut self) -> RequestBuilder {
+    /// A fetch can upgrade HTTP to HTTPS after the request builder is created.
+    /// Keep any existing redirect-chain taint and also classify the final URL,
+    /// so a toolbar reload cannot disclose Strict cookies withheld by that fetch.
+    pub(crate) fn navigation_cookie_same_site_for_response(&self, final_url: &ServoUrl) -> bool {
+        // Without redirects, the final URL replaces the pre-upgrade URL rather
+        // than adding a cross-site hop. With redirects retain the recorded taint.
+        (self.url_list.len() <= 1 || self.cookie_navigation_same_site) &&
+            (self.cookie_navigation_null_client ||
+                self.cookie_navigation_client_site.as_ref().is_some_and(|site| {
+                    net_traits::pub_domains::is_same_site(site, &final_url.origin())
+                }))
+    }
+
+    pub(crate) fn request_builder(&mut self, cookie_site: Option<ImmutableOrigin>) -> RequestBuilder {
         let client_origin = match self.load_data.load_origin {
             LoadOrigin::Script(ref initiator_origin) => initiator_origin.immutable().clone(),
             _ => ImmutableOrigin::new_opaque(),
@@ -237,10 +258,17 @@ impl InProgressLoad {
             preloaded_resources: PreloadedResources::default(),
             policy_container: self.load_data.policy_container.clone().unwrap_or_default(),
             origin: Origin::Origin(client_origin),
+            cookie_site: if matches!(self.load_data.load_origin, LoadOrigin::Script(_)) {
+                self.load_data.cookie_site.clone()
+            } else { cookie_site },
+            cookie_client_is_null: self.parent_info.is_none() && !matches!(self.load_data.load_origin, LoadOrigin::Script(_)),
             is_nested_browsing_context: self.parent_info.is_some(),
             insecure_requests_policy,
             has_trustworthy_ancestor_origin: self.load_data.has_trustworthy_ancestor_origin,
         };
+
+        self.cookie_navigation_client_site = request_client.cookie_site.clone();
+        self.cookie_navigation_null_client = request_client.cookie_client_is_null;
 
         let mut request_builder = RequestBuilder::new(
             Some(webview_id),
@@ -263,6 +291,7 @@ impl InProgressLoad {
         .url_list(self.url_list.clone());
 
         request_builder.reload_navigation = self.load_data.reload_navigation;
+        request_builder.protocol_state.clone_from(&self.load_data.protocol_state);
         request_builder.history_navigation = self.load_data.history_navigation;
 
         if !request_builder.headers.contains_key(header::ACCEPT) {
@@ -272,6 +301,7 @@ impl InProgressLoad {
         }
         set_default_accept_language(&mut request_builder.headers);
 
+        self.cookie_navigation_same_site = request_builder.cookie_context().same_site;
         request_builder
     }
 }
@@ -304,8 +334,8 @@ pub(crate) fn determine_the_origin(
     }
 
     // Step 4. If url matches about:blank and sourceOrigin is non-null, then return sourceOrigin.
-    if url.as_str() == "about:blank" &&
-        let Some(source_origin) = source_origin
+    if url.as_str() == "about:blank"
+        && let Some(source_origin) = source_origin
     {
         return source_origin;
     }
@@ -390,9 +420,9 @@ pub(crate) fn navigate(
     // Step 4 and 5
     let pipeline_id = window.pipeline_id();
     let window_proxy = window.window_proxy();
-    if let Some(active) = window_proxy.currently_active() &&
-        pipeline_id == active &&
-        document.is_prompting_or_unloading()
+    if let Some(active) = window_proxy.currently_active()
+        && pipeline_id == active
+        && document.is_prompting_or_unloading()
     {
         return;
     }
@@ -627,7 +657,23 @@ pub(crate) fn snapshot_target_snapshot_params(navigable: &WindowProxy) -> Target
     // the result of determining the iframe element referrer policy given
     // targetNavigable's container
     let iframe_element_referrer_policy = determine_iframe_element_referrer_policy(container);
+    let container_embedder_policy = container
+        .map(|element| {
+            element
+                .owner_document()
+                .policy_container()
+                .embedder_policy
+                .value
+        })
+        .or_else(|| {
+            navigable
+                .currently_active()
+                .and_then(ScriptThread::find_document)
+                .map(|document| document.container_embedder_policy())
+        })
+        .unwrap_or_default();
     TargetSnapshotParams {
+        container_embedder_policy,
         sandboxing_flags,
         iframe_element_referrer_policy,
     }

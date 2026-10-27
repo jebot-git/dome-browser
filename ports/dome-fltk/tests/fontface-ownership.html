@@ -1,0 +1,29 @@
+<!doctype html><meta charset=utf-8><title>Script font rendering ownership</title>
+<style>@font-face{font-family:CssKeep;src:url('/font-api.ttf?css-keep')}span{font:16px/20px monospace;display:inline-block}</style>
+<span id=sample>Fallback label</span><span id=css style=font-family:CssKeep,monospace>Fallback label</span>
+<script>
+addEventListener('load',async()=>{
+ const checks=[],metrics=[];const check=(name,passed,error='')=>checks.push({name,passed,error});
+ const wait=p=>Promise.race([p,new Promise((_,reject)=>setTimeout(()=>reject(Error('font ready deadline')),5000))]);
+ const delay=()=>new Promise(r=>setTimeout(r,150));const width=e=>e.getBoundingClientRect().width;const near=(a,b)=>Math.abs(a-b)<.2;
+ const settle=async()=>{width(sample);await wait(document.fonts.ready);await delay()};
+ const note=(name,e,expected)=>{const actual=width(e);metrics.push({name,actual,expected});check(name,near(actual,expected),JSON.stringify([actual,expected]))};
+ try{
+ await settle();const fallback=width(sample),loaded=width(css);check('font metrics distinguish loaded and fallback',Math.abs(fallback-loaded)>2);
+ const fonts=document.fonts,one=new FontFace('OwnerOne','url(/font-api.ttf?shared-source)');await one.load();fonts.add(one);sample.style.fontFamily='OwnerOne,monospace';await settle();note('added face renders',sample,loaded);
+ check('delete returns true',fonts.delete(one));await settle();note('delete removes rendering',sample,fallback);
+ fonts.add(one);await settle();note('loaded face can be re-added',sample,loaded);fonts.delete(one);await settle();note('second deletion removes rendering',sample,fallback);
+ const a=new FontFace('OwnerPair','url(/font-api.ttf?shared-source)'),b=new FontFace('OwnerPair','url(/font-api.ttf?shared-source)');await Promise.all([a.load(),b.load()]);fonts.add(a);fonts.add(b);sample.style.fontFamily='OwnerPair,monospace';await settle();note('same URL faces render',sample,loaded);
+ fonts.delete(a);await settle();note('deleting one same URL face preserves sibling',sample,loaded);fonts.delete(b);await settle();note('deleting last same URL face restores fallback',sample,fallback);
+ fonts.add(a);await settle();fonts.clear();await settle();note('clear removes script rendering',sample,fallback);note('clear preserves CSS rendering',css,loaded);
+ const pending=new FontFace('OwnerPending','url(/font-api.ttf?delay=0.8&pending-owner)');fonts.add(pending);const pendingLoad=pending.load();fonts.delete(pending);await pendingLoad;sample.style.fontFamily='OwnerPending,monospace';await settle();note('completion after deletion does not install font',sample,fallback);fonts.add(pending);await settle();note('completed removed face can be re-added',sample,loaded);fonts.delete(pending);
+ const bytes=await(await fetch('/font-api.ttf?buffer-owner')).arrayBuffer();const buffer=new FontFace('OwnerBuffer',bytes);await buffer.loaded;fonts.add(buffer);sample.style.fontFamily='OwnerBuffer,monospace';await settle();note('buffer font renders',sample,loaded);fonts.delete(buffer);await settle();note('buffer removal restores fallback',sample,fallback);fonts.add(buffer);await settle();note('buffer data survives removal and re-add',sample,loaded);fonts.delete(buffer);
+ const iframe=document.createElement('iframe');document.body.append(iframe);await new Promise(r=>{iframe.onload=r;iframe.srcdoc='<!doctype html><span style="font:16px/20px monospace;display:inline-block">Fallback label</span>'});const child=iframe.contentDocument,childSample=child.querySelector('span'),childFallback=width(childSample);await wait(child.fonts.ready);
+ const shared=new FontFace('OwnerShared','url(/font-api.ttf?shared-docs)');await shared.load();fonts.add(shared);child.fonts.add(shared);sample.style.fontFamily='OwnerShared,monospace';childSample.style.fontFamily='OwnerShared,monospace';await settle();await delay();note('shared face renders in parent',sample,loaded);note('shared face renders in child',childSample,loaded);
+ fonts.delete(shared);await settle();await delay();note('parent deletion restores only parent fallback',sample,fallback);note('parent deletion preserves child rendering',childSample,loaded);
+ fonts.add(shared);child.fonts.delete(shared);await settle();await delay();note('child deletion preserves parent rendering',sample,loaded);note('child deletion restores child fallback',childSample,childFallback);
+ const cold=new FontFace('OwnerCold','url(/font-api.ttf?delay=0.4&cold-docs)');fonts.add(cold);child.fonts.add(cold);await cold.load();sample.style.fontFamily='OwnerCold,monospace';childSample.style.fontFamily='OwnerCold,monospace';await settle();await delay();note('load completion installs parent member',sample,loaded);note('load completion installs child member',childSample,loaded);
+ child.fonts.clear();await delay();note('child clear preserves parent member',sample,loaded);note('child clear removes child member',childSample,childFallback);fonts.clear();await settle();note('parent clear removes final member',sample,fallback);note('CSS face still renders at end',css,loaded);
+ }catch(e){check('fixture completes',false,String(e))}
+ fetch('/report',{method:'POST',body:JSON.stringify({checks,metrics})});
+});</script>

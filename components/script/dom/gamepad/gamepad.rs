@@ -115,13 +115,19 @@ impl Gamepad {
         axis_bounds: (f64, f64),
         button_bounds: (f64, f64),
         supported_haptic_effects: GamepadSupportedHapticEffects,
-        xr: bool,
+        // XR dimensions are optional; ordinary gamepads keep their standard
+        // layout without depending on the optional WebXR API crate.
+        xr: Option<(usize, usize)>,
     ) -> DomRoot<Gamepad> {
-        let buttons = Gamepad::init_buttons(cx, window);
+        let buttons = if let Some(layout) = xr {
+            (0..layout.0).map(|_| GamepadButton::new(cx, window, false, false)).collect()
+        } else {
+            Gamepad::init_buttons(cx, window)
+        };
         rooted_vec!(let buttons <- buttons.iter().map(DomRoot::as_traced));
         let vibration_actuator =
             GamepadHapticActuator::new(cx, window, gamepad_id, supported_haptic_effects);
-        let index = if xr { -1 } else { 0 };
+        let index = if xr.is_some() { -1 } else { 0 };
         let gamepad = reflect_dom_object(
             cx,
             Box::new(Gamepad::new_inherited(
@@ -140,7 +146,11 @@ impl Gamepad {
             )),
             window,
         );
-        gamepad.init_axes();
+        if let Some(layout) = xr {
+            *gamepad.axes.borrow_mut() = vec![0.; layout.1];
+        } else {
+            gamepad.init_axes();
+        }
         gamepad
     }
 }
@@ -235,6 +245,37 @@ impl Gamepad {
             GamepadButton::new(cx, window, false, false), // Right button in left cluster
             GamepadButton::new(cx, window, false, false), // Center button in center cluster
         ]
+    }
+
+    /// XR controls are already normalized, and have independent press/touch states.
+    /// Update every slot, including neutral values, so interruptions cannot leave
+    /// a pressed button or displaced axis in the script-visible object.
+    #[cfg(feature = "webxr")]
+    pub(crate) fn update_xr_state(&self, frame: &webxr_api::InputFrame, timestamp: f64) {
+        let mut changed = false;
+        for (i, button) in self.buttons.iter().enumerate() {
+            let value = frame.button_values.get(i).copied().unwrap_or(0.);
+            let value = if value.is_finite() { value.clamp(0., 1.) as f64 } else { 0. };
+            let pressed = frame.button_pressed.get(i).copied().unwrap_or_else(|| match i {
+                0 => frame.pressed,
+                1 => frame.squeezed,
+                _ => value >= BUTTON_PRESS_THRESHOLD,
+            });
+            let touched = frame.button_touched.get(i).copied().unwrap_or(pressed || value > 0.);
+            let touched = touched || pressed || value > 0.;
+            changed |= button.state() != (pressed, touched, value);
+            button.update(pressed, touched, value);
+        }
+        for (i, axis) in self.axes.borrow_mut().iter_mut().enumerate() {
+            let value = frame.axis_values.get(i).copied().unwrap_or(0.);
+            let value = if value.is_finite() { value.clamp(-1., 1.) as f64 } else { 0. };
+            changed |= *axis != value;
+            *axis = value;
+        }
+        if changed {
+            self.timestamp.set(timestamp);
+            self.frozen_axes.clear();
+        }
     }
 
     pub(crate) fn update_connected(&self, connected: bool) {

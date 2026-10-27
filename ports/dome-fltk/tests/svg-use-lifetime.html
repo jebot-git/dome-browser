@@ -1,0 +1,30 @@
+<!doctype html><meta charset=utf-8><title>Repeated SVG instance snapshots</title>
+<style>body{margin:0;background:white}.tile{position:absolute;top:20px;width:60px;height:60px}.tint{fill:var(--paint,red)}</style>
+<svg width="0" height="0" style="position:absolute"><defs>
+ <g id="sprite"><rect class="tint" width="60" height="60"/></g>
+ <linearGradient id="empty" href="#empty"/>
+ <g id="empty-shape"><rect fill="url(#empty) red" width="60" height="60"/></g>
+</defs></svg>
+<svg class="tile" style="left:20px"><use class="host" href="#sprite"/></svg>
+<svg class="tile" style="left:100px"><use class="host" href="#sprite"/></svg>
+<svg class="tile" style="left:180px"><use class="host" href="#sprite"/></svg>
+<svg class="tile" style="left:260px"><use href="#empty-shape"/></svg>
+<script>
+addEventListener('load',()=>{
+ const green='rgb(20,180,90)',blue='rgb(30,90,220)',hosts=[...document.querySelectorAll('.host')],start=performance.now();let frames=0;
+ const update=color=>hosts.forEach(host=>host.style.setProperty('--paint',color));
+ function tick(){
+  frames++;update(frames%2?green:blue);
+  if(performance.now()-start<60000){requestAnimationFrame(tick);return}
+  update(green);
+  setTimeout(()=>fetch('/report',{method:'POST',body:JSON.stringify({frames,elapsed:performance.now()-start,checks:[
+   {name:'snapshot animation makes sustained progress',passed:frames>=100},
+   {name:'connected use count stays bounded',passed:document.querySelectorAll('svg use').length===4},
+   {name:'instance IDs are not exposed in the document',passed:document.querySelector('[id^="dome-instance-"]')===null},
+   {name:'source style remains untouched',passed:document.querySelector('#sprite rect').getAttribute('style')===null},
+   {name:'source resource IDs remain unique',passed:document.querySelectorAll('#sprite').length===1&&document.querySelectorAll('#empty').length===1}
+  ]})}),1500);
+ }
+ requestAnimationFrame(tick);
+});
+</script>

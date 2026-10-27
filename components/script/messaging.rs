@@ -78,6 +78,7 @@ impl MixedMessage {
                 ScriptThreadMessage::GetTitle(id) => Some(*id),
                 ScriptThreadMessage::GetDocumentOrigin(id, _) => Some(*id),
                 ScriptThreadMessage::GetDocumentOriginDetails(id, _) => Some(*id),
+                ScriptThreadMessage::GetDownloadClient(id, _) => Some(*id),
                 ScriptThreadMessage::SetDocumentActivity(id, ..) => Some(*id),
                 ScriptThreadMessage::SetThrottled(id, ..) => Some(*id),
                 ScriptThreadMessage::NavigateIframe(id, ..) => Some(*id),

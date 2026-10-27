@@ -35,6 +35,7 @@ impl PerformanceMark {
         name: DOMString,
         start_time: CrossProcessInstant,
         duration: Duration,
+        time_origin: CrossProcessInstant,
     ) -> PerformanceMark {
         PerformanceMark {
             entry: PerformanceEntry::new_inherited(
@@ -42,6 +43,7 @@ impl PerformanceMark {
                 EntryType::Mark,
                 Some(start_time),
                 duration,
+                time_origin,
             ),
             detail: Default::default(),
         }
@@ -58,10 +60,16 @@ impl PerformanceMark {
         name: DOMString,
         start_time: CrossProcessInstant,
         duration: Duration,
+        time_origin: CrossProcessInstant,
     ) -> DomRoot<PerformanceMark> {
         reflect_dom_object_with_proto(
             cx,
-            Box::new(PerformanceMark::new_inherited(name, start_time, duration)),
+            Box::new(PerformanceMark::new_inherited(
+                name,
+                start_time,
+                duration,
+                time_origin,
+            )),
             global,
             proto,
         )
@@ -81,6 +89,20 @@ impl PerformanceMarkMethods<crate::DomTypeHolder> for PerformanceMark {
         proto: Option<HandleObject>,
         mark_name: DOMString,
         mark_options: &PerformanceMarkOptions,
+    ) -> Fallible<DomRoot<PerformanceMark>> {
+        let time_origin = global.performance(cx).time_origin();
+        Self::construct(cx, global, proto, mark_name, mark_options, time_origin)
+    }
+}
+
+impl PerformanceMark {
+    pub(crate) fn construct(
+        cx: &mut js::context::JSContext,
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+        mark_name: DOMString,
+        mark_options: &PerformanceMarkOptions,
+        time_origin: CrossProcessInstant,
     ) -> Fallible<DomRoot<PerformanceMark>> {
         // The PerformanceMark constructor must run the following steps:
         // Step 1. If the current global object is a Window object and markName uses the same name
@@ -102,8 +124,7 @@ impl PerformanceMarkMethods<crate::DomTypeHolder> for PerformanceMark {
                     return Err(Error::Type(c"startTime must not be negative".to_owned()));
                 }
                 // Step 5.1.2. Otherwise, set entry’s startTime to the value of markOptions’s startTime.
-                global.performance(cx).time_origin() +
-                    Duration::microseconds(start_time.mul_add(1000.0, 0.0) as i64)
+                time_origin + Duration::microseconds(start_time.mul_add(1000.0, 0.0) as i64)
             },
             // Step 5.2. Otherwise, set it to the value that would be returned by the Performance object’s now() method.
             None => CrossProcessInstant::now(),
@@ -117,6 +138,7 @@ impl PerformanceMarkMethods<crate::DomTypeHolder> for PerformanceMark {
             mark_name,
             start_time,
             Duration::ZERO,
+            time_origin,
         );
 
         // Step 7. If markOptions’s detail is null, set entry’s detail to null.

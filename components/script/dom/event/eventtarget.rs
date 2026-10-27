@@ -475,6 +475,10 @@ impl EventTarget {
 
     /// Notify the global about a listener being added for a given event type.
     fn notify_listener_added(&self, ty: &Atom) {
+        #[cfg(feature = "webxr")]
+        if *ty == atom!("reset") && let Some(space) = self.downcast::<crate::dom::xrreferencespace::XRReferenceSpace>() {
+            space.reset_listener_added();
+        }
         if let Some(interest) = self.interest_for_event_type(ty) {
             self.global().register_interest(interest);
         }
@@ -482,6 +486,10 @@ impl EventTarget {
 
     /// Notify the global about a listener being removed for a given event type.
     fn notify_listener_removed(&self, ty: &Atom) {
+        #[cfg(feature = "webxr")]
+        if *ty == atom!("reset") && let Some(space) = self.downcast::<crate::dom::xrreferencespace::XRReferenceSpace>() {
+            space.reset_listener_removed();
+        }
         if let Some(interest) = self.interest_for_event_type(ty) {
             self.global().unregister_interest(interest);
         }

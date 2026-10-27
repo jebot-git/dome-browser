@@ -1,0 +1,22 @@
+<!doctype html>
+<title>Adblock transport fixture</title>
+<style nonce="fixture">.ad{width:100px;height:100px;background:red}.legitimate{width:100px;height:100px;background:green}</style>
+<div class="ad">Advertisement</div><div class="legitimate">Content</div>
+<script nonce="fixture">
+addEventListener('load',async()=>{
+ try {
+  const sockets=[];
+  for(const path of ['control','typed-ping','typed-websocket','typed-xhr','typed-scheme']) {
+   navigator.sendBeacon('/'+path+'?kind=beacon','test');
+   sockets.push(fetch('/'+path+'?kind=fetch',{keepalive:true}).then(()=>{},()=>{}));
+   sockets.push(new Promise(resolve=>{
+    const socket=new WebSocket('ws://'+location.host+'/'+path+'?kind=websocket');
+    socket.onopen=()=>socket.close();socket.onerror=resolve;socket.onclose=resolve;
+   }));
+  }
+  await Promise.race([Promise.all(sockets),new Promise(resolve=>setTimeout(resolve,4000))]);
+  await new Promise(resolve=>setTimeout(resolve,250));
+  await fetch('/report',{method:'POST',body:JSON.stringify({hidden:getComputedStyle(document.querySelector('.ad')).display,legitimate:getComputedStyle(document.querySelector('.legitimate')).display})});
+ }catch(e){fetch('/report',{method:'POST',body:JSON.stringify({error:String(e)})});}
+});
+</script>

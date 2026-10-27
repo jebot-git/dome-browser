@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise Discord scheduler fallback and persistent IndexedDB in real Servo."""
+"""Exercise native scheduling, Cache API and persistent IndexedDB in real Servo."""
 import contextlib
 import http.server
 import json
@@ -18,7 +18,7 @@ if os.environ.get('DOME_COMPATIBILITY_TEST_BUS') != '1':
 
 port = Path(__file__).resolve().parents[1]
 source = port.parents[1]
-artifacts = source.parent / 'artifacts/browser-compatibility-tests'
+artifacts = Path(os.environ.get('DOME_BROWSER_TEST_OUTPUT', str(source.parent / 'artifacts/browser-compatibility-tests')))
 artifacts.mkdir(parents=True, exist_ok=True)
 results = []
 page = '''<!doctype html><title>Compatibility fixture</title><h1>Compatibility fixture</h1>
@@ -27,31 +27,26 @@ page = '''<!doctype html><title>Compatibility fixture</title><h1>Compatibility f
  const checks = [];
  function check(ok, name) { if (!ok) throw Error(name); checks.push(name); }
  try {
-  check(typeof requestIdleCallback === 'undefined', 'fallback is absent on unrelated origins');
-  const install = new Function('location', await (await fetch('/shim.js')).text());
-  install({protocol:'http:', hostname:'discord.com'});
-  install({protocol:'https:', hostname:'discord.com.example.org'});
-  check(typeof requestIdleCallback === 'undefined', 'fallback requires a Discord HTTPS origin');
-  const native = () => 123;
-  globalThis.requestIdleCallback = native;
-  install({protocol:'https:', hostname:'discord.com'});
-  check(requestIdleCallback === native, 'existing native scheduler is preserved');
-  delete globalThis.requestIdleCallback;
-  install({protocol:'https:', hostname:'canary.discord.com'});
+  check(typeof requestIdleCallback === 'function' && typeof cancelIdleCallback === 'function',
+        'idle scheduling is available on ordinary origins');
+  check(Function.prototype.toString.call(requestIdleCallback).includes('[native code]'),
+        'idle scheduling is supplied by the engine');
   let cancelled = true;
   cancelIdleCallback(requestIdleCallback(() => cancelled = false));
   const deadline = await new Promise(resolve => requestIdleCallback(resolve, {timeout:0}));
   await new Promise(resolve => setTimeout(resolve, 20));
   check(cancelled, 'cancelled callbacks do not run');
-  check(deadline.didTimeout && deadline.timeRemaining() >= 0 && deadline.timeRemaining() <= 8,
-        'fallback supplies a bounded deadline and timeout flag');
+  check(deadline instanceof IdleDeadline && !deadline.didTimeout &&
+        deadline.timeRemaining() >= 0 && deadline.timeRemaining() <= 50,
+        'native idle callback supplies an IdleDeadline with a bounded budget');
   let rejected = false;
   try { requestIdleCallback(null); } catch(e) { rejected = e instanceof TypeError; }
   check(rejected, 'invalid callback is rejected');
   const cache = await caches.open('asset-fixture');
   check(cache instanceof Cache && await caches.has('asset-fixture'), 'Discord asset loader can open a cache');
   await cache.put('/fixture.wasm', new Response('fixture'));
-  check(await cache.match('/fixture.wasm') === undefined, 'network-only cache never returns a fabricated response');
+  check(await (await cache.match('/fixture.wasm')).text() === 'fixture', 'native cache returns the stored response');
+  check(Function.prototype.toString.call(Cache.prototype.put).includes('[native code]'), 'cache is supplied by the engine');
   check(await caches.delete('asset-fixture') && !(await caches.has('asset-fixture')), 'cache names can be removed');
   const db = await new Promise((resolve, reject) => {
    const request = indexedDB.open('dome-compatibility-fixture', 1);
@@ -80,9 +75,9 @@ page = '''<!doctype html><title>Compatibility fixture</title><h1>Compatibility f
 
 class Server(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        data = (port/'src/discord-compatibility.js').read_bytes() if self.path == '/shim.js' else page.encode()
+        data = page.encode()
         self.send_response(200)
-        self.send_header('Content-Type', 'text/javascript' if self.path == '/shim.js' else 'text/html')
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(data)))
         self.end_headers()
         self.wfile.write(data)

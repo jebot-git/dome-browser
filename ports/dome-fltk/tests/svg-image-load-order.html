@@ -1,0 +1,14 @@
+<!doctype html><meta charset="utf-8"><title>SVG image document load order</title>
+<style>html,body{margin:0}svg{position:absolute;left:0;top:0}</style>
+<script>
+const events=[];let sent=false;
+function report(){if(sent)return;sent=true;fetch('/report',{method:'POST',body:JSON.stringify({checks:[
+ {name:'parser-inserted image loads once',passed:events.filter(x=>x==='image').length===1},
+ {name:'window load fires once',passed:events.filter(x=>x==='window').length===1},
+ {name:'image load precedes window load',passed:events.indexOf('image')>=0&&events.indexOf('image')<events.indexOf('window')},
+ {name:'image has no error event',passed:!events.includes('error')}
+],diagnostics:{events},pixel_cases:[{name:'parser-image',x:20,y:20,expected:'green'}],scope:'Delayed parser-inserted image verifies document-load blocking and callback order; fresh private profile.'})})}
+addEventListener('load',()=>{events.push('window');setTimeout(report,200)});
+setTimeout(report,10000);
+</script>
+<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80"><rect width="80" height="80" fill="red"/><image href="/svg-image.svg?name=parser-delay&amp;delay=400" width="80" height="80" onload="events.push('image')" onerror="events.push('error')"/></svg>

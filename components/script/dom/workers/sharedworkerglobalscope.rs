@@ -64,6 +64,7 @@ use crate::dom::workerglobalscope::{
     WorkerDebuggerGlobalScope, WorkerDevtoolsControlMsg, WorkerGlobalScope,
 };
 use crate::messaging::{CommonScriptMsg, ScriptEventLoopReceiver, ScriptEventLoopSender};
+use crate::runtime::script_runtime::ThreadSafeJSContext;
 use crate::runtime::script_runtime::ScriptThreadEventCategory::WorkerEvent;
 use crate::runtime::script_runtime::{IntroductionType, Runtime};
 use crate::scripting::script_module::fetch_a_module_script_graph;
@@ -78,7 +79,6 @@ pub(crate) enum SharedWorkerScriptMsg {
 }
 
 pub(crate) enum SharedWorkerControlMsg {
-    #[expect(dead_code)]
     Exit,
     SetNetworkOnlineState(bool),
 }
@@ -377,7 +377,7 @@ impl SharedWorkerGlobalScope {
         image_cache: Arc<dyn ImageCache>,
         #[cfg(feature = "webgpu")] gpu_id_hub: Arc<IdentityHub>,
         control_receiver: Receiver<SharedWorkerControlMsg>,
-        setup_sender: Sender<bool>,
+        setup_sender: Sender<(bool, ThreadSafeJSContext)>,
         registration_receiver: Receiver<()>,
         registration_id: Uuid,
         credentials: CredentialsMode,
@@ -420,6 +420,8 @@ impl SharedWorkerGlobalScope {
                     preloaded_resources: PreloadedResources::default(),
                     policy_container: policy_container.clone(),
                     origin: Origin::Origin(origin.clone()),
+                    cookie_site: init.cookie_site.clone(),
+                    cookie_client_is_null: false,
                     is_nested_browsing_context,
                     insecure_requests_policy,
                     has_trustworthy_ancestor_origin: current_global_ancestor_trustworthy,
@@ -431,6 +433,7 @@ impl SharedWorkerGlobalScope {
                 // still create their own JS runtime in that thread; this avoids child
                 // runtime lifetime coupling with the embedding script thread.
                 let runtime = Runtime::new(Some(event_loop_sender.clone()));
+                let context_for_interrupt = runtime.thread_safe_js_context();
                 // SAFETY: We are in a new thread, so this first cx.
                 // It is OK to have it separated of runtime here,
                 // because it will never outlive it (runtime destruction happens at the end of this function)
@@ -531,7 +534,7 @@ impl SharedWorkerGlobalScope {
                     );
                 }
 
-                if setup_sender.send(worker_is_secure_context).is_err() {
+                if setup_sender.send((worker_is_secure_context, context_for_interrupt)).is_err() {
                     return;
                 }
 

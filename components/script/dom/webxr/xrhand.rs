@@ -124,7 +124,6 @@ impl XRHand {
         source: &XRInputSource,
         support: Hand<()>,
     ) -> DomRoot<XRHand> {
-        let id = source.id();
         let session = source.session();
         let spaces = support.map(cx, |cx, field, joint| {
             let hand_joint = JOINT_SPACE_MAP
@@ -132,7 +131,7 @@ impl XRHand {
                 .find(|&&(_, value)| value == joint)
                 .map(|&(hand_joint, _)| hand_joint)
                 .expect("Invalid joint name");
-            field.map(|_| XRJointSpace::new(cx, global, session, id, joint, hand_joint))
+            field.map(|_| XRJointSpace::new(cx, global, session, source, joint, hand_joint))
         });
         reflect_dom_object(cx, Box::new(XRHand::new_inherited(source, &spaces)), global)
     }

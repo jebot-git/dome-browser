@@ -81,6 +81,7 @@ impl PerformanceResourceTiming {
         url: ServoUrl,
         initiator_type: InitiatorType,
         resource_timing: &ResourceFetchTiming,
+        time_origin: CrossProcessInstant,
     ) -> PerformanceResourceTiming {
         let (entry_type, start_time) = if initiator_type == InitiatorType::Navigation {
             (EntryType::Navigation, None)
@@ -93,6 +94,7 @@ impl PerformanceResourceTiming {
                 entry_type,
                 start_time,
                 Duration::ZERO, // duration is calculated dynamically in PerformanceEntry::Duration
+                time_origin,
             ),
             initiator_type,
             next_hop: None,
@@ -121,12 +123,14 @@ impl PerformanceResourceTiming {
         initiator_type: InitiatorType,
         resource_timing: &ResourceFetchTiming,
     ) -> DomRoot<PerformanceResourceTiming> {
+        let time_origin = global.performance(cx).time_origin();
         reflect_dom_object(
             cx,
             Box::new(PerformanceResourceTiming::new_inherited(
                 url,
                 initiator_type,
                 resource_timing,
+                time_origin,
             )),
             global,
         )
@@ -137,12 +141,10 @@ impl PerformanceResourceTiming {
     /// always after that time.
     pub(crate) fn to_dom_high_res_time_stamp(
         &self,
-        cx: &mut JSContext,
+        _cx: &mut JSContext,
         instant: Option<CrossProcessInstant>,
     ) -> DOMHighResTimeStamp {
-        self.global()
-            .performance(cx)
-            .maybe_to_dom_high_res_time_stamp(instant)
+        self.entry.to_dom_high_res_time_stamp(instant)
     }
 }
 

@@ -10,6 +10,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::{mem, thread_local};
 
+use base64::Engine as _;
 use imsz::imsz_from_reader;
 use log::{debug, error, warn};
 use malloc_size_of::{MallocConditionalSizeOf, MallocSizeOf as MallocSizeOfTrait, MallocSizeOfOps};
@@ -434,9 +435,9 @@ enum KeyCacheState {
 impl KeyCacheState {
     fn size(&self) -> usize {
         match self {
-            KeyCacheState::PendingBatch |
-            KeyCacheState::Processing |
-            KeyCacheState::PipelineClosed => 0,
+            KeyCacheState::PendingBatch
+            | KeyCacheState::Processing
+            | KeyCacheState::PipelineClosed => 0,
             KeyCacheState::Ready(items) => items.len(),
         }
     }
@@ -568,8 +569,9 @@ impl ImageCacheStore {
     /// If a key is available the image will be immediately loaded, otherwise it will load then the next batch of
     /// keys is received. Only call this if the image does not have a `LoadKey` yet.
     fn load_image_with_keycache(&mut self, pending_image: PendingKey) {
-        if let PendingKey::Svg((pending_id, ref _raster_image, requested_size)) = pending_image &&
-            self.key_cache
+        if let PendingKey::Svg((pending_id, ref _raster_image, requested_size)) = pending_image
+            && self
+                .key_cache
                 .evicted_images
                 .remove(&(pending_id, requested_size))
         {
@@ -728,15 +730,43 @@ impl ImageCacheStore {
     ) {
         if let Some(loaded_image) =
             self.completed_loads
-                .remove(&(url.clone(), origin.clone(), *cors_setting)) &&
-            let ImageResponse::Loaded(Image::Raster(image), _) = loaded_image.image_response &&
-            let Some(id) = image.id
+                .remove(&(url.clone(), origin.clone(), *cors_setting))
+            && let ImageResponse::Loaded(Image::Raster(image), _) = loaded_image.image_response
+            && let Some(id) = image.id
         {
             self.paint_api.update_images(
                 self.webview_id.into(),
                 vec![ImageUpdate::DeleteImage(id)].into(),
             );
         }
+    }
+
+    fn remove_vector_snapshot(&mut self, image_id: PendingImageId) {
+        self.vector_images.remove(&image_id);
+        let sizes = self
+            .rasterized_vector_images
+            .keys()
+            .filter_map(|(id, size)| (*id == image_id).then_some(*size))
+            .collect::<Vec<_>>();
+        for size in sizes {
+            let listeners = self
+                .rasterized_vector_images
+                .get_mut(&(image_id, size))
+                .map(|task| std::mem::take(&mut task.listeners))
+                .unwrap_or_default();
+            self.remove_rasterized_vector_image(&image_id, &size);
+            for (pipeline_id, callback) in listeners {
+                callback(ImageCacheResponseMessage::VectorImageRasterizationComplete(
+                    RasterizationCompleteResponse {
+                        pipeline_id,
+                        image_id,
+                        requested_size: size,
+                    },
+                ));
+            }
+        }
+        self.svg_rasterization_task_store
+            .remove_all_for_id(image_id);
     }
 
     fn remove_rasterized_vector_image(
@@ -1075,18 +1105,10 @@ impl ImageCache for ImageCacheImpl {
             return Some(result.clone());
         }
 
-        if let Some(svg_id) = svg_id &&
-            let Some(old_mapped_image_id) =
-                self.svg_id_image_id_map.lock().insert(svg_id, image_id) &&
-            old_mapped_image_id != image_id
-        {
-            store.vector_images.remove(&old_mapped_image_id);
-            store
-                .rasterized_vector_images
-                .remove(&(old_mapped_image_id, requested_size));
-            store
-                .svg_rasterization_task_store
-                .remove_all_for_id(old_mapped_image_id);
+        if let Some(svg_id) = svg_id {
+            // The completed snapshot stays alive until script promotes its
+            // replacement. Do not discard it merely because new work started.
+            self.svg_id_image_id_map.lock().insert(svg_id, image_id);
         }
 
         if store
@@ -1112,9 +1134,9 @@ impl ImageCache for ImageCacheImpl {
         };
 
         // Requirements from tiny_skia::Pixmap::new
-        if tinyskia_requested_size.width() == 0 ||
-            tinyskia_requested_size.width() > (i32::MAX / 4).try_into().unwrap() ||
-            tinyskia_requested_size.height() == 0
+        if tinyskia_requested_size.width() == 0
+            || tinyskia_requested_size.width() > (i32::MAX / 4).try_into().unwrap()
+            || tinyskia_requested_size.height() == 0
         {
             debug!(
                 "Asked for requested size {:?} which has zero size. Not returning image",
@@ -1137,8 +1159,8 @@ impl ImageCache for ImageCacheImpl {
 
             // Some SVG documents, primarily ones created by fuzzers, can cause resvg to fail
             // assertions and panic. We catch any panics in `resvg::render` here so that we don't
-            // crash the whole engine for such cases. In case of a panic, the completion listeners
-            // added for this request will never get called.
+            // crash the whole engine for such cases. Failed snapshots release their completion
+            // listeners so inline SVG can advance to a later valid generation.
             //
             // We also need to set `SUPPRESS_ABORT_IN_PANIC_HOOK` for the duration of the call
             // because servoshell registers a custom hook that intercepts the panic and crashes
@@ -1188,24 +1210,76 @@ impl ImageCache for ImageCacheImpl {
                 Err(_) => {
                     warn!("resvg panicked while rasterizing SVG image {image_id:?} at {requested_size:?}");
                     let mut store = store.lock();
-                    // Clean up data for this rasterization request.
-                    store
-                        .svg_rasterization_task_store
-                        .remove_being_rasterized(image_id, requested_size);
-                    store
-                        .rasterized_vector_images
-                        .remove(&(image_id, requested_size));
-
-                    // Remove the `image_id` from `vector_images` so the check at the top of this
-                    // method will fail for subsequent calls and won't trigger rasterization
-                    // again. Note, however, this means subsequent rasterization requests for
-                    // a different `requested_size` will also fail, but the panics in resvg so far
-                    // seem indepenent of the size, so this should be good enough.
-                    store.vector_images.remove(&image_id);
+                    store.remove_vector_snapshot(image_id);
                 },
             }
         });
         None
+    }
+
+    fn prepare_image_for_svg_snapshot(
+        &self,
+        image: Image,
+        callback: Box<dyn FnOnce(Option<ServoUrl>) + Send>,
+    ) {
+        let tree = match &image {
+            Image::Vector(image) => self.store.lock().vector_images.get(&image.id)
+                .map(|image| image.svg_tree.clone()),
+            Image::Raster(_) => None,
+        };
+        // XML/PNG serialization can be expensive. Keep it off the script thread
+        // and do not hold the cache lock while preparing the private resource.
+        self.thread_pool.spawn(move || {
+            let previous_suppression = SUPPRESS_ABORT_IN_PANIC_HOOK.replace(true);
+            let source = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let (mime, bytes) = match image {
+                    Image::Raster(image) => {
+                        let mut bytes = Vec::new();
+                        image.as_snapshot().encode_for_mime_type(
+                            &pixels::EncodedImageType::Png, None, &mut bytes,
+                        ).ok()?;
+                        ("image/png", bytes)
+                    },
+                    Image::Vector(_) => {
+                        ("image/svg+xml", tree?.to_string(&usvg::WriteOptions::default()).into_bytes())
+                    },
+                };
+                let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+                ServoUrl::parse(&format!("data:{mime};base64,{encoded}")).ok()
+            }));
+            SUPPRESS_ABORT_IN_PANIC_HOOK.set(previous_suppression);
+            match source {
+                Ok(source) => callback(source),
+                Err(_) => {
+                    warn!("Image serialization failed while preparing an SVG snapshot resource");
+                    callback(None);
+                },
+            }
+        });
+    }
+
+    fn get_rasterized_vector_image(&self, image_id: PendingImageId) -> Option<RasterImage> {
+        self.store
+            .lock()
+            .rasterized_vector_images
+            .iter()
+            .find_map(|((id, _), task)| (*id == image_id).then(|| task.result.clone()).flatten())
+    }
+
+    fn evict_svg_snapshot(&self, url: &ServoUrl, origin: &ImmutableOrigin) {
+        let mut store = self.store.lock();
+        let key = (url.clone(), origin.clone(), None);
+        if let Some(id) = store.pending_loads.url_to_load_key.get(&key).copied() {
+            if let Some(load) = store.pending_loads.remove(&id) {
+                for listener in load.listeners {
+                    listener.respond(ImageResponse::FailedToLoadOrDecode);
+                }
+            }
+            store.remove_vector_snapshot(id);
+        }
+        if let Some(load) = store.completed_loads.remove(&key) {
+            store.remove_vector_snapshot(load.id);
+        }
     }
 
     /// Add a new listener for the given pending image id. If the image is already present,
@@ -1245,8 +1319,12 @@ impl ImageCache for ImageCacheImpl {
     /// Inform the image cache about a response for a pending request.
     fn notify_pending_response(&self, id: PendingImageId, action: FetchResponseMsg) {
         match (action, id) {
-            (FetchResponseMsg::ProcessRequestBody(..), _) |
-            (FetchResponseMsg::ProcessCspViolations(..), _) => (),
+            (FetchResponseMsg::ProcessResponseChunkWithAck(request_id, bytes, ack), _) => {
+                self.notify_pending_response(id, FetchResponseMsg::ProcessResponseChunk(request_id, bytes));
+                let _ = ack.send(());
+            },
+            (FetchResponseMsg::ProcessRequestBody(..), _)
+            | (FetchResponseMsg::ProcessCspViolations(..), _) => (),
             (FetchResponseMsg::ProcessResponse(_, response), _) => {
                 debug!("Received {:?} for {:?}", response.as_ref().map(|_| ()), id);
                 let mut store = self.store.lock();

@@ -1,0 +1,38 @@
+<!doctype html><meta charset="utf-8"><title>Cleanup pending during worker termination</title>
+<script>
+'use strict';
+let sent = false;
+const code = `
+'use strict';
+let started = false;
+const registry = new FinalizationRegistry(held => {
+ if (held !== 'first' || started) return;
+ started = true;
+ for (let i = 0; i < 1500; i++) registry.register({i}, i);
+ postMessage('cleanup-running');
+ pressure();
+});
+registry.register({}, 'first');
+function pressure() {
+ for (let i = 0; i < 128; i++) {
+  const buffer = new ArrayBuffer(1024 * 1024);
+  new Uint8Array(buffer)[0] = i;
+ }
+}
+setTimeout(pressure, 150);
+`;
+const url = URL.createObjectURL(new Blob([code], {type: 'text/javascript'}));
+const worker = new Worker(url);
+function report(passed) {
+ if (sent) return;
+ sent = true;
+ worker.terminate();
+ URL.revokeObjectURL(url);
+ fetch('/report', {method: 'POST', body: JSON.stringify({checks: [
+   {name: 'worker cleanup active before termination request', passed}
+ ], scope: 'Owner-thread lifecycle stress; no fixed GC or callback deadline conformance claim.'})});
+}
+worker.onmessage = event => { if (event.data === 'cleanup-running') report(true); };
+worker.onerror = event => { event.preventDefault(); report(false); };
+setTimeout(() => report(false), 10000);
+</script>

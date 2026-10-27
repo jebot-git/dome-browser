@@ -237,6 +237,24 @@ pub trait ImageCache: Sync + Send {
         svg_id: Option<Uuid>,
     ) -> Option<RasterImage>;
 
+    /// Serialize a decoded image for an internal SVG raster snapshot. This does
+    /// not fetch resources or change the source Image's CORS status. The result
+    /// This is a static representation, matching the current inline rasterizer.
+    /// It does not implement animated-image playback. The result
+    /// must never replace the script-visible source or enable a canvas readback
+    /// path without the original image's origin-clean checks.
+    fn prepare_image_for_svg_snapshot(
+        &self,
+        image: Image,
+        callback: Box<dyn FnOnce(Option<ServoUrl>) + Send>,
+    );
+
+    /// Return a completed raster at any size for a retained inline-SVG fallback.
+    fn get_rasterized_vector_image(&self, image_id: VectorImageId) -> Option<RasterImage>;
+
+    /// Retire an inline SVG's private snapshot, including pending work and rasters.
+    fn evict_svg_snapshot(&self, url: &ServoUrl, origin: &ImmutableOrigin);
+
     /// Adds a new listener to be notified once the given `image_id` has been rasterized at
     /// the given `size`. The listener will receive a `VectorImageRasterizationComplete`
     /// message on the given `sender`, even if the listener is called after rasterization

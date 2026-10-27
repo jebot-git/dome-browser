@@ -60,6 +60,7 @@ pub enum InputEvent {
     MouseLeftViewport(MouseLeftViewportEvent),
     MouseMove(MouseMoveEvent),
     Touch(TouchEvent),
+    Pen(PenEvent),
     Wheel(WheelEvent),
 }
 
@@ -143,6 +144,7 @@ impl InputEvent {
             InputEvent::MouseMove(event) => Some(event.point),
             InputEvent::MouseLeftViewport(_) => None,
             InputEvent::Touch(event) => Some(event.point),
+            InputEvent::Pen(event) => Some(event.point),
             InputEvent::Wheel(event) => Some(event.point),
         }
     }
@@ -198,6 +200,9 @@ pub struct MouseButtonEvent {
     // An internal flag marking a compatibility mouse event synthesized for a
     // touch/pen tap. Such events must not generate pointer events.
     pub is_compatibility_event_for_touch: bool,
+    /// The originating pointer path dispatches click and contextmenu itself.
+    #[serde(default)]
+    pub pointer_manages_activation: bool,
 }
 
 impl MouseButtonEvent {
@@ -207,6 +212,7 @@ impl MouseButtonEvent {
             button,
             point,
             is_compatibility_event_for_touch: false,
+            pointer_manages_activation: false,
         }
     }
 
@@ -221,6 +227,7 @@ impl MouseButtonEvent {
             button,
             point,
             is_compatibility_event_for_touch: true,
+            pointer_manages_activation: false,
         }
     }
 }
@@ -307,6 +314,52 @@ impl MouseMoveEvent {
 #[derive(Clone, Copy, Debug, Default, Deserialize, MallocSizeOf, Serialize)]
 pub struct MouseLeftViewportEvent {
     pub focus_moving_to_another_iframe: bool,
+    #[serde(default)]
+    pub is_compatibility_event: bool,
+}
+
+/// Native pen range updates are independent of touch gesture processing.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, MallocSizeOf, PartialEq, Serialize)]
+pub enum PenEventType { Sample, Leave, Cancel }
+
+#[derive(Clone, Copy, Debug, Deserialize, MallocSizeOf, Serialize)]
+pub struct PenEvent {
+    pub event_type: PenEventType,
+    pub id: i32,
+    pub point: WebViewPoint,
+    pub primary: bool,
+    /// Pointer Events buttons mask, including bit 32 for the eraser.
+    pub buttons: u16,
+    pub pressure: f32,
+    pub tangential_pressure: f32,
+    pub tilt_x: f64,
+    pub tilt_y: f64,
+    pub twist: f64,
+}
+impl PenEvent {
+    pub fn new(event_type: PenEventType, id: i32, point: WebViewPoint) -> Self {
+        Self { event_type, id, point, primary: true, buttons: 0, pressure: 0.,
+            tangential_pressure: 0., tilt_x: 0., tilt_y: 0., twist: 0. }
+    }
+    pub fn normalized(mut self) -> Self {
+        self.buttons &= 63;
+        self.pressure = if self.pressure.is_finite() {self.pressure.clamp(0.,1.)} else {0.};
+        self.tangential_pressure = if self.tangential_pressure.is_finite() {self.tangential_pressure.clamp(-1.,1.)} else {0.};
+        self.tilt_x = if self.tilt_x.is_finite() {self.tilt_x.clamp(-90.,90.)} else {0.};
+        self.tilt_y = if self.tilt_y.is_finite() {self.tilt_y.clamp(-90.,90.)} else {0.};
+        self.twist = if self.twist.is_finite() {self.twist.rem_euclid(360.)} else {0.};
+        if self.event_type!=PenEventType::Sample {self.buttons=0;}
+        if self.buttons==0 {self.pressure=0.;}
+        self
+    }
+    /// Orientation derived from the same rounded legacy tilt exposed to script.
+    pub fn orientation(self) -> (i32,i32,f64,f64) {
+        let sample=self.normalized();let x=sample.tilt_x.round() as i32;let y=sample.tilt_y.round() as i32;
+        let tx=(x as f64).to_radians().tan();let ty=(y as f64).to_radians().tan();
+        let altitude=1f64.atan2(tx.hypot(ty));
+        let azimuth=if x==0 && y==0 {0.} else {ty.atan2(tx).rem_euclid(std::f64::consts::TAU)};
+        (x,y,altitude,azimuth)
+    }
 }
 
 /// The type of input represented by a multi-touch event.
@@ -343,6 +396,10 @@ pub struct TouchEvent {
     pub touch_id: TouchId,
     pub point: WebViewPoint,
     pub pointer_type: TouchPointerType,
+    /// Native primary identity, including contacts started in browser chrome.
+    /// None lets embedders without that information use document-local tracking.
+    #[serde(default)]
+    pub is_primary: Option<bool>,
     /// cancelable default value is true, once the first move has been processed by script disable it.
     cancelable: bool,
     /// Whether this `touchend` should generate the compatibility mouse events.
@@ -361,6 +418,7 @@ impl TouchEvent {
             touch_id,
             point,
             pointer_type,
+            is_primary: None,
             cancelable: true,
             can_synthesize_mouse_events: false,
         }
@@ -484,4 +542,29 @@ pub enum GamepadUpdateType {
     ///
     /// <https://www.w3.org/TR/gamepad/#dfn-represents-a-standard-gamepad-button>
     Button(usize, f64),
+}
+
+#[cfg(test)]
+mod pen_tests {
+    use super::*;
+    fn sample() -> PenEvent {PenEvent::new(PenEventType::Sample,1,crate::DevicePoint::new(0.,0.).into())}
+    #[test]
+    fn pen_axes_reject_nonfinite_values_and_bound_physical_ranges() {
+        let mut p=sample();p.buttons=0xffff;p.pressure=f32::NAN;p.tangential_pressure=2.;
+        p.tilt_x=f64::INFINITY;p.tilt_y=-120.;p.twist=-15.;let p=p.normalized();
+        assert_eq!((p.buttons,p.pressure,p.tangential_pressure),(63,0.,1.));
+        assert_eq!((p.tilt_x,p.tilt_y,p.twist),(0.,-90.,345.));
+    }
+    #[test]
+    fn pen_orientation_matches_legacy_tilt() {
+        let mut p=sample();p.tilt_x=30.;let (x,y,alt,azi)=p.orientation();
+        assert_eq!((x,y),(30,0));assert!((alt-std::f64::consts::PI/3.).abs()<1e-10);assert_eq!(azi,0.);
+        p.tilt_x=0.;p.tilt_y=-45.;let (_,_,alt,azi)=p.orientation();
+        assert!((alt-std::f64::consts::PI/4.).abs()<1e-10);assert!((azi-std::f64::consts::PI*1.5).abs()<1e-10);
+    }
+    #[test]
+    fn pen_hover_and_retirement_clear_contact_pressure_and_buttons() {
+        let mut p=sample();p.pressure=1.;assert_eq!(p.normalized().pressure,0.);
+        p.buttons=33;p.event_type=PenEventType::Cancel;let p=p.normalized();assert_eq!((p.buttons,p.pressure),(0,0.));
+    }
 }

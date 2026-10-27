@@ -1308,32 +1308,16 @@ where
             EmbedderToConstellationMessage::AllowNavigationResponse(pipeline_id, allowed) => {
                 self.handle_allow_navigation_response(pipeline_id, allowed);
             },
-            // Load a new page from a typed url
-            // If there is already a pending page (self.pending_changes), it will not be overridden;
-            // However, if the id is not encompassed by another change, it will be.
+            // An explicit embedder navigation supersedes unfinished top-level loads.
             EmbedderToConstellationMessage::LoadUrl(webview_id, url_request) => {
                 let mut load_data = LoadData::new_for_new_unrelated_webview(url_request.url);
 
                 if !url_request.headers.is_empty() {
                     load_data.headers.extend(url_request.headers);
                 }
+                load_data.protocol_state = url_request.protocol_state;
 
-                let ctx_id = BrowsingContextId::from(webview_id);
-                let pipeline_id = match self.browsing_contexts.get(&ctx_id) {
-                    Some(ctx) => ctx.pipeline_id,
-                    None => {
-                        return warn!("{}: LoadUrl for unknown browsing context", webview_id);
-                    },
-                };
-                // Since this is a top-level load, initiated by the embedder, go straight to load_url,
-                // bypassing schedule_navigation.
-                self.load_url(
-                    webview_id,
-                    pipeline_id,
-                    load_data,
-                    NavigationHistoryBehavior::Push,
-                    TargetSnapshotParams::default(),
-                );
+                self.load_url_from_embedder(webview_id, load_data);
             },
             // Create a new top level browsing context. Will use response_chan to return
             // the browsing context id.
@@ -1410,6 +1394,23 @@ where
                 script,
             ) => {
                 self.handle_evaluate_javascript(webview_id, evaluation_id, script);
+            },
+            EmbedderToConstellationMessage::GetDownloadClient(webview_id, context, callback) => {
+                let pipeline = match context {
+                    Some(id) if id.webview_id == webview_id => self.pipelines.get(&id.pipeline_id),
+                    Some(_) => None,
+                    None => self.browsing_contexts.get(&BrowsingContextId::from(webview_id))
+                        .and_then(|context| self.pipelines.get(&context.pipeline_id)),
+                }.filter(|pipeline| pipeline.webview_id == webview_id);
+                if let Some(pipeline) = pipeline {
+                    if pipeline.event_loop.send(ScriptThreadMessage::GetDownloadClient(
+                        pipeline.id, callback.clone(),
+                    )).is_err() {
+                        let _ = callback.send(None);
+                    }
+                } else {
+                    let _ = callback.send(None);
+                }
             },
             EmbedderToConstellationMessage::CreateMemoryReport(sender) => {
                 self.mem_profiler_chan.send(ProfilerMsg::Report(sender));
@@ -1801,10 +1802,11 @@ where
                 self.handle_activate_document_msg(webview_id, source_pipeline_id);
             },
             // Update pipeline url after redirections
-            ScriptToConstellationMessage::SetFinalUrl(final_url) => {
+            ScriptToConstellationMessage::SetFinalUrl(final_url, protocol_state) => {
                 // The script may have finished loading after we already started shutting down.
                 if let Some(ref mut pipeline) = self.pipelines.get_mut(&source_pipeline_id) {
                     pipeline.url = final_url;
+                    pipeline.load_data.protocol_state = protocol_state;
                 } else {
                     warn!("constellation got set final url message for dead pipeline");
                 }
@@ -3349,11 +3351,13 @@ where
             webview_id,
             viewport_details,
             user_content_manager_id,
+            protocol_state,
         }: NewWebViewDetails,
     ) {
         let pipeline_id = PipelineId::new();
         let browsing_context_id = BrowsingContextId::from(webview_id);
-        let load_data = LoadData::new_for_new_unrelated_webview(url);
+        let mut load_data = LoadData::new_for_new_unrelated_webview(url);
+        load_data.protocol_state = protocol_state;
         let is_private = false;
 
         // Register this new top-level browsing context id as a webview and set
@@ -3702,6 +3706,7 @@ where
             webview_id: new_webview_id,
             viewport_details,
             user_content_manager_id,
+            protocol_state: _,
         } = match webview_id_receiver.recv() {
             Ok(Some(new_webview_details)) => new_webview_details,
             Ok(None) | Err(_) => {
@@ -4172,6 +4177,99 @@ where
                     pipeline_id
                 )
             },
+        }
+    }
+
+    /// Replace unfinished top-level work without discarding the WebView or its
+    /// browsing-context group. The first document has no BrowsingContext yet.
+    fn load_url_from_embedder(&mut self, webview_id: WebViewId, load_data: LoadData) {
+        if self.shutting_down {
+            return;
+        }
+        let context_id = BrowsingContextId::from(webview_id);
+        let Some(webview) = self.webviews.get_mut(&webview_id) else {
+            return warn!("{webview_id}: LoadUrl for closed WebView");
+        };
+        let changes = std::mem::take(&mut webview.pending_changes);
+        let (superseded, remaining): (Vec<_>, Vec<_>) = changes
+            .into_iter()
+            .partition(|change| change.browsing_context_id == context_id);
+        webview.pending_changes = remaining;
+
+        let started = if let Some(context) = self.browsing_contexts.get(&context_id) {
+            let pipeline_id = context.pipeline_id;
+            self.pending_approval_navigations.remove(&pipeline_id);
+            let replacement = self.load_url(
+                webview_id,
+                pipeline_id,
+                load_data,
+                NavigationHistoryBehavior::Push,
+                TargetSnapshotParams::default(),
+            );
+            let started = replacement.is_some_and(|id| self.pipelines.contains_key(&id));
+            if !started && let Some(id) = replacement && let Some(webview) = self.webviews.get_mut(&webview_id) {
+                webview.remove_pending_change_for_pipeline(id);
+            }
+            started
+        } else if let Some(initial) = superseded.iter().find(|change| {
+            change.new_browsing_context_info.as_ref().is_some_and(|info| {
+                info.parent_pipeline_id.is_none()
+            })
+        }) {
+            let info = initial.new_browsing_context_info.as_ref().unwrap();
+            let is_private = info.is_private;
+            let new_pipeline_id = PipelineId::new();
+            let opener = self.pipelines.get(&initial.new_pipeline_id).and_then(|pipeline| pipeline.opener);
+            let viewport_details = initial.viewport_details;
+            let new_browsing_context_info = Some(NewBrowsingContextInfo {
+                parent_pipeline_id: None,
+                is_private,
+                inherited_secure_context: info.inherited_secure_context,
+            });
+            self.webviews.get_mut(&webview_id).unwrap().add_pending_change(SessionHistoryChange {
+                webview_id,
+                browsing_context_id: context_id,
+                new_pipeline_id,
+                replace: None,
+                new_browsing_context_info,
+                viewport_details,
+            });
+            self.new_pipeline(
+                new_pipeline_id,
+                context_id,
+                webview_id,
+                None,
+                opener,
+                viewport_details,
+                load_data,
+                is_private,
+                TargetSnapshotParams::default(),
+                None,
+            );
+            let started = self.pipelines.contains_key(&new_pipeline_id);
+            if !started && let Some(webview) = self.webviews.get_mut(&webview_id) {
+                webview.remove_pending_change_for_pipeline(new_pipeline_id);
+            }
+            started
+        } else {
+            false
+        };
+
+        if !started {
+            if let Some(webview) = self.webviews.get_mut(&webview_id) {
+                webview.pending_changes.extend(superseded);
+            }
+            return;
+        }
+        // Attach replacement work before requesting exits: a same-origin
+        // replacement may share an event loop with a superseded pipeline.
+        for change in superseded {
+            self.pending_approval_navigations.remove(&change.new_pipeline_id);
+            self.close_pipeline(
+                change.new_pipeline_id,
+                DiscardBrowsingContext::No,
+                ExitPipelineMode::Normal,
+            );
         }
     }
 
@@ -5315,6 +5413,14 @@ where
                 pipeline.send_throttle_messages(hidden);
             }
         }
+        let state = self.webviews[&webview_id].state();
+        for event_loop in self.event_loops() {
+            if let Err(error) =
+                event_loop.send(ScriptThreadMessage::UpdateWebViewState(state.clone()))
+            {
+                warn!("Sending visibility to closed event loop ({:?}): {error}", event_loop.id());
+            }
+        }
     }
 
     #[servo_tracing::instrument(skip_all)]
@@ -5432,6 +5538,7 @@ where
                 webview_id,
                 entries,
                 current_index,
+                self.pipelines.get(&browsing_context.pipeline_id).and_then(|pipeline| pipeline.load_data.protocol_state.clone()),
             ));
     }
 

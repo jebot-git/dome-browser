@@ -1,0 +1,44 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>SVG paint server stylesheet regression</title>
+<style>
+body { margin:0; background:white; }
+svg { position:absolute; top:20px; width:60px; height:60px; }
+#attributes { left:20px; }
+#solid { left:100px; }
+#gradient { left:180px; }
+#stops { left:260px; }
+#stroke { left:340px; }
+#fallback { left:420px; }
+#solid rect { fill:rgb(20,180,90); }
+#gradient rect { fill:url(#sheetGradient); }
+#stops stop { stop-color:rgb(20,180,90); }
+#stroke rect { fill:none; stroke:url(#strokeGradient); stroke-width:20px; }
+#fallback rect { fill:url(#missingGradient) rgb(20,180,90); }
+</style>
+<svg id="attributes" viewBox="0 0 60 60">
+ <defs><linearGradient id="attributeGradient"><stop offset="0" stop-color="rgb(20,180,90)"/><stop offset="1" stop-color="rgb(20,180,90)"/></linearGradient></defs>
+ <rect width="60" height="60" fill="url(#attributeGradient)"/>
+</svg>
+<svg id="solid" viewBox="0 0 60 60"><rect width="60" height="60"/></svg>
+<svg id="gradient" viewBox="0 0 60 60">
+ <defs><linearGradient id="sheetGradient"><stop offset="0" stop-color="rgb(20,180,90)"/><stop offset="1" stop-color="rgb(20,180,90)"/></linearGradient></defs>
+ <rect width="60" height="60"/>
+</svg>
+<svg id="stops" viewBox="0 0 60 60">
+ <defs><linearGradient id="stopGradient"><stop offset="0"/><stop offset="1"/></linearGradient></defs>
+ <rect width="60" height="60" fill="url(#stopGradient)"/>
+</svg>
+<svg id="stroke" viewBox="0 0 60 60">
+ <defs><linearGradient id="strokeGradient"><stop offset="0" stop-color="rgb(20,180,90)"/><stop offset="1" stop-color="rgb(20,180,90)"/></linearGradient></defs>
+ <rect x="10" y="10" width="40" height="40"/>
+</svg>
+<svg id="fallback" viewBox="0 0 60 60"><rect width="60" height="60"/></svg>
+<script>
+window.addEventListener('load',()=>{
+ const styles=[...document.querySelectorAll('svg')].map(svg=>({id:svg.id,
+  fill:getComputedStyle(svg.querySelector('rect')).fill,
+  stops:[...svg.querySelectorAll('stop')].map(stop=>getComputedStyle(stop).stopColor)}));
+ fetch('/result',{method:'POST',body:JSON.stringify({styles})});
+});
+</script>

@@ -1,0 +1,29 @@
+<!doctype html><meta charset="utf-8"><title>SVG image native adblock integration</title>
+<style>html,body{margin:0;background:white}svg{position:absolute;top:0;width:80px;height:80px}</style>
+<script>
+(async()=>{
+ const SVG='http://www.w3.org/2000/svg',disabled=new URL(location).searchParams.has('disabled'),checks=[],pixel_cases=[],events={};
+ const check=(name,passed)=>checks.push({name,passed:!!passed});
+ const specs=[{name:'legitimate',expected:'load'},{name:'adblock-denied',expected:disabled?'load':'error'},{name:'adblock-exception',expected:'load'}];
+ const roots=[];
+ await Promise.all(specs.map(async(spec,index)=>{
+  const root=document.createElementNS(SVG,'svg');root.style.left=index*85+'px';root.setAttribute('width',80);root.setAttribute('height',80);
+  const red=document.createElementNS(SVG,'rect');red.setAttribute('width',80);red.setAttribute('height',80);red.setAttribute('fill','red');root.append(red);
+  const image=document.createElementNS(SVG,'image');image.setAttribute('width',80);image.setAttribute('height',80);
+  image.setAttribute('href','/svg-image.svg?name='+spec.name+'&transport=image');events[spec.name]=[];
+  const done=new Promise(resolve=>{for(const type of ['load','error'])image.addEventListener(type,()=>{events[spec.name].push(type);resolve(type)});setTimeout(()=>resolve('timeout'),4000)});
+  root.append(image);document.documentElement.append(root);roots.push(root);
+  check(spec.name+' terminal event follows native filter policy',await done===spec.expected);
+  pixel_cases.push({name:spec.name,x:index*85+20,y:20,expected:spec.expected==='load'?'green':'not-green'});
+ }));
+ const hidden=document.createElementNS(SVG,'svg');hidden.classList.add('ad');hidden.style.left='255px';hidden.setAttribute('width',80);hidden.setAttribute('height',80);
+ const blue=document.createElementNS(SVG,'rect');blue.setAttribute('width',80);blue.setAttribute('height',80);blue.setAttribute('fill','blue');hidden.append(blue);document.documentElement.append(hidden);
+ const typed=await fetch('/svg-image.svg?name=adblock-denied&transport=fetch');check('image filter preserves fetch resource type',typed.ok&&(await typed.text()).includes('<svg'));
+ await new Promise(resolve=>setTimeout(resolve,800));
+ check('cosmetic rule shares native blocker policy',(getComputedStyle(hidden).display==='none')===!disabled);
+ for(const spec of specs)check(spec.name+' terminal event occurs once',events[spec.name].length===1);
+ check('private snapshot representation remains out of public XML',roots.every(root=>!new XMLSerializer().serializeToString(root).includes('data:')));
+ pixel_cases.push({name:'cosmetic',x:275,y:20,expected:disabled?'blue':'white'});
+ fetch('/report',{method:'POST',body:JSON.stringify({checks,diagnostics:{disabled,events},pixel_cases,scope:'Private profile custom adblock-rust image filters, exception, resource-type positive control and cosmetic hiding; no default-list network dependency'})});
+})().catch(error=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[{name:'fixture completed',passed:false,error:String(error)}]})}));
+</script>

@@ -4,6 +4,19 @@
 
 #![cfg_attr(crown, allow(crown::jscontext_first_arg))]
 
+fn error_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::mem;
@@ -28,7 +41,7 @@ use js::context::JSContext;
 use markup5ever::TokenizerResult;
 use mime::{self, Mime};
 use net_traits::mime_classifier::{ApacheBugFlag, MediaType, MimeClassifier, NoSniffFlag};
-use net_traits::policy_container::PolicyContainer;
+use net_traits::policy_container::{EmbedderPolicy, PolicyContainer};
 use net_traits::{
     FetchMetadata, LoadContext, Metadata, NetworkError, ReferrerPolicy, ResourceFetchTiming,
 };
@@ -248,6 +261,27 @@ impl ServoParser {
         input: DOMString,
         allow_declarative_shadow_roots: bool,
     ) -> impl Iterator<Item = DomRoot<Node>> + use<'el> {
+        Self::parse_html_fragment_internal(cx, context, input, allow_declarative_shadow_roots, None, false)
+    }
+
+    pub(crate) fn parse_html_fragment_with_registry<'el>(
+        cx: &mut JSContext,
+        context: &'el Element,
+        input: DOMString,
+        allow_declarative_shadow_roots: bool,
+        registry: Option<&CustomElementRegistry>,
+    ) -> impl Iterator<Item = DomRoot<Node>> + use<'el> {
+        Self::parse_html_fragment_internal(cx, context, input, allow_declarative_shadow_roots, registry, true)
+    }
+
+    fn parse_html_fragment_internal<'el>(
+        cx: &mut JSContext,
+        context: &'el Element,
+        input: DOMString,
+        allow_declarative_shadow_roots: bool,
+        registry: Option<&CustomElementRegistry>,
+        preserve_registry: bool,
+    ) -> impl Iterator<Item = DomRoot<Node>> + use<'el> {
         let context_node = context.upcast::<Node>();
         let context_document = context_node.owner_doc();
         let window = context_document.window();
@@ -281,6 +315,9 @@ impl ServoParser {
             context_document.pipeline_id(),
             context_document.image_cache(),
         );
+
+        if preserve_registry { document.mark_registry_fragment_document(); }
+        if let Some(registry) = registry { document.set_custom_element_registry(registry); }
 
         // Step 2. If context's node document is in quirks mode, then set document's mode to "quirks".
         // Step 3. Otherwise, if context's node document is in limited-quirks mode, then set document's
@@ -536,8 +573,8 @@ impl ServoParser {
         // and we are parsing for a document load (not just things like innerHTML).
         // TODO: check if a devtools client is actually connected and/or wants the sources?
         #[cfg(feature = "devtools")]
-        let content_for_devtools = (document.global().devtools_chan().is_some() &&
-            document.has_browsing_context())
+        let content_for_devtools = (document.global().devtools_chan().is_some()
+            && document.has_browsing_context())
         .then_some(DomRefCell::new(String::new()));
 
         ServoParser {
@@ -1043,11 +1080,12 @@ impl ParserContext {
         // TODO Step 6. Parse Integrity-Policy headers with response and result.
         // Step 7. Return result.
         PolicyContainer {
+            // Native file authority is bound below once the response document's
+            // actual origin exists; headers cannot grant that authority.
+            local_file_origin: None,
             // Step 3. Set result's CSP list to the result of parsing a response's Content Security Policies given response.
             csp_list: parse_csp_list_from_metadata(&metadata.headers),
-            // TODO Step 4. If environment is non-null, then set result's embedder policy to the
-            // result of obtaining an embedder policy given response and environment.
-            // Otherwise, set it to "unsafe-none".
+            // Step 4 is completed below once the reserved document's secure-context state is available.
             embedder_policy: Default::default(),
             // Step 5. Set result's referrer policy to the result of parsing the `Referrer-Policy` header given response. [REFERRERPOLICY]
             referrer_policy: ReferrerPolicy::parse_header_for_response(&metadata.headers),
@@ -1056,6 +1094,8 @@ impl ParserContext {
 
     /// <https://html.spec.whatwg.org/multipage/#initialise-the-document-object>
     fn initialize_document_object(&self, cx: &mut JSContext, document: &Document) {
+        document.initialize_cookie_site();
+        document.note_cosmetic_element(None);
         // Step 9. Let document be a new Document, with
         // policy container: navigationParams's policy container
         document.set_policy_container(self.navigation_params.policy_container.clone());
@@ -1402,7 +1442,7 @@ impl ParserContext {
         // Step 21.9. Set responsePolicyContainer to the result of creating a
         // policy container from a fetch response given response and request's
         // reserved client.
-        let (policy_container, endpoints_list, link_headers, content_language) = metadata
+        let (mut policy_container, endpoints_list, link_headers, content_language) = metadata
             .as_ref()
             .map(|metadata| {
                 (
@@ -1453,6 +1493,16 @@ impl ParserContext {
 
         self.document = Some(Trusted::new(&*document));
 
+        if error.is_none() &&
+            metadata.as_ref().is_some_and(|metadata| metadata.final_url.scheme() == "file")
+        {
+            // Error documents may retain the failed file URL. They must not
+            // acquire authority from synthesized failure metadata.
+            // The file protocol already authorized the navigation. Bind the
+            // grant to this document, not to a freshly generated file URL origin.
+            policy_container.local_file_origin = Some(document.origin().immutable().clone());
+        }
+
         if document
             .get_current_parser()
             .is_some_and(|parser| parser.aborted.get())
@@ -1463,6 +1513,41 @@ impl ParserContext {
         let mut realm = enter_auto_realm(cx, &*document);
         let cx = &mut realm;
         let window = document.window();
+
+        if let Some(metadata) = metadata
+            .as_ref()
+            .filter(|metadata| !metadata.final_url.is_local_scheme())
+        {
+            policy_container.embedder_policy = EmbedderPolicy::from_headers(
+                metadata.headers.as_ref().map(|headers| &**headers),
+                window.upcast::<GlobalScope>().is_secure_context(),
+            );
+        }
+
+        if metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.final_url.is_local_scheme())
+        {
+            policy_container = (**document.policy_container()).clone();
+        } else if self.parent_info.is_some()
+            && self
+                .target_snapshot_params
+                .container_embedder_policy
+                .compatible_with_cross_origin_isolation()
+            && !policy_container
+                .embedder_policy
+                .value
+                .compatible_with_cross_origin_isolation()
+        {
+            // Render an internal failure document, never the rejected response body.
+            // Keep the container's policy if the parent can access this same-origin error page.
+            policy_container.embedder_policy.value =
+                self.target_snapshot_params.container_embedder_policy;
+            error = Some(NetworkError::ResourceLoadError(
+                "Cross-Origin-Embedder-Policy blocked child navigation".into(),
+            ));
+            document.make_document_unsalvageable();
+        }
 
         // https://html.spec.whatwg.org/multipage/#attempt-to-populate-the-history-entry%27s-document
         // Step 4. Otherwise, if any of the following are true:
@@ -1540,49 +1625,49 @@ impl ParserContext {
             let page = match error {
                 NetworkError::SslValidation(reason, bytes) => {
                     let page = resources::read_string(Resource::BadCertHTML);
-                    let page = page.replace("${reason}", &reason);
                     let encoded_bytes = general_purpose::STANDARD_NO_PAD.encode(bytes);
                     let page = page.replace("${bytes}", encoded_bytes.as_str());
-                    page.replace("${secret}", &net_traits::PRIVILEGED_SECRET.to_string())
+                    let page = page.replace("${secret}", &net_traits::PRIVILEGED_SECRET.to_string());
+                    page.replace("${reason}", &error_text(&reason))
                 },
-                NetworkError::BlobURLStoreError(reason) |
-                NetworkError::WebsocketConnectionFailure(reason) |
-                NetworkError::HttpError(reason) |
-                NetworkError::ResourceLoadError(reason) |
-                NetworkError::MimeType(reason) => {
+                NetworkError::BlobURLStoreError(reason)
+                | NetworkError::WebsocketConnectionFailure(reason)
+                | NetworkError::HttpError(reason)
+                | NetworkError::ResourceLoadError(reason)
+                | NetworkError::MimeType(reason) => {
                     let page = resources::read_string(Resource::NetErrorHTML);
-                    page.replace("${reason}", &reason)
+                    page.replace("${reason}", &error_text(&reason))
                 },
                 NetworkError::Crash(details) => {
                     let page = resources::read_string(Resource::CrashHTML);
-                    page.replace("${details}", &details)
+                    page.replace("${details}", &error_text(&details))
                 },
-                NetworkError::UnsupportedScheme |
-                NetworkError::CorsGeneral |
-                NetworkError::CrossOriginResponse |
-                NetworkError::CorsCredentials |
-                NetworkError::CorsAllowMethods |
-                NetworkError::CorsAllowHeaders |
-                NetworkError::CorsMethod |
-                NetworkError::CorsAuthorization |
-                NetworkError::CorsHeaders |
-                NetworkError::ConnectionFailure |
-                NetworkError::RedirectError |
-                NetworkError::TooManyRedirects |
-                NetworkError::TooManyInFlightKeepAliveRequests |
-                NetworkError::InvalidMethod |
-                NetworkError::ContentSecurityPolicy |
-                NetworkError::Nosniff |
-                NetworkError::SubresourceIntegrity |
-                NetworkError::MixedContent |
-                NetworkError::CacheError |
-                NetworkError::InvalidPort |
-                NetworkError::LocalDirectoryError |
-                NetworkError::PartialResponseToNonRangeRequestError |
-                NetworkError::ProtocolHandlerSubstitutionError |
-                NetworkError::DecompressionError => {
+                NetworkError::UnsupportedScheme
+                | NetworkError::CorsGeneral
+                | NetworkError::CrossOriginResponse
+                | NetworkError::CorsCredentials
+                | NetworkError::CorsAllowMethods
+                | NetworkError::CorsAllowHeaders
+                | NetworkError::CorsMethod
+                | NetworkError::CorsAuthorization
+                | NetworkError::CorsHeaders
+                | NetworkError::ConnectionFailure
+                | NetworkError::RedirectError
+                | NetworkError::TooManyRedirects
+                | NetworkError::TooManyInFlightKeepAliveRequests
+                | NetworkError::InvalidMethod
+                | NetworkError::ContentSecurityPolicy
+                | NetworkError::Nosniff
+                | NetworkError::SubresourceIntegrity
+                | NetworkError::MixedContent
+                | NetworkError::CacheError
+                | NetworkError::InvalidPort
+                | NetworkError::LocalDirectoryError
+                | NetworkError::PartialResponseToNonRangeRequestError
+                | NetworkError::ProtocolHandlerSubstitutionError
+                | NetworkError::DecompressionError => {
                     let page = resources::read_string(Resource::NetErrorHTML);
-                    page.replace("${reason}", &format!("{:?}", error))
+                    page.replace("${reason}", &error_text(&format!("{error:?}")))
                 },
                 NetworkError::LoadCancelled => {
                     // The next load will show a page
@@ -1633,8 +1718,8 @@ impl ParserContext {
         timing: ResourceFetchTiming,
     ) {
         let parser = self.parser.as_ref().map(|parser| parser.root());
-        if parser.as_ref().is_some_and(|parser| parser.aborted.get()) ||
-            self.is_synthesized_document
+        if parser.as_ref().is_some_and(|parser| parser.aborted.get())
+            || self.is_synthesized_document
         {
             return;
         }
@@ -1866,6 +1951,17 @@ impl TreeSink for Sink {
         attrs: Vec<Attribute>,
         flags: ElementFlags,
     ) -> Dom<Node> {
+        self.create_element_with_context(name, attrs, flags, None)
+    }
+
+    #[expect(unsafe_code)]
+    fn create_element_with_context(
+        &self,
+        name: QualName,
+        attrs: Vec<Attribute>,
+        flags: ElementFlags,
+        context: Option<(&Dom<Node>, Option<&Dom<Node>>, bool)>,
+    ) -> Dom<Node> {
         // TODO: https://github.com/servo/servo/issues/42839
         let mut cx = unsafe { temp_cx() };
         let cx = &mut cx;
@@ -1878,15 +1974,27 @@ impl TreeSink for Sink {
         } else {
             self.parsing_algorithm
         };
+        let intended_parent = context.and_then(|(node, fallback, before)| {
+            if let Some(fallback) = fallback {
+                node.GetParentNode().or_else(|| Some(DomRoot::from_ref(&**fallback)))
+            } else if before { node.GetParentNode() }
+            else { Some(DomRoot::from_ref(&**node)) }
+        });
+        let document = intended_parent.as_ref().map(|parent| parent.owner_doc())
+            .unwrap_or_else(|| DomRoot::from_ref(&*self.document));
+        let registry = intended_parent.as_ref().map(|parent| {
+            CustomElementRegistry::lookup_a_custom_element_registry(parent)
+        }).unwrap_or_else(|| document.custom_element_registry());
         let element = create_element_for_token(
             cx,
             name,
             attrs,
-            &self.document,
+            &document,
             ElementCreator::ParserCreated(self.current_line.get()),
             parsing_algorithm,
             &self.custom_element_reaction_stack,
             flags.had_duplicate_attributes,
+            registry.as_deref(),
         );
         Dom::from_ref(element.upcast())
     }
@@ -2096,8 +2204,8 @@ impl TreeSink for Sink {
         let elem = handle.downcast::<Element>().unwrap();
         elem.get_attribute_string_value(&local_name!("encoding"))
             .is_some_and(|value| {
-                value.eq_ignore_ascii_case("text/html") ||
-                    value.eq_ignore_ascii_case("application/xhtml+xml")
+                value.eq_ignore_ascii_case("text/html")
+                    || value.eq_ignore_ascii_case("application/xhtml+xml")
             })
     }
 
@@ -2167,6 +2275,7 @@ fn create_element_for_token(
     parsing_algorithm: ParsingAlgorithm,
     custom_element_reaction_stack: &CustomElementReactionStack,
     had_duplicate_attributes: bool,
+    registry: Option<&CustomElementRegistry>,
 ) -> DomRoot<Element> {
     // Step 1. If the active speculative HTML parser is not null, then return the result
     // of creating a speculative mock element given namespace, token's tag name, and
@@ -2190,13 +2299,13 @@ fn create_element_for_token(
         .find(|attr| attr.name.local.eq_str_ignore_ascii_case("is"))
         .map(|attr| LocalName::from(&attr.value));
 
-    // Step 6. Let registry be the result of looking up a custom element registry given intendedParent.
-    // TODO: Implement registries other than `Document`.
+    // The sink resolves the intended parent's document and registry before
+    // creation, including template contents, shadows and foster parenting.
 
     // Step 7. Let definition be the result of looking up a custom element definition
     // given registry, namespace, localName, and is.
     let definition = CustomElementRegistry::lookup_custom_element_definition(
-        document.custom_element_registry().as_deref(),
+        registry,
         &name.ns,
         &name.local,
         is.as_ref(),
@@ -2228,7 +2337,7 @@ fn create_element_for_token(
     } else {
         CustomElementCreationMode::Asynchronous
     };
-    let element = Element::create(cx, name, is, document, creator, creation_mode, None);
+    let element = Element::create_with_registry(cx, name, is, document, creator, creation_mode, None, registry);
 
     // Step 11. Append each attribute in the given token to element.
     element.attrs().reserve_exact(attrs.len());
@@ -2262,9 +2371,9 @@ fn create_element_for_token(
     // Step 14. If element is a resettable element and not a form-associated custom
     // element, then invoke its reset algorithm. (This initializes the element's value and
     // checkedness based on the element's attributes.)
-    if let Some(html_element) = element.downcast::<HTMLElement>() &&
-        element.is_resettable() &&
-        !html_element.is_form_associated_custom_element()
+    if let Some(html_element) = element.downcast::<HTMLElement>()
+        && element.is_resettable()
+        && !html_element.is_form_associated_custom_element()
     {
         element.reset(cx);
     }
@@ -2339,9 +2448,13 @@ fn attach_declarative_shadow_inner(
             _ => {},
         });
 
+    let keep_null = attributes.iter().any(|attr|
+        &*attr.name.local == "shadowrootcustomelementregistry");
+    let registry = if keep_null { None } else { host.owner_doc().custom_element_registry() };
+
     // Step 8.1. Attach a shadow root with declarative shadow host element,
     // mode, clonable, serializable, delegatesFocus, and "named".
-    match host_element.attach_shadow(
+    match host_element.attach_shadow_with_registry(
         cx,
         IsUserAgentWidget::No,
         shadow_root_mode,
@@ -2349,10 +2462,12 @@ fn attach_declarative_shadow_inner(
         serializable,
         delegatesfocus,
         slot_assignment_mode,
+        registry.as_deref(),
     ) {
         Ok(shadow_root) => {
             // Step 8.3. Set shadow's declarative to true.
             shadow_root.set_declarative(true);
+            shadow_root.set_keep_custom_element_registry_null(keep_null);
 
             // Set 8.4. Set template's template contents property to shadow.
             let shadow = shadow_root.upcast::<DocumentFragment>();

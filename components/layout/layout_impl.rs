@@ -56,6 +56,7 @@ use servo_url::ServoUrl;
 use style::animation::DocumentAnimationSet;
 use style::context::{
     QuirksMode, RegisteredSpeculativePainter, RegisteredSpeculativePainters, SharedStyleContext,
+    StyleContext, ThreadLocalStyleContext,
 };
 use style::device::Device;
 use style::device::servo::FontMetricsProvider;
@@ -72,7 +73,8 @@ use style::selector_parser::{PseudoElement, SnapshotMap};
 use style::servo::media_features::PointerCapabilities;
 use style::shared_lock::{SharedRwLock, StylesheetGuards};
 use style::stylesheets::{DocumentStyleSheet, Origin, Stylesheet};
-use style::stylist::Stylist;
+use style::style_resolver::{PseudoElementResolution, StyleResolverForElement};
+use style::stylist::{RuleInclusion, Stylist};
 use style::traversal::DomTraversal;
 use style::traversal_flags::TraversalFlags;
 use style::values::computed::font::GenericFontFamily;
@@ -561,6 +563,69 @@ impl Layout for LayoutThread {
             let accessibility_tree = accessibility_tree.as_ref()?;
             accessibility_tree.accesskit_node_for_dom_node(&node)
         })
+    }
+
+    fn style_svg_use_instance(
+        &self,
+        root: TrustedNodeAddress,
+        inherited: ServoArc<ComputedValues>,
+        animations: DocumentAnimationSet,
+        animation_timeline_value: f64,
+    ) {
+        with_layout_state(|| {
+            let root = unsafe { ServoLayoutNode::new(&root).dangerous_style_node() };
+            assert!(root.parent_node().is_none(), "SVG instance must be detached");
+            let document = root.owner_doc();
+            let locks = document.shared_style_locks();
+            let guards = StylesheetGuards {
+                author: &locks.author.read(),
+                ua_or_user: &locks.ua_or_user.read(),
+            };
+            let snapshots = SnapshotMap::new();
+            let shared = self.build_shared_style_context(
+                guards,
+                &snapshots,
+                animation_timeline_value,
+                &animations,
+                TraversalFlags::empty(),
+            );
+            let mut local = ThreadLocalStyleContext::new();
+            let mut context = StyleContext {
+                shared: &shared,
+                thread_local: &mut local,
+            };
+            let mut pending = vec![(root, inherited)];
+            while let Some((node, inherited)) = pending.pop() {
+                let style = if let Some(element) = node.as_element() {
+                    // Rebuild for the actual clone ancestry. In particular,
+                    // selectors matching source ancestors must not leak in.
+                    context.thread_local.bloom_filter.clear();
+                    if let Some(parent) = element.traversal_parent() {
+                        context.thread_local.bloom_filter.rebuild(parent);
+                        context.thread_local.bloom_filter.push(parent);
+                    }
+                    context.thread_local.current_dom_depth = node.depth();
+                    let style = StyleResolverForElement::new(
+                        element,
+                        &mut context,
+                        RuleInclusion::All,
+                        PseudoElementResolution::IfApplicable,
+                    )
+                    .resolve_primary_style(Some(&inherited), Some(&inherited))
+                    .style.0;
+                    // Only the private clone is changed. Descendant selectors
+                    // and container queries can consult its computed ancestors.
+                    unsafe { element.ensure_data() }.styles.primary = Some(style.clone());
+                    style
+                } else {
+                    inherited
+                };
+                let children: Vec<_> = node.dom_children().collect();
+                pending.extend(
+                    children.into_iter().rev().map(|child| (child, style.clone())),
+                );
+            }
+        });
     }
 
     #[servo_tracing::instrument(skip_all)]

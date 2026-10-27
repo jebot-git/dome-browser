@@ -206,6 +206,8 @@ impl RootedOneshotTimerOrJsCallback {
 //     `invoke<T: DomObject>(self: Box<Self>, this: &T, js_timers: &JsTimers);`.
 #[derive(JSTraceable, MallocSizeOf)]
 pub(crate) enum OneshotTimerCallback {
+    IdleCallbackTimeout(u32),
+    IdlePeriodWake(u64),
     XhrTimeout(XHRTimeoutCallback),
     EventSourceTimeout(EventSourceTimeoutCallback),
     /// <https://www.w3.org/TR/geolocation/#dom-positionoptions-timeout>
@@ -231,6 +233,16 @@ pub(crate) enum OneshotTimerCallback {
 impl OneshotTimerCallback {
     fn invoke(self, cx: &mut JSContext, global: &GlobalScope) {
         match self {
+            OneshotTimerCallback::IdlePeriodWake(generation) => {
+                if let Some(window) = global.downcast::<Window>() {
+                    window.idle_period_wake(generation);
+                }
+            },
+            OneshotTimerCallback::IdleCallbackTimeout(handle) => {
+                if let Some(window) = global.downcast::<Window>() {
+                    window.invoke_idle_timeout(cx, handle);
+                }
+            },
             OneshotTimerCallback::XhrTimeout(callback) => callback.invoke(cx),
             OneshotTimerCallback::EventSourceTimeout(callback) => callback.invoke(),
             OneshotTimerCallback::GeolocationTimeout(callback) => callback.invoke(),

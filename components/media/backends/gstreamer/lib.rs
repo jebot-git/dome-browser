@@ -11,6 +11,9 @@ pub mod media_capture;
 pub mod media_stream;
 mod media_stream_source;
 pub mod player;
+mod player_signals;
+#[cfg(feature = "native-mse")]
+pub mod mse;
 mod registry_scanner;
 mod render;
 mod source;
@@ -66,6 +69,35 @@ pub struct GStreamerBackend {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct ErrorLoadingPlugins<'a>(Vec<&'a str>);
+
+fn start_shutdown_thread(
+    instances: Arc<Mutex<WeakMediaInstanceHashMap>>,
+    receiver: mpsc::Receiver<BackendMsg>,
+) -> thread::JoinHandle<()> {
+    thread::Builder::new()
+        .name("GStreamerBackend ShutdownThread".to_owned())
+        .spawn(move || {
+            while let Ok(message) = receiver.recv() {
+                match message {
+                    BackendMsg::Shutdown { context, id, tx_ack } => {
+                        {
+                            let mut instances = instances.lock().unwrap();
+                            if let Some(entries) = instances.get_mut(&context) {
+                                entries.retain(|entry| entry.0 != id);
+                                if entries.is_empty() {
+                                    instances.remove(&context);
+                                }
+                            }
+                        }
+                        // The registry lock is released before the owner resumes.
+                        // A caller may have gone away while its record was queued.
+                        let _ = tx_ack.send(());
+                    },
+                }
+            }
+        })
+        .unwrap()
+}
 
 impl GStreamerBackend {
     pub fn init_with_plugins<'a, T: AsRef<str>>(
@@ -140,30 +172,8 @@ impl GStreamerBackend {
         let instances: HashMap<ClientContextId, MediaInstancesVec> = Default::default();
         let instances = Arc::new(Mutex::new(instances));
 
-        let instances_ = instances.clone();
         let (backend_chan, recvr) = mpsc::channel();
-        thread::Builder::new()
-            .name("GStreamerBackend ShutdownThread".to_owned())
-            .spawn(move || {
-                match recvr.recv().unwrap() {
-                    BackendMsg::Shutdown {
-                        context,
-                        id,
-                        tx_ack,
-                    } => {
-                        let mut instances_ = instances_.lock().unwrap();
-                        if let Some(vec) = instances_.get_mut(&context) {
-                            vec.retain(|m| m.0 != id);
-                            if vec.is_empty() {
-                                instances_.remove(&context);
-                            }
-                        }
-                        // tell caller we are done removing this instance
-                        let _ = tx_ack.send(());
-                    },
-                };
-            })
-            .unwrap();
+        start_shutdown_thread(instances.clone(), recvr);
 
         Ok(Box::new(GStreamerBackend {
             capture_mocking: AtomicBool::new(false),
@@ -178,20 +188,32 @@ impl GStreamerBackend {
         id: &ClientContextId,
         cb: &dyn Fn(&dyn MediaInstance) -> Result<(), MediaInstanceError>,
     ) {
-        let mut instances = self.instances.lock().unwrap();
-        match instances.get_mut(id) {
-            Some(vec) => vec.retain(|(_, weak)| match weak.upgrade() {
+        // Keep upgraded instances alive until after releasing the registry.
+        // Their last Arc can be dropped by this action: destruction waits for
+        // ShutdownThread to remove the same instance from this registry.
+        let active = {
+            let mut instances = self.instances.lock().unwrap();
+            let Some(entries) = instances.get_mut(id) else {
+                warn!("Trying to exec media action on an unknown client context");
+                return;
+            };
+            let mut active = Vec::with_capacity(entries.len());
+            entries.retain(|(_, weak)| match weak.upgrade() {
                 Some(instance) => {
-                    if cb(&*(instance.lock().unwrap())).is_err() {
-                        warn!("Error executing media instance action");
-                    }
+                    active.push(instance);
                     true
                 },
-                _ => false,
-            }),
-            None => {
-                warn!("Trying to exec media action on an unknown client context");
-            },
+                None => false,
+            });
+            if entries.is_empty() {
+                instances.remove(id);
+            }
+            active
+        };
+        for instance in active {
+            if cb(&*instance.lock().unwrap()).is_err() {
+                warn!("Error executing media instance action");
+            }
         }
     }
 }
@@ -386,5 +408,155 @@ impl BackendDeInit for GStreamerBackend {
                 });
             let _ = rx_ack.recv();
         }
+    }
+}
+
+#[cfg(test)]
+mod registry_lifetime_tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    struct Instance {
+        id: usize,
+        cleanup: Option<(Sender<BackendMsg>, Sender<bool>)>,
+    }
+
+    impl MediaInstance for Instance {
+        fn get_id(&self) -> usize { self.id }
+        fn mute(&self, _: bool) -> Result<(), MediaInstanceError> { Ok(()) }
+        fn suspend(&self) -> Result<(), MediaInstanceError> { Ok(()) }
+        fn resume(&self) -> Result<(), MediaInstanceError> { Ok(()) }
+    }
+
+    impl Drop for Instance {
+        fn drop(&mut self) {
+            if let Some((sender, result)) = &self.cleanup {
+                let (tx_ack, rx_ack) = mpsc::channel();
+                let sent = sender.send(BackendMsg::Shutdown {
+                    context: ClientContextId::build(1, 1), id: self.id, tx_ack,
+                }).is_ok();
+                // Bound the baseline deadlock so the regression fails without
+                // leaving blocked test threads or an unbounded test process.
+                let acknowledged = sent && rx_ack.recv_timeout(Duration::from_millis(500)).is_ok();
+                let _ = result.send(acknowledged);
+            }
+        }
+    }
+
+    fn instance(id: usize) -> Arc<Mutex<dyn MediaInstance>> {
+        Arc::new(Mutex::new(Instance { id, cleanup: None }))
+    }
+
+    #[test]
+    fn shutdown_consumer_drains_multiple_contexts_and_tolerates_lost_ack() {
+        let a = ClientContextId::build(1, 1);
+        let b = ClientContextId::build(2, 1);
+        let one = instance(1); let two = instance(2); let three = instance(3);
+        let instances = Arc::new(Mutex::new(HashMap::from([
+            (a, vec![(1, Arc::downgrade(&one)), (2, Arc::downgrade(&two))]),
+            (b, vec![(3, Arc::downgrade(&three))]),
+        ])));
+        let (sender, receiver) = mpsc::channel();
+        let worker = start_shutdown_thread(instances.clone(), receiver);
+        let mut acknowledgements = 0;
+        for (context, id) in [(a, 1), (b, 99), (a, 1), (a, 2), (b, 3)] {
+            let (tx_ack, rx_ack) = mpsc::channel();
+            if sender.send(BackendMsg::Shutdown { context, id, tx_ack }).is_ok() &&
+                rx_ack.recv_timeout(Duration::from_secs(2)).is_ok() {
+                acknowledgements += 1;
+            }
+        }
+        let (tx_ack, rx_ack) = mpsc::channel();
+        drop(rx_ack);
+        let _ = sender.send(BackendMsg::Shutdown { context: a, id: 1, tx_ack });
+        let (tx_ack, rx_ack) = mpsc::channel();
+        let sent_after_lost_ack = sender.send(BackendMsg::Shutdown { context: b, id: 3, tx_ack }).is_ok();
+        let continued_after_lost_ack = sent_after_lost_ack && rx_ack.recv_timeout(Duration::from_secs(2)).is_ok();
+        drop(sender);
+        let joined = worker.join().is_ok();
+        assert_eq!(acknowledgements, 5, "later instance closures must be consumed");
+        assert!(continued_after_lost_ack && joined && instances.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn shutdown_consumer_exits_cleanly_without_any_instances() {
+        let (sender, receiver) = mpsc::channel();
+        let worker = start_shutdown_thread(Arc::new(Mutex::new(HashMap::new())), receiver);
+        drop(sender);
+        assert!(worker.join().is_ok());
+    }
+
+    #[test]
+    fn backend_deinit_and_late_player_drops_clear_all_contexts() {
+        use servo_media_player::context::{GlApi, GlContext, NativeDisplay};
+        struct Headless;
+        impl PlayerGLContext for Headless {
+            fn get_gl_context(&self) -> GlContext { GlContext::Unknown }
+            fn get_native_display(&self) -> NativeDisplay { NativeDisplay::Headless }
+            fn get_gl_api(&self) -> GlApi { GlApi::None }
+        }
+        gstreamer::init().unwrap();
+        let instances = Arc::new(Mutex::new(HashMap::new()));
+        let (sender, receiver) = mpsc::channel();
+        let worker = start_shutdown_thread(instances.clone(), receiver);
+        let backend = GStreamerBackend { capture_mocking: AtomicBool::new(false),
+            instances: instances.clone(), next_instance_id: AtomicUsize::new(0),
+            backend_chan: Arc::new(Mutex::new(sender)), };
+        let mut players = Vec::new();
+        for n in 0..16 {
+            players.push(backend.create_player(&ClientContextId::build(n / 4, n % 4 + 1),
+                StreamType::Seekable, GenericCallback::new(|_| {}).unwrap(),
+                None, None, Box::new(Headless)));
+        }
+        assert_eq!(instances.lock().unwrap().len(), 16);
+        backend.deinit();
+        assert!(instances.lock().unwrap().is_empty());
+        drop(players);
+        assert!(instances.lock().unwrap().is_empty());
+        drop(backend);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn last_owner_during_action_can_complete_cleanup_and_preserve_new_instances() {
+        let context = ClientContextId::build(1, 1);
+        let (sender, receiver) = mpsc::channel();
+        let (cleanup_result, result) = mpsc::channel();
+        let one: Arc<Mutex<dyn MediaInstance>> = Arc::new(Mutex::new(Instance {
+            id: 1, cleanup: Some((sender.clone(), cleanup_result)),
+        }));
+        let two = instance(2);
+        let instances = Arc::new(Mutex::new(HashMap::from([
+            (context, vec![(1, Arc::downgrade(&one))]),
+        ])));
+        let worker = start_shutdown_thread(instances.clone(), receiver);
+        let backend = Arc::new(GStreamerBackend { capture_mocking: AtomicBool::new(false),
+            instances: instances.clone(), next_instance_id: AtomicUsize::new(3),
+            backend_chan: Arc::new(Mutex::new(sender)), });
+        let action_backend = backend.clone();
+        let (entered, ready) = mpsc::channel();
+        let (release, resume) = mpsc::channel();
+        let action = thread::spawn(move || action_backend.media_instance_action(&context, &|instance| {
+            assert_eq!(instance.get_id(), 1);
+            entered.send(()).unwrap();
+            resume.recv_timeout(Duration::from_secs(2)).unwrap();
+            Ok(())
+        }));
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        let registry_available = if let Ok(mut map) = instances.try_lock() {
+            map.get_mut(&context).unwrap().push((2, Arc::downgrade(&two)));
+            true
+        } else { false };
+        drop(one);
+        release.send(()).unwrap();
+        action.join().unwrap();
+        let acknowledged = result.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(backend);
+        worker.join().unwrap();
+        let remaining = instances.lock().unwrap().get(&context)
+            .map(|entries| entries.iter().map(|entry|entry.0).collect::<Vec<_>>());
+        assert!(registry_available && acknowledged && remaining == Some(vec![2]),
+            "registry_available={registry_available}, acknowledged={acknowledged}, remaining={remaining:?}");
     }
 }

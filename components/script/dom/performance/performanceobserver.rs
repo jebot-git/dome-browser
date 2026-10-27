@@ -11,6 +11,7 @@ use script_bindings::callback::{OwnerWindow, RootedCallback, TracedCallback};
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_proto};
 
+use super::performance::Performance;
 use super::performanceentry::{EntryType, PerformanceEntry};
 use super::performanceobserverentrylist::PerformanceObserverEntryList;
 use crate::dom::bindings::callback::ExceptionHandling;
@@ -36,15 +37,22 @@ pub(crate) struct PerformanceObserver {
     callback: TracedCallback<PerformanceObserverCallback>,
     entries: DomRefCell<Vec<Dom<PerformanceEntry>>>,
     observer_type: Cell<ObserverType>,
+    // A reused initial about:blank Window can acquire a new Performance object.
+    // Registration and disconnect must continue to use this observer's owner.
+    performance: Dom<Performance>,
 }
 
 impl PerformanceObserver {
-    fn new_inherited(callback: RootedCallback<PerformanceObserverCallback>) -> PerformanceObserver {
+    fn new_inherited(
+        callback: RootedCallback<PerformanceObserverCallback>,
+        performance: &Performance,
+    ) -> PerformanceObserver {
         PerformanceObserver {
             reflector_: Reflector::new(),
             callback: callback.to_traced(),
             entries: Default::default(),
             observer_type: Cell::new(ObserverType::Undefined),
+            performance: Dom::from_ref(performance),
         }
     }
 
@@ -54,9 +62,10 @@ impl PerformanceObserver {
         proto: Option<HandleObject>,
         callback: RootedCallback<PerformanceObserverCallback>,
     ) -> DomRoot<PerformanceObserver> {
+        let performance = global.performance(cx);
         reflect_dom_object_with_proto(
             cx,
-            Box::new(PerformanceObserver::new_inherited(callback)),
+            Box::new(PerformanceObserver::new_inherited(callback, &performance)),
             global,
             proto,
         )
@@ -173,8 +182,7 @@ impl PerformanceObserverMethods<crate::DomTypeHolder> for PerformanceObserver {
             // Steps 6.4-6.5
             // This never pre-fills buffered entries, and
             // any existing types are replaced.
-            self.global()
-                .performance(cx)
+            self.performance
                 .add_multiple_type_observer(self, entry_types);
             Ok(())
         } else if let Some(entry_type) = &options.type_ {
@@ -187,7 +195,7 @@ impl PerformanceObserverMethods<crate::DomTypeHolder> for PerformanceObserver {
             // Steps 7.3-7.5
             // This may pre-fill buffered entries, and
             // existing types are appended to.
-            self.global().performance(cx).add_single_type_observer(
+            self.performance.add_single_type_observer(
                 self,
                 entry_type,
                 options.buffered.unwrap_or(false),
@@ -200,8 +208,8 @@ impl PerformanceObserverMethods<crate::DomTypeHolder> for PerformanceObserver {
     }
 
     /// <https://w3c.github.io/performance-timeline/#dom-performanceobserver-disconnect>
-    fn Disconnect(&self, cx: &mut JSContext) {
-        self.global().performance(cx).remove_observer(self);
+    fn Disconnect(&self, _cx: &mut JSContext) {
+        self.performance.remove_observer(self);
         self.entries.borrow_mut().clear();
     }
 

@@ -319,6 +319,8 @@ pub(crate) fn job_queue_microtask_checkpoint(
     unsafe {
         (*job_queue).draining = false;
     }
+    // Cleanup callbacks run in ordinary tasks after the checkpoint, never in GC.
+    crate::runtime::finalization_registry::enqueue_tasks();
     // TODO: Step 8. Record timing info for microtask checkpoint.
 }
 

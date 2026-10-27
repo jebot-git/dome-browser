@@ -1,0 +1,12 @@
+project('dome-native-mse-probe','c',version:'1.28.7',default_options:['buildtype=release','c_args=-march=native'])
+gnome=import('gnome')
+cc=meson.get_compiler('c')
+gst=dependency('gstreamer-1.0',version:'>=1.28')
+app=dependency('gstreamer-app-1.0')
+base=dependency('gstreamer-base-1.0')
+includes=include_directories('.')
+public_enums=gnome.mkenums_simple('mse-enumtypes',sources:['gstmediasource.h', 'gstsourcebuffer.h', 'gstsourcebufferlist.h', 'gstmsesrc.h', 'mse.h', 'mse-prelude.h'],header_prefix:'#include <gst/mse/mse-prelude.h>',decorator:'GST_MSE_API')
+private_enums=gnome.mkenums_simple('mse-enumtypes-private',sources:['gstappendpipeline-private.h', 'gstmediasourcesamplemap-private.h', 'gstmediasourcetrackbuffer-private.h', 'gstmediasourcetrack-private.h', 'gstmseeventqueue-private.h', 'gstmselogging-private.h', 'gstmsemediatype-private.h'],header_prefix:'#include <gst/mse/mse-prelude.h>',decorator:'GST_MSE_PRIVATE')
+library('gstmse-1.0',['gstmediasource.c', 'gstmsesrc.c', 'gstsourcebuffer.c', 'gstsourcebufferlist.c', 'gstappendpipeline.c', 'gstmediasourcesamplemap.c', 'gstmediasourcetrackbuffer.c', 'gstmediasourcetrack.c', 'gstmseeventqueue.c', 'gstmselogging.c', 'gstmsemediatype.c'],public_enums,private_enums,include_directories:includes,
+ dependencies:[gst,app,base,cc.find_library('m')],version:'0.2807.0',soversion:'0',install:false,
+ c_args:['-DBUILDING_GST_MSE','-DGST_USE_UNSTABLE_API','-DG_LOG_DOMAIN="GStreamer-MSE"'])

@@ -1,0 +1,52 @@
+<!doctype html><meta charset="utf-8"><title>Local file authority across document and worker contexts</title>
+<script>
+(async()=>{
+ const cfg=await fetch('/local-fixture-config.json').then(r=>r.json()),results=[],workerResults=[],checks=[];
+ cfg.serverOrigin=new URL('/local-fixture-config.json',document.baseURI).origin;
+ const wait=ms=>new Promise(r=>setTimeout(r,ms));
+ async function imageProbe(cfg){
+  const SVG='http://www.w3.org/2000/svg',events={};
+  async function image(name,url,svg){
+   const root=svg?document.createElementNS(SVG,'svg'):document.createElement('div');
+   const img=svg?document.createElementNS(SVG,'image'):document.createElement('img');img.setAttribute('width',2);img.setAttribute('height',2);
+   const done=new Promise(resolve=>{img.onload=()=>resolve('load');img.onerror=()=>resolve('error');setTimeout(()=>resolve('timeout'),2500)});
+   img.setAttribute(svg?'href':'src',url);root.append(img);document.documentElement.append(root);events[name]=await done;
+  }
+  await Promise.all([image('html',cfg.localImage,false),image('svg',cfg.localImage,true),image('http',cfg.serverOrigin+'/svg-image.svg?name=context-positive',false)]);
+  let fileFetchAllowed=false;try{await fetch(cfg.localImage,{mode:'no-cors'});fileFetchAllowed=true}catch{}
+  let sameParent=false;try{sameParent=parent.document!==undefined}catch{}
+  return {events,fileFetchAllowed,sameParent,url:location.href.split(',')[0],origin:self.origin};
+ }
+ results.push({name:'top',...(await imageProbe(cfg))});
+ async function frameProbe(name){
+  const frame=document.createElement('iframe'),token=name+'-'+Math.random(),encoded=JSON.stringify(cfg);
+  const script='('+imageProbe.toString()+')('+encoded+').then(result=>parent.postMessage({token:'+JSON.stringify(token)+',result},"*"))';
+  const html='<script>'+script+'<\/script>';
+  const done=new Promise(resolve=>{
+   const listener=event=>{if(event.source===frame.contentWindow&&event.data?.token===token){removeEventListener('message',listener);resolve({name,...event.data.result})}};
+   addEventListener('message',listener);setTimeout(()=>{removeEventListener('message',listener);resolve({name,error:'timeout'})},6000);
+  });
+  if(name==='aboutblank'){
+   frame.src='about:blank';frame.onload=()=>{try{frame.contentDocument.open();frame.contentDocument.write(html);frame.contentDocument.close()}catch(error){results.push({name:name+'-setup',error:String(error)})}};
+  }else if(name==='data')frame.src='data:text/html,'+encodeURIComponent(html);
+  else if(name==='blob')frame.src=URL.createObjectURL(new Blob([html],{type:'text/html'}));
+  else{if(name==='sandbox')frame.sandbox='allow-scripts';frame.srcdoc=html}
+  document.documentElement.append(frame);const result=await done;frame.remove();return result;
+ }
+ results.push(...await Promise.all(['aboutblank','srcdoc','sandbox','data','blob'].map(frameProbe)));
+ const workerText='async function probe(cfg){let fileAllowed=false,positive=false;try{await fetch(cfg.localImage,{mode:"no-cors"});fileAllowed=true}catch{}try{positive=(await(await fetch(cfg.serverOrigin+"/svg-image.svg?name=worker-positive&cors=anonymous")).text()).includes("<svg")}catch{}return {fileAllowed,positive,origin:self.origin}};onmessage=async({data:cfg})=>postMessage(await probe(cfg));';
+ async function runWorker(name,url){
+  return new Promise(resolve=>{
+   let worker;try{worker=new Worker(url)}catch(error){resolve({name,error:String(error)});return}
+   worker.onmessage=event=>{worker.terminate();resolve({name,...event.data})};worker.onerror=event=>{worker.terminate();resolve({name,error:event.message||event.type||'worker error'})};
+   worker.postMessage(cfg);setTimeout(()=>{worker.terminate();resolve({name,error:'timeout'})},6000);
+  });
+ }
+ workerResults.push(await runWorker('blob',URL.createObjectURL(new Blob([workerText],{type:'text/javascript'}))));
+ if(location.protocol!=='file:')workerResults.push(await runWorker('http',cfg.serverOrigin+'/file-boundary-worker.js'));
+ checks.push({name:'all document probes report with HTTP positive controls',passed:results.length===6&&results.every(r=>!r.error&&r.events.http==='load')});
+ checks.push({name:'aboutblank and srcdoc preserve parent principal',passed:results.filter(r=>['aboutblank','srcdoc'].includes(r.name)).every(r=>r.sameParent)});
+ checks.push({name:'worker probes retain HTTP positive controls',passed:workerResults.every(r=>!r.error&&r.positive)});
+ fetch('/report',{method:'POST',body:JSON.stringify({checks,diagnostics:{localTop:location.protocol==='file:',documents:results,workers:workerResults},scope:'Characterize local-file authority in top-level/blank/srcdoc/sandbox/data/blob documents and workers. Individual file outcomes require separate security and standards classification; only synthetic temporary files.'})});
+})().catch(error=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[{name:'fixture completed',passed:false,error:String(error)}]})}));
+</script>

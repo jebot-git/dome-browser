@@ -4,14 +4,14 @@
 
 // https://www.khronos.org/registry/webgl/specs/latest/1.0/webgl.idl
 use std::cell::Cell;
+use std::rc::{Rc, Weak};
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::reflector::{DomObject, reflect_dom_object};
-use script_bindings::weakref::WeakRef;
 use servo_base::generic_channel;
 use servo_canvas_traits::webgl::{
-    WebGLBufferId, WebGLCommand, WebGLError, WebGLResult, webgl_channel,
+    WebGLBufferId, WebGLCommand, WebGLError, WebGLMsgSender, WebGLResult, webgl_channel,
 };
 
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants;
@@ -20,7 +20,7 @@ use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::webgl::webglobject::WebGLObject;
-use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
+use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext, send_webgl_cleanup_command};
 
 fn target_is_copy_buffer(target: u32) -> bool {
     target == WebGL2RenderingContextConstants::COPY_READ_BUFFER ||
@@ -28,12 +28,14 @@ fn target_is_copy_buffer(target: u32) -> bool {
 }
 
 #[derive(JSTraceable, MallocSizeOf)]
-struct DroppableWebGLBuffer {
+pub(crate) struct DroppableWebGLBuffer {
     #[no_trace]
     id: WebGLBufferId,
     marked_for_deletion: Cell<bool>,
     attached_counter: Cell<u32>,
-    context: WeakRef<WebGLRenderingContext>,
+    #[no_trace]
+    #[ignore_malloc_size_of = "Non-owning native context channel"]
+    sender: Weak<WebGLMsgSender>,
 }
 
 impl DroppableWebGLBuffer {
@@ -41,13 +43,13 @@ impl DroppableWebGLBuffer {
         id: WebGLBufferId,
         marked_for_deletion: Cell<bool>,
         attached_counter: Cell<u32>,
-        context: WeakRef<WebGLRenderingContext>,
+        sender: Weak<WebGLMsgSender>,
     ) -> Self {
         Self {
             id,
             marked_for_deletion,
             attached_counter,
-            context,
+            sender,
         }
     }
 }
@@ -83,13 +85,12 @@ impl DroppableWebGLBuffer {
 
     pub(crate) fn delete(&self, operation_fallibility: Operation) {
         assert!(self.is_deleted());
-        if let Some(context) = self.context.root() {
-            let cmd = WebGLCommand::DeleteBuffer(self.id);
-            match operation_fallibility {
-                Operation::Fallible => context.send_command_ignored(cmd),
-                Operation::Infallible => context.send_command(cmd),
-            }
-        }
+        send_webgl_cleanup_command(&self.sender, WebGLCommand::DeleteBuffer(self.id), operation_fallibility);
+    }
+
+    pub(crate) fn decrement_attached_counter(&self, operation_fallibility: Operation) {
+        self.set_attached_counter(self.get_attached_counter().checked_sub(1).expect("refcount underflowed"));
+        if self.is_deleted() { self.delete(operation_fallibility); }
     }
 
     pub(crate) fn mark_for_deletion(&self, operation_fallibility: Operation) {
@@ -117,7 +118,9 @@ pub(crate) struct WebGLBuffer {
     capacity: Cell<usize>,
     /// <https://www.khronos.org/registry/OpenGL-Refpages/es2.0/xhtml/glGetBufferParameteriv.xml>
     usage: Cell<u32>,
-    droppable: DroppableWebGLBuffer,
+    // Native state remains alive while a VAO finalizer releases attachments.
+    #[conditional_malloc_size_of]
+    droppable: Rc<DroppableWebGLBuffer>,
 }
 
 impl WebGLBuffer {
@@ -127,12 +130,12 @@ impl WebGLBuffer {
             target: Default::default(),
             capacity: Default::default(),
             usage: Cell::new(WebGLRenderingContextConstants::STATIC_DRAW),
-            droppable: DroppableWebGLBuffer::new(
+            droppable: Rc::new(DroppableWebGLBuffer::new(
                 id,
                 Default::default(),
                 Default::default(),
-                WeakRef::new(context),
-            ),
+                context.cleanup_sender(),
+            )),
         }
     }
 
@@ -164,6 +167,10 @@ impl WebGLBuffer {
 impl WebGLBuffer {
     pub(crate) fn id(&self) -> WebGLBufferId {
         self.droppable.id()
+    }
+
+    pub(crate) fn cleanup_handle(&self) -> Rc<DroppableWebGLBuffer> {
+        self.droppable.clone()
     }
 
     pub(crate) fn buffer_data(&self, target: u32, data: &[u8], usage: u32) -> WebGLResult<()> {
@@ -266,14 +273,7 @@ impl WebGLBuffer {
     }
 
     pub(crate) fn decrement_attached_counter(&self, operation_fallibility: Operation) {
-        self.set_attached_counter(
-            self.get_attached_counter()
-                .checked_sub(1)
-                .expect("refcount underflowed"),
-        );
-        if self.is_deleted() {
-            self.delete(operation_fallibility);
-        }
+        self.droppable.decrement_attached_counter(operation_fallibility);
     }
 
     pub(crate) fn usage(&self) -> u32 {

@@ -1,0 +1,67 @@
+<!doctype html><meta charset="utf-8"><title>SVG image policy controls</title>
+<style>html,body{margin:0;background:white}svg.case{position:absolute;top:0;width:80px;height:80px}image.selector-control[href^="data:"]{display:none!important}</style>
+<script>
+(async()=>{
+ const checks=[],pixel_cases=[],diagnostics={events:{},policy:new URLSearchParams(location.search).get('policy')||'allow'};
+ const check=(name,passed)=>checks.push({name,passed:!!passed});
+ const config=await fetch('/config.json').then(r=>r.json());
+ const SVG='http://www.w3.org/2000/svg';
+ const asset=(name,base=location.origin,extra='')=>base+'/svg-image.svg?name='+name+extra;
+ const embedded='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="'+SVG+'" width="2" height="2"><rect width="2" height="2" fill="green"/></svg>');
+ const specs=[
+  {name:'same-none',href:asset('same-none'),cors:null},
+  {name:'same-anonymous',href:asset('same-anonymous'),cors:'anonymous'},
+  {name:'cross-none',href:asset('cross-none',config.crossOrigin),cors:null},
+  {name:'cross-anonymous-denied',href:asset('cross-anonymous-denied',config.crossOrigin),cors:'anonymous',error:true},
+  {name:'cross-anonymous-allowed',href:asset('cross-anonymous-allowed',config.crossOrigin,'&cors=anonymous'),cors:'anonymous'},
+  {name:'cross-credentials-allowed',href:asset('cross-credentials-allowed',config.crossOrigin,'&cors=credentials'),cors:'use-credentials'},
+  {name:'cross-credentials-denied',href:asset('cross-credentials-denied',config.crossOrigin,'&cors=missing-credentials'),cors:'use-credentials',error:true},
+  {name:'embedded',href:embedded,cors:null}
+ ];
+ function expected(spec) {
+  if(diagnostics.policy==='none')return 'error';
+  if(diagnostics.policy==='self' && new URL(spec.href,location.href).origin!==location.origin)return 'error';
+  return spec.error?'error':'load';
+ }
+ const nodes={};
+ function create(spec,index) {
+  const root=document.createElementNS(SVG,'svg');root.setAttribute('width','80');root.setAttribute('height','80');root.classList.add('case');root.style.left=(index*85)+'px';
+  const red=document.createElementNS(SVG,'rect');red.setAttribute('width','80');red.setAttribute('height','80');red.setAttribute('fill','red');root.append(red);
+  const image=document.createElementNS(SVG,'image');image.setAttribute('width','80');image.setAttribute('height','80');
+  if(spec.name==='same-none')image.classList.add('selector-control');
+  if(spec.cors!==null)image.crossOrigin=spec.cors;
+  image.setAttribute('href',spec.href);root.append(image);nodes[spec.name]={root,image,spec};
+  diagnostics.events[spec.name]=[];
+  const done=new Promise(resolve=>{
+   for(const event of ['load','error'])image.addEventListener(event,()=>{diagnostics.events[spec.name].push(event);resolve(event)});
+   setTimeout(()=>resolve('timeout'),3500);
+  });
+  document.documentElement.append(root);
+  pixel_cases.push({name:spec.name,x:index*85+20,y:20,expected:expected(spec)==='load'?'green':'red'});
+  return done.then(result=>check(spec.name+' event respects CSP/CORS',result===expected(spec)));
+ }
+ const waits=specs.map(create);
+ if(diagnostics.policy==='allow') {
+  const spec={name:'stale',href:asset('stale-old',location.origin,'&delay=650&color=blue'),cors:null};
+  waits.push(create(spec,specs.length));
+  setTimeout(()=>{spec.href=asset('stale-new');nodes.stale.image.setAttribute('href',spec.href)},60);
+ }
+ const index=pixel_cases.length;
+ const control=document.createElementNS(SVG,'svg');control.setAttribute('width','80');control.setAttribute('height','80');control.classList.add('case');control.style.left=(index*85)+'px';
+ const green=document.createElementNS(SVG,'rect');green.setAttribute('width','80');green.setAttribute('height','80');green.setAttribute('fill','green');control.append(green);document.documentElement.append(control);
+ pixel_cases.push({name:'inline-geometry-control',x:index*85+20,y:20,expected:'green'});
+ await Promise.all(waits);await new Promise(r=>setTimeout(r,1200));
+ for(const {root,image,spec}of Object.values(nodes)) {
+  check(spec.name+' receives one terminal event',diagnostics.events[spec.name].length===1);
+  check(spec.name+' preserves public href',image.getAttribute('href')===spec.href);
+  if(!spec.href.startsWith('data:'))check(spec.name+' keeps private source out of public XML',!new XMLSerializer().serializeToString(root).includes('data:'));
+ }
+ if(diagnostics.policy==='allow') {
+  const canvas=document.createElement('canvas');canvas.width=canvas.height=2;const ctx=canvas.getContext('2d');
+  ctx.fillStyle='green';ctx.fillRect(0,0,2,2);check('canvas positive control works',ctx.getImageData(0,0,1,1).data[1]===128);
+  let read=false;try{ctx.drawImage(nodes['cross-none'].image,0,0);ctx.getImageData(0,0,1,1);read=true}catch(error){diagnostics.canvasSVGImageError=error.name}
+  check('opaque cross-origin SVG image cannot expose pixels',!read);
+ }
+ fetch('/report',{method:'POST',body:JSON.stringify({checks,diagnostics,pixel_cases,scope:'Private same-site/cross-origin image controls. Ports share the fixture cookie site; these cases test credentials/CORS, not third-party-cookie partitioning. Canvas may reject SVGImageElement as unsupported.'})});
+})().catch(error=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[{name:'fixture completed',passed:false,error:String(error)}]})}));
+</script>

@@ -257,7 +257,7 @@ impl LinkProcessingOptions {
             // destination is a script-like destination and mimeTypeRecord is a JavaScript MIME type;
             || (destination.is_script_like() && mime_type == MediaType::JavaScript)
             // destination is "image" and mimeTypeRecord is an image MIME type;
-            || (destination == Destination::Image && mime_type == MediaType::Image)
+            || (destination == Destination::Image && mime_type_record.type_() == mime::IMAGE)
             // destination is "font" and mimeTypeRecord is a font MIME type;
             || (destination == Destination::Font && mime_type == MediaType::Font)
             // destination is "json" and mimeTypeRecord is a JSON MIME type;

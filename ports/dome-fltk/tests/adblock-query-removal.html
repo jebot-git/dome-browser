@@ -1,0 +1,27 @@
+<!doctype html><title>Privacy query fixture</title>
+<link rel=preload as=script href="/privacy-preload?keep=a%2Bb&utm_source=preload&keep=two">
+<link rel=preload as=script href="__CROSS_ORIGIN__/privacy-preload-cross?keep=a%2Bb&utm_source=crosspreload&keep=two">
+<script>
+addEventListener('load',async()=>{
+ try{
+  document.cookie='queryProbe=yes;SameSite=Lax;Path=/';
+  const query=tag=>'?keep=a%2Bb&utm_source='+tag+'&keep=two';
+  const get=await(await fetch('/privacy-get'+query('get'))).json();
+  const post=await(await fetch('/privacy-post'+query('post'),{method:'POST',body:'post body'})).json();
+  const cross=await(await fetch('__CROSS_ORIGIN__/privacy-cross'+query('cross'),{method:'POST',headers:{'Content-Type':'application/json','X-Probe':'yes'},body:'cross body'})).json();
+  let deny=false;try{await fetch('__CROSS_ORIGIN__/privacy-deny'+query('deny'))}catch(e){deny=true}
+  const redir=await fetch('/redirect');await redir.text();
+  const loadScript=src=>new Promise(resolve=>{const s=document.createElement('script');s.src=src;s.onload=()=>resolve(true);s.onerror=()=>resolve(false);document.head.append(s)});
+  await loadScript('/scope-default-script'+query('default-script'));
+  const defaultScopeFetch=await(await fetch('/scope-default-fetch'+query('default-fetch'))).json();
+  await loadScript('/privacy-script'+query('script'));await loadScript('/privacy-preload'+query('preload'));await loadScript('__CROSS_ORIGIN__/privacy-preload-cross'+query('crosspreload'));await loadScript('/privacy-block'+query('block'));
+  const image=await new Promise(resolve=>{const i=new Image();i.onload=()=>resolve(i.naturalWidth);i.onerror=()=>resolve(0);i.src='/privacy-image'+query('image')});
+  const source=URL.createObjectURL(new Blob([`onmessage=async e=>{try{postMessage(await(await fetch(e.data)).json())}catch(e){postMessage({error:String(e)})}}`],{type:'application/javascript'}));
+  const worker=await new Promise(resolve=>{const w=new Worker(source);w.onmessage=e=>{w.terminate();resolve(e.data)};w.onerror=e=>{w.terminate();resolve({error:String(e.message)})};w.postMessage(location.origin+'/privacy-worker'+query('worker'))});URL.revokeObjectURL(source);
+  const ws=await new Promise(resolve=>{let opened=false;const w=new WebSocket(location.origin.replace('http:','ws:')+'/privacy-ws'+query('ws'));w.onopen=()=>{opened=true;w.close()};w.onclose=()=>resolve(opened);w.onerror=()=>resolve(false)});
+  await fetch('/privacy-fragment#route?utm_source=fragment-only');
+  const beacon=navigator.sendBeacon('/privacy-beacon'+query('beacon'),'beacon body');
+  await fetch('/report',{method:'POST',body:JSON.stringify({phase:'main',get,post,cross,worker,ws,image,deny,redirected:redir.redirected,blocked:!!window.blockedPath,cookie:document.cookie.includes('queryProbe=yes'),script:window.scriptPath,preload:window.preloadPath,preloadCross:window.preloadCrossPath,beacon,defaultScopeScript:window.defaultScopeScript,defaultScopeFetch})});
+ }catch(e){fetch('/report',{method:'POST',body:JSON.stringify({phase:'main',error:String(e)})});}
+});
+</script>

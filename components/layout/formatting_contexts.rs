@@ -27,7 +27,7 @@ use crate::sizing::{
     self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize,
     SizeConstraint,
 };
-use crate::style_ext::{AspectRatio, Display, DisplayInside, LayoutStyle};
+use crate::style_ext::{AspectRatio, ComputedValuesExt, Display, DisplayInside, LayoutStyle};
 use crate::table::Table;
 use crate::taffy::TaffyContainer;
 use crate::{
@@ -520,6 +520,24 @@ impl IndependentFormattingContext {
         preferred_aspect_ratio: Option<AspectRatio>,
         lazy_block_size: &LazySize,
     ) -> (IndependentFormattingContextLayoutResult, bool) {
+        let mut ratio_containing_block = ContainingBlock {
+            size: containing_block_for_children.size.clone(),
+            style: containing_block_for_children.style,
+        };
+        if !self.is_replaced() && !self.is_table() {
+            if let Some(ratio) = preferred_aspect_ratio {
+                let target = ratio.compute_dependent_size(
+                    LogicalAxis::Block, ratio_containing_block.size.inline,
+                );
+                let content_minimum = !self.style().establishes_scroll_container(
+                    self.base.base_fragment_info.flags,
+                );
+                if let Some(size) = lazy_block_size.set_aspect_ratio_size(target, content_minimum) {
+                    ratio_containing_block.size.block = SizeConstraint::Definite(size);
+                }
+            }
+        }
+        let containing_block_for_children = &ratio_containing_block;
         let content_block_size_under_default_constraint = match self
             .base
             .cached_independent_formatting_context_layout_if_applicable(
@@ -627,8 +645,7 @@ impl IndependentFormattingContext {
             IndependentFormattingContextContents::Replaced(replaced, _) => {
                 replaced.preferred_aspect_ratio(self.style(), padding_border_sums)
             },
-            // TODO: support preferred aspect ratios on non-replaced boxes.
-            _ => None,
+            _ => self.style().preferred_aspect_ratio(None, padding_border_sums),
         }
     }
 

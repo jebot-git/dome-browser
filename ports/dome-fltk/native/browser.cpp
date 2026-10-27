@@ -7,6 +7,7 @@
 #include <FL/Fl_Double_Window.H>
 #include <FL/Fl_Button.H>
 #include <FL/Fl_Input.H>
+#include <FL/Fl_Text_Editor.H>
 #include <FL/Fl_Choice.H>
 #include <FL/Fl_Box.H>
 #include <FL/Fl_Menu_Button.H>
@@ -19,6 +20,22 @@
 #include <deque>
 #include <memory>
 #include <vector>
+#include <dlfcn.h>
+#include "smallnet-form.h"
+#include "external-links.h"
+
+// Optional in older FLTK builds; the browser must still launch without it.
+extern "C" int fl_wl_window_suspended(Fl_Window *) __attribute__((weak));
+extern "C" int fl_wl_set_touch_handler(int (*)(Fl_Window *,int,int,double,double,int,void *),void *) __attribute__((weak));
+#ifndef FL_WAYLAND_PEN_EVENT_DEFINED
+struct Fl_Wayland_Pen_Event {
+  unsigned version;int action,id,primary,tool_type,eraser;
+  double x,y,pressure,distance,tilt_x,tilt_y,rotation,tangential_pressure,wheel;
+  int wheel_clicks;unsigned buttons,capabilities,time;
+};
+#endif
+using NativePenHandler=int (*)(Fl_Window*,const Fl_Wayland_Pen_Event*,void*);
+static int (*setNativePenHandler)(NativePenHandler,void*)=nullptr;
 
 namespace {
 std::deque<BrowserEvent> events;
@@ -32,10 +49,20 @@ std::string menuLabel(const std::string &text) {
   return label;
 }
 void emit(int kind, int a=0, int b=0, int c=0, int d=0, const char *text="") {
+  if((kind==1 || kind==5) && text && strlen(text)>=sizeof(BrowserEvent::text)) {
+    browser_ui_status("Address exceeds the native input limit");return;
+  }
   BrowserEvent e{kind,a,b,c,d,{}};
   std::snprintf(e.text,sizeof e.text,"%s",text?text:"");
   if (events.size()>512 && (kind==12 || kind==10)) return;
   events.push_back(e);
+}
+// Some backends report shifted Tab as ISO_Left_Tab rather than FL_Tab.
+bool tabShortcut(int event) {
+  if((event!=FL_KEYDOWN && event!=FL_SHORTCUT) || !Fl::event_state(FL_CTRL))return false;
+  const int key=Fl::event_key();
+  if(key!=FL_Tab && key!=0xfe20)return false;
+  emit(7,(Fl::event_state(FL_SHIFT)||key==0xfe20)?-2:-1);return true;
 }
 class LocationInput : public Fl_Input {
   std::string completion;
@@ -45,6 +72,7 @@ public:
   const char *target() const { return completion.empty()?value():completion.c_str(); }
   void setUrl(const char *url) { completion.clear(); value(url); }
   int handle(int event) override {
+    if(tabShortcut(event))return 1;
     if(event==FL_KEYDOWN && Fl::event_state(FL_CTRL)) {
       int key=Fl::event_key();
       if(key=='l'){completion.clear();insert_position(0,size());return 1;}
@@ -96,6 +124,7 @@ public:
     if (changed) emit(10,std::max(1,w),std::max(1,h));
   }
   int handle(int event) override {
+    if(tabShortcut(event))return 1;
     int px=Fl::event_x()-x(),py=Fl::event_y()-y();
     switch(event) {
       case FL_ENTER: return 1;
@@ -152,6 +181,11 @@ public:
     command("Bookmarks/Remove Bookmark",0,35);
     command("History/Open History",FL_CTRL+'h',36);
     command("History/Clear History",0,37);
+    command("Tools/Open media in external player",0,42);
+    command("Tools/External player...",0,43);
+    command("Tools/Cookies/View or edit ck.txt",0,44);
+    command("Tools/Cookies/Delete all cookies",0,45);
+    menu->add("Tools/Cookies/Block third-party cookies",0,[](Fl_Widget *,void *){emit(46);},nullptr,FL_MENU_TOGGLE|FL_MENU_VALUE);
     command("Privacy/Ad blocking/Enable or disable",0,50);
     command("Privacy/Ad blocking/Toggle exception for this site",0,51);
     command("Privacy/Ad blocking/Reload lists and custom rules",0,52);
@@ -160,6 +194,7 @@ public:
     command("Privacy/Passwords/Enable or disable KWallet",0,60);
     command("Privacy/Passwords/Forget logins for this site",0,61);
     command("Window/Next Tab",FL_CTRL+FL_Tab,7,-1);
+    command("Window/Previous Tab",FL_CTRL+FL_SHIFT+FL_Tab,7,-2);
     command("Help/WebXR Demo",0,21);
     menu->add("Help/About",0,[](Fl_Widget *,void *){fl_message("Dome Browser\nServo engine with native FLTK 1.4.5 controls\nWebXR shares DomeD's existing XR session.");});
     back=new Fl_Button(8,38,82,34,"Back");forward=new Fl_Button(96,38,98,34,"Forward");reload=new Fl_Button(200,38,90,34,"Reload");
@@ -190,6 +225,10 @@ public:
     page->resize(0,top+90,w(),std::max(1,h()-top-118));status->resize(8,h()-25,w()-16,22);redraw();
   }
   void resize(int x,int y,int w,int h) override {Fl_Double_Window::resize(x,y,w,h);layout();}
+  int handle(int event) override {
+    if(tabShortcut(event))return 1;
+    return Fl_Double_Window::handle(event);
+  }
 };
 std::unique_ptr<Browser> browser;
 GDBusConnection *applicationBus=nullptr;
@@ -197,6 +236,28 @@ GDBusNodeInfo *applicationInfo=nullptr;
 guint applicationObject=0;
 std::string returned;
 uint64_t revision=0;
+}
+static int nativeTouch(Fl_Window *window,int action,int id,double x,double y,int primary,void *) {
+  if (!browser || window!=browser.get()) return 0;
+  Page *page=browser->page;
+  if (action==0) {
+    if (!page->visible_r() || x<page->x() || y<page->y() || x>=page->x()+page->w() || y>=page->y()+page->h()) return 0;
+    page->take_focus();
+  }
+  char point[128];std::snprintf(point,sizeof point,"[%.17g,%.17g]",x-page->x(),y-page->y());
+  emit(47,action,id,primary,0,point);return 1;
+}
+static int nativePen(Fl_Window *window,const Fl_Wayland_Pen_Event *e,void *) {
+  if(!browser || window!=browser.get() || !e || e->version!=1)return 0;
+  Page *page=browser->page;
+  bool inside=page->visible_r() && e->x>=page->x() && e->y>=page->y() && e->x<page->x()+page->w() && e->y<page->y()+page->h();
+  if(e->action==0){if(!inside)return 0;page->take_focus();}
+  Json sample={{"x",e->x-page->x()},{"y",e->y-page->y()},{"inside",inside},
+    {"pressure",e->pressure},{"tilt_x",e->tilt_x},{"tilt_y",e->tilt_y},
+    {"twist",e->rotation},{"tangential_pressure",e->tangential_pressure},
+    {"wheel",e->wheel},{"wheel_clicks",e->wheel_clicks}};
+  auto text=sample.dump();emit(48,e->action,e->id,e->primary,e->buttons,text.c_str());
+  return inside || e->action==1 || e->action==2 || e->action==3;
 }
 extern "C" int browser_ui_open(const char *url) {
   applicationBus=g_bus_get_sync(G_BUS_TYPE_SESSION,nullptr,nullptr);
@@ -209,8 +270,9 @@ extern "C" int browser_ui_open(const char *url) {
       if(url && *url && strcmp(url,"about:blank")) {method="Open";const char *uris[]={url,nullptr};parameters=g_variant_new("(^asa{sv})",uris,&options);}
       else parameters=g_variant_new("(a{sv})",&options);
       auto result=g_dbus_connection_call_sync(applicationBus,"org.domed.Browser","/org/domed/Browser","org.freedesktop.Application",method,parameters,nullptr,G_DBUS_CALL_FLAGS_NONE,3000,nullptr,nullptr);
+      const bool forwarded=result!=nullptr;
       if(result)g_variant_unref(result);
-      g_object_unref(applicationBus);applicationBus=nullptr;return 0;
+      g_object_unref(applicationBus);applicationBus=nullptr;return forwarded?0:-1;
     }
     const char *xml=R"XML(<node><interface name="org.freedesktop.Application"><method name="Activate"><arg type="a{sv}" direction="in"/></method><method name="Open"><arg type="as" direction="in"/><arg type="a{sv}" direction="in"/></method><method name="ActivateAction"><arg type="s" direction="in"/><arg type="av" direction="in"/><arg type="a{sv}" direction="in"/></method></interface></node>)XML";
     applicationInfo=g_dbus_node_info_new_for_xml(xml,nullptr);
@@ -220,7 +282,7 @@ extern "C" int browser_ui_open(const char *url) {
     },nullptr,nullptr,{nullptr}};
     applicationObject=g_dbus_connection_register_object(applicationBus,"/org/domed/Browser",applicationInfo->interfaces[0],&vtable,nullptr,nullptr,nullptr);
   }
-  Fl::lock();dx::init();browser=std::make_unique<Browser>();browser->show();browser->layout();return 1;
+  Fl::lock();dx::init();browser=std::make_unique<Browser>();browser->show();browser->layout();if(fl_wl_set_touch_handler)fl_wl_set_touch_handler(nativeTouch,nullptr);setNativePenHandler=(decltype(setNativePenHandler))dlsym(RTLD_DEFAULT,"fl_wl_set_pen_handler");if(setNativePenHandler)setNativePenHandler(nativePen,nullptr);return 1;
 }
 extern "C" void browser_ui_wait(double seconds) {
   while(g_main_context_iteration(nullptr,false)){}
@@ -228,13 +290,18 @@ extern "C" void browser_ui_wait(double seconds) {
   if(revision!=dx::font_revision){revision=dx::font_revision;browser->layout();emit(15,browser_ui_light());}
 }
 extern "C" int browser_ui_poll(BrowserEvent *e) {if(events.empty())return 0;*e=events.front();events.pop_front();return 1;}
+extern "C" int browser_ui_page_focused(){return browser && Fl::focus()==browser->page && !Fl::modal();}
+extern "C" int browser_ui_visible(){
+  if(!browser || !browser->visible_r())return 0;
+  return !fl_wl_window_suspended || fl_wl_window_suspended(browser.get())!=1;
+}
 extern "C" void browser_ui_wake(){Fl::awake();}
-extern "C" void browser_ui_close(){browser.reset();if(applicationBus){if(applicationObject)g_dbus_connection_unregister_object(applicationBus,applicationObject);g_object_unref(applicationBus);applicationBus=nullptr;}if(applicationInfo){g_dbus_node_info_unref(applicationInfo);applicationInfo=nullptr;}}
+extern "C" void browser_ui_close(){if(setNativePenHandler)setNativePenHandler(nullptr,nullptr);setNativePenHandler=nullptr;if(fl_wl_set_touch_handler)fl_wl_set_touch_handler(nullptr,nullptr);browser_ui_smallnet_form_close();browser.reset();if(applicationBus){if(applicationObject)g_dbus_connection_unregister_object(applicationBus,applicationObject);g_object_unref(applicationBus);applicationBus=nullptr;}if(applicationInfo){g_dbus_node_info_unref(applicationInfo);applicationInfo=nullptr;}}
 extern "C" void browser_ui_frame(const uint8_t *p,unsigned w,unsigned h){browser->page->frame(p,w,h);}
 extern "C" void browser_ui_title(const char *title,const char *url,int back,int forward){browser->copy_label((std::string(title)+" — Dome Browser").c_str());if(Fl::focus()!=browser->address)browser->address->setUrl(url);if(back)browser->back->activate();else browser->back->deactivate();if(forward)browser->forward->activate();else browser->forward->deactivate();}
 extern "C" void browser_ui_tabs(const char *text,int active){try{auto data=Json::parse(text);browser->tabs->clear();int index=0;for(const auto &t:data){auto label=menuLabel(std::to_string(++index)+". "+t.get<std::string>());browser->tabs->add(label.c_str(),0,nullptr);}browser->tabs->value(active);}catch(...){} }
 extern "C" void browser_ui_status(const char *text){browser->status->copy_label(text);}
-extern "C" void browser_ui_cursor(int cursor){browser->cursor(cursor==1?FL_CURSOR_HAND:cursor==2?FL_CURSOR_INSERT:FL_CURSOR_DEFAULT);}
+extern "C" void browser_ui_cursor(int cursor){static const Fl_Cursor cursors[]={FL_CURSOR_DEFAULT,FL_CURSOR_HAND,FL_CURSOR_INSERT,FL_CURSOR_NWSE,FL_CURSOR_NS,FL_CURSOR_WE,FL_CURSOR_NESW,FL_CURSOR_MOVE};browser->cursor(cursors[std::clamp(cursor,0,7)]);}
 extern "C" void browser_ui_fullscreen(int enabled){if(browser->fullscreenMode==bool(enabled))return;std::string title=browser->label()?browser->label():"Dome Browser";browser->fullscreenMode=enabled;if(enabled)browser->fullscreen();else browser->fullscreen_off();browser->copy_label(title.c_str());browser->layout();}
 extern "C" int browser_ui_ask(const char *title,const char *message){fl_message_title(title);return fl_choice("%s","Deny","Allow",nullptr,message)==1;}
 extern "C" const char *browser_ui_prompt(const char *message,const char *value){fl_message_title("Dome Browser");const char *answer=fl_input("%s",value,message);if(!answer)return nullptr;returned=answer;return returned.c_str();}
@@ -262,9 +329,41 @@ extern "C" const char *browser_ui_primary_selection(){return selection_text(0);}
 extern "C" const char *browser_ui_file(int multiple){Fl_Native_File_Chooser picker;picker.title("Choose a file");picker.type(multiple?Fl_Native_File_Chooser::BROWSE_MULTI_FILE:Fl_Native_File_Chooser::BROWSE_FILE);if(picker.show()!=0)return nullptr;Json paths=Json::array();for(int i=0;i<picker.count();++i)paths.push_back(picker.filename(i));returned=paths.dump();return returned.c_str();}
 extern "C" int browser_ui_select(const char *text,int x,int y){try{auto items=Json::parse(text);Fl_Menu_Button popup(x+browser->x(),y+browser->y(),1,1);for(auto &item:items){auto label=menuLabel(item.get<std::string>());popup.add(label.c_str(),0,nullptr);}const Fl_Menu_Item *chosen=popup.popup();return chosen?int(chosen-popup.menu()):-1;}catch(...){return -1;}}
 extern "C" void browser_ui_notification(const char *text){try{browser->notifications->post(Json::parse(text));}catch(...){} }
+// All values use the same FLTK logical-pixel coordinates as the page surface.
+extern "C" void browser_ui_screen_geometry(int *values){
+  const int screen=browser->screen_num();
+  int x=0,y=0,w=0,h=0,ax=0,ay=0,aw=0,ah=0;
+  Fl::screen_xywh(x,y,w,h,screen);Fl::screen_work_area(ax,ay,aw,ah,screen);
+  values[0]=std::max(1,w);values[1]=std::max(1,h);
+  values[2]=std::max(1,aw);values[3]=std::max(1,ah);
+  values[4]=browser->x();values[5]=browser->y();
+  values[6]=browser->w();values[7]=browser->h();
+}
 extern "C" int browser_ui_width(){return browser->page->w();}
 extern "C" int browser_ui_height(){return browser->page->h();}
 extern "C" int browser_ui_light(){return Fl::get_color(FL_BACKGROUND_COLOR)>0x80808000u;}
 extern "C" int browser_ui_screenshot(const char *path){return dx::screenshot(*browser,path);}
 
 extern "C" void browser_ui_history(const char *text){try{browser->address->history=Json::parse(text).get<std::vector<std::string>>();}catch(...){}}
+
+extern "C" void browser_ui_cookie_policy(int blocked){
+  auto item=const_cast<Fl_Menu_Item *>(browser->menu->find_item("Tools/Cookies/Block third-party cookies"));
+  if(item){if(blocked)item->set();else item->clear();browser->menu->redraw();}
+}
+
+extern "C" const char *browser_ui_edit_cookies(const char *text){
+  Fl_Text_Buffer buffer;buffer.text(text);
+  Fl_Double_Window window(1000,680,"Cookies - ck.txt");
+  auto help=new Fl_Box(12,8,976,42,"One JSON record per cookie. Delete a line to remove it. Invalid records disable persisted cookies until repaired.");
+  help->align(FL_ALIGN_LEFT|FL_ALIGN_INSIDE|FL_ALIGN_WRAP);
+  auto editor=new Fl_Text_Editor(12,56,976,566);editor->buffer(&buffer);
+  bool saved=false;
+  auto cancel=new Fl_Button(772,634,100,32,"Cancel");
+  cancel->callback([](Fl_Widget *w,void *){w->window()->hide();});
+  auto save=new Fl_Button(884,634,104,32,"Save");
+  save->callback([](Fl_Widget *w,void *data){*static_cast<bool *>(data)=true;w->window()->hide();},&saved);
+  window.end();window.resizable(editor);window.set_modal();dx::style(&window);window.show();editor->take_focus();
+  while(window.shown())Fl::wait();
+  if(!saved)return nullptr;
+  char *value=buffer.text();returned=value;free(value);return returned.c_str();
+}

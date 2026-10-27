@@ -206,19 +206,19 @@ impl Request {
         request.history_navigation = temporary_request.history_navigation;
 
         // Step 13. If init is not empty, then:
-        if init.body.is_some() ||
-            init.cache.is_some() ||
-            init.credentials.is_some() ||
-            init.duplex.is_some() ||
-            init.integrity.is_some() ||
-            init.headers.is_some() ||
-            init.keepalive.is_some() ||
-            init.method.is_some() ||
-            init.mode.is_some() ||
-            init.redirect.is_some() ||
-            init.referrer.is_some() ||
-            init.referrerPolicy.is_some() ||
-            !init.window.get().is_undefined()
+        if init.body.is_some()
+            || init.cache.is_some()
+            || init.credentials.is_some()
+            || init.duplex.is_some()
+            || init.integrity.is_some()
+            || init.headers.is_some()
+            || init.keepalive.is_some()
+            || init.method.is_some()
+            || init.mode.is_some()
+            || init.redirect.is_some()
+            || init.referrer.is_some()
+            || init.referrerPolicy.is_some()
+            || !init.window.get().is_undefined()
         {
             // Step 13.1. If request’s mode is "navigate", then set it to "same-origin".
             if request.mode == NetTraitsRequestMode::Navigate {
@@ -259,10 +259,10 @@ impl Request {
                 // parsedReferrer’s scheme is "about" and path is the string "client"
                 // parsedReferrer’s origin is not same origin with origin
                 if let Ok(parsed_referrer) = parsed_referrer {
-                    if (parsed_referrer.cannot_be_a_base() &&
-                        parsed_referrer.scheme() == "about" &&
-                        parsed_referrer.path() == "client") ||
-                        parsed_referrer.origin() != *origin
+                    if (parsed_referrer.cannot_be_a_base()
+                        && parsed_referrer.scheme() == "about"
+                        && parsed_referrer.path() == "client")
+                        || parsed_referrer.origin() != *origin
                     {
                         // then set request’s referrer to "client".
                         request.referrer = global.get_referrer();
@@ -307,8 +307,8 @@ impl Request {
 
         // Step 21. If request’s cache mode is "only-if-cached" and request’s mode
         // is not "same-origin", then throw a TypeError.
-        if request.cache_mode == CacheMode::OnlyIfCached &&
-            request.mode != NetTraitsRequestMode::SameOrigin
+        if request.cache_mode == CacheMode::OnlyIfCached
+            && request.mode != NetTraitsRequestMode::SameOrigin
         {
             return Err(Error::Type(
                 c"Cache is 'only-if-cached' and mode is not 'same-origin'".to_owned(),
@@ -525,8 +525,8 @@ impl Request {
             }
             // Step 39.2. If this’s request’s mode is neither "same-origin" nor "cors", then throw a TypeError.
             let request_mode = &request.request.borrow().mode;
-            if *request_mode != NetTraitsRequestMode::CorsMode &&
-                *request_mode != NetTraitsRequestMode::SameOrigin
+            if *request_mode != NetTraitsRequestMode::CorsMode
+                && *request_mode != NetTraitsRequestMode::SameOrigin
             {
                 return Err(Error::Type(
                     c"Request mode must be Cors or SameOrigin".to_owned(),
@@ -1048,5 +1048,52 @@ impl Convert<RequestRedirect> for RedirectMode {
             RedirectMode::Error => RequestRedirect::Error,
             RedirectMode::Manual => RequestRedirect::Manual,
         }
+    }
+}
+
+impl Request {
+    pub(crate) fn cache_record(&self, cx: &mut JSContext) -> RequestBuilder {
+        let request = self.request.borrow();
+        // Preserve the public request metadata without serializing a live
+        // request's body channels, client or task-routing identity.
+        let mut record = RequestBuilder::new(
+            None,
+            request.url_with_blob_claim(),
+            request.referrer.clone(),
+        )
+        .method(request.method.clone())
+        .headers(self.Headers(cx).get_headers_list())
+        .mode(request.mode.clone())
+        .credentials_mode(request.credentials_mode)
+        .cache_mode(request.cache_mode)
+        .redirect_mode(request.redirect_mode)
+        .integrity_metadata(request.integrity_metadata.clone())
+        .referrer_policy(request.referrer_policy)
+        .keep_alive(request.keep_alive)
+        .destination(request.destination);
+        record.reload_navigation = request.reload_navigation;
+        record.history_navigation = request.history_navigation;
+        record
+    }
+
+    pub(crate) fn from_cache_record(
+        cx: &mut JSContext,
+        global: &GlobalScope,
+        record: RequestBuilder,
+    ) -> Fallible<DomRoot<Self>> {
+        let request = Self::constructor(
+            cx,
+            global,
+            None,
+            RequestInfo::USVString(USVString(record.url.url().to_string())),
+            &RequestInit::empty(),
+            None,
+        )?;
+        *request.request.borrow_mut() = record.build();
+        request
+            .Headers(cx)
+            .set_headers(request.request.borrow().headers.clone());
+        request.Headers(cx).set_guard(Guard::Immutable);
+        Ok(request)
     }
 }

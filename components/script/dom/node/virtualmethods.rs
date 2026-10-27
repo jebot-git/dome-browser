@@ -87,6 +87,7 @@ use crate::dom::svg::svgstopelement::SVGStopElement;
 use crate::dom::svg::svgsvgelement::SVGSVGElement;
 use crate::dom::svg::svgsymbolelement::SVGSymbolElement;
 use crate::dom::svg::svgtextelement::SVGTextElement;
+use crate::dom::svg::svgtitleelement::SVGTitleElement;
 use crate::dom::svg::svgtspanelement::SVGTSpanElement;
 use crate::dom::svg::svguseelement::SVGUseElement;
 
@@ -428,6 +429,9 @@ pub(crate) fn vtable_for(node: &Node) -> &dyn VirtualMethods {
         NodeTypeId::Element(ElementTypeId::SVGElement(SVGElementTypeId::SVGGradientElement(
             SVGGradientElementTypeId::SVGRadialGradientElement,
         ))) => node.downcast::<SVGRadialGradientElement>().unwrap() as &dyn VirtualMethods,
+        NodeTypeId::Element(ElementTypeId::SVGElement(SVGElementTypeId::SVGTitleElement)) => {
+            node.downcast::<SVGTitleElement>().unwrap() as &dyn VirtualMethods
+        },
         NodeTypeId::Element(ElementTypeId::SVGElement(SVGElementTypeId::SVGStopElement)) => {
             node.downcast::<SVGStopElement>().unwrap() as &dyn VirtualMethods
         },

@@ -169,6 +169,9 @@ pub struct HTMLCanvasData {
 pub struct SVGElementData<'dom> {
     /// The SVG's XML source represented as a base64 encoded `data:` url.
     pub source: Option<Result<ServoUrl, ()>>,
+    /// Last completed frame retained while a newer snapshot is pending.
+    pub completed_source: Option<ServoUrl>,
+    pub snapshot_pending: bool,
     pub width: Option<&'dom AttrValue>,
     pub height: Option<&'dom AttrValue>,
     pub svg_id: Uuid,
@@ -412,6 +415,17 @@ pub trait Layout {
     ) -> String;
 
     fn query_accesskit_node(&self, node: TrustedNodeAddress) -> Option<accesskit::Node>;
+
+    /// Match and cascade a detached, privately owned SVG instance subtree.
+    /// The root inherits from its use host; selectors cannot cross the detached
+    /// subtree boundary. The caller keeps the clone rooted for this operation.
+    fn style_svg_use_instance(
+        &self,
+        root: TrustedNodeAddress,
+        inherited: ServoArc<ComputedValues>,
+        animations: DocumentAnimationSet,
+        animation_timeline_value: f64,
+    );
 
     fn query_resolved_font_style(
         &self,
@@ -923,8 +937,9 @@ impl ImageAnimationState {
             return false;
         }
         let time_interval_since_last_update = now - self.frame_start_time;
-        let mut remain_time_interval = time_interval_since_last_update -
-            self.image
+        let mut remain_time_interval = time_interval_since_last_update
+            - self
+                .image
                 .frames
                 .get(self.active_frame)
                 .unwrap()

@@ -12,6 +12,7 @@ use malloc_size_of_derive::MallocSizeOf;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use servo_arc::Arc;
+use servo_base::generic_channel::GenericCallback;
 use servo_url::ServoUrl;
 
 use crate::fetch::headers::extract_mime_type_as_mime;
@@ -92,10 +93,33 @@ pub struct ResponseInit {
     pub location_url: Option<Result<ServoUrl, String>>,
 }
 
+/// A registered native protocol can continue through Fetch with its original
+/// consumer. User interaction retries do not consume the redirect allowance.
+#[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
+pub struct ProtocolRedirect {
+    pub url: ServoUrl,
+    pub count_redirect: bool,
+    /// Releases pending protocol state after continuation or terminal failure.
+    pub finished: Option<GenericCallback<()>>,
+}
+
+impl ProtocolRedirect {
+    pub fn new(url: ServoUrl) -> Self {
+        Self { url, count_redirect: true, finished: None }
+    }
+}
+
 /// A [Response](https://fetch.spec.whatwg.org/#concept-response) as defined by the Fetch spec
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct Response {
     pub response_type: ResponseType,
+    /// An engine-registered protocol handler can restart Fetch at another URL.
+    /// This is internal state, never populated from remote HTTP headers.
+    pub custom_redirect: Option<ProtocolRedirect>,
+    /// Opaque native view state for this document's navigation entry. Remote
+    /// response headers cannot populate it.
+    #[serde(default)]
+    pub protocol_state: Option<String>,
     pub termination_reason: Option<TerminationReason>,
     url: Option<ServoUrl>,
     pub url_list: Vec<ServoUrl>,
@@ -140,6 +164,8 @@ impl Response {
     pub fn new(url: ServoUrl, resource_timing: ResourceFetchTiming) -> Response {
         Response {
             response_type: ResponseType::Default,
+            custom_redirect: None,
+            protocol_state: None,
             termination_reason: None,
             url: Some(url),
             url_list: vec![],
@@ -174,6 +200,8 @@ impl Response {
     pub fn network_error(e: NetworkError) -> Response {
         Response {
             response_type: ResponseType::Error(e),
+            custom_redirect: None,
+            protocol_state: None,
             termination_reason: None,
             url: None,
             url_list: vec![],
@@ -273,8 +301,8 @@ impl Response {
                     .iter()
                     .filter(|(name, _)| {
                         let name = name.as_str();
-                        !name.eq_ignore_ascii_case("set-cookie") &&
-                            !name.eq_ignore_ascii_case("set-cookie2")
+                        !name.eq_ignore_ascii_case("set-cookie")
+                            && !name.eq_ignore_ascii_case("set-cookie2")
                     })
                     .map(|(n, v)| (n.clone(), v.clone()))
                     .collect();
@@ -286,17 +314,17 @@ impl Response {
                     .iter()
                     .filter(|(name, _)| {
                         let name = name.as_str();
-                        if name.eq_ignore_ascii_case("cache-control") ||
-                            name.eq_ignore_ascii_case("content-language") ||
-                            name.eq_ignore_ascii_case("content-length") ||
-                            name.eq_ignore_ascii_case("content-type") ||
-                            name.eq_ignore_ascii_case("expires") ||
-                            name.eq_ignore_ascii_case("last-modified") ||
-                            name.eq_ignore_ascii_case("pragma")
+                        if name.eq_ignore_ascii_case("cache-control")
+                            || name.eq_ignore_ascii_case("content-language")
+                            || name.eq_ignore_ascii_case("content-length")
+                            || name.eq_ignore_ascii_case("content-type")
+                            || name.eq_ignore_ascii_case("expires")
+                            || name.eq_ignore_ascii_case("last-modified")
+                            || name.eq_ignore_ascii_case("pragma")
                         {
                             true
-                        } else if name.eq_ignore_ascii_case("set-cookie") ||
-                            name.eq_ignore_ascii_case("set-cookie2")
+                        } else if name.eq_ignore_ascii_case("set-cookie")
+                            || name.eq_ignore_ascii_case("set-cookie2")
                         {
                             false
                         } else {
@@ -341,6 +369,8 @@ impl Response {
             metadata.referrer.clone_from(&response.referrer);
             metadata.referrer_policy = response.referrer_policy;
             metadata.redirected = response.actual_response().url_list.len() > 1;
+            metadata.request_includes_credentials = response.request_includes_credentials;
+            metadata.protocol_state.clone_from(&response.protocol_state);
             metadata
                 .tls_security_info
                 .clone_from(&response.tls_security_info);

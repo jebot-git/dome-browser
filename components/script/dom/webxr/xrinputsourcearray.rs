@@ -81,7 +81,7 @@ impl XRInputSourceArray {
         let global = self.global();
         let window = global.as_window();
         let removed = if let Some(i) = self.input_sources.borrow().iter().find(|i| i.id() == id) {
-            i.gamepad().update_connected(false);
+            i.disconnect();
             [DomRoot::from_ref(&**i)]
         } else {
             return;
@@ -114,7 +114,7 @@ impl XRInputSourceArray {
         let window = global.as_window();
         let root;
         let removed = if let Some(i) = self.input_sources.borrow().iter().find(|i| i.id() == id) {
-            i.gamepad().update_connected(false);
+            i.disconnect();
             root = [DomRoot::from_ref(&**i)];
             &root as &[_]
         } else {
@@ -142,6 +142,17 @@ impl XRInputSourceArray {
             removed,
         );
         event.upcast::<Event>().fire(cx, session.upcast());
+    }
+
+    pub(crate) fn disconnect_all(&self) {
+        for input in self.input_sources.borrow().iter() {
+            input.disconnect();
+        }
+    }
+
+    pub(crate) fn clear(&self, cx: &mut JSContext) {
+        self.disconnect_all();
+        self.input_sources.safe_borrow_mut(cx.no_gc()).clear();
     }
 
     pub(crate) fn find(&self, id: InputId) -> Option<DomRoot<XRInputSource>> {

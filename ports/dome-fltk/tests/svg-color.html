@@ -1,0 +1,30 @@
+<!doctype html><meta charset=utf-8><title>SVG color presentation attribute</title>
+<style>
+body{margin:0;background:white;color:rgb(90,30,190)}.tile{position:absolute;width:60px;height:60px}.rule{color:rgb(20,180,90)}
+</style>
+<svg class=tile style="left:20px;top:20px" color="rgb(20,180,90)"><rect id=root width=60 height=60 fill=currentColor /></svg>
+<svg class=tile style="left:100px;top:20px"><g color="rgb(20,180,90)"><rect id=group width=60 height=60 fill=currentColor /></g></svg>
+<svg class=tile style="left:180px;top:20px"><rect id=rule class=rule color=red width=60 height=60 fill=currentColor /></svg>
+<svg class=tile style="left:260px;top:20px"><rect id=inline color=red style="color:rgb(20,180,90)" width=60 height=60 fill=currentColor /></svg>
+<svg class=tile style="left:340px;top:20px;color:rgb(20,180,90)"><rect id=inherit color=inherit width=60 height=60 fill=currentColor /></svg>
+<svg class=tile style="left:420px;top:20px;color:rgb(20,180,90)"><rect id=unset color=unset width=60 height=60 fill=currentColor /></svg>
+<svg class=tile style="left:20px;top:120px;--paint:rgb(20,180,90)"><rect id=variable color="var(--paint)" width=60 height=60 fill=currentColor /></svg>
+<svg class=tile style="left:100px;top:120px;color:rgb(20,180,90)"><rect id=invalid color="red junk" width=60 height=60 fill=currentColor /></svg>
+<svg class=tile style="left:180px;top:120px;color:rgb(20,180,90)"><rect id=namespace width=60 height=60 fill=currentColor /></svg>
+<svg class=tile style="left:260px;top:120px;color:rgb(20,180,90)"><rect id=current color=currentColor width=60 height=60 fill=currentColor /></svg>
+<svg class=tile style="left:340px;top:120px"><rect id=mutation color=red width=60 height=60 fill=currentColor /></svg>
+<svg class=tile style="left:420px;top:120px;color:rgb(20,180,90)"><rect id=removal color=red width=60 height=60 fill=currentColor /></svg>
+<script>
+addEventListener('load',()=>{
+ const checks=[],green='rgb(20, 180, 90)',check=(name,actual,expected)=>checks.push({name,passed:actual===expected,error:actual===expected?'':JSON.stringify({actual,expected})});
+ const computed=id=>getComputedStyle(document.getElementById(id)).color;
+ document.getElementById('namespace').setAttributeNS('http://www.w3.org/1999/xlink','xlink:color','red');
+ check('color attribute initially applies before mutation',computed('mutation'),'rgb(255, 0, 0)');
+ document.getElementById('mutation').setAttribute('color','rgb(20,180,90)');
+ check('color attribute initially applies before removal',computed('removal'),'rgb(255, 0, 0)');
+ document.getElementById('removal').removeAttribute('color');
+ for(const id of ['root','group','rule','inline','inherit','unset','variable','invalid','namespace','current','mutation','removal'])check(id+' computed color',computed(id),green);
+ check('presentation attribute does not rewrite style',document.getElementById('mutation').getAttribute('style'),null);
+ setTimeout(()=>fetch('/report',{method:'POST',body:JSON.stringify({checks})}),1000);
+});
+</script>

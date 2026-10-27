@@ -1,0 +1,104 @@
+<!doctype html><meta charset=utf-8><title>WebXR inline integration</title>
+<style>body{background:#202830;color:white;font:18px monospace}button{padding:16px;background:#305ac0;color:white}canvas{display:block;width:256px;height:128px}</style>
+<h1>WebXR inline integration</h1><button id=start disabled>Test immersive coexistence</button>
+<canvas id=canvas width=256 height=128></canvas><canvas id=immersiveCanvas width=128 height=96></canvas>
+<script>
+'use strict';
+let order=0,frames=0,inline,viewer,layer,gl,savedFrame,second,immersive;
+const report=(type,data={})=>fetch('/event',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({order:++order,type,data})});
+function check(ok,name,details={}){report('check',{passed:!!ok,name,details});}
+const fail=e=>report('error',{message:String(e),stack:e.stack});
+const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const near=(a,b)=>Math.abs(a-b)<.0001;
+async function rejects(fn,name){try{await fn();return false;}catch(e){return e.name===name;}}
+function nextFrame(session=inline,space=viewer,base=layer,context=gl){
+ return new Promise((resolve,reject)=>session.requestAnimationFrame((time,frame)=>{try{
+  savedFrame=frame;const pose=frame.getViewerPose(space),view=pose?.views[0],vp=view&&base?.getViewport(view);
+  if(context&&base){context.bindFramebuffer(context.FRAMEBUFFER,base.framebuffer);context.clearColor(.2,.4,.6,1);context.clear(context.COLOR_BUFFER_BIT);}
+  const pixel=new Uint8Array(4);if(context)context.readPixels(0,0,1,1,context.RGBA,context.UNSIGNED_BYTE,pixel);
+  resolve({time,predicted:frame.predictedDisplayTime,now:performance.now(),session:frame.session===session,
+   count:pose?.views.length,frozen:pose&&Object.isFrozen(pose.views),eye:view?.eye,
+   position:pose?Array.from(pose.transform.matrix):null,projection:view?Array.from(view.projectionMatrix):null,
+   viewport:vp&&[vp.x,vp.y,vp.width,vp.height],pixel:Array.from(pixel)});
+ }catch(e){reject(e);}}));
+}
+function projectionMatches(p,width,height,fov,nearPlane,farPlane){
+ const y=1/Math.tan(fov/2);return near(p[0],y/(width/height))&&near(p[5],y)&&near(p[10],-(farPlane+nearPlane)/(farPlane-nearPlane))&&near(p[14],-2*farPlane*nearPlane/(farPlane-nearPlane));
+}
+function drawProjectedTriangle(projection){
+ const shader=(kind,source)=>{const s=gl.createShader(kind);gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(s));return s;};
+ const vertex=shader(gl.VERTEX_SHADER,'attribute vec3 position; uniform mat4 projection; void main(){gl_Position=projection*vec4(position,1.0);}');
+ const fragment=shader(gl.FRAGMENT_SHADER,'precision mediump float; void main(){gl_FragColor=vec4(1.0,0.0,0.0,1.0);}');
+ const program=gl.createProgram();gl.attachShader(program,vertex);gl.attachShader(program,fragment);gl.linkProgram(program);
+ if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));
+ const buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-.4,-.4,-2,.4,-.4,-2,0,.4,-2]),gl.STATIC_DRAW);
+ gl.useProgram(program);const position=gl.getAttribLocation(program,'position');gl.enableVertexAttribArray(position);gl.vertexAttribPointer(position,3,gl.FLOAT,false,0,0);
+ gl.uniformMatrix4fv(gl.getUniformLocation(program,'projection'),false,new Float32Array(projection));gl.viewport(0,0,gl.drawingBufferWidth,gl.drawingBufferHeight);gl.drawArrays(gl.TRIANGLES,0,3);
+ const pixel=new Uint8Array(4);gl.readPixels(Math.floor(gl.drawingBufferWidth/2),Math.floor(gl.drawingBufferHeight/2),1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
+ gl.disableVertexAttribArray(position);gl.useProgram(null);gl.deleteBuffer(buffer);gl.deleteProgram(program);gl.deleteShader(vertex);gl.deleteShader(fragment);
+ return Array.from(pixel);
+}
+(async()=>{
+ check(await navigator.xr.isSessionSupported('inline'),'Inline support is available without headset tracking');
+ report('support',{immersive:await navigator.xr.isSessionSupported('immersive-vr')});
+ inline=await navigator.xr.requestSession('inline',{optionalFeatures:['local-floor','unbounded']});
+ check(inline.visibilityState==='visible'&&inline.inputSources.length===0,'Sensor-free inline session has no tracked input sources');
+ check(inline.enabledFeatures.includes('viewer')&&!inline.enabledFeatures.includes('local-floor')&&!inline.enabledFeatures.includes('unbounded'),'Inline grants viewer and omits unsupported optional spatial features');
+ check(await rejects(()=>navigator.xr.requestSession('inline',{requiredFeatures:['local']}),'NotSupportedError'),'Unsupported required spatial feature is rejected');
+ check(await rejects(()=>inline.requestReferenceSpace('local'),'NotSupportedError'),'Inline does not expose a local tracking reference space');
+ viewer=await inline.requestReferenceSpace('viewer');
+ check(near(inline.renderState.inlineVerticalFieldOfView,Math.PI/2),'Inline render state starts with the standard vertical field of view');
+ gl=canvas.getContext('webgl',{preserveDrawingBuffer:true});layer=new XRWebGLLayer(inline,gl);
+ check(layer.framebuffer===null&&layer.framebufferWidth===256&&layer.framebufferHeight===128,'Inline layer uses the existing canvas default framebuffer');
+ inline.updateRenderState({baseLayer:layer});let frame=await nextFrame();
+ check(frame.session&&frame.count===1&&frame.eye==='none'&&frame.frozen,'Inline viewer has one monoscopic view in a frozen view array');
+ check(frame.position.every((v,i)=>near(v,i%5===0?1:0)),'Sensor-free viewer transform is identity');
+ check(frame.time===frame.predicted&&frame.time>=0&&frame.now-frame.time>=0&&frame.now-frame.time<150,'Inline predicted display and callback time share the document clock');
+ check(frame.viewport.join(',')==='0,0,256,128'&&frame.pixel.slice(0,3).every((v,i)=>Math.abs(v-[51,102,153][i])<=1),'Inline viewport covers the canvas and WebGL drawing reaches its framebuffer');
+ check(projectionMatches(frame.projection,256,128,Math.PI/2,.1,1000),'Initial projection matches canvas aspect and default clip planes',{projection:frame.projection});
+ const triangle=drawProjectedTriangle(frame.projection);check(triangle[0]===255&&triangle[1]===0&&triangle[2]===0,'A 3D triangle rendered with the inline projection covers the expected canvas pixel',{pixel:triangle});
+ await delay(0);
+ check(await rejects(()=>savedFrame.getViewerPose(viewer),'InvalidStateError'),'An inactive animation frame cannot be queried after its callback');
+ const offset=viewer.getOffsetReferenceSpace(new XRRigidTransform({x:1,y:2,z:3}));
+ frame=await nextFrame(inline,offset);
+ check(near(frame.position[12],-1)&&near(frame.position[13],-2)&&near(frame.position[14],-3),'Viewer-relative offsets preserve their coordinate transform');
+ inline.updateRenderState({inlineVerticalFieldOfView:1.2,depthNear:.25,depthFar:50});frame=await nextFrame();
+ check(projectionMatches(frame.projection,256,128,1.2,.25,50),'Projection applies pending field of view and clip-plane updates',{projection:frame.projection});
+ canvas.width=128;canvas.height=256;frame=await nextFrame();
+ check(layer.framebufferWidth===128&&layer.framebufferHeight===256&&frame.viewport.join(',')==='0,0,128,256','Resizing the canvas updates inline framebuffer dimensions and viewport');
+ check(projectionMatches(frame.projection,128,256,1.2,.25,50),'Resizing the canvas updates the inline projection aspect ratio',{projection:frame.projection});
+ for(const fov of [0,Math.PI]){
+  inline.updateRenderState({inlineVerticalFieldOfView:fov});frame=await nextFrame();
+  check(inline.renderState.inlineVerticalFieldOfView>0&&inline.renderState.inlineVerticalFieldOfView<Math.PI&&frame.projection.every(Number.isFinite),'Endpoint field of view '+fov+' is clamped to a finite perspective',{fov:inline.renderState.inlineVerticalFieldOfView});
+ }
+ inline.updateRenderState({inlineVerticalFieldOfView:1.2});await nextFrame();
+ second=await navigator.xr.requestSession('inline');const secondViewer=await second.requestReferenceSpace('viewer');
+ const secondGL=immersiveCanvas.getContext('webgl');const secondLayer=new XRWebGLLayer(second,secondGL);second.updateRenderState({baseLayer:secondLayer});
+ frame=await nextFrame(second,secondViewer,secondLayer,secondGL);check(frame.count===1,'Multiple inline sessions can render independently');
+ let secondEnds=0;second.addEventListener('end',()=>secondEnds++);await second.end();await delay(30);
+ check(secondEnds===1,'Ending one inline session dispatches one end event');
+ frame=await nextFrame();check(frame.count===1,'Ending a sibling inline session preserves the other session');
+ let cancelled=false;const cancelledId=inline.requestAnimationFrame(()=>{cancelled=true;});inline.cancelAnimationFrame(cancelledId);await nextFrame();check(!cancelled,'Cancelled inline animation callbacks are not invoked');
+ function tick(){frames++;inline.requestAnimationFrame(tick);}inline.requestAnimationFrame(tick);
+ if(new URL(location.href).searchParams.has('coexist')){
+  start.disabled=false;report('ready',{start:start.getBoundingClientRect().toJSON(),viewport:[innerWidth,innerHeight],ratio:devicePixelRatio,frames});
+ }else{
+  let ends=0;inline.addEventListener('end',()=>ends++);await inline.end();await delay(50);const stopped=frames;await delay(80);
+  check(ends===1&&frames===stopped,'Inline shutdown ends once and stops scheduled callbacks');report('done');
+ }
+})().catch(fail);
+start.onclick=async()=>{try{
+ immersive=await navigator.xr.requestSession('immersive-vr');start.disabled=true;
+ const immersiveGL=immersiveCanvas.getContext('webgl');await immersiveGL.makeXRCompatible();
+ const immersiveLayer=new XRWebGLLayer(immersive,immersiveGL);immersive.updateRenderState({baseLayer:immersiveLayer});
+ const immersiveSpace=await immersive.requestReferenceSpace('local');let immersiveFrames=0;
+ function immersiveTick(t,f){f.getViewerPose(immersiveSpace);immersiveGL.bindFramebuffer(immersiveGL.FRAMEBUFFER,immersiveLayer.framebuffer);immersiveGL.clearColor(.3,.1,.2,1);immersiveGL.clear(immersiveGL.COLOR_BUFFER_BIT);immersiveFrames++;immersive.requestAnimationFrame(immersiveTick);}
+ immersive.requestAnimationFrame(immersiveTick);await delay(120);const paused=frames;await delay(180);
+ check(immersiveFrames>2&&frames===paused,'Inline callbacks pause while an immersive session is active');
+ const temporary=await navigator.xr.requestSession('inline');await temporary.end();check(true,'An inline session can end while immersive rendering is active');
+ await immersive.end();await delay(180);check(frames>paused,'Inline callbacks resume after immersive shutdown');
+ let ends=0;inline.addEventListener('end',()=>ends++);await inline.end();await delay(50);const stopped=frames;await delay(80);
+ check(ends===1&&frames===stopped,'Inline shutdown ends once and stops scheduled callbacks');report('done');
+}catch(e){fail(e);}};
+window.addEventListener('error',e=>fail(e.error||e.message));
+</script>

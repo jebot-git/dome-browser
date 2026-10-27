@@ -215,6 +215,10 @@ pub trait LayoutNode<'dom>: Copy + Debug + NodeInfo + Send + Sync {
     /// Whether or not this is an image element that is showing a broken image icon.
     fn showing_broken_image_icon(&self) -> bool;
 
+    /// Whether an image has failed, or has never had a source to load.
+    /// Pending and available image requests do not use alternative-text fallback.
+    fn image_is_ready_for_fallback(&self) -> bool;
+
     /// Return the [`HTMLCanvas`] data for this node, if it is a canvas.
     fn canvas_data(&self) -> Option<HTMLCanvasData>;
 

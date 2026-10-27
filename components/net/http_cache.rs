@@ -170,6 +170,9 @@ impl CachedResource {
         if self.aborted.load(Ordering::Acquire) {
             return false;
         }
+        if self.metadata.request_includes_credentials && !request.coep_allows_credentials() {
+            return false;
+        }
         if !self.vary_header_matches(&request.headers) {
             return false;
         }
@@ -215,8 +218,8 @@ impl CachedResource {
         }
 
         for vary_header_field in vary_value.iter_strs() {
-            if request_headers.get(vary_header_field) !=
-                original_request_headers.get(vary_header_field)
+            if request_headers.get(vary_header_field)
+                != original_request_headers.get(vary_header_field)
             {
                 return false;
             }
@@ -270,6 +273,12 @@ struct CachedMetadata {
     pub charset: Option<String>,
     /// HTTP Status
     pub status: HttpStatus,
+    #[serde(default = "cached_request_includes_credentials_default")]
+    pub request_includes_credentials: bool,
+}
+
+fn cached_request_includes_credentials_default() -> bool {
+    true
 }
 
 /// Whether a cached response is fresh or requires validation before or after use.
@@ -338,8 +347,9 @@ impl MallocSizeOf for HttpCache {
         self.entries
             .iter()
             .map(|(_key, entry)| entry.blocking_read().size_of(ops))
-            .sum::<usize>() +
-            self.disk_cache
+            .sum::<usize>()
+            + self
+                .disk_cache
                 .as_ref()
                 .map(|data| data.size_of(ops))
                 .unwrap_or(0)
@@ -440,9 +450,9 @@ fn response_is_cacheable(metadata: &Metadata) -> bool {
     // 1. check for absence of private response directive <https://tools.ietf.org/html/rfc7234#section-5.2.2.6>
     // 2. check for absence of the Authorization header field.
     let mut is_cacheable = false;
-    if headers.contains_key(header::EXPIRES) ||
-        headers.contains_key(header::LAST_MODIFIED) ||
-        headers.contains_key(header::ETAG)
+    if headers.contains_key(header::EXPIRES)
+        || headers.contains_key(header::LAST_MODIFIED)
+        || headers.contains_key(header::ETAG)
     {
         is_cacheable = true;
     }
@@ -450,17 +460,17 @@ fn response_is_cacheable(metadata: &Metadata) -> bool {
         if directive.no_store() {
             return false;
         }
-        if directive.public() ||
-            directive.s_max_age().is_some() ||
-            directive.max_age().is_some() ||
-            directive.no_cache()
+        if directive.public()
+            || directive.s_max_age().is_some()
+            || directive.max_age().is_some()
+            || directive.no_cache()
         {
             // If cache-control is understood, we can use it and ignore pragma.
             return true;
         }
     }
-    if let Some(pragma) = headers.typed_get::<Pragma>() &&
-        pragma.is_no_cache()
+    if let Some(pragma) = headers.typed_get::<Pragma>()
+        && pragma.is_no_cache()
     {
         return false;
     }
@@ -546,8 +556,8 @@ fn get_response_expiry(response: &Response) -> ApproxDuration {
             return heuristic_freshness;
         }
         // Other status codes can only use heuristic freshness if the public cache directive is present.
-        if let Some(ref directives) = response.headers.typed_get::<CacheControl>() &&
-            directives.public()
+        if let Some(ref directives) = response.headers.typed_get::<CacheControl>()
+            && directives.public()
         {
             return heuristic_freshness;
         }
@@ -657,6 +667,7 @@ fn create_cached_response(
     let resource_timing = ResourceFetchTiming::new(request.timing_type());
     let mut response = Response::new(cached_resource.metadata.final_url.clone(), resource_timing);
     response.headers = cached_headers.clone();
+    response.request_includes_credentials = cached_resource.metadata.request_includes_credentials;
     response.body = cached_resource.body.clone();
     if let ResponseBody::Receiving(_) = *cached_resource.body.lock() {
         debug!("existing body is in progress");
@@ -696,9 +707,9 @@ fn create_cached_response(
         ValidationStatus::Valid
     } else {
         ValidationStatus::Stale {
-            revalidate_in_background: within_stale_while_revalidate_window &&
-                !cached_resource.stale_while_revalidate.is_zero() &&
-                !request_demands_revalidation(request),
+            revalidate_in_background: within_stale_while_revalidate_window
+                && !cached_resource.stale_while_revalidate.is_zero()
+                && !request_demands_revalidation(request),
         }
     };
 
@@ -1012,6 +1023,9 @@ pub fn refresh(
     // Update cached Resource with response and constructed response.
     if let Some(constructed_response) = constructed_response.as_mut() {
         let cached_resource = &mut cached_resources[cached_resource_index];
+        cached_resource.metadata.request_includes_credentials =
+            response.request_includes_credentials;
+        constructed_response.request_includes_credentials = response.request_includes_credentials;
 
         // Bracket is to minimize lock duration.
         {
@@ -1239,6 +1253,7 @@ impl<'a> CachedResourcesOrGuard<'a> {
             content_type: metadata.content_type,
             charset: metadata.charset,
             status: metadata.status,
+            request_includes_credentials: response.request_includes_credentials,
         };
         let entry_resource = CachedResource {
             request_headers: Arc::new(ParkingLotMutex::new(request.headers.clone().into())),
@@ -1262,9 +1277,9 @@ impl<'a> CachedResourcesOrGuard<'a> {
                 // named in the `Vary` header.
                 if response.status == StatusCode::OK {
                     cached_resources.retain(|cached_resource| {
-                        cached_resource.status != StatusCode::OK ||
-                            !cached_resource.is_done() ||
-                            !cached_resource.vary_header_matches(&request.headers)
+                        cached_resource.status != StatusCode::OK
+                            || !cached_resource.is_done()
+                            || !cached_resource.vary_header_matches(&request.headers)
                     });
                 }
 

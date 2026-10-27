@@ -1,0 +1,12 @@
+<!doctype html><meta charset="utf-8"><title>SVG external paint server fallbacks</title>
+<style>body{margin:0;background:white}svg{position:absolute;top:20px;width:60px;height:60px}#css rect{fill:url(https://example.invalid/paint.svg#paint) rgb(20,180,90)}#cssNone rect{fill:url(https://example.invalid/paint.svg#paint) none}</style>
+<svg id="attr" style="left:20px"><rect width="60" height="60" fill="url(https://example.invalid/paint.svg#paint) rgb(20,180,90)"/></svg>
+<svg id="inline" style="left:100px"><rect width="60" height="60" style="fill:url(https://example.invalid/paint.svg#paint) rgb(20,180,90)"/></svg>
+<svg id="css" style="left:180px"><rect width="60" height="60"/></svg>
+<svg id="collision" style="left:260px"><defs><linearGradient id="paint"><stop stop-color="red"/><stop offset="1" stop-color="red"/></linearGradient></defs><rect width="60" height="60" style="fill:url(https://example.invalid/paint.svg#paint) rgb(20,180,90)"/></svg>
+<svg id="inlineNone" style="left:340px"><rect width="60" height="60" style="fill:url(https://example.invalid/paint.svg#paint) none"/></svg>
+<svg id="cssNone" style="left:420px"><rect width="60" height="60"/></svg>
+<svg id="externalUnset" style="left:20px;top:120px"><rect width="60" height="60" style="fill:url(https://example.invalid/paint.svg#paint)"/></svg>
+<svg id="localUnset" style="left:100px;top:120px"><rect width="60" height="60" fill="url(#missing)"/></svg>
+<svg id="stroke" style="left:180px;top:120px"><rect x="10" y="10" width="40" height="40" fill="none" stroke-width="20" style="stroke:url(https://example.invalid/paint.svg#paint) rgb(20,180,90)"/></svg>
+<script>addEventListener('load',()=>setTimeout(()=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[{name:'external fallback fixture loaded',passed:true}],styles:[...document.querySelectorAll('svg')].map(svg=>({id:svg.id,fill:getComputedStyle(svg.querySelector('rect')).fill}))})}),400));</script>

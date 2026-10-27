@@ -21,7 +21,7 @@ use js::jsapi::StackFormat as JSStackFormat;
 use js::jsval::UndefinedValue;
 use js::realm::CurrentRealm;
 use js::rust::wrappers2::{
-    JS_ClearPendingException, JS_ErrorFromException, JS_GetPendingException,
+    GetErrorTypeName, JS_ClearPendingException, JS_ErrorFromException, JS_GetPendingException,
 };
 use js::rust::{describe_scripted_caller, error_info_from_exception_stack};
 use libc::c_uint;
@@ -285,6 +285,18 @@ impl ErrorInfo {
                 };
                 String::from_utf8_lossy(message).into_owned()
             };
+            let message = if message.is_empty() {
+                // A native Error without a custom message still needs a useful
+                // non-empty description. Read its intrinsic type, not name or
+                // message properties that page code can replace with getters.
+                let name = unsafe { GetErrorTypeName(cx, (*report).exnType) };
+                NonNull::new(name.cast())
+                    .map(|name| unsafe { jsstr_to_string(cx, name) })
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| String::from("Error"))
+            } else {
+                message
+            };
 
             Some(ErrorInfo {
                 filename,
@@ -323,6 +335,24 @@ impl ErrorInfo {
             if let Some(info) = ErrorInfo::from_object(cx, object.handle()) {
                 return info;
             }
+            // Error extraction must not run arbitrary author coercion hooks.
+            // Preserve the object itself on ErrorEvent and use a safe description.
+            let scripted_caller = describe_scripted_caller(cx).unwrap_or_default();
+            return ErrorInfo {
+                message: String::from("uncaught exception: [object Object]"),
+                filename: scripted_caller.filename,
+                lineno: scripted_caller.line,
+                column: scripted_caller.col + 1,
+            };
+        }
+        if value.is_symbol() {
+            let scripted_caller = describe_scripted_caller(cx).unwrap_or_default();
+            return ErrorInfo {
+                message: String::from("uncaught exception: Symbol"),
+                filename: scripted_caller.filename,
+                lineno: scripted_caller.line,
+                column: scripted_caller.col + 1,
+            };
         }
 
         match USVString::from_jsval(cx, value, ()) {
@@ -336,7 +366,19 @@ impl ErrorInfo {
                 }
             },
             _ => {
-                panic!("uncaught exception: failed to stringify primitive");
+                // Reporting an error must not panic if description conversion
+                // fails. Preserve the original value on ErrorEvent and clear
+                // only the secondary conversion exception.
+                unsafe { JS_ClearPendingException(cx) };
+                let scripted_caller = describe_scripted_caller(cx).unwrap_or_default();
+                ErrorInfo {
+                    message: String::from(
+                        "uncaught exception (value could not be converted to a string)",
+                    ),
+                    filename: scripted_caller.filename,
+                    lineno: scripted_caller.line,
+                    column: scripted_caller.col + 1,
+                }
             },
         }
     }

@@ -70,6 +70,7 @@ mod from_embedder {
                 Self::SetScrollStates(..) => target!("SetScrollStates"),
                 Self::PaintMetric(..) => target!("PaintMetric"),
                 Self::EvaluateJavaScript(..) => target!("EvaluateJavaScript"),
+                Self::GetDownloadClient(..) => target!("GetDownloadClient"),
                 Self::CreateMemoryReport(..) => target!("CreateMemoryReport"),
                 Self::SendImageKeysForPipeline(..) => target!("SendImageKeysForPipeline"),
                 Self::PreferencesUpdated(..) => target!("PreferencesUpdated"),
@@ -105,6 +106,7 @@ mod from_embedder {
                 InputEvent::MouseMove(..) => target_variant!("MouseMove"),
                 InputEvent::MouseLeftViewport(..) => target_variant!("MouseLeftViewport"),
                 InputEvent::Touch(..) => target_variant!("Touch"),
+                InputEvent::Pen(..) => target_variant!("Pen"),
                 InputEvent::Wheel(..) => target_variant!("Wheel"),
             }
         }

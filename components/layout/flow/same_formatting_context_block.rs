@@ -29,7 +29,7 @@ use crate::geom::{LogicalRect, LogicalSides1D, LogicalVec2};
 use crate::layout_box_base::LayoutBoxBase;
 use crate::positioned::PositioningContext;
 use crate::sizing::InlineContentSizesResult;
-use crate::style_ext::LayoutStyle;
+use crate::style_ext::{ComputedValuesExt, LayoutStyle};
 use crate::{ConstraintSpace, ContainingBlock};
 
 /// A block in block flow that does not establish a new formatting context.
@@ -179,6 +179,7 @@ impl SameFormattingContextBlock {
             available_block_size,
             justify_self,
             automatic_block_size,
+            preferred_aspect_ratio,
             ..
         } = solve_containing_block_padding_and_border_for_in_flow_box(
             layout_context,
@@ -349,13 +350,18 @@ impl SameFormattingContextBlock {
             content_block_size += collapsible_margins_in_children.end.solve();
         }
 
-        let block_size = block_sizes.resolve(
+        let ratio_size = preferred_aspect_ratio.map(|ratio| ratio.compute_dependent_size(
+            LogicalAxis::Block, containing_block_for_children.size.inline,
+        ));
+        let block_size = block_sizes.resolve_with_aspect_ratio(
             LogicalAxis::Block,
             automatic_block_size,
             Au::zero,
             available_block_size,
             || content_block_size.into(),
             false, /* is_table */
+            ratio_size.map(crate::sizing::AspectRatioSizing::preferred),
+            !style.establishes_scroll_container(self.base.base_fragment_info.flags),
         );
 
         // If the final block size is different than the intrinsic size of the contents,

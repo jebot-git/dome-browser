@@ -1,0 +1,30 @@
+<!doctype html><meta charset=utf-8><title>Cosmetic filter fixture</title>
+<style nonce=fixture>
+.dome-ad-generic, #dome-ad-id, .dome-ad-site { display:block!important }
+</style>
+<div data-test=generic class=dome-ad-generic>Generic advertisement</div>
+<div data-test=id id=dome-ad-id>ID advertisement</div>
+<div data-test=site class=dome-ad-site>Site advertisement</div>
+<div data-test=excepted class=dome-ad-excepted>Explicitly excepted content</div>
+<div data-test=other class=dome-ad-other>Other hostname rule</div>
+<div data-test=legitimate class=dome-legitimate>Legitimate content</div>
+<div data-test=changed>Class changes after load</div>
+<script nonce=fixture>
+const originalURL=location.href;
+setTimeout(()=>{
+  const node=document.createElement('div');node.dataset.test='inserted';
+  node.className='dome-ad-generic';node.textContent='Dynamic advertisement';document.body.append(node);
+  document.querySelector('[data-test=changed]').className='dome-ad-generic';
+},300);
+if(location.pathname==='/history'){
+  setTimeout(()=>history.pushState({},'', '/generichide-history'),1800);
+  setTimeout(()=>history.replaceState({},'', '/normal-history'),3800);
+}
+setInterval(()=>{
+  const values={};for(const node of document.querySelectorAll('[data-test]')){
+    values[node.dataset.test]={display:getComputedStyle(node).display,height:node.getBoundingClientRect().height};
+  }
+  fetch('/report',{method:'POST',body:JSON.stringify({url:location.href,originalURL,values,
+    sheets:document.styleSheets.length,styles:document.querySelectorAll('style').length})}).catch(()=>{});
+},100);
+</script>

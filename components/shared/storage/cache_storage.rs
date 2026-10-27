@@ -5,9 +5,10 @@
 use std::ops::{Deref, DerefMut};
 
 use malloc_size_of_derive::MallocSizeOf;
+use net_traits::request::RequestBuilder as Request;
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::{GenericCallback, GenericSender};
-use servo_url::ImmutableOrigin;
+use servo_url::{ImmutableOrigin, ServoUrl};
 
 use crate::client_storage::StorageProxyMap;
 
@@ -55,42 +56,106 @@ impl DerefMut for CacheStorageThreadHandle {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum CacheStorageThreadMessage {
-    /// <https://w3c.github.io/ServiceWorker/#cache-storage-has>
-    HasCache {
-        cache_name: String,
-        callback: GenericCallback<CacheStorageThreadResponse>,
+    Run {
+        origin: ImmutableOrigin,
         proxy: StorageProxyMap,
-        origin: ImmutableOrigin,
-    },
-    /// <https://w3c.github.io/ServiceWorker/#cache-storage-open>
-    OpenCache {
-        cache_name: String,
-        callback: GenericCallback<CacheStorageThreadResponse>,
-        proxy: StorageProxyMap,
-        origin: ImmutableOrigin,
-    },
-    /// <https://w3c.github.io/ServiceWorker/#cache-keys>
-    Keys {
-        cache_name: String,
-        callback: GenericCallback<CacheStorageThreadResponse>,
-        origin: ImmutableOrigin,
-    },
-    DeleteCache {
-        cache_name: String,
-        callback: GenericCallback<CacheStorageThreadResponse>,
-        proxy: StorageProxyMap,
-        origin: ImmutableOrigin,
+        operation: CacheOperation,
+        callback: GenericCallback<Result<CacheResult, CacheFailure>>,
     },
     Exit(GenericSender<()>),
 }
 
+/// A cache is a request/response list. Names can be removed while existing
+/// objects continue to reference this list, so a name is not its identity.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, MallocSizeOf, PartialEq, Eq)]
+pub struct CacheIdentifier {
+    pub bottle_id: i64,
+    pub id: i64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+pub struct CacheQuery {
+    pub ignore_search: bool,
+    pub ignore_method: bool,
+    pub ignore_vary: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, MallocSizeOf, PartialEq, Eq)]
+pub enum CachedResponseType {
+    Default,
+    Basic,
+    Cors,
+    Opaque,
+    OpaqueRedirect,
+    Error,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, MallocSizeOf)]
+pub struct CachedResponseMetadata {
+    pub request_includes_credentials: bool,
+    pub url: Option<ServoUrl>,
+    pub status: u16,
+    pub status_text: Vec<u8>,
+    pub headers: Vec<(String, Vec<u8>)>,
+    pub redirected: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum CacheStorageThreadResponse {
-    HasCacheResult(Result<bool, String>),
-    OpenCacheResult {
-        result: Result<(), String>,
-        cache_name: String,
+pub struct CachedResponse {
+    pub kind: CachedResponseType,
+    pub metadata: CachedResponseMetadata,
+    /// Filtered response metadata is the public view. Keep the internal
+    /// metadata/body separately without exposing it through DOM Headers/Body.
+    pub internal_metadata: Option<CachedResponseMetadata>,
+    pub body: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CacheEntry {
+    pub request: Request,
+    pub response: CachedResponse,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum CacheOperation {
+    Open(Vec<u16>),
+    Has(Vec<u16>),
+    DeleteCache(Vec<u16>),
+    StorageKeys,
+    StorageMatch {
+        request: Request,
+        options: CacheQuery,
+        cache_name: Option<Vec<u16>>,
     },
-    KeysResult(Result<Vec<String>, String>),
-    DeleteCacheResult(Result<bool, String>),
+    Query {
+        cache: CacheIdentifier,
+        request: Option<Request>,
+        options: CacheQuery,
+    },
+    DeleteEntries {
+        cache: CacheIdentifier,
+        request: Request,
+        options: CacheQuery,
+    },
+    Put {
+        cache: CacheIdentifier,
+        entries: Vec<CacheEntry>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum CacheResult {
+    Opened(CacheIdentifier),
+    Boolean(bool),
+    Names(Vec<Vec<u16>>),
+    Entries(Vec<CacheEntry>),
+    Done,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum CacheFailure {
+    Storage(String),
+    Type(String),
+    InvalidState,
+    QuotaExceeded,
 }

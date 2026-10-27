@@ -251,13 +251,13 @@ impl MimeClassifier {
     }
 
     /// <https://mimesniff.spec.whatwg.org/#xml-mime-type>
-    /// SVG is worth distinguishing from other XML MIME types:
-    /// <https://mimesniff.spec.whatwg.org/#mime-type-miscellaneous>
+    /// SVG is both an image MIME type and an XML MIME type. In browsing
+    /// contexts it must retain XML processing, rather than becoming an image
+    /// wrapper document or being re-sniffed as a different image format.
     fn is_xml(mt: &Mime) -> bool {
-        !Self::is_image(mt) &&
-            (mt.suffix() == Some(mime::XML) ||
-                mt.essence_str() == "text/xml" ||
-                mt.essence_str() == "application/xml")
+        mt.suffix() == Some(mime::XML) ||
+            mt.essence_str() == "text/xml" ||
+            mt.essence_str() == "application/xml"
     }
 
     /// <https://mimesniff.spec.whatwg.org/#html-mime-type>

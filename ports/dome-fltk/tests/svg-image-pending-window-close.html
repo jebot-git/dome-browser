@@ -1,0 +1,13 @@
+<!doctype html><meta charset="utf-8"><title>Close with pending SVG image requests</title>
+<script>
+(async()=>{
+ const SVG='http://www.w3.org/2000/svg',root=document.createElementNS(SVG,'svg');document.documentElement.append(root);
+ const events=[];
+ for(let n=0;n<6;n++){
+  const image=document.createElementNS(SVG,'image');image.setAttribute('width',20);image.setAttribute('height',20);
+  image.setAttribute('href','/svg-image.svg?name=close-pending-'+n+'&delay=2000');image.onload=()=>events.push('load');image.onerror=()=>events.push('error');root.append(image);
+ }
+ await new Promise(resolve=>setTimeout(resolve,200));
+ fetch('/report',{method:'POST',body:JSON.stringify({checks:[{name:'six images connected before close',passed:root.childNodes.length===6},{name:'image requests still pending before close',passed:events.length===0}],diagnostics:{events},scope:'Controlled browser shutdown with pending network/decode image work; not all-interleaving proof'})});
+})().catch(error=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[{name:'fixture completed',passed:false,error:String(error)}]})}));
+</script>

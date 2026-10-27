@@ -1,0 +1,67 @@
+<!doctype html><meta charset=utf-8><title>WebXR reference-space integration</title>
+<style>body{background:#202830;color:white;font:20px monospace}button{padding:20px;background:#305ac0;color:white}</style>
+<h1>WebXR reference-space integration</h1><button id=start disabled>Start reset test</button><button id=end disabled>End session</button><canvas id=canvas width=128 height=96></canvas>
+<script>
+'use strict';
+const start=document.getElementById('start'),end=document.getElementById('end'),canvas=document.getElementById('canvas');
+let lastViewerX=null;
+let order=0,frameCount=0,resetSerial=0,session=null,ended=false,lastFrame=null,busy=false;
+const spaces=new Map(),callbacks=new Map();
+const report=(type,data={})=>fetch('/event',{method:'POST',body:JSON.stringify({order:++order,type,data})});
+const fail=e=>report('error',{message:String(e),stack:e?.stack});
+const matrix=t=>Array.from(t.matrix);
+const identity=()=>[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
+const multiply=(a,b)=>Array.from({length:16},(_,i)=>{const r=i%4,c=Math.floor(i/4);let n=0;for(let k=0;k<4;k++)n+=a[k*4+r]*b[c*4+k];return n;});
+const translated=(x,y,z)=>matrix(new XRRigidTransform({x,y,z}));
+const anchor=translated(1,1.6,2),floorAnchor=translated(1,0,2);
+function retain(name,space,basis,property=false){
+ spaces.set(name,{space,basis});
+ const callback=e=>report('reset',{name,serial:++resetSerial,frameCount,sameSpace:e.referenceSpace===space&&e.referenceSpace===e.referenceSpace,sameTransform:e.transform===e.transform,matrix:e.transform?matrix(e.transform):null,trusted:e.isTrusted,bubbles:e.bubbles,cancelable:e.cancelable});
+ callbacks.set(name,callback);if(property)space.onreset=callback;else space.addEventListener('reset',callback);
+}
+const gl=canvas.getContext('webgl',{xrCompatible:true});
+gl.makeXRCompatible().then(()=>{start.disabled=false;report('ready',{start:start.getBoundingClientRect().toJSON(),end:end.getBoundingClientRect().toJSON(),viewport:[innerWidth,innerHeight],ratio:devicePixelRatio});}).catch(fail);
+start.onclick=async()=>{try{
+ session=await navigator.xr.requestSession('immersive-vr',{requiredFeatures:['local-floor']});
+ start.disabled=true;end.disabled=false;
+ session.addEventListener('end',()=>{ended=true;report('ended');});
+ for(const name of ['selectstart','select','selectend'])session.addEventListener(name,e=>report(name,{resetSerial}));
+ const local=await session.requestReferenceSpace('local'),floor=await session.requestReferenceSpace('local-floor'),viewer=await session.requestReferenceSpace('viewer');
+ retain('local',local,anchor);retain('local-again',await session.requestReferenceSpace('local'),anchor);
+ const o1=new XRRigidTransform({x:2,y:.5,z:-1},{x:0,y:Math.sin(Math.PI/6),z:0,w:Math.cos(Math.PI/6)});
+ const o2=new XRRigidTransform({x:.5,y:-.25,z:.75},{x:Math.sin(Math.PI/8),y:0,z:0,w:Math.cos(Math.PI/8)});
+ const offset=local.getOffsetReferenceSpace(o1);retain('offset',offset,multiply(anchor,matrix(o1)));
+ retain('nested',offset.getOffsetReferenceSpace(o2),multiply(multiply(anchor,matrix(o1)),matrix(o2)));
+ retain('floor',floor,floorAnchor,true);
+ const fo=new XRRigidTransform({x:-1,y:1.25,z:2},{x:0,y:0,z:Math.sin(Math.PI/12),w:Math.cos(Math.PI/12)});
+ retain('floor-offset',floor.getOffsetReferenceSpace(fo),multiply(floorAnchor,matrix(fo)));
+ retain('viewer',viewer,identity());
+ report('spaces',{bases:Object.fromEntries([...spaces].map(([name,v])=>[name,v.basis]))});
+ const layer=new XRWebGLLayer(session,gl);session.updateRenderState({baseLayer:layer});
+ const frame=(time,f)=>{
+  frameCount++;lastFrame={frameCount,resetSerial,viewer:matrix(f.getViewerPose(local).transform)};
+  if(frameCount===2)report('running');
+  if(frameCount%4===0||lastViewerX!==lastFrame.viewer[12])report('frame',lastFrame);lastViewerX=lastFrame.viewer[12];
+  gl.bindFramebuffer(gl.FRAMEBUFFER,layer.framebuffer);gl.clearColor(.1,.2,.4,1);gl.clear(gl.COLOR_BUFFER_BIT);session.requestAnimationFrame(frame);
+ };session.requestAnimationFrame(frame);
+}catch(e){fail(e);}};
+end.onclick=async()=>{try{await session.end();end.disabled=true;}catch(e){fail(e);}};
+async function command(op){
+ if(op==='spawn')spaces.get('local').space.addEventListener('reset',()=>{
+  const basis=translated(1.25,1.6,2);retain('late',spaces.get('local').space.getOffsetReferenceSpace(new XRRigidTransform({x:.25})),basis);
+  report('late-created',{basis});
+ },{once:true});
+ if(op==='remove-late'){
+  const value=spaces.get('late');value.space.removeEventListener('reset',callbacks.get('late'));callbacks.delete('late');spaces.delete('late');
+ }
+ if(op==='end-on-reset')spaces.get('local').space.addEventListener('reset',()=>{
+  Promise.all([session.end(),session.end()]).then(()=>report('end-promises')).catch(fail);
+ },{once:true});
+ report('command',{op});
+}
+setInterval(async()=>{
+ if(busy)return;busy=true;try{const op=await(await fetch('/command')).json();if(op)await command(op);}catch(e){fail(e);}finally{busy=false;}
+ report('heartbeat',{frameCount,resetSerial,lastFrame,ended});
+},60);
+addEventListener('error',e=>fail(e.message));
+</script>

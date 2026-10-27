@@ -91,6 +91,7 @@ interface Element : Node {
 };
 
 dictionary ShadowRootInit {
+  CustomElementRegistry? customElementRegistry;
   required ShadowRootMode mode;
   boolean delegatesFocus = false;
   SlotAssignmentMode slotAssignment = "named";

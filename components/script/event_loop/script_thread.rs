@@ -54,10 +54,12 @@ use http::header::REFRESH;
 use hyper_serde::Serde;
 use js::context::{JSContext, NoGC};
 use js::glue::GetWindowProxyClass;
-use js::jsapi::{GCReason, JSContext as UnsafeJSContext};
+use js::jsapi::{GCReason, JSContext as UnsafeJSContext, JSGCParamKey};
 use js::jsval::UndefinedValue;
 use js::rust::ParentRuntime;
-use js::rust::wrappers2::{JS_AddInterruptCallback, JS_GC, SetWindowProxyClass};
+use js::rust::wrappers2::{
+    JS_AddInterruptCallback, JS_GC, JS_GetGCParameter, JS_MaybeGC, SetWindowProxyClass,
+};
 use layout_api::{LayoutConfig, LayoutFactory, RestyleReason, ScriptThreadFactory};
 use media::WindowGLContext;
 use metrics::MAX_TASK_NS;
@@ -280,6 +282,8 @@ pub struct ScriptThread {
 
     /// <https://html.spec.whatwg.org/multipage/#last-render-opportunity-time>
     last_render_opportunity_time: Cell<Option<Instant>>,
+    /// Rotate idle work among active windows sharing this event loop.
+    idle_window_index: Cell<usize>,
     /// State that is common to `WebView`s to be shared with all of their `Pipeline`s. Each
     /// is stored as a `Weak` and pruned lazily so that there does not need to be any
     /// management when `WebView`s are closed.
@@ -965,6 +969,7 @@ impl ScriptThread {
                     webview_states: Default::default(),
                     documents: DomRefCell::new(DocumentCollection::default()),
                     last_render_opportunity_time: Default::default(),
+                    idle_window_index: Default::default(),
                     window_proxies: Default::default(),
                     incomplete_loads: DomRefCell::new(vec![]),
                     incomplete_parser_contexts: IncompleteParserContexts(RefCell::new(vec![])),
@@ -1299,10 +1304,10 @@ impl ScriptThread {
             .iter()
             .any(|(_, document)| document.needs_rendering_update(no_gc));
         let running_animations = self.documents.borrow().iter().any(|(_, document)| {
-            document.is_fully_active() &&
-                !document.window().throttled() &&
-                (document.animation_manager().running_animation_count() != 0 ||
-                    document.has_active_request_animation_frame_callbacks())
+            document.is_fully_active()
+                && !document.window().throttled()
+                && (document.animation_manager().running_animation_count() != 0
+                    || document.has_active_request_animation_frame_callbacks())
         });
 
         // If we are not running animations and no rendering update is
@@ -1372,22 +1377,104 @@ impl ScriptThread {
         }
     }
 
+    /// Bound idle work by timers, pending rendering, and the 50ms responsiveness cap.
+    pub(crate) fn idle_deadline(&self) -> Instant {
+        let now = Instant::now();
+        let mut deadline = now + Duration::from_millis(50);
+        if let Some(timer) = self.timer_scheduler.borrow().next_deadline() {
+            deadline = deadline.min(timer);
+        }
+        if self.needs_rendering_update.load(Ordering::Relaxed) ||
+            self.documents.borrow().iter().any(|(_, document)| {
+                document.has_active_request_animation_frame_callbacks()
+            })
+        {
+            deadline = deadline.min(now + Duration::from_micros(16_000));
+        }
+        deadline
+    }
+
+    /// Run one idle task only after input, networking, timers and rendering have
+    /// yielded. Windows snapshot runnable callbacks at period boundaries and
+    /// defer new registrations until that period's deadline. Return to normal
+    /// task processing between callbacks so input and timers keep priority.
+    fn invoke_one_idle_callback(&self, cx: &mut JSContext) -> bool {
+        let windows: Vec<_> = self.documents.borrow().iter()
+            .filter(|(_, document)| document.is_fully_active())
+            .map(|(_, document)| DomRoot::from_ref(document.window()))
+            .collect();
+        if windows.is_empty() {
+            return false;
+        }
+        let first = self.idle_window_index.get() % windows.len();
+        for offset in 0..windows.len() {
+            let index = (first + offset) % windows.len();
+            let window = &windows[index];
+            let deadline = self.idle_deadline();
+            let invoked = self.profile_event(ScriptThreadEventCategory::ScriptEvent, None, || {
+                window.invoke_idle_callback(cx, deadline)
+            });
+            if invoked {
+                self.idle_window_index.set(index + 1);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Offer an empty event queue to SpiderMonkey's eager allocation policy.
+    /// A collection may enqueue jobs, so report it to the normal checkpoints.
+    #[expect(unsafe_code)]
+    fn maybe_collect_idle_garbage(&self, cx: &mut JSContext) -> bool {
+        unsafe {
+            let before = (
+                JS_GetGCParameter(cx, JSGCParamKey::JSGC_NUMBER),
+                JS_GetGCParameter(cx, JSGCParamKey::JSGC_SLICE_NUMBER),
+            );
+            JS_MaybeGC(cx);
+            let after = (
+                JS_GetGCParameter(cx, JSGCParamKey::JSGC_NUMBER),
+                JS_GetGCParameter(cx, JSGCParamKey::JSGC_SLICE_NUMBER),
+            );
+            after != before
+        }
+    }
+
     /// Handle incoming messages from other tasks and the task queue.
     fn handle_msgs(&self, cx: &mut JSContext) -> bool {
         // Proritize rendering tasks and others, and gather all other events as `sequential`.
         let mut sequential: SmallVec<[MixedMessage; 10]> = SmallVec::new();
 
-        // Notify the background-hang-monitor we are waiting for an event.
-        self.background_hang_monitor.notify_wait();
-
-        // Receive at least one message so we don't spinloop.
-        debug!("Waiting for event.");
         let fully_active = self.get_fully_active_document_ids();
-        let mut event = self.receivers.recv(
-            &self.task_queue,
-            &self.timer_scheduler.borrow(),
-            &fully_active,
-        );
+        // Expired timeouts run as ordinary tasks, even when there is no idle
+        // time. Never race an idle callback ahead of an already due timeout.
+        self.timer_scheduler.borrow_mut().dispatch_completed_timers();
+        let ready = self.receivers.try_recv(&self.task_queue, &fully_active);
+        let mut event = match ready {
+            Some(event) => event,
+            // A rendering timer sets this flag without queueing a message.
+            // Dispatching it above consumed its wakeup; perform the rendering
+            // checkpoint instead of blocking with pending input still queued.
+            None if self.needs_rendering_update.load(Ordering::Relaxed) => MixedMessage::TimerFired,
+            // Do not block after a collection with GC-generated jobs pending.
+            // Input, due timers and pending rendering have already taken priority.
+            None if !self.closing.load(Ordering::SeqCst) && self.maybe_collect_idle_garbage(cx) => {
+                MixedMessage::TimerFired
+            },
+            None if !self.closing.load(Ordering::SeqCst) && self.invoke_one_idle_callback(cx) => {
+                // Continue through the usual microtask/rendering checkpoints.
+                MixedMessage::TimerFired
+            },
+            None => {
+                self.background_hang_monitor.notify_wait();
+                debug!("Waiting for event.");
+                self.receivers.recv(
+                    &self.task_queue,
+                    &self.timer_scheduler.borrow(),
+                    &fully_active,
+                )
+            },
+        };
 
         loop {
             debug!("Handling event: {event:?}");
@@ -1728,9 +1815,9 @@ impl ScriptThread {
         };
         let task_duration = start.elapsed();
         for (doc_id, doc) in self.documents.borrow().iter() {
-            if let Some(pipeline_id) = pipeline_id &&
-                pipeline_id == doc_id &&
-                task_duration.as_nanos() > MAX_TASK_NS
+            if let Some(pipeline_id) = pipeline_id
+                && pipeline_id == doc_id
+                && task_duration.as_nanos() > MAX_TASK_NS
             {
                 if opts::get()
                     .debug
@@ -1816,6 +1903,12 @@ impl ScriptThread {
             },
             ScriptThreadMessage::GetDocumentOriginDetails(pipeline_id, result_sender) => {
                 self.handle_get_origin_details(pipeline_id, result_sender);
+            },
+            ScriptThreadMessage::GetDownloadClient(pipeline_id, callback) => {
+                let client = self.documents.borrow().find_document(pipeline_id)
+                    .filter(|document| document.is_fully_active())
+                    .map(|document| (document.url(), document.window().request_client(None)));
+                let _ = callback.send(client);
             },
             ScriptThreadMessage::GetTitle(pipeline_id) => self.handle_get_title_msg(pipeline_id),
             ScriptThreadMessage::SetDocumentActivity(pipeline_id, activity) => {
@@ -1938,9 +2031,9 @@ impl ScriptThread {
                     document.handle_no_longer_waiting_on_asynchronous_image_updates();
                 }
             },
-            msg @ ScriptThreadMessage::SpawnPipeline(..) |
-            msg @ ScriptThreadMessage::ExitFullScreen(..) |
-            msg @ ScriptThreadMessage::ExitScriptThread => {
+            msg @ ScriptThreadMessage::SpawnPipeline(..)
+            | msg @ ScriptThreadMessage::ExitFullScreen(..)
+            | msg @ ScriptThreadMessage::ExitScriptThread => {
                 panic!("should have handled {:?} already", msg)
             },
             ScriptThreadMessage::SetScrollStates(pipeline_id, scroll_states) => {
@@ -1970,11 +2063,17 @@ impl ScriptThread {
                 self.handle_refresh_cursor(pipeline_id);
             },
             ScriptThreadMessage::PreferencesUpdated(updates) => {
+                let cosmetic_changed = updates.iter().any(|(name, _)| name == "network_cosmetic_filter_generation" || name == "network_cosmetic_filtering_enabled");
                 let mut current_preferences = prefs::get().clone();
                 for (name, value) in updates {
                     current_preferences.set_value(&name, value);
                 }
                 prefs::set(current_preferences);
+                if cosmetic_changed {
+                    let documents: Vec<_> = self.documents.borrow().iter()
+                        .map(|(_, document)| DomRoot::from_ref(&*document)).collect();
+                    for document in documents { document.reset_cosmetic_filters(cx); }
+                }
             },
             ScriptThreadMessage::ForwardKeyboardScroll(pipeline_id, scroll) => {
                 if let Some(document) = self.documents.borrow().find_document(pipeline_id) {
@@ -2741,7 +2840,7 @@ impl ScriptThread {
         })
     }
 
-    /// Handle changes to the theme, triggering reflow if the theme actually changed.
+    /// Apply shared WebView theme, focus and visibility changes to its documents.
     fn handle_update_webview_state(&self, cx: &mut JSContext, new_state: WebViewState) {
         let Some(webview_state) = self
             .webview_states
@@ -2757,8 +2856,10 @@ impl ScriptThread {
         let new_has_system_focus = new_state.has_system_focus.get();
         let system_focus_changed =
             webview_state.has_system_focus.replace(new_has_system_focus) != new_has_system_focus;
+        let hidden = new_state.hidden.get();
+        let visibility_changed = webview_state.hidden.replace(hidden) != hidden;
 
-        if !theme_changed && !system_focus_changed {
+        if !theme_changed && !system_focus_changed && !visibility_changed {
             return;
         }
 
@@ -2782,6 +2883,9 @@ impl ScriptThread {
             if system_focus_changed {
                 document.gained_or_lost_system_focus(cx, new_has_system_focus);
             }
+            if visibility_changed {
+                document.update_webview_visibility(cx);
+            }
         }
     }
 
@@ -2798,10 +2902,24 @@ impl ScriptThread {
         );
     }
 
+    fn document_cookie_site(&self, id: PipelineId, webview_id: WebViewId) -> Option<ImmutableOrigin> {
+        if let Some(document) = self.documents.borrow().find_document(id) {
+            return document.cookie_site();
+        }
+        let (sender, receiver) = generic_channel::channel()?;
+        let channel = ScriptToConstellationChan {
+            sender: self.senders.pipeline_to_constellation_sender.clone(),
+            webview_id,
+            pipeline_id: id,
+        };
+        channel.send(ScriptToConstellationMessage::GetDocumentOriginDetails(id, sender)).ok()?;
+        receiver.recv().ok()?.and_then(|(_, _, site)| site)
+    }
+
     fn handle_get_origin_details(
         &self,
         id: PipelineId,
-        result_sender: GenericSender<Option<(OriginSnapshot, Vec<ImmutableOrigin>)>>,
+        result_sender: GenericSender<Option<(OriginSnapshot, Vec<ImmutableOrigin>, Option<ImmutableOrigin>)>>,
     ) {
         let origin_details = self.documents.borrow().find_document(id).map(|document| {
             (
@@ -2810,6 +2928,7 @@ impl ScriptThread {
                     .internal_ancestor_origin_objects_list()
                     .clone()
                     .unwrap_or_default(),
+                document.cookie_site(),
             )
         });
         let _ = result_sender.send(origin_details);
@@ -3251,10 +3370,23 @@ impl ScriptThread {
     ) {
         debug!("{pipeline_id}: Starting pipeline exit.");
 
+        // A pipeline can exit before a Document exists. Cancel its pending
+        // fetch now instead of retaining it until script-thread destruction.
+        let incomplete = {
+            let mut loads = self.incomplete_loads.borrow_mut();
+            let index = loads.iter().position(|load| load.pipeline_id == pipeline_id);
+            index.map(|index| loads.remove(index))
+        };
+        let had_incomplete_load = incomplete.is_some();
+        if let Some(mut load) = incomplete {
+            load.controller.terminate();
+        }
+
         // Abort the parser, if any,
         // to prevent any further incoming networking messages from being handled.
         let document = self.documents.borrow_mut().remove(pipeline_id);
         if let Some(document) = document {
+            debug_assert!(!had_incomplete_load);
             // We should never have a pipeline that's still an incomplete load, but also has a Document.
             debug_assert!(
                 !self
@@ -3477,8 +3609,10 @@ impl ScriptThread {
         };
 
         let final_url = metadata.final_url.clone();
+        let navigation_cookie_same_site =
+            incomplete.navigation_cookie_same_site_for_response(&final_url);
         let _ = script_to_constellation_chan
-            .send(ScriptToConstellationMessage::SetFinalUrl(final_url.clone()));
+            .send(ScriptToConstellationMessage::SetFinalUrl(final_url.clone(), metadata.protocol_state.clone()));
 
         debug!(
             "ScriptThread: loading {} on pipeline {:?}",
@@ -3643,7 +3777,9 @@ impl ScriptThread {
             .and_then(|charset| Encoding::for_label(charset.as_bytes()));
 
         let is_html_document = match content_type {
-            Some(ref mime) if mime.type_ == APPLICATION && mime.has_suffix("xml") => {
+            // Every +xml subtype is XML, including image/svg+xml and
+            // text/*+xml. Navigations must use an XML document and tokenizer.
+            Some(ref mime) if mime.has_suffix("xml") => {
                 IsHTMLDocument::NonHTMLDocument
             },
 
@@ -3700,12 +3836,22 @@ impl ScriptThread {
         //   navigation start time set to navigationParams's response's timing
         //   info's start time.
         document.set_navigation_start(incomplete.navigation_start);
+        document.set_container_embedder_policy(
+            incomplete.target_snapshot_params.container_embedder_policy,
+        );
+        if final_url.is_local_scheme() {
+            if let Some(policy) = incomplete.load_data.policy_container.clone() {
+                document.set_policy_container(policy);
+            }
+        }
 
         let referrer_policy = metadata
             .headers
             .as_deref()
             .and_then(|h| h.typed_get::<ReferrerPolicyHeader>())
             .into();
+        document.set_navigation_cookie_same_site(navigation_cookie_same_site);
+        document.set_protocol_state(metadata.protocol_state.clone());
         document.set_referrer_policy(referrer_policy);
 
         self.documents
@@ -3714,6 +3860,7 @@ impl ScriptThread {
 
         // Step 10. Set window's associated Document to document.
         window.init_document(&document);
+        document.queue_initial_visibility_entry(cx);
 
         let iframe = incomplete.parent_info.and_then(|parent_id| {
             self.documents
@@ -3735,8 +3882,8 @@ impl ScriptThread {
         // hence we filter it out here.
         let iframe_in_this_script_thread = iframe.is_some();
         let parent_info = incomplete.parent_info.filter(|parent_id| {
-            iframe_in_this_script_thread ||
-                self.documents.borrow().find_document(*parent_id).is_none()
+            iframe_in_this_script_thread
+                || self.documents.borrow().find_document(*parent_id).is_none()
         });
 
         // Initialize the browsing context for the window.
@@ -4164,7 +4311,8 @@ impl ScriptThread {
             .borrow_mut()
             .push((incomplete.pipeline_id, context));
 
-        let request_builder = incomplete.request_builder();
+        let cookie_site = incomplete.parent_info.and_then(|parent| self.document_cookie_site(parent, incomplete.webview_id()));
+        let request_builder = incomplete.request_builder(cookie_site);
         incomplete.controller = FetchController::new(
             request_builder.id,
             false,
@@ -4192,6 +4340,10 @@ impl ScriptThread {
             },
             FetchResponseMsg::ProcessResponseChunk(_request_id, chunk) => {
                 self.handle_fetch_chunk(cx, pipeline_id, chunk)
+            },
+            FetchResponseMsg::ProcessResponseChunkWithAck(_request_id, chunk, ack) => {
+                self.handle_fetch_chunk(cx, pipeline_id, chunk);
+                let _ = ack.send(());
             },
             FetchResponseMsg::ProcessResponseEOF(_request_id, eof, timing) => {
                 self.handle_fetch_eof(cx, pipeline_id, eof, timing)
@@ -4258,8 +4410,8 @@ impl ScriptThread {
             // we need to register an iframe entry to the performance timeline if present
             if let Some(window_proxy) = context
                 .get_document()
-                .and_then(|document| document.browsing_context()) &&
-                let Some(frame_element) = window_proxy.frame_element()
+                .and_then(|document| document.browsing_context())
+                && let Some(frame_element) = window_proxy.frame_element()
             {
                 let iframe_ctx = IframeContext::new(
                     frame_element
@@ -4326,7 +4478,8 @@ impl ScriptThread {
                 metadata.final_url.clone(),
             ));
 
-        let mut request_builder = incomplete_load.request_builder();
+        let cookie_site = incomplete_load.parent_info.and_then(|parent| self.document_cookie_site(parent, incomplete_load.webview_id()));
+        let mut request_builder = incomplete_load.request_builder(cookie_site);
         request_builder.referrer = metadata
             .referrer
             .clone()
@@ -4469,8 +4622,8 @@ impl ScriptThread {
             return;
         };
 
-        if let Some(window) = self.documents.borrow().find_window(pipeline_id) &&
-            window.live_devtools_updates()
+        if let Some(window) = self.documents.borrow().find_window(pipeline_id)
+            && window.live_devtools_updates()
         {
             let css_error = CSSError {
                 filename,

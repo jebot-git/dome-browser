@@ -64,6 +64,8 @@ pub(crate) struct WorkletGlobalScope {
 
     #[no_trace]
     origin: MutableOrigin,
+    #[no_trace]
+    cookie_site: Option<ImmutableOrigin>,
 
     /// The [`TaskManager`] for this [`WorkletGlobalScope`].
     #[conditional_malloc_size_of]
@@ -160,6 +162,7 @@ impl WorkletGlobalScope {
                 }),
             )),
             origin: MutableOrigin::new(ImmutableOrigin::new_opaque()),
+            cookie_site: init.cookie_site.clone(),
             closing,
             module_map: Default::default(),
         }
@@ -170,6 +173,8 @@ impl WorkletGlobalScope {
     ) -> &DomRefCell<HashMapTracedValues<ModuleRequest, ModuleStatus>> {
         &self.module_map
     }
+
+    pub(crate) fn cookie_site(&self) -> Option<ImmutableOrigin> { self.cookie_site.clone() }
 
     pub(crate) fn origin(&self) -> MutableOrigin {
         self.origin.clone()
@@ -224,6 +229,7 @@ impl From<&Window> for WorkletGlobalScopeInit {
         WorkletGlobalScopeInit {
             to_script_thread_sender: window.main_thread_script_chan().clone(),
             resource_threads: global_scope.resource_threads().clone(),
+            cookie_site: global_scope.cookie_site(),
             storage_threads: global_scope.storage_threads().clone(),
             mem_profiler_chan: global_scope.mem_profiler_chan().clone(),
             time_profiler_chan: global_scope.time_profiler_chan().clone(),
@@ -241,6 +247,7 @@ impl From<&Window> for WorkletGlobalScopeInit {
 /// Resources required by workletglobalscopes
 #[derive(Clone)]
 pub(crate) struct WorkletGlobalScopeInit {
+    pub cookie_site: Option<ImmutableOrigin>,
     /// Channel to the main script thread
     pub(crate) to_script_thread_sender: Sender<MainThreadScriptMsg>,
     /// Channel to a resource thread

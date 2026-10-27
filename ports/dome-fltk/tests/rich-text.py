@@ -10,7 +10,7 @@ from Xlib import X, XK, display
 from Xlib.ext import xtest
 port=Path(__file__).resolve().parents[1]
 mode='native-svg' if '--native-svg' in sys.argv else 'compat' if '--compat' in sys.argv else 'native'
-out=port.parents[2]/'artifacts/browser-rich-text-tests'/mode;out.mkdir(parents=True,exist_ok=True)
+out=Path(os.environ.get('DOME_BROWSER_TEST_OUTPUT',port.parents[2]/'artifacts/browser-rich-text-tests'/mode));out.mkdir(parents=True,exist_ok=True)
 events=[]
 page='''<!doctype html><meta charset=utf-8><title>Rich text fixture</title>
 <style>body{font:18px sans-serif}#plain{position:absolute;left:24px;top:30px;width:120px;height:50px;background:#aac}
@@ -102,6 +102,13 @@ with tempfile.TemporaryDirectory(prefix='browser-rich-text-') as d:
             wait(lambda:any(e['name']=='READY' for e in events))
             wait(lambda:(out/'frame.png').exists())
             main=wait(lambda:next((w for w in x.screen().root.query_tree().children if 'Rich text fixture' in str(w.get_wm_name())),None))
+            # A frame capture can contain the initial blank viewport. Wait for
+            # the actual control to paint before sending the first native click.
+            # The point is inside #plain's background, below its text.
+            def control_painted():
+                pixel=main.get_image(30,190,1,1,X.ZPixmap,0xffffffff).data
+                return pixel[:3]==bytes((204,170,170))
+            wait(control_painted)
             g=main.get_geometry();raw=main.get_image(0,0,g.width,g.height,X.ZPixmap,0xffffffff).data
             rgb=bytearray(g.width*g.height*3);rgb[0::3]=raw[2::4];rgb[1::3]=raw[1::4];rgb[2::3]=raw[0::4]
             (out/'window.ppm').write_bytes(f'P6\n{g.width} {g.height}\n255\n'.encode()+rgb)

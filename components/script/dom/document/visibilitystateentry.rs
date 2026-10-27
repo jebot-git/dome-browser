@@ -28,6 +28,7 @@ impl VisibilityStateEntry {
     fn new_inherited(
         state: DocumentVisibilityState,
         timestamp: CrossProcessInstant,
+        time_origin: CrossProcessInstant,
     ) -> VisibilityStateEntry {
         let name = match state {
             DocumentVisibilityState::Visible => DOMString::from_static("visible"),
@@ -39,6 +40,7 @@ impl VisibilityStateEntry {
                 EntryType::VisibilityState,
                 Some(timestamp),
                 Duration::ZERO,
+                time_origin,
             ),
         }
     }
@@ -49,9 +51,14 @@ impl VisibilityStateEntry {
         state: DocumentVisibilityState,
         timestamp: CrossProcessInstant,
     ) -> DomRoot<VisibilityStateEntry> {
+        let time_origin = global.performance(cx).time_origin();
         reflect_dom_object(
             cx,
-            Box::new(VisibilityStateEntry::new_inherited(state, timestamp)),
+            Box::new(VisibilityStateEntry::new_inherited(
+                state,
+                timestamp,
+                time_origin,
+            )),
             global,
         )
     }

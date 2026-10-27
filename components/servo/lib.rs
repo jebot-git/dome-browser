@@ -140,14 +140,15 @@ pub mod webxr {
 
 // TODO: The protocol handler interface needs to be cleaned and simplified.
 pub mod protocol_handler {
-    pub use net::fetch::methods::{DoneChannel, FetchContext};
+    pub use net::fetch::methods::{Data, DoneChannel, FetchContext, fetch, is_bad_port};
     pub use net::filemanager_thread::FILE_CHUNK_SIZE;
     pub use net::protocols::{ProtocolHandler, ProtocolRegistry};
     pub use net_traits::filemanager_thread::RelativePos;
     pub use net_traits::http_status::HttpStatus;
-    pub use net_traits::request::Request;
-    pub use net_traits::response::{Response, ResponseBody};
-    pub use net_traits::{NetworkError, ResourceFetchTiming};
+    pub use net_traits::request::{Destination, Initiator, Request, RequestMode};
+    pub use net_traits::response::{ProtocolRedirect, Response, ResponseBody};
+    pub use net_traits::blob_url_store::UrlWithBlobClaim;
+    pub use net_traits::{DiscardFetch, NetworkError, ResourceFetchTiming};
 
     pub use crate::webview_delegate::ProtocolHandlerRegistration;
 }

@@ -26,6 +26,21 @@ pub enum TargetRayMode {
     TransientPointer,
 }
 
+/// Immutable dimensions and mapping of a controller's XR-only Gamepad.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, MallocSizeOf)]
+pub struct GamepadLayout {
+    pub buttons: usize,
+    pub axes: usize,
+    pub xr_standard: bool,
+}
+
+impl GamepadLayout {
+    /// Pose-only sources, and a lone button without a grip, have no Gamepad.
+    pub fn exposed(self, supports_grip: bool) -> bool {
+        self.buttons > 1 || self.axes > 0 || (self.buttons == 1 && supports_grip)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, MallocSizeOf)]
 pub struct InputSource {
     pub handedness: Handedness,
@@ -34,6 +49,8 @@ pub struct InputSource {
     pub supports_grip: bool,
     pub hand_support: Option<Hand<()>>,
     pub profiles: Vec<String>,
+    #[serde(default)]
+    pub gamepad: Option<GamepadLayout>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, MallocSizeOf)]
@@ -45,6 +62,10 @@ pub struct InputFrame {
     pub hand: Option<Box<Hand<JointFrame>>>,
     pub squeezed: bool,
     pub button_values: Vec<f32>,
+    #[serde(default)]
+    pub button_pressed: Vec<bool>,
+    #[serde(default)]
+    pub button_touched: Vec<bool>,
     pub axis_values: Vec<f32>,
     pub input_changed: bool,
 }

@@ -2,10 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
 use dom_struct::dom_struct;
 use embedder_traits::GamepadSupportedHapticEffects;
 use js::context::JSContext;
-use js::conversions::ToJSValConvertible;
 use js::jsapi::Heap;
 use js::jsval::{JSVal, UndefinedValue};
 use js::rust::MutableHandleValue;
@@ -35,11 +36,12 @@ pub(crate) struct XRInputSource {
     hand: MutNullableDom<XRHand>,
     #[ignore_malloc_size_of = "mozjs"]
     profiles: Heap<JSVal>,
-    gamepad: Dom<Gamepad>,
+    gamepad: MutNullableDom<Gamepad>,
+    connected: Cell<bool>,
 }
 
 impl XRInputSource {
-    fn new_inherited(session: &XRSession, info: InputSource, gamepad: &Gamepad) -> XRInputSource {
+    fn new_inherited(session: &XRSession, info: InputSource, gamepad: Option<&Gamepad>) -> XRInputSource {
         XRInputSource {
             reflector: Reflector::new(),
             session: Dom::from_ref(session),
@@ -48,7 +50,8 @@ impl XRInputSource {
             grip_space: Default::default(),
             hand: Default::default(),
             profiles: Heap::default(),
-            gamepad: Dom::from_ref(gamepad),
+            gamepad: MutNullableDom::new(gamepad),
+            connected: Cell::new(true),
         }
     }
 
@@ -59,31 +62,35 @@ impl XRInputSource {
         info: InputSource,
     ) -> DomRoot<XRInputSource> {
         // <https://www.w3.org/TR/webxr-gamepads-module-1/#gamepad-differences>
-        let gamepad = Gamepad::new(
+        let gamepad = info.gamepad.filter(|layout| layout.exposed(info.supports_grip)).map(|layout| Gamepad::new(
             cx,
             window,
             0,
             String::new(),
-            "xr-standard".into(),
+            if layout.xr_standard && info.supports_grip && matches!(info.target_ray_mode, TargetRayMode::TrackedPointer) {
+                "xr-standard".into()
+            } else {
+                String::new()
+            },
             (-1.0, 1.0),
             (0.0, 1.0),
             GamepadSupportedHapticEffects {
                 supports_dual_rumble: false,
                 supports_trigger_rumble: false,
             },
-            true,
-        );
+            Some((layout.buttons, layout.axes)),
+        ));
 
         let source = reflect_dom_object(
             cx,
-            Box::new(XRInputSource::new_inherited(session, info, &gamepad)),
+            Box::new(XRInputSource::new_inherited(session, info, gamepad.as_deref())),
             window,
         );
 
         let mut realm = enter_auto_realm(cx, window);
         let cx = &mut realm.current_realm();
         rooted!(&in(cx) let mut profiles = UndefinedValue());
-        source.info.profiles.to_jsval(cx, profiles.handle_mut());
+        script_bindings::utils::to_frozen_array(cx, &source.info.profiles, profiles.handle_mut());
         source.profiles.set(profiles.get());
         source
     }
@@ -96,22 +103,23 @@ impl XRInputSource {
         &self.session
     }
 
-    pub(crate) fn update_gamepad_state(&self, frame: InputFrame) {
-        frame
-            .button_values
-            .iter()
-            .enumerate()
-            .for_each(|(i, value)| {
-                self.gamepad.map_and_normalize_buttons(i, *value as f64);
-            });
-        frame.axis_values.iter().enumerate().for_each(|(i, value)| {
-            self.gamepad.map_and_normalize_axes(i, *value as f64);
-        });
+    pub(crate) fn update_gamepad_state(&self, frame: &InputFrame, timestamp: f64) {
+        if let Some(gamepad) = self.gamepad.get() {
+            gamepad.update_xr_state(frame, timestamp);
+        }
     }
 
-    pub(crate) fn gamepad(&self) -> &Gamepad {
-        &self.gamepad
+    pub(crate) fn connected(&self) -> bool {
+        self.connected.get()
     }
+
+    pub(crate) fn disconnect(&self) {
+        self.connected.set(false);
+        if let Some(gamepad) = self.gamepad.get() {
+            gamepad.update_connected(false);
+        }
+    }
+
 }
 
 impl XRInputSourceMethods<crate::DomTypeHolder> for XRInputSource {
@@ -167,7 +175,7 @@ impl XRInputSourceMethods<crate::DomTypeHolder> for XRInputSource {
 
     /// <https://www.w3.org/TR/webxr-gamepads-module-1/#xrinputsource-interface>
     fn GetGamepad(&self) -> Option<DomRoot<Gamepad>> {
-        Some(DomRoot::from_ref(&*self.gamepad))
+        self.gamepad.get()
     }
 
     /// <https://github.com/immersive-web/webxr-hands-input/blob/master/explainer.md>

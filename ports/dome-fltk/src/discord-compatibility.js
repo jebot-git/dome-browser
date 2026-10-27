@@ -25,33 +25,4 @@
             pending.delete(id);
         };
     }
-    // Discord's WASM loader assumes CacheStorage exists. Servo's Cache API
-    // currently has keys() only, so enabling ServiceWorker is insufficient.
-    // Supply a deliberately empty cache: assets still use normal fetch/CSP,
-    // and every lookup misses. This provides no offline or persistent cache.
-    if (typeof globalThis.caches === "undefined" && typeof globalThis.Cache === "undefined") {
-        class Cache {
-            async match() { return undefined; }
-            async matchAll() { return []; }
-            async put() {}
-            async delete() { return false; }
-            async keys() { return []; }
-        }
-        class CacheStorage {
-            #names = new Map();
-            async open(name) {
-                name = String(name);
-                if (!this.#names.has(name)) this.#names.set(name, new Cache());
-                return this.#names.get(name);
-            }
-            async has(name) { return this.#names.has(String(name)); }
-            async delete(name) { return this.#names.delete(String(name)); }
-            async keys() { return [...this.#names.keys()]; }
-            async match() { return undefined; }
-        }
-        globalThis.Cache = Cache;
-        globalThis.CacheStorage = CacheStorage;
-        globalThis.caches = new CacheStorage();
-    }
-
 })();

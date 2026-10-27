@@ -15,7 +15,6 @@ use crate::dom::customelementregistry::{
 };
 use crate::dom::document::Document;
 use crate::dom::element::{CustomElementCreationMode, Element, ElementCreator};
-use crate::dom::globalscope::GlobalScope;
 use crate::dom::html::form_controls::htmlinputelement::HTMLInputElement;
 use crate::dom::html::htmlanchorelement::HTMLAnchorElement;
 use crate::dom::html::htmlareaelement::HTMLAreaElement;
@@ -105,6 +104,7 @@ use crate::dom::svg::svgstopelement::SVGStopElement;
 use crate::dom::svg::svgsvgelement::SVGSVGElement;
 use crate::dom::svg::svgsymbolelement::SVGSymbolElement;
 use crate::dom::svg::svgtextelement::SVGTextElement;
+use crate::dom::svg::svgtitleelement::SVGTitleElement;
 use crate::dom::svg::svgtspanelement::SVGTSpanElement;
 use crate::dom::svg::svguseelement::SVGUseElement;
 use crate::event_loop::script_thread::ScriptThread;
@@ -116,6 +116,7 @@ fn create_svg_element(
     prefix: Option<Prefix>,
     document: &Document,
     proto: Option<HandleObject>,
+    creator: ElementCreator,
 ) -> DomRoot<Element> {
     assert_eq!(name.ns, ns!(svg));
 
@@ -145,6 +146,7 @@ fn create_svg_element(
         local_name!("svg") => make!(SVGSVGElement),
         local_name!("symbol") => make!(SVGSymbolElement),
         local_name!("text") => make!(SVGTextElement),
+        local_name!("title") => DomRoot::upcast(SVGTitleElement::new(cx, name.local, prefix, document, proto, creator)),
         local_name!("tspan") => make!(SVGTSpanElement),
         local_name!("use") => make!(SVGUseElement),
         _ => make!(SVGElement),
@@ -162,13 +164,13 @@ fn create_html_element(
     creator: ElementCreator,
     mode: CustomElementCreationMode,
     proto: Option<HandleObject>,
+    registry: Option<&CustomElementRegistry>,
 ) -> DomRoot<Element> {
     assert_eq!(name.ns, ns!(html));
 
     // Step 2. If registry is "default", then set registry
     // to the result of looking up a custom element registry given document.
     // TODO: We don't pass in any other value than "default" atm
-    let registry = CustomElementRegistry::lookup_a_custom_element_registry(document.upcast());
 
     // Step 3. Let definition be the result of looking up a custom element
     // definition given registry, namespace, localName, and is.
@@ -226,8 +228,7 @@ fn create_html_element(
                         },
                         Err(error) => {
                             // If any of these steps threw an exception exception:
-                            let global =
-                                GlobalScope::current().unwrap_or_else(|| document.global());
+                            let global = definition.constructor_global();
 
                             let mut realm = enter_auto_realm(cx, &*global);
                             let cx = &mut realm.current_realm();
@@ -276,6 +277,7 @@ fn create_html_element(
     // custom element state set to "uncustomized", custom element definition set to null,
     // is value set to is, and node document set to document.
     let result = create_native_html_element(cx, name.clone(), prefix, document, creator, proto);
+    result.set_custom_element_registry(registry, cx.no_gc());
     // Step 5.3. If namespace is the HTML namespace, and either localName is a valid custom element name or
     // is is non-null, then set result’s custom element state to "undefined".
     match is {
@@ -484,10 +486,31 @@ pub(crate) fn create_element(
     mode: CustomElementCreationMode,
     proto: Option<HandleObject>,
 ) -> DomRoot<Element> {
+    let registry = document.custom_element_registry();
+    create_element_with_registry(cx, name, is, document, creator, mode, proto, registry.as_deref())
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(crate) fn create_element_with_registry(
+    cx: &mut JSContext,
+    name: QualName,
+    is: Option<LocalName>,
+    document: &Document,
+    creator: ElementCreator,
+    mode: CustomElementCreationMode,
+    proto: Option<HandleObject>,
+    registry: Option<&CustomElementRegistry>,
+) -> DomRoot<Element> {
+    let registry = if document.is_svg_snapshot_document() { None } else { registry };
     let prefix = name.prefix.clone();
-    match name.ns {
-        ns!(html) => create_html_element(cx, name, prefix, is, document, creator, mode, proto),
-        ns!(svg) => create_svg_element(cx, name, prefix, document, proto),
-        _ => Element::new(cx, name.local, name.ns, prefix, document, proto),
+    if name.ns == ns!(html) {
+        return create_html_element(cx, name, prefix, is, document, creator, mode, proto, registry);
     }
+    let element = if name.ns == ns!(svg) {
+        create_svg_element(cx, name, prefix, document, proto, creator)
+    } else {
+        Element::new(cx, name.local, name.ns, prefix, document, proto)
+    };
+    element.set_custom_element_registry(registry, cx.no_gc());
+    element
 }

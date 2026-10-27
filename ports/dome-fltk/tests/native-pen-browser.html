@@ -1,0 +1,68 @@
+<!doctype html><meta charset=utf-8><title>Native browser pen</title>
+<style>body{margin:0;background:#203040;color:white}canvas{position:absolute;left:40px;top:80px;width:300px;height:200px;padding:10px;border:5px solid orange;touch-action:none}#other{left:430px}#edit{position:absolute;left:480px;top:310px;width:180px;height:24px;margin:0}#check{position:absolute;margin:0;left:440px;top:310px;width:24px;height:24px}</style>
+<canvas id=canvas width=600 height=400></canvas><canvas id=other width=600 height=400></canvas>
+<input id=check type=checkbox><input id=edit value="alpha beta gamma">
+<script>
+'use strict';
+const canvas=document.getElementById('canvas'),other=document.getElementById('other'),check=document.getElementById('check');
+const sessions=[],viewers=[],retired=[[],[]],ids=new WeakMap(),frameIds=new WeakMap();let nextId=0,nextFrame=0;
+const id=s=>{if(!ids.has(s))ids.set(s,++nextId);return ids.get(s);};
+const fid=f=>{if(!frameIds.has(f))frameIds.set(f,++nextFrame);return frameIds.get(f);};
+const test=window.test={ready:false,error:null,events:[],frames:0,latest:[],prevent:false,hoverCapture:false,hoverCaptureError:null,hoverCaptured:null};
+const record=(name,data={})=>test.events.push({name,...data});
+function overlay(){const div=document.createElement('div');div.id='other';div.style='position:absolute;left:40px;top:80px;width:330px;height:230px;background:#506070';canvas.after(div);test.overlay=div;}
+for(const name of ['pointerover','pointerenter','pointerleave','pointerout','pointerdown','pointermove','pointerup','pointercancel','click','auxclick','dblclick','contextmenu','gotpointercapture','lostpointercapture'])document.addEventListener(name,e=>{
+ if(!['canvas','other','check','edit'].includes(e.target.id)&&!(name==='lostpointercapture'&&e.target===document))return;
+ record(name,{target:e.target===document?'document':e.target.id,related:e.relatedTarget?.id??null,pointer:e instanceof PointerEvent,id:e.pointerId,kind:e.pointerType,primary:e.isPrimary,
+   button:e.button,buttons:e.buttons,pressure:e.pressure,tilt:[e.tiltX,e.tiltY],twist:e.twist,tangential:e.tangentialPressure,
+   altitude:e.altitudeAngle,azimuth:e.azimuthAngle,x:e.clientX,y:e.clientY,trusted:e.isTrusted,activation:navigator.userActivation.isActive,detail:e.detail,captured:e.target.hasPointerCapture?.(e.pointerId),bubbles:e.bubbles,cancelable:e.cancelable,composed:e.composed});
+ if(name==='pointerdown'){
+  test.lastPointer=e.pointerId;
+  if(['redirect','release-got','redirect-detach'].includes(test.captureMode))other.setPointerCapture(e.pointerId);
+  if(test.captureMode==='release-down')e.target.releasePointerCapture(e.pointerId);
+ }
+ if(name==='pointermove'&&e.buttons&&test.captureMode==='in-move'&&!test.captureRequested){test.captureRequested=true;other.setPointerCapture(e.pointerId);}
+ if(name==='gotpointercapture'&&test.captureMode==='release-got')e.target.releasePointerCapture(e.pointerId);
+ if(name==='lostpointercapture'&&e.target===document&&test.captureMode==='redirect-detach')canvas.setPointerCapture(e.pointerId);
+ if(name==='auxclick')e.preventDefault();
+ if(name==='click'&&test.overlayAfterClick&&e.target===canvas){test.overlayAfterClick=false;overlay();}
+ if(name==='pointerdown'&&test.prevent)e.preventDefault();
+ if(name==='contextmenu')e.preventDefault();
+ if(name==='pointermove'&&e.buttons===0&&test.hoverCapture){try{canvas.setPointerCapture(e.pointerId);test.hoverCaptured=canvas.hasPointerCapture(e.pointerId);}catch(ex){test.hoverCaptureError=ex.name;}}
+},true);
+for(const name of ['touchstart','touchmove','touchend','touchcancel','mousedown','mouseup','mousemove','mouseover','mouseout'])document.addEventListener(name,e=>{if([canvas,other].includes(e.target))record(name,{trusted:e.isTrusted,target:e.target.id,detail:e.detail});},true);
+document.addEventListener('wheel',e=>{record('wheel',{x:e.deltaX,y:e.deltaY,mode:e.deltaMode,trusted:e.isTrusted});e.preventDefault();},{passive:false});
+const describe=s=>({id:id(s),mode:s.targetRayMode,handedness:s.handedness,grip:s.gripSpace===null,gamepad:s.gamepad===null});
+function ray(f,s,v){const p=f.getPose(s.targetRaySpace,v);if(!p)return null;const m=p.transform.matrix;return [-m[8],-m[9],-m[10]];}
+test.command=op=>{
+ if(op.startsWith('capture:')){test.captureMode=op.slice(8);test.captureRequested=false;}
+ if(op==='detach-capture')other.remove();
+ if(op==='restore-capture')document.body.append(other);
+ if(op==='prevent')test.prevent=true;
+ if(op==='overlay-after-click')test.overlayAfterClick=true;
+ if(op==='remove-overlay'){test.overlay?.remove();test.overlay=null;}
+ if(op==='allow')test.prevent=false;
+ if(op==='hover-capture')test.hoverCapture=true;
+ if(op==='no-hover-capture')test.hoverCapture=false;
+ if(op==='synthetic'){canvas.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerType:'pen',pointerId:77,buttons:1}));canvas.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerType:'pen',pointerId:77}));}
+};
+test.snapshot=()=>({ready:test.ready,error:test.error,events:[...test.events],frames:test.frames,latest:test.latest,lengths:sessions.map(s=>s.inputSources.length),
+ viewport:[innerWidth,innerHeight],ratio:devicePixelRatio,hover:canvas.matches(':hover'),checked:check.checked,selection:[document.getElementById('edit').selectionStart,document.getElementById('edit').selectionEnd],
+ hoverCaptured:test.hoverCaptured,hoverCaptureError:test.hoverCaptureError,activation:navigator.userActivation.isActive});
+(async()=>{
+ const gl=canvas.getContext('webgl');
+ for(let index=0;index<2;index++){
+  const s=await navigator.xr.requestSession('inline'),v=await s.requestReferenceSpace('viewer');sessions.push(s);viewers.push(v);
+  s.updateRenderState({baseLayer:new XRWebGLLayer(s,gl)});
+  s.addEventListener('inputsourceschange',e=>{retired[index].push(...e.removed);record('sources',{index,added:[...e.added].map(describe),removed:[...e.removed].map(describe)});});
+  s.addEventListener('selectstart',e=>{if(!test.syntheticChecked){test.syntheticChecked=true;const event=new XRInputSourceEvent('select',{frame:e.frame,inputSource:e.inputSource});new EventTarget().dispatchEvent(event);record('synthetic-select',{trusted:event.isTrusted,activation:navigator.userActivation.isActive});}});
+  for(const name of ['selectstart','select','selectend'])s.addEventListener(name,e=>record(name,{index,source:describe(e.inputSource),ray:ray(e.frame,e.inputSource,v),frame:fid(e.frame),time:e.frame.predictedDisplayTime,trusted:e.isTrusted,activation:navigator.userActivation.isActive}));
+  const frame=(time,f)=>{test.latest[index]={length:s.inputSources.length,rays:[...s.inputSources].map(src=>({id:id(src),ray:ray(f,src,v)})),retired:retired[index].map(src=>ray(f,src,v))};test.frames++;s.requestAnimationFrame(frame);};s.requestAnimationFrame(frame);
+ }
+ test.ready=true;
+})().catch(e=>test.error=String(e)+' '+e.stack);
+setInterval(async()=>{try{
+ await fetch('/snapshot',{method:'POST',body:JSON.stringify(test.snapshot())});
+ for(const op of await (await fetch('/commands')).json()){test.command(op);await fetch('/ack',{method:'POST',body:JSON.stringify(op)});}
+}catch(e){console.error(e)}},80);
+</script>

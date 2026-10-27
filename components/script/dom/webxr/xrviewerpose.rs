@@ -5,7 +5,6 @@
 use dom_struct::dom_struct;
 use euclid::RigidTransform3D;
 use js::context::JSContext;
-use js::conversions::ToJSValConvertible;
 use js::jsapi::Heap;
 use js::jsval::{JSVal, UndefinedValue};
 use js::rust::MutableHandleValue;
@@ -182,7 +181,7 @@ impl XRViewerPose {
         );
 
         rooted!(&in(cx) let mut jsval = UndefinedValue());
-        views.to_jsval(cx, jsval.handle_mut());
+        script_bindings::utils::to_frozen_array(cx, &views, jsval.handle_mut());
         pose.views.set(jsval.get());
 
         pose

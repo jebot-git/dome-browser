@@ -39,7 +39,7 @@ pub enum ConstellationToEmbedderMsg {
     /// Whether or not to allow a pipeline to load a url.
     AllowNavigationRequest(WebViewId, PipelineId, ServoUrl),
     /// The history state has changed.
-    HistoryChanged(WebViewId, Vec<ServoUrl>, usize),
+    HistoryChanged(WebViewId, Vec<ServoUrl>, usize, Option<String>),
     /// A pipeline exited, whether cleanly or because its content process died.
     PipelineExited(PipelineId),
 }

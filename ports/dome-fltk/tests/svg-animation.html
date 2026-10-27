@@ -1,0 +1,20 @@
+<!doctype html><meta charset="utf-8"><title>Continuously changing SVG snapshots stay visible</title>
+<style>body{margin:0;background:black}svg{position:absolute;top:20px}#animated{left:20px;width:480px;height:490px}#control{left:520px;width:60px;height:60px}</style>
+<svg id="animated" viewBox="0 0 480 490"><defs><radialGradient id="moving" gradientUnits="userSpaceOnUse" cx="240" cy="245" r="200"><stop id="first" stop-color="red"/><stop id="last" offset="1" stop-color="red"/></radialGradient></defs><rect width="480" height="490" fill="url(#moving)"/></svg>
+<svg id="control" viewBox="0 0 60 60"><rect width="60" height="60" fill="#14b45a"/></svg>
+<div id="removed" style="position:absolute;left:650px;top:20px"><svg class="shared" style="position:static;width:60px;height:60px" viewBox="0 0 60 60"><rect width="60" height="60" fill="#14b45a"/></svg></div>
+<div style="position:absolute;left:730px;top:20px"><svg class="shared" style="position:static;width:60px;height:60px" viewBox="0 0 60 60"><rect width="60" height="60" fill="#14b45a"/></svg></div>
+<script>
+addEventListener('load',()=>setTimeout(()=>{
+ const gradient=document.getElementById('moving'),first=document.getElementById('first'),last=document.getElementById('last');
+ const started=performance.now();let frames=0,changed=false,reported=false;
+ setTimeout(()=>document.getElementById('removed').firstElementChild.remove(),1000);
+ function animate(now){
+  frames++;gradient.setAttribute('cx',240+80*Math.sin(now/200));gradient.setAttribute('cy',245+80*Math.cos(now/300));
+  if(!changed&&now-started>1000){changed=true;first.setAttribute('stop-color','#14b45a');last.setAttribute('stop-color','#14b45a')}
+  if(!reported&&now-started>2500){reported=true;fetch('/report',{method:'POST',body:JSON.stringify({checks:[{name:'animation advances and changes its paint',passed:frames>20&&changed}],frames,changed,animation_still_running:true})})}
+  requestAnimationFrame(animate);
+ }
+ requestAnimationFrame(animate);
+},500));
+</script>

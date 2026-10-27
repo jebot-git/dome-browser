@@ -121,8 +121,13 @@ pub enum ServiceWorkerState {
 /// parameters or headers
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LoadData {
+    /// Native protocol view state retained by this history entry.
+    #[serde(default)]
+    pub protocol_state: Option<String>,
     /// The origin where the load started.
     pub load_origin: LoadOrigin,
+    /// Captured before the source document can be discarded by navigation.
+    pub cookie_site: Option<ImmutableOrigin>,
     /// The URL.
     pub url: ServoUrl,
     /// <https://html.spec.whatwg.org/multipage/#concept-document-about-base-url>
@@ -182,6 +187,11 @@ pub struct LoadData {
 }
 
 impl LoadData {
+    pub fn with_cookie_site(mut self, site: Option<ImmutableOrigin>) -> Self {
+        self.cookie_site = site;
+        self
+    }
+
     /// Create a new `LoadData` object.
     #[expect(clippy::too_many_arguments)]
     pub fn new(
@@ -198,6 +208,8 @@ impl LoadData {
     ) -> Self {
         Self {
             load_origin,
+            protocol_state: None,
+            cookie_site: None,
             url,
             about_base_url,
             creator_pipeline_id,
@@ -574,6 +586,8 @@ pub struct WorkerGlobalScopeInit {
     pub pipeline_id: PipelineId,
     /// The origin
     pub origin: ImmutableOrigin,
+    /// Ancestor-aware inherited site for cookie policy.
+    pub cookie_site: Option<ImmutableOrigin>,
     /// True if secure context
     pub inherited_secure_context: Option<bool>,
     /// Unminify Javascript.
@@ -774,7 +788,7 @@ pub enum ScriptToConstellationMessage {
     /// corresponding to the given `PipelineId`.
     GetDocumentOriginDetails(
         PipelineId,
-        GenericSender<Option<(OriginSnapshot, Vec<ImmutableOrigin>)>>,
+        GenericSender<Option<(OriginSnapshot, Vec<ImmutableOrigin>, Option<ImmutableOrigin>)>>,
     ),
     /// All pending loads are complete, and the `load` event for this pipeline
     /// has been dispatched.
@@ -820,7 +834,7 @@ pub enum ScriptToConstellationMessage {
     /// Mark a new document as active
     ActivateDocument,
     /// Update the pipeline Url, which can change after redirections.
-    SetFinalUrl(ServoUrl),
+    SetFinalUrl(ServoUrl, Option<String>),
     /// A log entry, with the top-level browsing context id and thread name
     LogEntry(Option<ScriptEventLoopId>, Option<String>, LogEntry),
     /// Discard the document.
@@ -882,6 +896,9 @@ impl fmt::Debug for ScriptToConstellationMessage {
 /// <https://html.spec.whatwg.org/multipage/#target-snapshot-params>
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct TargetSnapshotParams {
+    /// The container document's policy, retained for child-initiated navigation.
+    #[serde(default)]
+    pub container_embedder_policy: net_traits::policy_container::EmbedderPolicyValue,
     /// <https://html.spec.whatwg.org/multipage/#target-snapshot-params-sandbox>
     pub sandboxing_flags: SandboxingFlagSet,
     /// <https://html.spec.whatwg.org/multipage/#target-snapshot-params-iframe-referrer-policy>
@@ -891,6 +908,7 @@ pub struct TargetSnapshotParams {
 impl Default for TargetSnapshotParams {
     fn default() -> Self {
         Self {
+            container_embedder_policy: Default::default(),
             sandboxing_flags: SandboxingFlagSet::empty(),
             iframe_element_referrer_policy: ReferrerPolicy::EmptyString,
         }

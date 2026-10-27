@@ -118,3 +118,74 @@ pub struct MockButton {
     pub x_value: f32,
     pub y_value: f32,
 }
+
+/// The primary action is always button zero. Missing reserved controls keep
+/// their internal placeholders, while trailing placeholders are omitted.
+fn mock_slots(buttons: &[MockButton]) -> Vec<(usize, Option<usize>, &MockButton)> {
+    let mut optional_button = 4;
+    let mut optional_axis = 4;
+    buttons
+        .iter()
+        .map(|button| {
+            let (index, axes) = match button.button_type {
+                MockButtonType::Grip => (1, None),
+                MockButtonType::Touchpad => (2, Some(0)),
+                MockButtonType::Thumbstick => (3, Some(2)),
+                MockButtonType::OptionalButton => {
+                    let i = optional_button;
+                    optional_button += 1;
+                    (i, None)
+                },
+                MockButtonType::OptionalThumbstick => {
+                    let i = optional_button;
+                    optional_button += 1;
+                    let a = optional_axis;
+                    optional_axis += 2;
+                    (i, Some(a))
+                },
+            };
+            (index, axes, button)
+        })
+        .collect()
+}
+
+pub fn mock_gamepad_layout(buttons: &[MockButton]) -> crate::GamepadLayout {
+    let slots = mock_slots(buttons);
+    crate::GamepadLayout {
+        buttons: slots.iter().map(|(i, _, _)| i + 1).max().unwrap_or(0),
+        axes: slots
+            .iter()
+            .filter_map(|(_, axis, _)| axis.map(|a| a + 2))
+            .max()
+            .unwrap_or(0),
+        xr_standard: true,
+    }
+}
+
+pub fn mock_gamepad_state(
+    buttons: &[MockButton],
+    primary: bool,
+) -> (Vec<f32>, Vec<bool>, Vec<bool>, Vec<f32>) {
+    let layout = mock_gamepad_layout(buttons);
+    let mut values = vec![0.; layout.buttons];
+    let mut pressed = vec![false; layout.buttons];
+    let mut touched = vec![false; layout.buttons];
+    let mut axes = vec![0.; layout.axes];
+    if !values.is_empty() {
+        values[0] = if primary { 1. } else { 0. };
+        pressed[0] = primary;
+        touched[0] = primary;
+    }
+    for (i, axis, button) in mock_slots(buttons) {
+        values[i] = button.pressed_value;
+        pressed[i] = button.pressed;
+        touched[i] = button.touched;
+        if let Some(axis) = axis {
+            if button.button_type != MockButtonType::Touchpad || button.touched {
+                axes[axis] = button.x_value;
+                axes[axis + 1] = button.y_value;
+            }
+        }
+    }
+    (values, pressed, touched, axes)
+}

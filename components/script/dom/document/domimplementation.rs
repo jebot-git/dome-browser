@@ -127,6 +127,7 @@ impl DOMImplementationMethods<crate::DomTypeHolder> for DOMImplementation {
         } else {
             let options =
                 StringOrElementCreationOptions::ElementCreationOptions(ElementCreationOptions {
+                customElementRegistry: None,
                     is: None,
                 });
             Some(

@@ -296,6 +296,11 @@ pub(crate) struct GlobalScope {
     #[ignore_malloc_size_of = "mozjs"]
     frozen_supported_performance_entry_types: CachedFrozenArray,
 
+    /// Source exceptions awaiting SpiderMonkey's asynchronous WASM stream-error
+    /// callback. Heap slots stay boxed so their barrier addresses remain stable.
+    #[ignore_malloc_size_of = "mozjs"]
+    wasm_stream_errors: DomRefCell<HashMapTracedValues<usize, Box<Heap<js::jsval::JSVal>>>>,
+
     /// The stack of active group labels for the Console APIs.
     console_group_stack: DomRefCell<Vec<TracedDOMString>>,
 
@@ -431,6 +436,7 @@ impl GlobalScope {
             #[cfg(feature = "webgpu")]
             gpu_devices: DomRefCell::new(HashMapTracedValues::new_fx()),
             frozen_supported_performance_entry_types: CachedFrozenArray::new(),
+            wasm_stream_errors: Default::default(),
             console_group_stack: DomRefCell::new(Vec::new()),
             console_count_map: Default::default(),
             inherited_secure_context,
@@ -966,15 +972,15 @@ impl GlobalScope {
         // Step 7, a few preliminary steps.
 
         // - Check the worker is not closing.
-        if let Some(worker) = self.downcast::<WorkerGlobalScope>() &&
-            worker.is_closing()
+        if let Some(worker) = self.downcast::<WorkerGlobalScope>()
+            && worker.is_closing()
         {
             return;
         }
 
         // - Check the associated document is fully-active.
-        if let Some(window) = self.downcast::<Window>() &&
-            !window.Document().is_fully_active()
+        if let Some(window) = self.downcast::<Window>()
+            && !window.Document().is_fully_active()
         {
             return;
         }
@@ -2293,6 +2299,26 @@ impl GlobalScope {
         receiver.recv().unwrap_or(u64::MAX)
     }
 
+    pub(crate) fn cookie_site(&self) -> Option<ImmutableOrigin> {
+        if let Some(window) = self.downcast::<Window>() { return window.Document().cookie_site(); }
+        if let Some(worker) = self.downcast::<WorkerGlobalScope>() {
+            return worker.cookie_site().filter(|site|
+                net_traits::pub_domains::is_same_site(site, self.origin().immutable()));
+        }
+        if let Some(worklet) = self.downcast::<WorkletGlobalScope>() { return worklet.cookie_site(); }
+        None
+    }
+
+    pub(crate) fn cookie_source(&self) -> net_traits::CookieSource {
+        if self.cookie_site().is_some() { net_traits::CookieSource::NonHTTP }
+        else { net_traits::CookieSource::NonHTTPCrossSite }
+    }
+
+    pub(crate) fn cookies_allowed(&self) -> bool {
+        !pref!(network_cookie_block_third_party) || self.cookie_site().is_some_and(|site|
+            net_traits::pub_domains::is_same_site(&site, self.origin().immutable()))
+    }
+
     /// Part of <https://fetch.spec.whatwg.org/#populate-request-from-client>
     pub(crate) fn request_client(&self, no_gc: Option<&NoGC>) -> RequestClient {
         if let Some(window) = self.downcast::<Window>() {
@@ -2302,6 +2328,8 @@ impl GlobalScope {
             preloaded_resources: Default::default(),
             policy_container: self.policy_container(),
             origin: RequestOrigin::Origin(self.origin().immutable().clone()),
+            cookie_site: self.cookie_site(),
+            cookie_client_is_null: false,
             is_nested_browsing_context: false,
             insecure_requests_policy: self.insecure_requests_policy(),
             has_trustworthy_ancestor_origin: false,
@@ -2467,15 +2495,6 @@ impl GlobalScope {
         error_info: ErrorInfo,
         value: HandleValue,
     ) {
-        self.send_to_embedder(EmbedderMsg::ShowConsoleApiMessage(
-            self.webview_id(),
-            ConsoleLogLevel::Error,
-            format!(
-                "Error at {}:{}:{} {}",
-                error_info.filename, error_info.lineno, error_info.column, error_info.message
-            ),
-        ));
-
         #[cfg(feature = "js_backtrace")]
         LAST_EXCEPTION_BACKTRACE.with(|backtrace| {
             if let Some((js_backtrace, rust_backtrace)) = backtrace.borrow_mut().take() {
@@ -2518,6 +2537,11 @@ impl GlobalScope {
             self.in_error_reporting_mode.set(false);
         }
 
+        log::debug!(
+            "Runtime error event handled={}: {}",
+            !not_handled,
+            error_info.message
+        );
         // Step 7. If notHandled is true, then:
         if not_handled {
             // Step 7.2. If global implements DedicatedWorkerGlobalScope,
@@ -2527,20 +2551,35 @@ impl GlobalScope {
             // https://html.spec.whatwg.org/multipage/#runtime-script-errors-2
             if let Some(dedicated) = self.downcast::<DedicatedWorkerGlobalScope>() {
                 dedicated.forward_error_to_worker_object(error_info);
-            } else if self.is::<Window>() {
-                // Step 7.3. Otherwise, the user agent may report exception to a developer console.
+            } else {
+                // Step 7.3. Only report after the error event remains uncanceled.
+                // Dedicated worker errors must first reach their owner, which can
+                // cancel them too; reporting here avoids premature/duplicate logs.
+                self.send_to_embedder(EmbedderMsg::ShowConsoleApiMessage(
+                    self.webview_id(),
+                    ConsoleLogLevel::Error,
+                    format!(
+                        "Error at {}:{}:{} {}",
+                        error_info.filename,
+                        error_info.lineno,
+                        error_info.column,
+                        error_info.message
+                    ),
+                ));
                 #[cfg(feature = "devtools")]
-                if let Some(ref chan) = self.devtools_chan {
-                    let _ = chan.send(ScriptToDevtoolsControlMsg::ReportPageError(
-                        self.pipeline_id(),
-                        PageError {
-                            error_message: error_info.message.clone(),
-                            source_name: error_info.filename.clone(),
-                            line_number: error_info.lineno,
-                            column_number: error_info.column,
-                            time_stamp: get_time_stamp(),
-                        },
-                    ));
+                if self.is::<Window>() {
+                    if let Some(ref chan) = self.devtools_chan {
+                        let _ = chan.send(ScriptToDevtoolsControlMsg::ReportPageError(
+                            self.pipeline_id(),
+                            PageError {
+                                error_message: error_info.message.clone(),
+                                source_name: error_info.filename.clone(),
+                                line_number: error_info.lineno,
+                                column_number: error_info.column,
+                                time_stamp: get_time_stamp(),
+                            },
+                        ));
+                    }
                 }
             }
         }
@@ -2892,8 +2931,8 @@ impl GlobalScope {
                 // Step 2. If the result of Is url potentially trustworthy?
                 // given environment's top-level creation URL is "Potentially Trustworthy", then return true.
                 // Step 3. Return false.
-                if top_level_creation_url.scheme() == "blob" &&
-                    Some(true) == self.inherited_secure_context
+                if top_level_creation_url.scheme() == "blob"
+                    && Some(true) == self.inherited_secure_context
                 {
                     return true;
                 }
@@ -3298,3 +3337,15 @@ impl GlobalScopeHelpers<crate::DomTypeHolder> for GlobalScope {
 }
 
 impl OwnerWindow<DomTypeHolder> for GlobalScope {}
+
+impl GlobalScope {
+    pub(crate) fn remember_wasm_stream_error(&self, id: usize, error: HandleValue) {
+        self.wasm_stream_errors
+            .borrow_mut()
+            .insert(id, Heap::boxed(error.get()));
+    }
+
+    pub(crate) fn take_wasm_stream_error(&self, id: usize) -> Option<Box<Heap<js::jsval::JSVal>>> {
+        self.wasm_stream_errors.borrow_mut().remove(&id)
+    }
+}

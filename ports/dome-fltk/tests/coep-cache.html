@@ -1,0 +1,122 @@
+<!doctype html><meta charset="utf-8"><title>COEP and cached opaque responses</title>
+<h1>COEP and Cache response delivery</h1>
+<script>
+const results=[];
+function assert(value,message){if(!value)throw new Error(message)}
+async function test(name,body){try{await Promise.race([body(),new Promise((_,reject)=>setTimeout(()=>reject(new Error('timeout')),5000))]);results.push({name,passed:true})}catch(error){results.push({name,passed:false,error:String(error)})}}
+async function rejects(promise,Type=TypeError){let caught=false;try{await promise}catch(error){caught=true;assert(error instanceof Type,'Wrong rejection '+error)}assert(caught,'Expected TypeError')}
+(async()=>{
+ const config=await(await fetch('/config.json')).json();
+ const cache=await caches.open('__coep_cache_fixture__');
+ if(location.pathname==='/coep-document'){
+  const syntax=new URLSearchParams(location.search);
+  if(syntax.has('credentialless')){
+   await test('credentialless accepts cached responses fetched without credentials',async()=>assert((await cache.match('/saved-opaque')).type==='opaque','Missing public opaque response'));
+   await test('credentialless rejects cached credentialed responses without CORP',()=>rejects(cache.match('/saved-private')));
+   await test('credentialless accepts cached credentialed responses with CORP',async()=>assert((await cache.match('/saved-private-corp')).type==='opaque','Explicit CORP lost'));
+   await test('credentialless strips cookies from cross-origin no-cors fetch',async()=>{
+    const tag='cross-'+Date.now()+'-'+Math.random();const response=await fetch(config.crossOrigin+'/credential-test?tag='+tag,{mode:'no-cors',credentials:'include'});
+    assert(response.type==='opaque','Not opaque');const audit=await(await fetch('/request-headers?tag='+tag)).json();assert(audit.length===1&&!audit[0].cookie.includes('__dome_coep=present'),'Cross-origin credentials leaked '+JSON.stringify(audit));
+    await cache.put('/credentialless-new',response);assert((await cache.match('/credentialless-new')).type==='opaque','Credential flag not retained');
+   });
+   await test('credentialless preserves cookies on same-origin no-cors fetch',async()=>{
+    const tag='same-'+Date.now()+'-'+Math.random();await fetch('/credential-test?tag='+tag,{mode:'no-cors',credentials:'include'});
+    const audit=await(await fetch('/request-headers?tag='+tag)).json();assert(audit.length===1&&audit[0].cookie.includes('__dome_coep=present'),'Same-origin credentials stripped '+JSON.stringify(audit));
+   });
+   await test('credentialless does not reuse an HTTP response fetched with credentials',async()=>{
+    const tag=config.credentialCacheTag;await fetch(config.crossOrigin+'/credential-cache?tag='+tag,{mode:'no-cors',credentials:'include'});
+    const audit=await(await fetch('/request-headers?tag='+tag)).json();assert(audit.length===2&&audit[0].cookie.includes('__dome_coep=present')&&!audit[1].cookie.includes('__dome_coep=present'),'Wrong cached credential boundary '+JSON.stringify(audit));
+   });
+   await test('credentialless keeps public HTTP cache reuse or refetch anonymous',async()=>{
+    const tag=config.credentialCacheTag+'-public';await fetch(config.crossOrigin+'/credential-cache?tag='+tag,{mode:'no-cors',credentials:'include'});
+    const audit=await(await fetch('/request-headers?tag='+tag)).json();assert(audit.length>=1&&audit.every(record=>!record.cookie.includes('__dome_coep=present')),'Public response used credentials '+JSON.stringify(audit));
+   });
+   parent.postMessage({coepChecks:results},location.origin);return;
+  }
+  if(syntax.has('syntax')){
+   await test('COEP structured item: '+syntax.get('policy')+(syntax.has('report_only')?' (report-only)':''),async()=>{
+    if(syntax.get('blocked')==='1')await rejects(cache.match('/saved-opaque'));
+    else assert((await cache.match('/saved-opaque')).type==='opaque','Expected an allowed opaque response');
+   });
+   parent.postMessage({coepChecks:results},location.origin);return;
+  }
+
+  await test('COEP rejects a new no-cors network response without CORP',()=>rejects(fetch(config.crossOrigin+'/opaque',{mode:'no-cors'})));
+  await test('COEP accepts explicit cross-origin CORP on the network',async()=>assert((await fetch(config.crossOrigin+'/opaque-corp',{mode:'no-cors'})).type==='opaque','Wrong response type'));
+  await test('COEP rechecks an opaque Cache.match result stored under unsafe-none',()=>rejects(cache.match('/saved-opaque')));
+  await test('COEP rechecks Cache.matchAll results',()=>rejects(cache.matchAll('/saved-opaque')));
+  await test('COEP rechecks CacheStorage.match results',()=>rejects(caches.match('/saved-opaque',{cacheName:'__coep_cache_fixture__'})));
+  await test('query options do not bypass opaque response policy',()=>rejects(cache.match('/saved-opaque',{ignoreVary:true,ignoreSearch:true,ignoreMethod:true})));
+  await test('keys remain accessible under a stricter response policy',async()=>assert((await cache.keys('/saved-opaque')).length===1,'Request key lost'));
+  await test('cached explicit cross-origin CORP response remains opaque and allowed',async()=>{
+   const response=await cache.match('/saved-corp');assert(response.type==='opaque'&&response.status===0&&response.body===null&&[...response.headers].length===0,'Internal data exposed');
+  });
+  await test('same-origin cached response remains available under COEP',async()=>assert(await(await cache.match('/saved-same-origin')).text()==='same-origin','Wrong same-origin data'));
+  await test('blob worker inherits COEP for cached response checks',async()=>{
+   const code=`onmessage=async()=>{try{const cache=await caches.open('__coep_cache_fixture__');try{await cache.match(${JSON.stringify(new URL('/saved-opaque',location.href).href)});postMessage({error:'Opaque response was allowed'})}catch(error){postMessage({ok:error instanceof TypeError})}}catch(error){postMessage({error:String(error)})}}`;
+   const objectURL=URL.createObjectURL(new Blob([code],{type:'text/javascript'}));const worker=new Worker(objectURL);
+   try{const result=await new Promise((resolve,reject)=>{worker.onmessage=e=>resolve(e.data);worker.onerror=reject;worker.postMessage('start')});assert(result.ok,JSON.stringify(result))}finally{worker.terminate();URL.revokeObjectURL(objectURL)}
+  });
+  await test('initial about:blank inherits COEP for cache reads',async()=>{
+   const frame=document.createElement('iframe');document.body.append(frame);
+   try{const child=frame.contentWindow;const other=await child.caches.open('__coep_cache_fixture__');await rejects(other.match(new URL('/saved-opaque',location.href).href),child.TypeError)}finally{frame.remove()}
+  });
+  await test('srcdoc inherits COEP for cache reads',async()=>{
+   const frame=document.createElement('iframe');const loaded=new Promise(resolve=>frame.onload=resolve);frame.srcdoc='<p>local child</p>';document.body.append(frame);
+   try{await loaded;const child=frame.contentWindow;const other=await child.caches.open('__coep_cache_fixture__');await rejects(other.match(new URL('/saved-opaque',location.href).href),child.TypeError)}finally{frame.remove()}
+  });
+  for(const [policy,allowed]of[['',false],['require-corp',true],['credentialless',true]])await test('dedicated worker policy inheritance: '+(policy||'missing header'),async()=>{
+   const worker=new Worker('/policy-worker.js'+(policy?'?policy='+policy:''));
+   try{const result=await new Promise(resolve=>{worker.onmessage=()=>resolve(true);worker.onerror=event=>{event.preventDefault();resolve(false)}});assert(result===allowed,'Worker policy mismatch allowed execution')}finally{worker.terminate()}
+  });
+  for(const [policy,allowed]of[['',false],['require-corp',true],['credentialless',true]])await test('child document policy inheritance: '+(policy||'missing header'),async()=>{
+   const tag='frame-'+Date.now()+'-'+Math.random();const frame=document.createElement('iframe');let ran=false;
+   function listener(event){if(event.source===frame.contentWindow&&event.data.policyChild===tag)ran=true}addEventListener('message',listener);
+   const loaded=new Promise(resolve=>frame.onload=resolve);frame.src='/policy-child?tag='+tag+(policy?'&policy='+policy:'');document.body.append(frame);
+   try{await loaded;await new Promise(resolve=>setTimeout(resolve,100));assert(ran===allowed,'Child document policy mismatch allowed execution')}
+   finally{removeEventListener('message',listener);frame.remove()}
+  });
+  await test('cross-origin child self-navigation retains the container policy',async()=>{
+   const tag='selfnav-'+Date.now()+'-'+Math.random();const frame=document.createElement('iframe');let ran=false;
+   function listener(event){if(event.source===frame.contentWindow&&event.data.policyChild===tag)ran=true}addEventListener('message',listener);
+   const completed=new Promise(resolve=>{frame.onload=async()=>{const records=await(await fetch('/policy-log?tag='+tag)).json();if(records.some(record=>record.path.includes('final=1')))resolve()}});
+   frame.src=config.crossOrigin+'/policy-child?tag='+tag+'&policy=require-corp&self_nav=1';document.body.append(frame);
+   try{await completed;await new Promise(resolve=>setTimeout(resolve,100));assert(!ran,'Self-navigation bypassed COEP')}
+   finally{removeEventListener('message',listener);frame.remove()}
+  });
+  parent.postMessage({coepChecks:results},location.origin);return;
+ }
+ await test('unsafe-none can store an opaque response without CORP',async()=>{
+  const response=await fetch(config.crossOrigin+'/opaque',{mode:'no-cors'});await cache.put('/saved-opaque',response);assert((await cache.match('/saved-opaque')).type==='opaque','Missing opaque response');
+ });
+ await fetch('/cookie-set');
+ await cache.put('/saved-private',await fetch(config.crossOrigin+'/opaque',{mode:'no-cors',credentials:'include'}));
+ await cache.put('/saved-private-corp',await fetch(config.crossOrigin+'/opaque-corp',{mode:'no-cors',credentials:'include'}));
+ await fetch(config.crossOrigin+'/credential-cache?tag='+config.credentialCacheTag,{mode:'no-cors',credentials:'include'});
+ await fetch(config.crossOrigin+'/credential-cache?tag='+config.credentialCacheTag+'-public',{mode:'no-cors',credentials:'omit'});
+ await new Promise(resolve=>setTimeout(resolve,100));
+ await cache.put('/saved-corp',await fetch(config.crossOrigin+'/opaque-corp',{mode:'no-cors'}));
+ await cache.put('/saved-same-origin',new Response('same-origin'));
+ async function frameChecks(query=''){
+  const frame=document.createElement('iframe');
+  const completed=new Promise(resolve=>{function listener(event){if(event.source===frame.contentWindow&&event.origin===location.origin&&event.data.coepChecks){removeEventListener('message',listener);resolve(event.data.coepChecks)}}addEventListener('message',listener)});
+  frame.src='/coep-document'+query;document.body.append(frame);
+  try{results.push(...await completed)}finally{frame.remove()}
+ }
+ await frameChecks();
+ for(const [policy,blocked]of[
+  ['require-corp;report-to="collector"',true],
+  ['require-corp;flag',true],
+  ['Require-Corp',false],
+  ['"require-corp"',false],
+  ['require-corp, require-corp',false],
+  ['unknown-value',false],
+  ['require-corp;broken=@',false]
+ ])await frameChecks('?syntax=1&policy='+encodeURIComponent(policy)+'&blocked='+(blocked?'1':'0'));
+ await frameChecks('?syntax=1&policy=require-corp&blocked=0&report_only=1');
+ await frameChecks('?policy=credentialless&credentialless=1');
+ await test('stricter reader does not delete the original cache entry',async()=>assert((await cache.match('/saved-opaque')).type==='opaque','Entry deleted'));
+ await caches.delete('__coep_cache_fixture__');
+ await fetch('/report',{method:'POST',body:JSON.stringify({phase:config.phase,checks:results})});
+})().catch(async error=>{results.push({name:'fixture completion',passed:false,error:String(error)});await fetch('/report',{method:'POST',body:JSON.stringify({checks:results})})});
+</script>

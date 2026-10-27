@@ -9,8 +9,8 @@ use std::rc::Rc;
 use crossbeam_channel::Sender;
 use embedder_traits::{
     AnimationState, InputEvent, InputEventAndId, InputEventId, InputEventResult,
-    PaintHitTestResult, Scroll, TouchEvent, TouchEventType, ViewportDetails, WebViewPoint,
-    WheelEvent,
+    PaintHitTestResult, Scroll, TouchEvent, TouchEventType, TouchId, ViewportDetails, WebViewPoint,
+    WheelEvent, PenEvent, PenEventType,
 };
 use euclid::{Scale, Size2D, Vector2D};
 use log::{debug, warn};
@@ -103,6 +103,11 @@ pub(crate) struct WebViewRenderer {
     pending_wheel_events: FxHashMap<InputEventId, WheelEvent>,
     /// Touch input state machine
     touch_handler: TouchHandler,
+    /// Last dispatchable document for each contact, so a release outside the
+    /// viewport can cancel the contact instead of silently leaving it active.
+    touch_hit_tests: FxHashMap<TouchId, PaintHitTestResult>,
+    pen_hit_tests: FxHashMap<i32, (PaintHitTestResult,u16)>,
+    cancelled_pens: std::collections::HashSet<i32>,
     /// "Desktop-style" zoom that resizes the viewport to fit the window.
     pub page_zoom: Scale<f32, CSSPixel, DeviceIndependentPixel>,
     /// "Mobile-style" zoom that does not reflow the page. When there is no [`PinchZoom`] a
@@ -153,6 +158,9 @@ impl WebViewRenderer {
             rect,
             pipelines: Default::default(),
             touch_handler: TouchHandler::new(webview_id),
+            touch_hit_tests: Default::default(),
+            pen_hit_tests: Default::default(),
+            cancelled_pens: Default::default(),
             pending_scroll_zoom_events: Default::default(),
             pending_wheel_events: Default::default(),
             page_zoom: DEFAULT_PAGE_ZOOM,
@@ -243,6 +251,13 @@ impl WebViewRenderer {
         pipeline.get_mut().lcp_candidates.clear();
 
         pipeline.remove_entry();
+        self.touch_hit_tests.retain(|_, hit| hit.pipeline_id != pipeline_id);
+        let cancelled=&mut self.cancelled_pens;
+        self.pen_hit_tests.retain(|id,(hit,buttons)| {
+            if hit.pipeline_id!=pipeline_id {return true;}
+            if *buttons!=0 {cancelled.insert(*id);}
+            false
+        });
         true
     }
 
@@ -414,13 +429,6 @@ impl WebViewRenderer {
             .event
             .point()
             .map(|point| point.as_device_point(self.device_pixels_per_page_pixel()));
-        let is_touch_down = matches!(
-            &event.event,
-            InputEvent::Touch(TouchEvent {
-                event_type: TouchEventType::Down,
-                ..
-            })
-        );
         let hit_test_result = match event_point {
             Some(point) => {
                 let hit_test_result = match event.event {
@@ -437,6 +445,21 @@ impl WebViewRenderer {
             None => None,
         };
 
+        self.dispatch_input_event_with_hit_test(event, hit_test_result)
+    }
+
+    fn dispatch_input_event_with_hit_test(
+        &mut self,
+        event: InputEventAndId,
+        hit_test_result: Option<PaintHitTestResult>,
+    ) -> bool {
+        let is_touch_down = matches!(
+            &event.event,
+            InputEvent::Touch(TouchEvent {
+                event_type: TouchEventType::Down,
+                ..
+            })
+        );
         // For touch-down, capture the hit node's `touch-action` and scrollable
         // axes from the scroll tree so the pan axis-lock policy can be decided
         // at pan-start.
@@ -477,6 +500,9 @@ impl WebViewRenderer {
         repaint_reason: &Cell<RepaintReason>,
         event_and_id: InputEventAndId,
     ) -> bool {
+        if let InputEvent::Pen(pen_event) = event_and_id.event {
+            return self.on_pen_event(render_api,pen_event,event_and_id.id);
+        }
         if let InputEvent::Touch(touch_event) = event_and_id.event {
             return self.on_touch_event(render_api, repaint_reason, touch_event, event_and_id.id);
         }
@@ -489,30 +515,95 @@ impl WebViewRenderer {
         self.dispatch_input_event_with_hit_testing(render_api, event_and_id)
     }
 
+    fn on_pen_event(&mut self, render_api:&RenderApi, mut event:PenEvent, id:InputEventId) -> bool {
+        event=event.normalized();
+        let old=self.pen_hit_tests.get(&event.id).cloned();
+        if event.event_type!=PenEventType::Sample {
+            self.cancelled_pens.remove(&event.id);
+            self.pen_hit_tests.remove(&event.id);
+            return old.is_some_and(|(hit,_)| self.dispatch_input_event_with_hit_test(
+                InputEventAndId {event:InputEvent::Pen(event),id},Some(hit)));
+        }
+        if self.cancelled_pens.contains(&event.id) {
+            if event.buttons==0 {self.cancelled_pens.remove(&event.id);}
+            return false;
+        }
+        let point=event.point.as_device_point(self.device_pixels_per_page_pixel());
+        let hit=if point.x.is_finite() && point.y.is_finite() {
+            let owner=old.as_ref().filter(|(_,buttons)|*buttons!=0).map(|(h,_)|h.pipeline_id);
+            self.hit_test(render_api,point).into_iter().find(|h|owner.is_none_or(|owner|h.pipeline_id==owner))
+        } else {None};
+        let Some(hit)=hit else {
+            self.pen_hit_tests.remove(&event.id);
+            if event.buttons!=0 {self.cancelled_pens.insert(event.id);}
+            if let Some((hit,buttons))=old {
+                event.event_type=if buttons!=0 {PenEventType::Cancel}else{PenEventType::Leave};
+                event=event.normalized();
+                return self.dispatch_input_event_with_hit_test(InputEventAndId {event:InputEvent::Pen(event),id},Some(hit));
+            }
+            return false;
+        };
+        if let Some((previous,_))=old && previous.pipeline_id!=hit.pipeline_id {
+            let mut leave=event;leave.event_type=PenEventType::Leave;
+            self.dispatch_input_event_with_hit_test(InputEvent::Pen(leave.normalized()).into(),Some(previous));
+        }
+        self.pen_hit_tests.insert(event.id,(hit.clone(),event.buttons));
+        self.dispatch_input_event_with_hit_test(InputEventAndId {event:InputEvent::Pen(event),id},Some(hit))
+    }
+
     fn send_touch_event(
         &mut self,
         render_api: &RenderApi,
-        event: TouchEvent,
+        mut event: TouchEvent,
         id: InputEventId,
     ) -> bool {
+        let point = event.point.as_device_point(self.device_pixels_per_page_pixel());
+        let owner = self.touch_hit_tests.get(&event.touch_id).map(|hit| hit.pipeline_id);
+        if !matches!(event.event_type, TouchEventType::Down) && owner.is_none() {
+            // A delayed event after cancellation must not start another contact.
+            return false;
+        }
+        // Touch events remain associated with their starting document. Query
+        // fresh viewport coordinates there, including when another frame is
+        // the topmost hit. The scroll-target cache is not a current input hit.
+        let hit = self.hit_test(render_api, point).into_iter().find(|hit| {
+            matches!(event.event_type, TouchEventType::Down) || Some(hit.pipeline_id) == owner
+        });
+        let hit = match hit {
+            Some(hit) => {
+                match event.event_type {
+                    TouchEventType::Down | TouchEventType::Move => {
+                        self.touch_hit_tests.insert(event.touch_id, hit.clone());
+                    },
+                    TouchEventType::Up | TouchEventType::Cancel => {
+                        self.touch_hit_tests.remove(&event.touch_id);
+                    },
+                }
+                hit
+            },
+            None => {
+                let Some(previous) = self.touch_hit_tests.remove(&event.touch_id) else {
+                    return false;
+                };
+                // The contact left all hit-testable content. Its old document
+                // still needs pointercancel/touchcancel and capture cleanup.
+                // Down/Move have not yet retired the paint-side contact.
+                if matches!(event.event_type, TouchEventType::Down | TouchEventType::Move) {
+                    self.touch_handler.on_touch_cancel(event.touch_id, point);
+                }
+                event.event_type = TouchEventType::Cancel;
+                event.can_synthesize_mouse_events = false;
+                previous
+            },
+        };
         let cancelable = event.is_cancelable();
         let event_type = event.event_type;
-
-        let input_event_and_id = InputEventAndId {
-            event: InputEvent::Touch(event),
-            id,
-        };
-
-        let result = self.dispatch_input_event_with_hit_testing(render_api, input_event_and_id);
-
-        // We only post-process events that are actually cancelable. Uncancelable ones
-        // are processed immediately and can be ignored once they have been sent to the
-        // Constellation.
+        let result = self.dispatch_input_event_with_hit_test(InputEventAndId {
+            event: InputEvent::Touch(event), id,
+        }, Some(hit));
         if cancelable && result {
-            self.touch_handler
-                .add_pending_touch_input_event(id, event.touch_id, event_type);
+            self.touch_handler.add_pending_touch_input_event(id, event.touch_id, event_type);
         }
-
         result
     }
 

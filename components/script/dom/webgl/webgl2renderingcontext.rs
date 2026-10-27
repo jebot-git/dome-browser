@@ -1411,6 +1411,9 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             _ => return self.base.BindBuffer(cx, target, buffer),
         };
         self.base.bind_buffer_maybe(slot, target, buffer);
+        if target == constants::ELEMENT_ARRAY_BUFFER {
+            self.current_vao(cx).sync_element_array_buffer_cleanup();
+        }
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.6>

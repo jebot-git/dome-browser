@@ -53,6 +53,7 @@ fn main() {
         &[
             "--cflags",
             "gio-2.0",
+            "gio-unix-2.0",
             "wayland-client",
             "x11",
             "fontconfig",

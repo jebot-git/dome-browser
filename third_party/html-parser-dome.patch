@@ -1,0 +1,120 @@
+--- a/html5ever/src/tree_builder/mod.rs
++++ b/html5ever/src/tree_builder/mod.rs
+@@ -12,7 +12,7 @@
+ pub use crate::interface::{create_element, ElemName, ElementFlags, Tracer, TreeSink};
+ pub use crate::interface::{AppendNode, AppendText, Attribute, NodeOrText};
+ pub use crate::interface::{LimitedQuirks, NoQuirks, Quirks, QuirksMode};
+-pub use markup5ever::interface::tree_builder::create_element_with_flags;
++pub use markup5ever::interface::tree_builder::{create_element_with_flags, create_element_with_context};
+ 
+ use self::types::*;
+ 
+@@ -833,11 +833,12 @@
+                 };
+                 // FIXME: Is there a way to avoid cloning the attributes twice here (once on their
+                 // own, once as part of t.clone() above)?
+-                let new_element = create_element_with_flags(
++                let new_element = create_element_with_context(
+                     &self.sink,
+                     QualName::new(None, ns!(html), tag.name.clone()),
+                     tag.attrs.clone(),
+                     tag.had_duplicate_attributes,
++                    Some((&common_ancestor, None, false)),
+                 );
+                 self.open_elems.borrow_mut()[node_index] = new_element.clone();
+                 self.active_formatting.borrow_mut()[node_formatting_index] =
+@@ -866,11 +867,12 @@
+             // 15.
+             // FIXME: Is there a way to avoid cloning the attributes twice here (once on their own,
+             // once as part of t.clone() above)?
+-            let new_element = create_element_with_flags(
++            let new_element = create_element_with_context(
+                 &self.sink,
+                 QualName::new(None, ns!(html), fmt_elem_tag.name.clone()),
+                 fmt_elem_tag.attrs.clone(),
+                 fmt_elem_tag.had_duplicate_attributes,
++                Some((&furthest_block, None, false)),
+             );
+             let new_entry = FormatEntry::Element(new_element.clone(), fmt_elem_tag);
+ 
+@@ -1393,7 +1395,10 @@
+ 
+         // By checking whether the form is associatable first, then creating the element
+         // we can avoid cloning the attributes.
+-        let elem = create_element_with_flags(&self.sink, qname, attrs, had_duplicate_attributes);
++        let elem = create_element_with_context(
++            &self.sink, qname, attrs, had_duplicate_attributes,
++            Some((&node1, node2.as_ref(), matches!(insertion_point, InsertionPoint::BeforeSibling(_)))),
++        );
+ 
+         if form_is_associatable {
+             let form = self.form_elem.borrow().as_ref().unwrap().clone();
+@@ -1444,8 +1449,16 @@
+     ) -> Handle {
+         let adjusted_insertion_location = self.appropriate_place_for_insertion(None);
+         let qname = QualName::new(None, ns, tag.name.clone());
+-        let elem =
+-            create_element_with_flags(&self.sink, qname, tag.attrs, tag.had_duplicate_attributes);
++        let (parent, fallback, before) = match &adjusted_insertion_location {
++            InsertionPoint::LastChild(parent) => (parent, None, false),
++            InsertionPoint::BeforeSibling(sibling) => (sibling, None, true),
++            InsertionPoint::TableFosterParenting { element, prev_element } =>
++                (element, Some(prev_element), false),
++        };
++        let elem = create_element_with_context(
++            &self.sink, qname, tag.attrs, tag.had_duplicate_attributes,
++            Some((parent, fallback, before)),
++        );
+ 
+         if !only_add_to_element_stack {
+             self.insert_at(adjusted_insertion_location, AppendNode(elem.clone()));
+--- a/markup5ever/interface/tree_builder.rs
++++ b/markup5ever/interface/tree_builder.rs
+@@ -96,6 +96,19 @@
+ where
+     Sink: TreeSink,
+ {
++    create_element_with_context(sink, name, attrs, had_duplicate_attributes, None)
++}
++
++/// Create an element with its logical insertion location available before any
++/// DOM constructor runs. The tuple contains parent-or-sibling, foster fallback,
++/// and whether the first handle denotes a sibling rather than a parent.
++pub fn create_element_with_context<Sink: TreeSink>(
++    sink: &Sink,
++    name: QualName,
++    attrs: Vec<Attribute>,
++    had_duplicate_attributes: bool,
++    context: Option<(&Sink::Handle, Option<&Sink::Handle>, bool)>,
++) -> Sink::Handle {
+     let mut flags = ElementFlags::default();
+     match name.expanded() {
+         expanded_name!(html "template") => flags.template = true,
+@@ -109,7 +122,7 @@
+         _ => {},
+     }
+     flags.had_duplicate_attributes = had_duplicate_attributes;
+-    sink.create_element(name, attrs, flags)
++    sink.create_element_with_context(name, attrs, flags, context)
+ }
+ 
+ /// An abstraction over any type that can represent an element's local name and namespace.
+@@ -147,6 +160,18 @@
+     where
+         Self: 'a;
+ 
++    /// Context-aware counterpart to `create_element`; sinks without contextual
++    /// construction retain their existing behavior.
++    fn create_element_with_context(
++        &self,
++        name: QualName,
++        attrs: Vec<Attribute>,
++        flags: ElementFlags,
++        _context: Option<(&Self::Handle, Option<&Self::Handle>, bool)>,
++    ) -> Self::Handle {
++        self.create_element(name, attrs, flags)
++    }
++
+     /// Consume this sink and return the overall result of parsing.
+     ///
+     /// TODO:This should default to `fn finish(self) -> Self::Output { self }`,

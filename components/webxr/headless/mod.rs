@@ -65,6 +65,7 @@ struct PerSessionData {
     quitter: Option<Quitter>,
     events: EventBuffer,
     needs_vp_update: bool,
+    frame_events: Vec<FrameUpdateEvent>,
 }
 
 struct HeadlessDeviceData {
@@ -72,7 +73,6 @@ struct HeadlessDeviceData {
     viewer_origin: Option<RigidTransform3D<f32, Viewer, Native>>,
     supported_features: Vec<String>,
     views: MockViewsInit,
-    needs_floor_update: bool,
     inputs: Vec<InputInfo>,
     sessions: Vec<PerSessionData>,
     disconnected: bool,
@@ -99,7 +99,6 @@ impl MockDiscoveryAPI<SurfmanGL> for HeadlessMockDiscovery {
             viewer_origin,
             supported_features: init.supported_features,
             views,
-            needs_floor_update: false,
             inputs: vec![],
             sessions: vec![],
             disconnected: false,
@@ -151,6 +150,7 @@ impl DiscoveryAPI<SurfmanGL> for HeadlessDiscovery {
             quitter: Default::default(),
             events: Default::default(),
             needs_vp_update: false,
+            frame_events: vec![],
         };
         d.sessions.push(per_session);
 
@@ -259,8 +259,9 @@ impl DeviceAPI for HeadlessDevice {
             let vp = data.viewports(mode);
             frame.events.push(FrameUpdateEvent::UpdateViewports(vp));
         }
-        let events = self.hit_tests.commit_tests();
-        frame.events = events;
+        let per_session = data.sessions.iter_mut().find(|s| s.id == self.id).unwrap();
+        frame.events.append(&mut per_session.frame_events);
+        frame.events.extend(self.hit_tests.commit_tests());
 
         if let Some(ref world) = data.world {
             for source in self.hit_tests.tests() {
@@ -280,12 +281,6 @@ impl DeviceAPI for HeadlessDevice {
             }
         }
 
-        if data.needs_floor_update {
-            frame
-                .events
-                .push(FrameUpdateEvent::UpdateFloorTransform(data.floor_transform));
-            data.needs_floor_update = false;
-        }
         Some(frame)
     }
 
@@ -378,17 +373,22 @@ impl HeadlessDeviceData {
             .inputs
             .iter()
             .filter(|i| i.active)
-            .map(|i| InputFrame {
+            .map(|i| {
+                let (button_values, button_pressed, button_touched, axis_values) =
+                    webxr_api::mock_gamepad_state(&i.buttons, i.clicking);
+                InputFrame {
                 id: i.source.id,
                 target_ray_origin: i.pointer,
                 grip_origin: i.grip,
-                pressed: false,
-                squeezed: false,
+                pressed: i.clicking,
+                squeezed: button_pressed.get(1).copied().unwrap_or(false),
                 hand: None,
-                button_values: vec![],
-                axis_values: vec![],
-                input_changed: false,
-            })
+                button_values,
+                button_pressed,
+                button_touched,
+                axis_values,
+                input_changed: true,
+            }})
             .collect();
         Frame {
             pose,
@@ -397,6 +397,7 @@ impl HeadlessDeviceData {
             sub_images,
             hit_test_results: vec![],
             predicted_display_time: 0.0,
+            predicted_display_instant: None,
         }
     }
 
@@ -429,8 +430,14 @@ impl HeadlessDeviceData {
                 self.viewer_origin = viewer_origin;
             },
             MockDeviceMsg::SetFloorOrigin(floor_origin) => {
+                let delta = self.floor_transform.zip(floor_origin).map(|(old, new)| new.then(&old).cast_unit());
                 self.floor_transform = floor_origin.map(|f| f.inverse());
-                self.needs_floor_update = true;
+                let floor = self.floor_transform;
+                with_all_sessions!(self, |s| {
+                    s.frame_events.push(FrameUpdateEvent::UpdateFloorTransform(floor));
+                    s.frame_events.push(FrameUpdateEvent::ReferenceSpaceChanged(BaseSpace::Floor, delta));
+                    s.frame_events.push(FrameUpdateEvent::ReferenceSpaceChanged(BaseSpace::BoundedFloor, delta));
+                });
             },
             MockDeviceMsg::SetViews(views) => {
                 self.views = views;
@@ -522,6 +529,7 @@ impl HeadlessDeviceData {
                         },
                         MockInputMsg::SetSupportedButtons(buttons) => {
                             input.buttons = buttons;
+                            input.source.gamepad = Some(webxr_api::mock_gamepad_layout(&input.buttons));
                             with_all_sessions!(self, |s| s.events.callback(Event::UpdateInput(
                                 input.source.id,
                                 input.source.clone()
@@ -547,12 +555,16 @@ impl HeadlessDeviceData {
                 return false;
             },
             MockDeviceMsg::SetBoundsGeometry(g) => {
-                self.bounds_geometry = g;
+                if self.bounds_geometry != g {
+                    self.bounds_geometry = g;
+                    with_all_sessions!(self, |s| s.frame_events.push(FrameUpdateEvent::ReferenceSpaceChanged(
+                        BaseSpace::BoundedFloor, Some(RigidTransform3D::identity())
+                    )));
+                }
             },
             MockDeviceMsg::SimulateResetPose => {
-                with_all_sessions!(self, |s| s.events.callback(Event::ReferenceSpaceChanged(
-                    BaseSpace::Local,
-                    RigidTransform3D::identity()
+                with_all_sessions!(self, |s| s.frame_events.push(FrameUpdateEvent::ReferenceSpaceChanged(
+                    BaseSpace::Local, Some(RigidTransform3D::identity())
                 )));
             },
         }

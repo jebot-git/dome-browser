@@ -30,15 +30,14 @@ use malloc_size_of::malloc_size_of_is_0;
 use malloc_size_of_derive::MallocSizeOf;
 use media::WindowGLContext;
 use net_traits::ResourceThreads;
+use net_traits::request::RequestClient;
 use paint_api::{CrossProcessPaintApi, PinchZoomInfos};
 use pixels::PixelFormat;
 use profile_traits::mem;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use servo_base::Epoch;
-#[cfg(feature = "devtools")]
-use servo_base::generic_channel::GenericCallback;
-use servo_base::generic_channel::{GenericReceiver, GenericSender};
+use servo_base::generic_channel::{GenericCallback, GenericReceiver, GenericSender};
 use servo_base::id::{
     BrowsingContextId, HistoryStateId, LCPCandidateID, PipelineId, PipelineNamespaceId,
     PipelineNamespaceRequest, ScriptEventLoopId, ServiceWorkerId, WebViewId,
@@ -75,6 +74,9 @@ pub struct WebViewState {
     /// Whether or not the `WebView` has system focus. More than one `WebView` may have
     /// system focus at one time.
     pub has_system_focus: Cell<bool>,
+    /// Whether the embedder has hidden this WebView, independent of keyboard focus.
+    #[serde(default)]
+    pub hidden: Cell<bool>,
 }
 
 /// The initial data required to create a new `Pipeline` attached to an existing `ScriptThread`.
@@ -205,8 +207,10 @@ pub enum ScriptThreadMessage {
     /// the origin of a parent in a different event loop.
     GetDocumentOriginDetails(
         PipelineId,
-        GenericSender<Option<(OriginSnapshot, Vec<ImmutableOrigin>)>>,
+        GenericSender<Option<(OriginSnapshot, Vec<ImmutableOrigin>, Option<ImmutableOrigin>)>>,
     ),
+    /// Snapshot a fully active document for an explicit native resource save.
+    GetDownloadClient(PipelineId, GenericCallback<Option<(ServoUrl, RequestClient)>>),
     /// Notifies script thread of a change to one of its document's activity
     SetDocumentActivity(PipelineId, DocumentActivity),
     /// Set whether to use less resources by running timers at a heavily limited rate.
@@ -457,6 +461,7 @@ impl ConstellationInputEvent {
         match self.event.event {
             InputEvent::MouseMove(ref event) => event.is_compatibility_event_for_touch,
             InputEvent::MouseButton(ref event) => event.is_compatibility_event_for_touch,
+            InputEvent::MouseLeftViewport(ref event) => event.is_compatibility_event,
             _ => false,
         }
     }

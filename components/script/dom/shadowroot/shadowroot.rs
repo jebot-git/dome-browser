@@ -102,6 +102,7 @@ pub(crate) struct ShadowRoot {
 
     /// <https://dom.spec.whatwg.org/#shadowroot-declarative>
     declarative: Cell<bool>,
+    keep_custom_element_registry_null: Cell<bool>,
 
     /// <https://dom.spec.whatwg.org/#shadowroot-serializable>
     serializable: Cell<bool>,
@@ -152,6 +153,7 @@ impl ShadowRoot {
             slots: Default::default(),
             is_user_agent_widget: is_user_agent_widget == IsUserAgentWidget::Yes,
             declarative: Cell::new(false),
+            keep_custom_element_registry_null: Cell::new(false),
             serializable: Cell::new(false),
             delegates_focus: Cell::new(false),
             adopted_stylesheets: Default::default(),
@@ -376,6 +378,14 @@ impl ShadowRoot {
         )
     }
 
+    pub(crate) fn keep_custom_element_registry_null(&self) -> bool {
+        self.keep_custom_element_registry_null.get()
+    }
+
+    pub(crate) fn set_keep_custom_element_registry_null(&self, keep: bool) {
+        self.keep_custom_element_registry_null.set(keep);
+    }
+
     pub(crate) fn custom_element_registry(&self) -> Option<DomRoot<CustomElementRegistry>> {
         self.document_or_shadow_root.custom_element_registry()
     }
@@ -522,7 +532,7 @@ impl ShadowRootMethods<crate::DomTypeHolder> for ShadowRoot {
         //
         // NOTE: The spec doesn't strictly tell us to bail out here, but
         // we can't continue if parsing failed
-        let frag = context.parse_fragment(value, cx)?;
+        let frag = context.parse_fragment_with_registry(value, cx, self.custom_element_registry().as_deref())?;
 
         // Step 4. Replace all with fragment within this.
         Node::replace_all(cx, Some(frag.upcast()), self.upcast());

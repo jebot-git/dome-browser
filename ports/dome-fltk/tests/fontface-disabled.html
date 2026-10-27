@@ -1,0 +1,15 @@
+<!doctype html><meta charset=utf-8><title>Disabled font API stays hidden during CSS loading</title>
+<style>.sample{font:16px/20px monospace}</style><span id=sample class=sample>Fallback label</span><span id=second class=sample>Fallback label</span>
+<script>
+addEventListener('load',async()=>{
+ const checks=[];const check=(name,passed,error='')=>checks.push({name,passed,error});
+ const settle=async()=>{sample.getBoundingClientRect();second.getBoundingClientRect();await document.fonts.ready;await new Promise(r=>setTimeout(r,200))};
+ const hidden=label=>{check(label+' FontFace hidden',typeof FontFace==='undefined');check(label+' add hidden',typeof document.fonts.add==='undefined');check(label+' load hidden',typeof document.fonts.load==='undefined')};
+ try{
+ hidden('initial');await settle();const before=sample.getBoundingClientRect().width;
+ const style=document.createElement('style');style.textContent="@font-face{font-family:HiddenApiCss;src:url('/font-api.ttf?disabled-one')}#sample{font-family:HiddenApiCss,monospace}";document.head.append(style);await settle();const loaded=sample.getBoundingClientRect().width;check('CSS font renders while API hidden',Math.abs(loaded-before)>2,JSON.stringify([before,loaded]));hidden('after CSS load');
+ const control=document.createElement('style');control.textContent="@font-face{font-family:HiddenApiControl;src:url('/font-api.ttf?disabled-two')}#second{font-family:HiddenApiControl,monospace}";document.head.append(control);await settle();check('independent CSS face uses same font metrics',Math.abs(loaded-second.getBoundingClientRect().width)<.2);hidden('after second CSS face');
+ style.remove();await settle();check('CSS removal returns to fallback metrics',Math.abs(sample.getBoundingClientRect().width-before)<.2);check('CSS removal preserves independent face',Math.abs(second.getBoundingClientRect().width-loaded)<.2);hidden('after CSS removal');
+ }catch(e){check('fixture completes',false,String(e))}
+ fetch('/report',{method:'POST',body:JSON.stringify({checks})});
+});</script>

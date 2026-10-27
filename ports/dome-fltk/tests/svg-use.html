@@ -1,0 +1,26 @@
+<!doctype html><meta charset=utf-8><title>SVG use reference resolution</title>
+<style>body{margin:0;background:white}.tile{position:absolute;width:60px;height:60px}.source-paint{fill:rgb(20,180,90)}</style>
+<script>if(new URLSearchParams(location.search).has('base')){const base=document.createElement('base');base.href='/not-found';document.head.append(base)}</script>
+<svg width=0 height=0 style=position:absolute><defs>
+ <g id=sprite-green><rect width=60 height=60 fill="rgb(20,180,90)"/></g>
+ <g id=sprite-red><rect width=60 height=60 fill=red /></g>
+ <g id="icon-猫"><rect width=60 height=60 fill="rgb(20,180,90)"/></g>
+ <g id=sprite-tiny><rect width=20 height=20 fill="rgb(20,180,90)"/></g>
+ <g id=sprite-cycle><use href="#sprite-cycle"/></g>
+ <g id=sprite-style><rect class=source-paint width=60 height=60 /></g>
+</defs></svg>
+<svg class=tile style="left:20px;top:20px"><defs><g id=local-green><rect width=60 height=60 fill="rgb(20,180,90)"/></g></defs><use href="#local-green"/></svg>
+<svg class=tile style="left:100px;top:20px"><use href="#sprite-green"/></svg>
+<svg class=tile style="left:180px;top:20px" xmlns:xlink="http://www.w3.org/1999/xlink"><use xlink:href="#sprite-green"/></svg>
+<svg class=tile style="left:260px;top:20px" xmlns:xlink="http://www.w3.org/1999/xlink"><use href="#sprite-green" xlink:href="#sprite-red"/></svg>
+<svg class=tile style="left:340px;top:20px" xmlns:xlink="http://www.w3.org/1999/xlink"><use href="" xlink:href="#sprite-green"/></svg>
+<svg class=tile style="left:20px;top:120px"><use href="#icon-猫"/></svg>
+<svg class=tile style="left:100px;top:120px"><use id=absolute href="#sprite-green"/></svg>
+<svg class=tile style="left:180px;top:120px"><use href="#icon-%E7%8C%AB"/></svg>
+<svg class=tile style="left:260px;top:120px"><use href="#sprite-style"/></svg>
+<svg class=tile style="left:340px;top:120px"><use href="/not-found#sprite-green"/></svg>
+<svg class=tile style="left:20px;top:220px"><use href="#sprite-tiny" x=20 y=20 /></svg>
+<svg class=tile style="left:100px;top:220px"><use href="#sprite-green" style="display:none"/></svg>
+<svg class=tile style="left:180px;top:220px"><use href="#sprite-tiny"/><use href="#sprite-tiny" x=30 y=30 /></svg>
+<svg id=cycle-tile class=tile style="left:260px;top:220px"></svg>
+<script>if(new URLSearchParams(location.search).has('cycles')){const use=document.createElementNS('http://www.w3.org/2000/svg','use');use.setAttribute('href','#sprite-cycle');document.getElementById('cycle-tile').append(use)}addEventListener('load',()=>{absolute.setAttribute('href',location.href.split('#')[0]+'#sprite-green');setTimeout(()=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[{name:'SVG use fixture completes',passed:true}]})}),500)});</script>

@@ -18,6 +18,7 @@ use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::window::Window;
+use crate::dom::globalscope::GlobalScope;
 use crate::dom::xrhittestresult::XRHitTestResult;
 use crate::dom::xrhittestsource::XRHitTestSource;
 use crate::dom::xrjointpose::XRJointPose;
@@ -53,8 +54,10 @@ impl XRFrame {
         cx: &mut JSContext,
         window: &Window,
         session: &XRSession,
-        data: Frame,
+        mut data: Frame,
     ) -> DomRoot<XRFrame> {
+        let instant = data.predicted_display_instant.unwrap_or_else(servo_base::cross_process_instant::CrossProcessInstant::now);
+        data.predicted_display_time = *window.as_global_scope().performance(cx).to_dom_high_res_time_stamp(instant);
         reflect_dom_object(cx, Box::new(XRFrame::new_inherited(session, data)), window)
     }
 
@@ -63,12 +66,29 @@ impl XRFrame {
         self.active.set(active);
     }
 
+    pub(crate) fn is_active(&self) -> bool {
+        self.active.get()
+    }
+
     /// <https://immersive-web.github.io/webxr/#xrframe-animationframe>
     pub(crate) fn set_animation_frame(&self, animation_frame: bool) {
         self.animation_frame.set(animation_frame);
     }
 
+    fn ensure_pose_access(&self) -> Result<(), Error> {
+        let current = GlobalScope::current();
+        if !self.session.poses_visible() || current.is_none_or(|current| current != self.global()) {
+            return Err(Error::Security(None));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn inputs(&self) -> &[webxr_api::InputFrame] {
+        &self.data.inputs
+    }
+
     pub(crate) fn get_pose(&self, space: &XRSpace) -> Option<ApiPose> {
+        if self.ensure_pose_access().is_err() { return None; }
         space.get_pose(&self.data)
     }
 
@@ -88,8 +108,6 @@ impl XRFrameMethods<crate::DomTypeHolder> for XRFrame {
 
     /// <https://www.w3.org/TR/webxr/#dom-xrframe-predicteddisplaytime>
     fn PredictedDisplayTime(&self) -> Finite<f64> {
-        // TODO: If inline, return the same value
-        // as the timestamp passed to XRFrameRequestCallback
         Finite::new(self.data.predicted_display_time)
             .expect("Failed to create predictedDisplayTime")
     }
@@ -108,6 +126,7 @@ impl XRFrameMethods<crate::DomTypeHolder> for XRFrame {
             return Err(Error::InvalidState(None));
         }
 
+        self.ensure_pose_access()?;
         let to_base = if let Some(to_base) = reference.get_base_transform(&self.data) {
             to_base
         } else {
@@ -140,6 +159,7 @@ impl XRFrameMethods<crate::DomTypeHolder> for XRFrame {
         if !self.active.get() {
             return Err(Error::InvalidState(None));
         }
+        self.ensure_pose_access()?;
         let space = if let Some(space) = self.get_pose(space) {
             space
         } else {
@@ -169,6 +189,7 @@ impl XRFrameMethods<crate::DomTypeHolder> for XRFrame {
         if !self.active.get() {
             return Err(Error::InvalidState(None));
         }
+        self.ensure_pose_access()?;
         let joint_frame = if let Some(frame) = space.frame(&self.data) {
             frame
         } else {
@@ -224,6 +245,7 @@ impl XRFrameMethods<crate::DomTypeHolder> for XRFrame {
             ));
         }
 
+        self.ensure_pose_access()?;
         let mut radii_vec = radii.to_vec().unwrap_or_default();
         let mut all_valid = true;
         radii_vec.iter_mut().enumerate().for_each(|(i, radius)| {
@@ -273,6 +295,7 @@ impl XRFrameMethods<crate::DomTypeHolder> for XRFrame {
             ));
         }
 
+        self.ensure_pose_access()?;
         let mut transforms_vec = transforms.to_vec().unwrap_or_default();
         let mut all_valid = true;
         spaces.iter().enumerate().for_each(|(i, space)| {

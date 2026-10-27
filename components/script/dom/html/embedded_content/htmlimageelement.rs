@@ -1576,6 +1576,18 @@ impl<'dom> LayoutDom<'dom, HTMLImageElement> {
         matches!(self.current_request().state, State::Broken)
     }
 
+    pub(crate) fn image_is_ready_for_fallback(self) -> bool {
+        if matches!(self.unsafe_get().image_request.get(), ImageRequestPhase::Pending) {
+            return false;
+        }
+        let state = self.current_request().state;
+        matches!(state, State::Broken) ||
+            // Untouched images start Unavailable but have no source to wait for.
+            // Scheduling source selection increments generation synchronously,
+            // including srcset and picture updates, before its microtask runs.
+            (matches!(state, State::Unavailable) && self.unsafe_get().generation.get() == 0)
+    }
+
     pub(crate) fn width(self) -> LengthOrPercentageOrAuto {
         self.dimension_attribute_source()
             .dimension_attr_value(local_name!("width"))
@@ -1854,6 +1866,11 @@ impl VirtualMethods for HTMLImageElement {
             .attribute_mutated(cx, attr, mutation);
 
         match attr.local_name() {
+            &local_name!("alt") => {
+                // Failed images render alternative text as native layout content.
+                // Adding/removing it can also change whether the box is replaced.
+                self.upcast::<Node>().dirty(cx.no_gc(), NodeDamage::Other);
+            },
             // <https://html.spec.whatwg.org/multipage/#reacting-to-dom-mutations>
             // > The element's src, srcset, width, or sizes attributes are set, changed, or
             // > removed.

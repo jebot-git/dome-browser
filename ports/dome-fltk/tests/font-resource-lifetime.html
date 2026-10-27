@@ -1,0 +1,22 @@
+<!doctype html><meta charset=utf-8><title>FontResourceStart</title><div id=control>Font resource lifetime control</div>
+<script>
+addEventListener('load',async()=>{
+ const checks=[],check=(name,passed,error='')=>checks.push({name,passed,error});
+ const frame=()=>new Promise(r=>requestAnimationFrame(r));
+ const wait=p=>Promise.race([p,new Promise((_,reject)=>setTimeout(()=>reject(Error('font readiness deadline')),8000))]);
+ async function cycle(i){
+  const style=document.createElement('style');style.textContent=`@font-face{font-family:UnusedLifetime${i};src:url('/font-api.ttf?unused-lifetime=${i}')}`;document.head.append(style);
+  control.getBoundingClientRect();await wait(document.fonts.ready);await frame();
+  style.remove();control.getBoundingClientRect();await frame();
+ }
+ try{
+  for(let i=0;i<8;i++)await cycle(i);
+  document.title='FontResourceBaseline';await new Promise(r=>setTimeout(r,2000));
+  for(let i=8;i<104;i++)await cycle(i);
+  document.title='FontResourceFinal';await new Promise(r=>setTimeout(r,2000));
+  check('104 unpainted CSS load/remove cycles complete',true);
+  check('ordinary content remains visible',control.getBoundingClientRect().width>100&&getComputedStyle(control).display!=='none');
+  check('gated FontFace API remains absent',typeof FontFace==='undefined');
+ }catch(e){check('fixture completes',false,String(e))}
+ fetch('/report',{method:'POST',body:JSON.stringify({checks,cycles:104})});
+});</script>

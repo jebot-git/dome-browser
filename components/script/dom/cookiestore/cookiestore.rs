@@ -11,7 +11,6 @@ use hyper_serde::Serde;
 use itertools::Itertools;
 use js::context::JSContext;
 use js::jsval::NullValue;
-use net_traits::CookieSource::NonHTTP;
 use net_traits::{CookieAsyncResponse, CookieData, CoreResourceMsg};
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::CookieStoreBinding::CookieSameSite;
@@ -83,6 +82,10 @@ impl CookieListener {
                 warn!("No promise exists for cookie store response");
                 return;
             };
+            if !context.root().global().cookies_allowed() {
+                promise.reject_error(cx, Error::Security(Some("Third-party cookies are blocked".into())));
+                return;
+            }
             match message.data {
                 CookieData::Get(cookie) => {
                     // If list is failure, then reject p with a TypeError and abort these steps.
@@ -196,6 +199,10 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
             p.reject_error(cx, Error::Security(None));
             return p;
         }
+        if !global.cookies_allowed() {
+            p.reject_error(cx, Error::Security(Some("Third-party cookies are blocked".into())));
+            return p;
+        }
 
         // 4. Let url be settings’s creation URL.
         let creation_url = global.creation_url();
@@ -210,6 +217,7 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
                 self.droppable.store_id,
                 creation_url,
                 Some(name),
+                global.cookie_source(),
             ));
         if res.is_err() {
             error!("Failed to send cookiestore message to resource threads");
@@ -237,6 +245,10 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
         // 3. If origin is an opaque origin, then return a promise rejected with a "SecurityError" DOMException.
         if !origin.is_tuple() {
             p.reject_error(cx, Error::Security(None));
+            return p;
+        }
+        if !global.cookies_allowed() {
+            p.reject_error(cx, Error::Security(Some("Third-party cookies are blocked".into())));
             return p;
         }
 
@@ -292,6 +304,7 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
                 self.droppable.store_id,
                 final_url,
                 options.name.clone().map(|val| CookieStore::normalize(&val)),
+                global.cookie_source(),
             ));
         if res.is_err() {
             error!("Failed to send cookiestore message to resource threads");
@@ -320,6 +333,10 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
             p.reject_error(cx, Error::Security(None));
             return p;
         }
+        if !global.cookies_allowed() {
+            p.reject_error(cx, Error::Security(Some("Third-party cookies are blocked".into())));
+            return p;
+        }
         // 4. Let url be settings’s creation URL.
         let creation_url = global.creation_url();
 
@@ -334,6 +351,7 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
                     self.droppable.store_id,
                     creation_url,
                     Some(name),
+                global.cookie_source(),
                 ));
         if res.is_err() {
             error!("Failed to send cookiestore message to resource threads");
@@ -361,6 +379,10 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
         // 3. If origin is an opaque origin, then return a promise rejected with a "SecurityError" DOMException.
         if !origin.is_tuple() {
             p.reject_error(cx, Error::Security(None));
+            return p;
+        }
+        if !global.cookies_allowed() {
+            p.reject_error(cx, Error::Security(Some("Third-party cookies are blocked".into())));
             return p;
         }
 
@@ -409,6 +431,7 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
                     self.droppable.store_id,
                     final_url,
                     options.name.clone().map(|val| CookieStore::normalize(&val)),
+                global.cookie_source(),
                 ));
         if res.is_err() {
             error!("Failed to send cookiestore message to resource threads");
@@ -438,6 +461,10 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
             p.reject_error(cx, Error::Security(None));
             return p;
         }
+        if !global.cookies_allowed() {
+            p.reject_error(cx, Error::Security(Some("Third-party cookies are blocked".into())));
+            return p;
+        }
 
         // 6.1 Let r be the result of running set a cookie with url, name, value, null, null, "/", "strict", false, and null.
         let properties = CookieInit {
@@ -464,7 +491,7 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
                 self.droppable.store_id,
                 creation_url.clone(),
                 Serde(cookie.into_owned()),
-                NonHTTP,
+                global.cookie_source(),
             ));
         if res.is_err() {
             error!("Failed to send cookiestore message to resource threads");
@@ -494,6 +521,10 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
             p.reject_error(cx, Error::Security(None));
             return p;
         }
+        if !global.cookies_allowed() {
+            p.reject_error(cx, Error::Security(Some("Third-party cookies are blocked".into())));
+            return p;
+        }
 
         // 4. Let url be settings’s creation URL.
         let creation_url = global.creation_url();
@@ -513,7 +544,7 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
                 self.droppable.store_id,
                 creation_url.clone(),
                 Serde(cookie.into_owned()),
-                NonHTTP,
+                global.cookie_source(),
             ));
         if res.is_err() {
             error!("Failed to send cookiestore message to resource threads");
@@ -543,6 +574,10 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
             p.reject_error(cx, Error::Security(None));
             return p;
         }
+        if !global.cookies_allowed() {
+            p.reject_error(cx, Error::Security(Some("Third-party cookies are blocked".into())));
+            return p;
+        }
 
         // 6. Run the following steps in parallel:
         // TODO: the spec passes additional parameters to _delete a cookie_ that we don't handle yet
@@ -552,6 +587,7 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
                 self.droppable.store_id,
                 global.creation_url(),
                 name.0,
+                global.cookie_source(),
             ));
         if res.is_err() {
             error!("Failed to send cookiestore message to resource threads");
@@ -581,6 +617,10 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
             p.reject_error(cx, Error::Security(None));
             return p;
         }
+        if !global.cookies_allowed() {
+            p.reject_error(cx, Error::Security(Some("Third-party cookies are blocked".into())));
+            return p;
+        }
 
         // 6. Run the following steps in parallel:
         // TODO: the spec passes additional parameters to _delete a cookie_ that we don't handle yet
@@ -590,6 +630,7 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
                 self.droppable.store_id,
                 global.creation_url(),
                 options.name.to_string(),
+                global.cookie_source(),
             ));
         if res.is_err() {
             error!("Failed to send cookiestore message to resource threads");

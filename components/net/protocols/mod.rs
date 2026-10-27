@@ -51,7 +51,7 @@ pub trait ProtocolHandler: Send + Sync {
     fn load<'a>(
         &'a self,
         request: &'a mut Request,
-        done_chan: &mut DoneChannel,
+        done_chan: &'a mut DoneChannel,
         context: &FetchContext,
     ) -> FutureResponse<'a>;
 
@@ -235,6 +235,19 @@ pub fn is_url_potentially_trustworthy(
     url: &ServoUrl,
 ) -> bool {
     url.is_potentially_trustworthy() || protocol_registry.is_secure(url.scheme())
+}
+
+/// Preserve the origin carried by a blob claim, including opaque file origins.
+/// The blob backend still validates the token and origin before returning bytes;
+/// neither serialized `null` nor the request initiator grants resource access.
+pub fn is_claimed_url_potentially_trustworthy(
+    protocol_registry: &ProtocolRegistry,
+    url: &UrlWithBlobClaim,
+) -> bool {
+    if url.scheme() == "blob" && url.token().is_some() {
+        return url.origin().is_potentially_trustworthy();
+    }
+    is_url_potentially_trustworthy(protocol_registry, &url.url())
 }
 
 pub fn range_not_satisfiable_error(response: &mut Response) {

@@ -175,8 +175,18 @@ impl FontTemplates {
     pub fn add_template(&mut self, new_template: FontTemplate) {
         for existing_template in &self.templates {
             let existing_template = existing_template.borrow();
-            if *existing_template.identifier() == new_template.identifier &&
-                existing_template.descriptor == new_template.descriptor
+            let same_rule = match (
+                &existing_template.font_face_rule,
+                &new_template.font_face_rule,
+            ) {
+                (Some(existing), Some(new)) => ServoArc::ptr_eq(existing, new),
+                (None, None) => true,
+                _ => false,
+            };
+            if same_rule
+                && existing_template.script_font_face_id == new_template.script_font_face_id
+                && *existing_template.identifier() == new_template.identifier
+                && existing_template.descriptor == new_template.descriptor
             {
                 return;
             }
@@ -253,6 +263,17 @@ impl FontTemplates {
         }
 
         self.templates.len() != old_length
+    }
+
+    pub(crate) fn remove_script_font_face(&mut self, id: uuid::Uuid) -> bool {
+        let old_length = self.templates.len();
+        self.templates.retain(|template| template.borrow().script_font_face_id != Some(id));
+        if self.templates.len() != old_length {
+            // Do not leave an optimized family slot pointing at a removed face.
+            self.simple_family = None;
+            return true;
+        }
+        false
     }
 
     pub(crate) fn for_all_identifiers(&self, mut callback: impl FnMut(&FontIdentifier)) {

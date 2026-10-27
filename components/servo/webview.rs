@@ -141,6 +141,7 @@ pub(crate) struct WebViewInner {
 
     /// The current index in the back / forward list.
     back_forward_list_index: usize,
+    protocol_state: Option<String>,
 }
 
 impl Drop for WebViewInner {
@@ -189,6 +190,7 @@ impl WebView {
             cursor: Cursor::Pointer,
             back_forward_list: Default::default(),
             back_forward_list_index: 0,
+            protocol_state: builder.protocol_state.clone(),
             user_content_manager: builder.user_content_manager.clone(),
         })));
 
@@ -214,6 +216,7 @@ impl WebView {
             webview_id: webview.id(),
             viewport_details,
             user_content_manager_id,
+            protocol_state: builder.protocol_state,
         };
 
         // There are two possibilities here. Either the WebView is a new toplevel
@@ -348,6 +351,10 @@ impl WebView {
             .get(inner.back_forward_list_index)
             .cloned()
     }
+
+    /// Opaque native protocol view state of the current navigation entry.
+    /// This state is supplied by a registered protocol, never remote headers.
+    pub fn protocol_state(&self) -> Option<String> { self.inner().protocol_state.clone() }
 
     /// Get the current status text for this [`WebView`]. Returns `None` if there is no status text.
     ///
@@ -501,6 +508,9 @@ impl WebView {
             .paint()
             .show_webview(self.id())
             .expect("BUG: invalid WebView instance");
+        self.servo()
+            .constellation_proxy()
+            .send(EmbedderToConstellationMessage::SetWebViewHidden(self.id(), false));
     }
 
     /// Hide this [`WebView`] within its [`RenderingContext`].
@@ -509,6 +519,9 @@ impl WebView {
             .paint()
             .hide_webview(self.id())
             .expect("BUG: invalid WebView instance");
+        self.servo()
+            .constellation_proxy()
+            .send(EmbedderToConstellationMessage::SetWebViewHidden(self.id(), true));
     }
 
     /// Notify this [`WebView`] of a change to the system theme (e.g. light or dark mode).
@@ -743,8 +756,18 @@ impl WebView {
         url: url::Url,
         callback: impl FnMut(crate::ResourceDownloadEvent) -> bool + Send + 'static,
     ) -> Result<(), String> {
-        let source = self.url().ok_or("The page has no URL")?;
-        self.servo().network_manager().download_resource(self.id(), url, source, callback)
+        self.download_resource_in_context(url, None, callback)
+    }
+
+    /// Save/copy a resource from the document that opened a native context menu.
+    /// A missing context selects the active top document.
+    pub fn download_resource_in_context(
+        &self,
+        url: url::Url,
+        context: Option<EmbedderControlId>,
+        callback: impl FnMut(crate::ResourceDownloadEvent) -> bool + Send + 'static,
+    ) -> Result<(), String> {
+        self.servo().network_manager().download_resource(self.id(), url, context, callback)
     }
 
     /// Evaluate the specified string of JavaScript code. Once execution is complete or an error
@@ -788,10 +811,11 @@ impl WebView {
             .request_screenshot(self.id(), rect, Box::new(callback));
     }
 
-    pub(crate) fn set_history(self, new_back_forward_list: Vec<ServoUrl>, new_index: usize) {
+    pub(crate) fn set_history(self, new_back_forward_list: Vec<ServoUrl>, new_index: usize, protocol_state: Option<String>) {
         {
             let mut inner_mut = self.inner_mut();
             inner_mut.back_forward_list_index = new_index;
+            inner_mut.protocol_state = protocol_state;
             inner_mut.back_forward_list = new_back_forward_list
                 .into_iter()
                 .map(ServoUrl::into_url)
@@ -1116,6 +1140,7 @@ pub struct WebViewBuilder {
     rendering_context: Rc<dyn RenderingContext>,
     delegate: Rc<dyn WebViewDelegate>,
     url: Option<Url>,
+    protocol_state: Option<String>,
     hidpi_scale_factor: Scale<f32, DeviceIndependentPixel, DevicePixel>,
     create_new_webview_responder: Option<AutomaticResponder<Option<NewWebViewDetails>>>,
     user_content_manager: Option<Rc<UserContentManager>>,
@@ -1135,6 +1160,7 @@ impl WebViewBuilder {
             servo: servo.clone(),
             rendering_context,
             url: None,
+            protocol_state: None,
             hidpi_scale_factor: Scale::new(1.0),
             delegate: Rc::new(DefaultWebViewDelegate),
             create_new_webview_responder: None,
@@ -1168,6 +1194,9 @@ impl WebViewBuilder {
         self.url = Some(url);
         self
     }
+
+    /// Restore native protocol view state alongside the initial public URL.
+    pub fn protocol_state(mut self, state: Option<String>) -> Self { self.protocol_state = state; self }
 
     /// Set the initial HiDPI scale factor for the [`WebView`] being created.
     pub fn hidpi_scale_factor(

@@ -1,0 +1,39 @@
+<!doctype html><meta charset=utf-8><title>WebXR controller integration</title>
+<style>body{background:#202830;color:white;font:20px monospace}button{padding:20px;background:#305ac0;color:white}</style>
+<h1>WebXR controller integration</h1><button id=start disabled>Start controller test</button><button id=end disabled>End session</button><canvas id=canvas width=128 height=96></canvas>
+<script>
+let order=0;const retained=[];const report=(type,data={})=>fetch('/event',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({order:++order,type,data})});
+const gl=canvas.getContext('webgl',{xrCompatible:true});let session,space,last='',frameCount=0,ending=false;
+const buttons=s=>s.gamepad?.buttons.map(b=>({pressed:b.pressed,touched:b.touched,value:b.value}));
+const info=s=>({hand:s.handedness,profiles:s.profiles,profilesFrozen:Object.isFrozen(s.profiles),grip:s.gripSpace!==null,gamepad:s.gamepad===null?null:{id:s.gamepad.id,index:s.gamepad.index,connected:s.gamepad.connected,mapping:s.gamepad.mapping,buttons:buttons(s),axes:Array.from(s.gamepad.axes)}});
+gl.makeXRCompatible().then(()=>{start.disabled=false;report('ready',{start:start.getBoundingClientRect().toJSON(),end:end.getBoundingClientRect().toJSON(),viewport:[innerWidth,innerHeight],ratio:devicePixelRatio});}).catch(e=>report('error',{message:String(e)}));
+document.addEventListener('pointerdown',e=>report('pointer',{x:e.clientX,y:e.clientY,target:e.target.id}),true);document.addEventListener('keydown',e=>report('key',{key:e.key,target:e.target.id}),true);
+start.onclick=async()=>{try{
+ session=await navigator.xr.requestSession('immersive-vr');start.disabled=true;end.disabled=false;
+ session.addEventListener('inputsourceschange',e=>{retained.push(...e.added);report('sources',{added:Array.from(e.added,info),removed:Array.from(e.removed,info)});});
+ for(const type of ['selectstart','select','selectend','squeezestart','squeeze','squeezeend'])session.addEventListener(type,e=>{
+  const pose=space&&!ending?e.frame.getPose(e.inputSource.targetRaySpace,space):null;
+  report(type,{input:info(e.inputSource),pose:pose?Array.from(pose.transform.matrix):null,eventFrameTime:e.frame.predictedDisplayTime,now:performance.now()});
+ });
+ session.addEventListener('visibilitychange',()=>{
+  last='';report('visibility',{state:session.visibilityState,frameCount});
+  if(session.visibilityState==='hidden')setTimeout(()=>report('hidden_sample',{state:session.visibilityState,frameCount}),180);
+ });
+ session.addEventListener('end',()=>report('ended',{sources:Array.from(session.inputSources,info),retained:retained.map(info)}));
+ space=await session.requestReferenceSpace('local');const layer=new XRWebGLLayer(session,gl);session.updateRenderState({baseLayer:layer});
+ function frame(t,f){
+  frameCount++;
+  if(session.visibilityState==='hidden'){
+   report('unexpected_hidden_frame',{frameCount});session.requestAnimationFrame(frame);return;
+  }
+  const sources=Array.from(session.inputSources);const retired=retained.filter(s=>!sources.includes(s)).map(s=>f.getPose(s.targetRaySpace,space)===null);const snapshot=sources.map(s=>({input:info(s),pose:f.getPose(s.targetRaySpace,space)?.transform.position.x??null,viewer:f.getViewerPose(space)!==null,timestamp:s.gamepad?.timestamp??null}));
+  const state=JSON.stringify({snapshot,retired});if(state!==last){last=state;report('snapshot',{sources:snapshot,retired});}
+  gl.bindFramebuffer(gl.FRAMEBUFFER,layer.framebuffer);gl.clearColor(.1,.2,.4,1);gl.clear(gl.COLOR_BUFFER_BIT);
+  if(frameCount===2)report('running',{now:performance.now(),callbackTime:t,predictedDisplayTime:f.predictedDisplayTime});session.requestAnimationFrame(frame);
+ }
+ session.requestAnimationFrame(frame);report('started');
+}catch(e){report('error',{message:String(e),stack:e.stack});}};
+end.onclick=async()=>{try{ending=true;await session.end();end.disabled=true;}catch(e){report('error',{message:String(e)});}};
+</script>
+
+<script>window.addEventListener('error',e=>report('error',{message:e.message}));</script>

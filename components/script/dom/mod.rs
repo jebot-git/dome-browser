@@ -360,6 +360,8 @@ pub(crate) use self::webrtc::*;
 pub(crate) mod webvtt;
 pub(crate) use self::webvtt::*;
 pub(crate) mod window;
+pub(crate) mod idlecallback;
+pub(crate) mod idledeadline;
 pub(crate) use self::window::*;
 pub(crate) mod workers;
 pub(crate) use self::workers::*;

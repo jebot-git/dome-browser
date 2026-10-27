@@ -1,0 +1,20 @@
+<meta charset="utf-8"><title>Quirks image alternative text</title>
+<style>body{font:16px/20px monospace;color:#c00000;background:white}img{font:inherit}</style>
+<script>
+addEventListener('load',async()=>{
+ const checks=[],geometry=[];const check=(name,passed,error='')=>checks.push({name,passed,error});
+ const pause=()=>new Promise(r=>setTimeout(r,100));
+ const load=(e,src)=>new Promise(r=>{e.onload=()=>r('load');e.onerror=()=>r('error');e.src=src});
+ const make=(css,attrs=false)=>{const host=document.createElement('section'),e=document.createElement('img');e.alt='Fallback label';e.style.cssText=css;if(attrs){e.width=100;e.height=80}host.append(e);document.body.append(host);return e};
+ check('document uses quirks mode',document.compatMode==='BackCompat');
+ for(const [name,css,attrs]of [['CSS dimensions','width:100px;height:80px',false],['attribute dimensions','',true]]){
+  const e=make(css,attrs);await load(e,'/not-found?'+name);await pause();const r=e.getBoundingClientRect();geometry.push({name,rect:[r.width,r.height]});check(name+' remain replaced',r.width===100&&r.height===80,JSON.stringify([r.width,r.height]));
+ }
+ const e=make('');await load(e,'/not-found?auto');await pause();let r=e.getBoundingClientRect();check('auto dimensions become text',r.width>40&&r.height>0&&r.height<=24,JSON.stringify([r.width,r.height]));
+ e.alt='Fallback label extended';await pause();let next=e.getBoundingClientRect();check('quirks text updates after alt mutation',next.width>r.width+30,JSON.stringify([next.width,next.height]));
+ e.style.width='100px';e.style.height='80px';await pause();r=e.getBoundingClientRect();check('CSS mutation switches text to replaced',r.width===100&&r.height===80,JSON.stringify([r.width,r.height]));
+ e.style.width='auto';e.style.height='auto';await pause();r=e.getBoundingClientRect();check('CSS mutation switches replaced to text',r.width>40&&r.height>0&&r.height<=24,JSON.stringify([r.width,r.height]));
+ check('author DOM remains empty',e.childNodes.length===0&&e.textContent==='');
+ fetch('/report',{method:'POST',body:JSON.stringify({checks,geometry})});
+});
+</script>

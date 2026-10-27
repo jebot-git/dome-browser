@@ -9,11 +9,10 @@ use std::borrow::ToOwned;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::SystemTime;
 
-use cookie::Cookie;
-use log::{Level, debug, log_enabled};
+use cookie::{Cookie, SameSite};
 use malloc_size_of_derive::MallocSizeOf;
 use net_traits::pub_domains::is_pub_domain;
-use net_traits::{CookieSource, ends_with_ignore_ascii_case};
+use net_traits::{CookieContext, CookieSource, ends_with_ignore_ascii_case};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take, take_while_m_n};
 use nom::combinator::{opt, recognize, value};
@@ -30,7 +29,7 @@ use time::{Date, Duration, Month, OffsetDateTime, Time};
 #[derive(Clone, Debug, Deserialize, Serialize, MallocSizeOf)]
 pub struct ServoCookie {
     #[serde(
-        deserialize_with = "hyper_serde::deserialize",
+        deserialize_with = "deserialize_cookie",
         serialize_with = "hyper_serde::serialize"
     )]
     pub cookie: Cookie<'static>,
@@ -41,13 +40,32 @@ pub struct ServoCookie {
     pub expiry_time: Option<SystemTime>,
 }
 
+fn deserialize_cookie<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Cookie<'static>, D::Error> {
+    use serde::de::Error;
+    let value = String::deserialize(deserializer)?;
+    net_traits::parse_cookie_string(value).map_err(|_| D::Error::custom("Invalid cookie text"))
+}
+
 impl ServoCookie {
+    pub fn same_site_allows(&self, context: CookieContext, source: CookieSource) -> bool {
+        match self.cookie.same_site() {
+            Some(SameSite::None) => self.cookie.secure().unwrap_or(false),
+            Some(SameSite::Strict) => context.same_site,
+            Some(SameSite::Lax) | None => context.same_site ||
+                (source == CookieSource::HTTP && context.top_level_navigation && context.safe_method),
+        }
+    }
+
+    pub fn same_site_allows_setting(&self, context: CookieContext) -> bool {
+        self.cookie.same_site() == Some(SameSite::None) || context.same_site || context.top_level_navigation
+    }
+
     pub fn from_cookie_string(
         cookie_str: &str,
         request: &ServoUrl,
         source: CookieSource,
     ) -> Option<ServoCookie> {
-        let mut cookie = Cookie::parse(cookie_str.to_owned()).ok()?;
+        let mut cookie = net_traits::parse_cookie_string(cookie_str.to_owned()).ok()?;
 
         // Cookie::parse uses RFC 2616 <http://tools.ietf.org/html/rfc2616#section-3.3.1> to parse
         // cookie expiry date. If it fails to parse the expiry date, try to parse again with
@@ -87,7 +105,7 @@ impl ServoCookie {
 
             // The user agent MUST limit the maximum value of the Max-Age attribute.
             // The limit SHOULD NOT be greater than 400 days (34560000 seconds) in the future.
-            let clamped_max_age = max_age.min(Duration::seconds(34_560_000));
+            let clamped_max_age = max_age.max(Duration::ZERO).min(Duration::seconds(34_560_000));
 
             // 2. Set the cookie's expiry-time to attribute-value of the last
             // attribute in the cookie-attribute-list with an attribute-name of "Max-Age".
@@ -214,13 +232,20 @@ impl ServoCookie {
 
         // Step 15. If the cookie was received from a "non-HTTP" API and the cookie's
         // http-only-flag is true, abort these steps and ignore the cookie entirely.
-        if http_only && source == CookieSource::NonHTTP {
+        if http_only && source.is_non_http() {
             return None;
         }
 
         // TODO: Step 16, Ignore cookies from insecure request uris based on existing cookies
 
-        // TODO: Steps 17-19, same-site-flag
+        // Non-HTTP access from a cross-site document cannot set a restricted
+        // SameSite cookie. None always requires Secure, independently of the
+        // user's third-party-cookie setting.
+        if cookie.same_site() == Some(SameSite::None) {
+            if !secure_only { return None; }
+        } else if source == CookieSource::NonHTTPCrossSite {
+            return None;
+        }
 
         // Step 20. If the cookie-name begins with a case-insensitive match for the string "__Secure-",
         // abort these steps and ignore the cookie entirely unless the cookie's secure-only-flag is true.
@@ -335,15 +360,6 @@ impl ServoCookie {
 
     /// <http://tools.ietf.org/html/rfc6265#section-5.4> step 1
     pub fn appropriate_for_url(&self, url: &ServoUrl, source: CookieSource) -> bool {
-        if log_enabled!(Level::Debug) {
-            debug!(
-                " === SENT COOKIE : {} {} {:?} {:?}",
-                self.cookie.name(),
-                self.cookie.value(),
-                self.cookie.domain(),
-                self.cookie.path()
-            );
-        }
 
         let domain = url.host_str();
         // Either: The cookie's host-only-flag is true and the canonicalized host of the
@@ -373,10 +389,12 @@ impl ServoCookie {
         }
 
         // If the cookie's http-only-flag is true, then exclude the cookie if the retrieval's type is "non-HTTP"
-        if self.cookie.http_only().unwrap_or(false) && source == CookieSource::NonHTTP {
+        if self.cookie.http_only().unwrap_or(false) && source.is_non_http() {
             return false;
         }
-        // TODO: Apply same site checks
+        if source == CookieSource::NonHTTPCrossSite && self.cookie.same_site() != Some(SameSite::None) {
+            return false;
+        }
         // TOOD: Apply Partitioning checks
 
         true

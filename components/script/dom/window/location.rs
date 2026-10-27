@@ -189,7 +189,7 @@ impl Location {
 
         // Initiate navigation
         // TODO: rethrow exceptions, set exceptions enabled flag.
-        let load_data = LoadData::new(
+        let mut load_data = LoadData::new(
             LoadOrigin::Script(load_origin),
             url,
             source_document.about_base_url(),
@@ -200,7 +200,9 @@ impl Location {
             Some(source_document.insecure_requests_policy()),
             source_document.has_trustworthy_ancestor_origin(),
             source_document.creation_sandboxing_flag_set_considering_parent_iframe(),
-        );
+        ).with_cookie_site(if matches!(navigation_type, NavigationType::ReloadByConstellation) &&
+            !source_document.navigation_cookie_same_site() { None } else { source_document.cookie_site() });
+        if reload_triggered { load_data.protocol_state = source_document.protocol_state(); }
         navigate(cx, window, history_handling, reload_triggered, load_data);
     }
 

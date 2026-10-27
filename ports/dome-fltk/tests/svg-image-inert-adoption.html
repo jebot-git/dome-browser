@@ -1,0 +1,17 @@
+<!doctype html><meta charset="utf-8"><title>SVG image adoption into inert document</title>
+<script>
+(async()=>{
+ const SVG='http://www.w3.org/2000/svg',wait=ms=>new Promise(r=>setTimeout(r,ms)),checks=[],events=[];
+ const root=document.createElementNS(SVG,'svg');document.documentElement.append(root);
+ const image=document.createElementNS(SVG,'image');image.setAttribute('width',20);image.setAttribute('height',20);image.setAttribute('href','/svg-image.svg?name=inert-adoption-old&delay=650');
+ image.onload=()=>events.push('load');image.onerror=()=>events.push('error');root.append(image);await wait(150);
+ const inert=document.implementation.createDocument(SVG,'svg');inert.documentElement.append(inert.adoptNode(image));await wait(1200);
+ checks.push({name:'adopted image belongs to inert document',passed:image.ownerDocument===inert});
+ checks.push({name:'obsolete active-document response cannot complete in inert document',passed:events.length===0});
+ const control=document.createElementNS(SVG,'image');control.setAttribute('width',20);control.setAttribute('height',20);
+ const positive=new Promise(resolve=>{control.onload=()=>resolve(true);control.onerror=()=>resolve(false);setTimeout(()=>resolve(false),2500)});
+ control.setAttribute('href','/svg-image.svg?name=inert-adoption-positive');root.append(control);
+ checks.push({name:'original active document remains functional',passed:await positive});
+ fetch('/report',{method:'POST',body:JSON.stringify({checks,diagnostics:{events},scope:'Inert-document adoption cancellation with active-document positive control'})});
+})().catch(error=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[{name:'fixture completed',passed:false,error:String(error)}]})}));
+</script>

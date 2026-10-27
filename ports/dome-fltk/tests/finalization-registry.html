@@ -1,0 +1,137 @@
+<!doctype html><meta charset="utf-8"><title>FinalizationRegistry host integration</title>
+<script>
+'use strict';
+// This is an embedding diagnostic with deliberate allocation pressure. Garbage
+// collection timing remains implementation-defined; correlate failures with
+// the GC log and native/reference controls, rather than treating the deadline
+// itself as an ECMAScript conformance requirement.
+const checks = [], diagnostics = {calls: {}, errors: [], scriptActive: false,
+  microtaskFinished: false, pressureRounds: 0, worker: null};
+const check = (name, passed) => checks.push({name, passed: !!passed});
+const keep = [], weak = [];
+queueMicrotask(() => { diagnostics.microtaskFinished = true; });
+function register(registry, name, token) {
+  const object = {name};
+  registry.register(object, name, token);
+  weak.push(new WeakRef(object));
+}
+function record(name) {
+  diagnostics.calls[name] = (diagnostics.calls[name] || 0) + 1;
+  diagnostics.callsDuringScript ||= diagnostics.scriptActive;
+  diagnostics.callsBeforeMicrotask ||= !diagnostics.microtaskFinished;
+}
+const normal = new FinalizationRegistry(function (held) {
+  diagnostics.normalThisUndefined = this === undefined;
+  record(held);
+  queueMicrotask(() => { diagnostics.cleanupMicrotaskRan = true; });
+});
+keep.push(normal);
+register(normal, 'normal');
+const token = {};
+register(normal, 'unregistered', token);
+normal.unregister(token);
+const throwing = new FinalizationRegistry(() => {
+  record('throwing');
+  throw new Error('expected-finalization-cleanup-error');
+});
+keep.push(throwing);
+register(throwing, 'throwing');
+addEventListener('error', event => {
+  diagnostics.errors.push({where: 'parent', message: event.message});
+  if (event.message.includes('expected-finalization-cleanup-error')) event.preventDefault();
+});
+const frame = document.createElement('iframe');
+frame.srcdoc = '<!doctype html><title>Registry realm</title>';
+frame.onload = () => {
+  const child = frame.contentWindow;
+  child.addEventListener('error', event => {
+    diagnostics.errors.push({where: 'child', message: event.message});
+    if (event.message.includes('expected-cross-realm-cleanup-error')) event.preventDefault();
+  });
+  const cross = new child.FinalizationRegistry(function (held) {
+    diagnostics.crossThisUndefined = this === undefined;
+    record(held);
+    throw new Error('expected-cross-realm-cleanup-error');
+  });
+  keep.push(cross);
+  register(cross, 'cross');
+  setTimeout(pressure, 100);
+};
+document.documentElement.append(frame);
+const retired = document.createElement('iframe');
+retired.srcdoc = '<!doctype html><title>Discarded registry realm</title>';
+retired.onload = () => {
+  const registry = new retired.contentWindow.FinalizationRegistry(() => record('discarded'));
+  keep.push(registry);
+  register(registry, 'discarded');
+  retired.remove();
+  diagnostics.discardedRealmReady = true;
+};
+document.documentElement.append(retired);
+function pressure() {
+  diagnostics.scriptActive = true;
+  diagnostics.microtaskFinished = false;
+  for (let i = 0; i < 45000; i++) {
+    const node = document.createElement('div');
+    node.textContent = 'cleanup-pressure-' + i;
+  }
+  diagnostics.pressureRounds++;
+  diagnostics.scriptActive = false;
+  queueMicrotask(() => { diagnostics.microtaskFinished = true; });
+}
+const workerCode = `
+'use strict';
+const state = {calls: 0, scriptActive: false, microtaskFinished: false};
+queueMicrotask(() => { state.microtaskFinished = true; });
+const registry = new FinalizationRegistry(function (held) {
+ state.calls++;
+ state.held = held;
+ state.thisUndefined = this === undefined;
+ state.duringScript = state.scriptActive;
+ state.beforeMicrotask = !state.microtaskFinished;
+});
+const weak = (() => { const object = {}; registry.register(object, 'worker-held'); return new WeakRef(object); })();
+setTimeout(() => {
+ state.scriptActive = true;
+ state.microtaskFinished = false;
+ for (let i = 0; i < 96; i++) {
+  const data = new ArrayBuffer(1024 * 1024);
+  new Uint8Array(data)[0] = i;
+ }
+ state.scriptActive = false;
+ queueMicrotask(() => { state.microtaskFinished = true; });
+}, 150);
+setTimeout(() => { state.targetCollected = weak.deref() === undefined; postMessage(state); }, 6500);
+`;
+const workerURL = URL.createObjectURL(new Blob([workerCode], {type: 'text/javascript'}));
+const worker = new Worker(workerURL);
+worker.onmessage = event => { diagnostics.worker = event.data; };
+worker.onerror = event => { diagnostics.workerError = event.message; event.preventDefault(); };
+setTimeout(pressure, 1300);
+setTimeout(() => {
+  diagnostics.collectedTargets = weak.filter(ref => ref.deref() === undefined).length;
+  check('all window weak targets collected under measured pressure', diagnostics.collectedTargets === weak.length);
+  check('normal cleanup delivered once', diagnostics.calls.normal === 1);
+  check('unregistered target has no cleanup', !diagnostics.calls.unregistered);
+  check('throwing cleanup delivered once', diagnostics.calls.throwing === 1);
+  check('cross-realm cleanup delivered once', diagnostics.calls.cross === 1);
+  check('callbacks run outside synchronous pressure script', !diagnostics.callsDuringScript);
+  check('callbacks run after pressure microtasks', !diagnostics.callsBeforeMicrotask);
+  check('normal callback receives undefined this', diagnostics.normalThisUndefined);
+  check('cross-realm callback receives undefined this', diagnostics.crossThisUndefined);
+  check('cleanup-created microtask runs', diagnostics.cleanupMicrotaskRan);
+  check('normal cleanup exception reported at registry global', diagnostics.errors.filter(e => e.where === 'parent' && e.message.includes('expected-finalization-cleanup-error')).length === 1);
+  check('cross-realm exception reported at registry global', diagnostics.errors.filter(e => e.where === 'child' && e.message.includes('expected-cross-realm-cleanup-error')).length === 1);
+  check('retained registry remains safe after iframe removal', diagnostics.discardedRealmReady && (diagnostics.calls.discarded || 0) <= 1);
+  check('worker reports without error', !!diagnostics.worker && !diagnostics.workerError);
+  check('worker weak target collected', diagnostics.worker?.targetCollected);
+  check('worker cleanup delivered once with correct held value', diagnostics.worker?.calls === 1 && diagnostics.worker?.held === 'worker-held');
+  check('worker cleanup receives undefined this', diagnostics.worker?.thisUndefined);
+  check('worker cleanup runs outside synchronous script', diagnostics.worker && !diagnostics.worker.duringScript);
+  check('worker cleanup runs after microtasks', diagnostics.worker && !diagnostics.worker.beforeMicrotask);
+  worker.terminate();
+  URL.revokeObjectURL(workerURL);
+  fetch('/report', {method: 'POST', body: JSON.stringify({checks, diagnostics,
+    scope: 'Cleanup delivery after iframe removal is diagnostic, not required or forbidden here. Bounded host-integration diagnostic; GC and callback deadlines are not guaranteed by ECMAScript. Use actual collection evidence and reference controls.'})});
+}, 8000);
+</script>

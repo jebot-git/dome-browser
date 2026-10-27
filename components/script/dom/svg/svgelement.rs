@@ -11,7 +11,10 @@ use script_bindings::codegen::GenericBindings::WindowBinding::ScrollBehavior;
 use script_bindings::str::DOMString;
 use style::attr::AttrValue;
 use style::parser::ParserContext;
-use style::properties::{PropertyDeclaration, longhands};
+use style::properties::declaration_block::parse_one_declaration_into;
+use style::properties::{
+    CSSWideKeyword, PropertyDeclaration, PropertyId, SourcePropertyDeclaration, longhands,
+};
 use style::stylesheets::{CssRuleType, Origin, UrlExtraData};
 use style::values::generics::NonNegative;
 use style::values::specified;
@@ -86,11 +89,12 @@ impl SVGElement {
         self.upcast::<Element>()
     }
 
-    fn invalidate_enclosing_svg_viewports(&self, cx: &mut JSContext) {
+    pub(crate) fn invalidate_enclosing_svg_viewports(&self, cx: &mut JSContext) {
         let node = self.upcast::<Node>();
         if !node.is_connected() {
             return;
         }
+        node.owner_doc().note_svg_resource_mutation();
         for ancestor in node.ancestors() {
             if let Some(svg) = ancestor.downcast::<SVGSVGElement>() {
                 svg.invalidate_cached_serialized_subtree_and_rasterization_result(cx.no_gc());
@@ -139,30 +143,35 @@ impl VirtualMethods for SVGElement {
     fn attribute_affects_presentational_hints(&self, attr: AttrRef<'_>) -> bool {
         matches!(
             attr.local_name(),
-            &local_name!("fill") |
-                &local_name!("fill-opacity") |
-                &local_name!("fill-rule") |
-                &local_name!("stroke") |
-                &local_name!("stroke-width") |
-                &local_name!("stroke-linecap") |
-                &local_name!("stroke-linejoin") |
-                &local_name!("stroke-dasharray") |
-                &local_name!("stroke-dashoffset") |
-                &local_name!("stroke-miterlimit") |
-                &local_name!("stroke-opacity") |
-                &local_name!("display") |
-                &local_name!("visibility") |
-                &local_name!("opacity") |
-                &local_name!("cx") |
-                &local_name!("cy") |
-                &local_name!("r") |
-                &local_name!("rx") |
-                &local_name!("ry") |
-                &local_name!("x") |
-                &local_name!("y") |
-                &local_name!("width") |
-                &local_name!("height") |
-                &local_name!("d")
+            &local_name!("clip-path")
+                | &local_name!("color")
+                | &local_name!("paint-order")
+                | &local_name!("stop-color")
+                | &local_name!("stop-opacity")
+                | &local_name!("fill")
+                | &local_name!("fill-opacity")
+                | &local_name!("fill-rule")
+                | &local_name!("stroke")
+                | &local_name!("stroke-width")
+                | &local_name!("stroke-linecap")
+                | &local_name!("stroke-linejoin")
+                | &local_name!("stroke-dasharray")
+                | &local_name!("stroke-dashoffset")
+                | &local_name!("stroke-miterlimit")
+                | &local_name!("stroke-opacity")
+                | &local_name!("display")
+                | &local_name!("visibility")
+                | &local_name!("opacity")
+                | &local_name!("cx")
+                | &local_name!("cy")
+                | &local_name!("r")
+                | &local_name!("rx")
+                | &local_name!("ry")
+                | &local_name!("x")
+                | &local_name!("y")
+                | &local_name!("width")
+                | &local_name!("height")
+                | &local_name!("d")
         ) || self
             .super_type()
             .unwrap()
@@ -313,6 +322,41 @@ impl<'dom> LayoutDom<'dom, SVGElement> {
             None,
             None,
             Default::default(),
+        );
+
+        // SVG color is a presentation attribute, not an HTML legacy color.
+        // Feed it through the ordinary CSS cascade so currentColor, custom
+        // properties, CSS-wide keywords and author overrides behave normally.
+        self.parse_svg_attribute(
+            &parser_context,
+            "color",
+            longhands::color::parse_declared,
+            push,
+        );
+        self.parse_svg_attribute(
+            &parser_context,
+            "clip-path",
+            longhands::clip_path::parse_declared,
+            push,
+        );
+        self.parse_svg_attribute(
+            &parser_context,
+            "paint-order",
+            longhands::paint_order::parse_declared,
+            push,
+        );
+
+        self.parse_svg_attribute(
+            &parser_context,
+            "stop-color",
+            longhands::stop_color::parse_declared,
+            push,
+        );
+        self.parse_svg_attribute(
+            &parser_context,
+            "stop-opacity",
+            longhands::stop_opacity::parse_declared,
+            push,
         );
 
         self.parse_svg_attribute(
@@ -492,10 +536,47 @@ impl<'dom> LayoutDom<'dom, SVGElement> {
         let element = self.upcast::<Element>();
         if let Some(value) = element.get_attr_val_for_layout(&ns!(), &LocalName::from(attr_name)) {
             let mut parser = cssparser::Parser::new(value);
+            // Presentation attributes participate in the CSS cascade. The typed
+            // longhand parser below only handles ordinary values, so preserve
+            // CSS-wide keywords as declarations instead of silently dropping them.
+            if let Ok(keyword) = parser.try_parse(|input| {
+                let keyword = CSSWideKeyword::parse(input)?;
+                input.expect_exhausted().map_err(|_| ())?;
+                Ok::<_, ()>(keyword)
+            }) {
+                if let Ok(property) = PropertyId::parse(attr_name, parser_context) {
+                    if let Some(id) = property.longhand_id() {
+                        push(PropertyDeclaration::css_wide_keyword(id, keyword));
+                    }
+                }
+                return;
+            }
             if let Ok(property) =
                 parser.parse_entirely(|parse_input| parse(parser_context, parse_input))
             {
                 push(property);
+                return;
+            }
+            // The typed parser cannot retain var() for substitution during the
+            // cascade. Use the ordinary declaration parser on that path so SVG
+            // presentation hints inherit and resolve custom properties too.
+            if let Ok(id) = PropertyId::parse(attr_name, parser_context) {
+                let mut declarations = SourcePropertyDeclaration::default();
+                if parse_one_declaration_into(
+                    &mut declarations,
+                    id,
+                    value,
+                    parser_context.stylesheet_origin,
+                    parser_context.url_data,
+                    None,
+                    parser_context.parsing_mode,
+                    parser_context.quirks_mode,
+                    CssRuleType::Style,
+                ).is_ok() {
+                    for declaration in declarations.drain().declarations {
+                        push(declaration);
+                    }
+                }
             }
         }
     }

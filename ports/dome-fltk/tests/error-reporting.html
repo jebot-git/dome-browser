@@ -1,0 +1,43 @@
+<!doctype html><meta charset="utf-8"><title>Error reporting cancellation and propagation</title>
+<script>
+(async()=>{
+ const query=new URLSearchParams(location.search),mode=query.get('case'),kind=query.get('value');
+ const checks=[],events={window:0,owner:0};let captured=null,ownerEvent=null,worker=null,selfReport=null,returned=false;
+ const value=kind==='undefined'?undefined:new Error('DOME_ERROR_REPORTING_SENTINEL');
+ const check=(name,passed)=>checks.push({name,passed});
+ addEventListener('error',event=>{events.window++;captured=event;if(mode==='window-listener-cancel'||mode==='worker-window-cancel')event.preventDefault()});
+ if(mode==='window-handler-true')onerror=()=>true;
+ if(mode==='window-handler-false')onerror=()=>false;
+ if(mode.startsWith('window-')){reportError(value);returned=true}
+ else{
+  function workerBody(mode,kind){
+   const value=kind==='undefined'?undefined:new Error('DOME_ERROR_REPORTING_SENTINEL');let count=0,event=null;
+   addEventListener('error',e=>{count++;event=e;if(mode==='worker-self-cancel')e.preventDefault()});
+   reportError(value);
+   setTimeout(()=>postMessage({count,sameValue:event!==null&&event.error===value,canceled:event?.defaultPrevented,returned:true}),30);
+  }
+  const url=URL.createObjectURL(new Blob(['('+workerBody.toString()+')('+JSON.stringify(mode)+','+JSON.stringify(kind)+')'],{type:'text/javascript'}));
+  worker=new Worker(url);
+  worker.addEventListener('error',event=>{events.owner++;ownerEvent=event;if(mode==='worker-owner-cancel')event.preventDefault()});
+  selfReport=await new Promise(resolve=>worker.onmessage=e=>resolve(e.data));returned=selfReport.returned;URL.revokeObjectURL(url);
+ }
+ await new Promise(resolve=>setTimeout(resolve,80));
+ const isWindow=mode.startsWith('window-');
+ const expectedWindow=isWindow||mode==='worker-window-cancel'||mode==='worker-unhandled'?1:0;
+ const expectedOwner=!isWindow&&mode!=='worker-self-cancel'?1:0;
+ check('reportError returns without throwing',returned);
+ check('expected Window error event count',events.window===expectedWindow);
+ check('expected owner Worker error event count',events.owner===expectedOwner);
+ if(isWindow){
+  check('Window event preserves the original value',captured!==null&&captured.error===value);
+  check('Window cancellation state is correct',captured!==null&&captured.defaultPrevented===(mode==='window-listener-cancel'||mode==='window-handler-true'));
+ }else{
+  check('worker global receives the original value once',selfReport.count===1&&selfReport.sameValue);
+  check('worker global cancellation is correct',selfReport.canceled===(mode==='worker-self-cancel'));
+  if(expectedOwner){check('Worker error omits the original cross-realm value',ownerEvent.error===null);check('owner cancellation state is correct',ownerEvent.defaultPrevented===(mode==='worker-owner-cancel'))}
+  if(expectedWindow){check('forwarded Window error omits the original value',captured.error===null);check('forwarded Window cancellation is correct',captured.defaultPrevented===(mode==='worker-window-cancel'))}
+ }
+ if(worker)worker.terminate();
+ await fetch('/report',{method:'POST',body:JSON.stringify({checks,mode,kind,events,selfReport})});
+})().catch(error=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[{name:'fixture completes',passed:false,error:String(error)}]})}));
+</script>

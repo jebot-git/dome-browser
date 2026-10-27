@@ -1138,7 +1138,7 @@ impl OpenXrDevice {
                     };
                     let transform = transform(&e.pose_in_previous_space());
                     self.events
-                        .callback(Event::ReferenceSpaceChanged(base_space, transform));
+                        .callback(Event::ReferenceSpaceChanged(base_space, e.pose_valid().then_some(transform)));
                 },
                 Some(_) => {
                     // FIXME: Handle other events
@@ -1357,6 +1357,7 @@ impl DeviceAPI for OpenXrDevice {
             sub_images,
             hit_test_results: vec![],
             predicted_display_time: frame_state.predicted_display_time.as_nanos() as f64,
+            predicted_display_instant: None,
         };
 
         if let Some(right_select) = right.select {

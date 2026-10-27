@@ -1,0 +1,34 @@
+<!doctype html><meta charset="utf-8"><title>Private SVG custom element isolation</title>
+<script>
+window.constructs = 0;
+window.failedConstructs = 0;
+window.constructorErrors = 0;
+addEventListener('error', event => {
+  if (event.message.includes('expected-constructor-failure')) {
+    window.constructorErrors++;
+    event.preventDefault();
+  }
+});
+customElements.define('snapshot-probe', class extends HTMLElement {
+  constructor() { super(); window.constructs++; }
+});
+customElements.define('throwing-probe', class extends HTMLElement {
+  constructor() { super(); window.failedConstructs++; throw new Error('expected-constructor-failure'); }
+});
+</script>
+<svg width="60" height="60"><rect width="60" height="60" fill="green"/>
+<foreignObject width="10" height="10"><snapshot-probe id="authored"></snapshot-probe><throwing-probe></throwing-probe></foreignObject></svg>
+<script>
+const publicClone = document.getElementById('authored').cloneNode(true);
+setTimeout(() => fetch('/report', {method:'POST', body:JSON.stringify({
+  constructs, failedConstructs, constructorErrors,
+  checks: [
+    {name:'private snapshots invoke no extra custom element constructors', passed:constructs === 2},
+    {name:'public clone still upgrades normally', passed:publicClone instanceof customElements.get('snapshot-probe')},
+    {name:'only authored custom element is in the document', passed:document.querySelectorAll('snapshot-probe').length === 1},
+    {name:'throwing constructor executes only for authored element', passed:failedConstructs === 1},
+    {name:'constructor exception reported once without browser failure', passed:constructorErrors === 1},
+    {name:'authored element retains its custom prototype', passed:document.getElementById('authored') instanceof customElements.get('snapshot-probe')}
+  ]
+})}), 1500);
+</script>

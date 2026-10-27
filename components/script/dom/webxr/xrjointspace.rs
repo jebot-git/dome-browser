@@ -13,6 +13,7 @@ use crate::dom::bindings::codegen::Bindings::XRJointSpaceBinding::XRJointSpaceMe
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::xrsession::{ApiPose, XRSession};
+use crate::dom::xrinputsource::XRInputSource;
 use crate::dom::xrspace::XRSpace;
 
 #[dom_struct]
@@ -29,13 +30,13 @@ pub(crate) struct XRJointSpace {
 impl XRJointSpace {
     pub(crate) fn new_inherited(
         session: &XRSession,
-        input: InputId,
+        input: &XRInputSource,
         joint: Joint,
         hand_joint: XRHandJoint,
     ) -> XRJointSpace {
         XRJointSpace {
-            xrspace: XRSpace::new_inherited(session),
-            input,
+            xrspace: XRSpace::new_inputspace_inner(session, input, false),
+            input: input.id(),
             joint,
             hand_joint,
         }
@@ -45,7 +46,7 @@ impl XRJointSpace {
         cx: &mut JSContext,
         global: &GlobalScope,
         session: &XRSession,
-        input: InputId,
+        input: &XRInputSource,
         joint: Joint,
         hand_joint: XRHandJoint,
     ) -> DomRoot<XRJointSpace> {
@@ -63,6 +64,7 @@ impl XRJointSpace {
     }
 
     pub(crate) fn frame<'a>(&self, frame: &'a Frame) -> Option<&'a JointFrame> {
+        if !self.xrspace.input_pose_visible() { return None; }
         frame
             .inputs
             .iter()

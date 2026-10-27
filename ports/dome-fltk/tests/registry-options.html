@@ -1,0 +1,205 @@
+<!doctype html><meta charset="utf-8"><title>Registry factories and shadow parsing</title>
+<style>body{margin:0;background:white}.tile{position:absolute;top:20px;width:60px;height:60px}</style>
+<script>
+const checks=[],diagnostics={};
+function test(name,fn){try{checks.push({name,passed:!!fn()})}catch(e){checks.push({name,passed:false,error:String(e)})}}
+function throws(name,fn){try{fn();return false}catch(e){return e.name===name}}
+let globalCalls=0,aCalls=0,bCalls=0;
+class GlobalProbe extends HTMLElement{constructor(){super();globalCalls++}}
+class AProbe extends HTMLElement{constructor(){super();aCalls++}}
+class BProbe extends HTMLElement{constructor(){super();bCalls++}}
+customElements.define('scope-probe',GlobalProbe);
+const a=new CustomElementRegistry(),b=new CustomElementRegistry();
+a.define('scope-probe',AProbe);b.define('scope-probe',BProbe);
+</script><body><script>
+let scoped,clone,nullNode;
+test('createElement uses scoped registry before any constructor',()=>{
+ scoped=document.createElement('scope-probe',{customElementRegistry:a});
+ return scoped instanceof AProbe&&scoped.customElementRegistry===a&&aCalls===1&&globalCalls===0;
+});
+test('createElementNS uses scoped registry and preserves prefix',()=>{
+ const node=document.createElementNS('http://www.w3.org/1999/xhtml','p:scope-probe',{customElementRegistry:b});
+ return node instanceof BProbe&&node.prefix==='p'&&node.customElementRegistry===b;
+});
+test('normal HTML and SVG elements retain explicit scoped registry',()=>{
+ const html=document.createElement('div',{customElementRegistry:a});
+ const svg=document.createElementNS('http://www.w3.org/2000/svg','svg',{customElementRegistry:a});
+ return html.customElementRegistry===a&&svg.customElementRegistry===a;
+});
+test('explicit null prevents global construction and remains null on insertion',()=>{
+ const before=globalCalls;nullNode=document.createElement('scope-probe',{customElementRegistry:null});
+ document.body.append(nullNode);
+ return nullNode.customElementRegistry===null&&!(nullNode instanceof GlobalProbe)&&globalCalls===before;
+});
+test('null-registry cloning does not call global constructor',()=>{
+ const before=globalCalls;const node=nullNode.cloneNode(true);
+ return node.customElementRegistry===null&&!(node instanceof GlobalProbe)&&globalCalls===before;
+});
+test('scoped cloning upgrades with its own constructor',()=>{
+ const before=globalCalls;clone=scoped.cloneNode(true);
+ return clone instanceof AProbe&&clone.customElementRegistry===a&&globalCalls===before;
+});
+test('document clone preserves an initialized scoped registry',()=>{
+ const doc=document.implementation.createHTMLDocument('scoped clone');
+ a.initialize(doc);
+ const copy=doc.cloneNode(true);
+ return doc.createElement('div').customElementRegistry===a&&
+  copy.createElement('div').customElementRegistry===a;
+});
+test('range fragment default context retains global registry',()=>{
+ class RangeProbe extends HTMLElement{}
+ customElements.define('range-global-probe',RangeProbe);
+ const range=document.createRange();
+ const fragment=range.createContextualFragment('<range-global-probe></range-global-probe>');
+ return fragment.firstChild instanceof RangeProbe&&fragment.firstChild.customElementRegistry===customElements;
+});
+test('global initialize rejects nodes from a document with no registry',()=>{
+ const doc=document.implementation.createHTMLDocument('inert');
+ return throws('NotSupportedError',()=>customElements.initialize(doc.createElement('div')));
+});
+test('registry option and is are rejected together',()=>
+ throws('NotSupportedError',()=>document.createElement('button',{is:'scope-probe',customElementRegistry:a}))&&
+ throws('NotSupportedError',()=>document.createElementNS('http://www.w3.org/1999/xhtml','button',{is:'scope-probe',customElementRegistry:null})));
+test('invalid registry values fail WebIDL conversion',()=>throws('TypeError',()=>document.createElement('div',{customElementRegistry:1})));
+const roots=[];
+const style='<style>scope-probe{display:block;width:60px;height:60px;background:rgb(120,120,120)}scope-probe:defined{background:rgb(20,180,90)}</style>';
+for(const [index,registry]of[a,b,null].entries()){
+ test('shadow parsing uses '+index+' registry without global fallback',()=>{
+  const host=document.createElement('div');host.className='tile';host.style.left=(20+index*80)+'px';document.body.append(host);
+  const root=host.attachShadow({mode:'open',clonable:true,customElementRegistry:registry});roots.push(root);
+  root.innerHTML=style+'<scope-probe></scope-probe>';
+  const node=root.querySelector('scope-probe');
+  return root.customElementRegistry===registry&&node.customElementRegistry===registry&&
+   (registry===null?!(node instanceof GlobalProbe):node instanceof registry.get('scope-probe'));
+ });
+}
+test('nested template remains inert inside scoped shadow',()=>{
+ const before=aCalls+globalCalls;const template=document.createElement('template',{customElementRegistry:a});
+ template.innerHTML='<scope-probe></scope-probe>';
+ return template.content.querySelector('scope-probe').customElementRegistry===null&&aCalls+globalCalls===before;
+});
+test('parser handles nested template content without constructors',()=>{
+ const before=aCalls+globalCalls;const host=document.createElement('div');const root=host.attachShadow({mode:'open',customElementRegistry:a});
+ root.innerHTML='<template><scope-probe></scope-probe></template>';
+ return root.querySelector('template').content.querySelector('scope-probe').customElementRegistry===null&&aCalls+globalCalls===before;
+});
+test('initialize does not replace an existing global registry',()=>{
+ const node=document.createElement('div');a.initialize(node);return node.customElementRegistry===customElements;
+});
+test('declarative null registry survives adoption and clone',()=>{
+ const before=globalCalls;const container=document.createElement('div');
+ container.setHTMLUnsafe('<div><template shadowrootmode="open" shadowrootclonable shadowrootcustomelementregistry><scope-probe></scope-probe></template></div>');
+ const host=container.firstElementChild,copy=host.cloneNode(true);
+ return host.shadowRoot.customElementRegistry===null&&copy.shadowRoot.customElementRegistry===null&&
+  host.shadowRoot.querySelector('scope-probe').customElementRegistry===null&&globalCalls===before;
+});
+test('scoped shadow clone retains both root and element registry',()=>{
+ const root=roots[0],copy=root.host.cloneNode(true),node=copy.shadowRoot.querySelector('scope-probe');
+ return copy.shadowRoot.customElementRegistry===a&&node.customElementRegistry===a&&node instanceof AProbe;
+});
+test('foster parenting preserves scoped constructor context',()=>{
+ const before=globalCalls;const root=document.createElement('div').attachShadow({mode:'open',customElementRegistry:a});
+ root.innerHTML='<table><scope-probe></scope-probe><tr><td><scope-probe></scope-probe></td></tr></table>';
+ const nodes=[...root.querySelectorAll('scope-probe')];
+ return nodes.length===2&&nodes.every(node=>node instanceof AProbe&&node.customElementRegistry===a)&&globalCalls===before;
+});
+test('formatting reconstruction preserves scoped context',()=>{
+ const before=globalCalls;const root=document.createElement('div').attachShadow({mode:'open',customElementRegistry:a});
+ root.innerHTML='<b><i><scope-probe></scope-probe></b><scope-probe></scope-probe></i>';
+ const nodes=[...root.querySelectorAll('scope-probe')];
+ return nodes.length===2&&nodes.every(node=>node instanceof AProbe&&node.customElementRegistry===a)&&globalCalls===before;
+});
+test('cross-document upgrade order follows connection association',()=>{
+ const frames=[document.createElement('iframe'),document.createElement('iframe')];
+ for(const frame of frames)document.body.append(frame);
+ try{
+  const registry=new CustomElementRegistry(),hosts=[],log=[];
+  for(const [index,frame]of frames.entries()){
+   const host=frame.contentDocument.createElement('div');
+   const root=host.attachShadow({mode:'open',customElementRegistry:registry});
+   root.innerHTML='<ordered-probe id="'+index+'"></ordered-probe>';hosts.push(host);
+  }
+  frames[1].contentDocument.body.append(hosts[1]);frames[0].contentDocument.body.append(hosts[0]);
+  registry.define('ordered-probe',class extends HTMLElement{constructor(){super();log.push(this.id)}});
+  diagnostics.upgradeOrder=log.slice();
+  diagnostics.upgradeNodes=hosts.map(host=>({registry:host.shadowRoot.firstChild.customElementRegistry===registry,defined:host.shadowRoot.firstChild.matches(':defined')}));
+  return log.join(',')==='1,0';
+ }finally{for(const frame of frames)frame.remove()}
+});
+const iframe=document.createElement('iframe');document.body.append(iframe);
+test('foreign global registries are rejected by both factories',()=>{
+ const foreign=iframe.contentWindow.customElements;
+ return throws('NotSupportedError',()=>document.createElement('div',{customElementRegistry:foreign}))&&
+  throws('NotSupportedError',()=>document.createElementNS('http://www.w3.org/1999/xhtml','div',{customElementRegistry:foreign}));
+});
+test('foreign global registry rejection leaves host untouched',()=>{
+ const host=document.createElement('div');
+ const result=throws('NotSupportedError',()=>host.attachShadow({mode:'open',customElementRegistry:iframe.contentWindow.customElements}));
+ return result&&host.shadowRoot===null;
+});iframe.remove();
+test('late global define leaves connected null-registry candidates untouched',()=>{
+ let calls=0;
+ class LateProbe extends HTMLElement{constructor(){super();calls++}}
+ const nullCandidate=document.createElement('late-null-probe',{customElementRegistry:null});
+ const globalCandidate=document.createElement('late-null-probe');
+ document.body.append(nullCandidate,globalCandidate);
+ customElements.define('late-null-probe',LateProbe);
+ diagnostics.lateGlobalDefine={calls,nullRegistry:nullCandidate.customElementRegistry===null,nullConstructed:nullCandidate instanceof LateProbe,globalConstructed:globalCandidate instanceof LateProbe};
+ const passed=calls===1&&nullCandidate.customElementRegistry===null&&!(nullCandidate instanceof LateProbe)&&globalCandidate instanceof LateProbe;
+ nullCandidate.remove();globalCandidate.remove();return passed;
+});
+test('import fallback reaches nested null-registry descendants',()=>{
+ class ImportProbe extends HTMLElement{}
+ customElements.define('import-fallback-probe',ImportProbe);
+ const template=document.createElement('template');
+ template.innerHTML='<div><import-fallback-probe></import-fallback-probe></div>';
+ const imported=document.importNode(template.content,true);
+ const node=imported.querySelector('import-fallback-probe');
+ return node instanceof ImportProbe&&node.customElementRegistry===customElements;
+});
+test('import descendants retain the original fallback across a scoped ancestor',()=>{
+ const doc=document.implementation.createHTMLDocument('fallback');
+ const container=doc.createElement('div');
+ const intermediate=doc.createElement('div',{customElementRegistry:b});
+ intermediate.append(doc.createElement('scope-probe'));container.append(intermediate);
+ const imported=document.importNode(container,{selfOnly:false,customElementRegistry:a});
+ return imported.customElementRegistry===a&&imported.firstChild.customElementRegistry===b&&
+  imported.firstChild.firstChild.customElementRegistry===a&&imported.firstChild.firstChild instanceof AProbe;
+});
+function closedUpgradeFixture(prefix){
+ class Owner extends HTMLElement{constructor(){super();this.internals=this.attachInternals()}}
+ customElements.define(prefix+'-owner',Owner);
+ const host=document.createElement(prefix+'-owner');
+ const root=host.attachShadow({mode:'closed',customElementRegistry:null});
+ root.innerHTML='<'+prefix+'-child></'+prefix+'-child>';
+ return {host,root,node:root.firstChild,registry:new CustomElementRegistry(),name:prefix+'-child'};
+}
+test('upgrade ignores an unassociated closed root without cloning assumptions',()=>{
+ const f=closedUpgradeFixture('closed-none');let calls=0;
+ class Probe extends HTMLElement{constructor(){super();calls++}}
+ f.registry.define(f.name,Probe);f.registry.upgrade(f.root);
+ return f.host.internals.shadowRoot===f.root&&f.root.customElementRegistry===null&&
+  f.node.customElementRegistry===null&&!(f.node instanceof Probe)&&calls===0;
+});
+test('initialize and upgrade work on an associated closed root',()=>{
+ const f=closedUpgradeFixture('closed-associated');let calls=0;
+ class Probe extends HTMLElement{constructor(){super();calls++}}
+ f.registry.define(f.name,Probe);f.registry.initialize(f.root);f.registry.upgrade(f.root);
+ return f.host.internals.shadowRoot===f.root&&f.root.customElementRegistry===f.registry&&
+  f.node.customElementRegistry===f.registry&&f.node instanceof Probe&&calls===1;
+});
+test('upgrade leaves nested null roots untouched until explicit initialization',()=>{
+ const f=closedUpgradeFixture('closed-nested');
+ class Inner extends HTMLElement{}
+ class Outer extends HTMLElement{constructor(){super();this.internals=this.attachInternals();
+  this.attachShadow({mode:'closed',customElementRegistry:null}).innerHTML='<closed-inner-probe></closed-inner-probe>'}}
+ f.registry.define(f.name,Outer);f.registry.initialize(f.root);
+ const innerRoot=f.node.internals.shadowRoot,inner=innerRoot.firstChild;
+ f.registry.define('closed-inner-probe',Inner);f.registry.upgrade(f.root);
+ const untouched=innerRoot.customElementRegistry===null&&inner.customElementRegistry===null&&!(inner instanceof Inner);
+ f.registry.initialize(innerRoot);f.registry.upgrade(innerRoot);
+ return untouched&&innerRoot.customElementRegistry===f.registry&&inner.customElementRegistry===f.registry&&inner instanceof Inner;
+});
+test('global constructor was never selected for explicit scoped/null operations',()=>globalCalls===0);
+setTimeout(()=>fetch('/report',{method:'POST',body:JSON.stringify({checks,globalCalls,aCalls,bCalls,diagnostics})}),150);
+</script>

@@ -507,6 +507,7 @@ pub enum EmbedderMsg {
     /// Inform embedder to clear the clipboard
     ClearClipboard(WebViewId),
     ManageLogin(WebViewId, LoginFormDetails, GenericCallback<Option<AuthenticationResponse>>),
+    CosmeticFilters(WebViewId, CosmeticFilterRequest, GenericCallback<Vec<String>>),
     /// Gets system clipboard contents
     GetClipboardText(WebViewId, GenericCallback<Result<String, String>>),
     /// Primary selection is separate from the explicit-copy clipboard.
@@ -706,6 +707,16 @@ pub enum GamepadHapticEffectType {
     DualRumble(DualRumbleEffectParams),
 }
 
+/// Native cosmetic-filter query. Ancestry and URL are supplied by the engine,
+/// independently of page scripts, Referrer-Policy and delayed UI history.
+#[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
+pub struct CosmeticFilterRequest {
+    pub url: ServoUrl,
+    pub top_level_origin: Option<String>,
+    pub classes: Vec<String>,
+    pub ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct WebResourceRequest {
     #[serde(
@@ -720,15 +731,26 @@ pub struct WebResourceRequest {
     pub headers: HeaderMap,
     pub url: ServoUrl,
     pub destination: Destination,
+    /// Native API provenance, never inferred from page-controlled headers.
+    #[serde(default)]
+    pub is_beacon: bool,
+    #[serde(default)]
+    pub is_websocket: bool,
     pub referrer_url: Option<ServoUrl>,
     /// Trusted initiator origin, independent of Referrer-Policy.
     pub initiator_origin: Option<String>,
+    /// Trusted top-level origin for site exceptions, independent of UI history.
+    /// Opaque or cross-site ancestor contexts are withheld rather than guessed.
+    #[serde(default)]
+    pub top_level_origin: Option<String>,
     pub is_for_main_frame: bool,
     pub is_redirect: bool,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
 pub enum WebResourceResponseMsg {
+    /// Continue the request after removing query fields; invalid scope changes cancel it.
+    RemoveQueryParameters(ServoUrl),
     /// Start an interception of this web resource load. It's expected that the client subsequently
     /// send either a `CancelLoad` or `FinishLoad` message after optionally sending chunks of body
     /// data via `SendBodyData`.
@@ -1187,6 +1209,8 @@ pub struct NewWebViewDetails {
     pub webview_id: WebViewId,
     pub viewport_details: ViewportDetails,
     pub user_content_manager_id: Option<UserContentManagerId>,
+    #[serde(default)]
+    pub protocol_state: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -1200,6 +1224,8 @@ pub struct NewWebViewDetails {
 /// ```
 pub struct UrlRequest {
     pub url: ServoUrl,
+    #[serde(default)]
+    pub protocol_state: Option<String>,
     #[serde(
         deserialize_with = "hyper_serde::deserialize",
         serialize_with = "hyper_serde::serialize"
@@ -1211,6 +1237,7 @@ impl UrlRequest {
     pub fn new(url: Url) -> Self {
         UrlRequest {
             url: url.into(),
+            protocol_state: None,
             headers: HeaderMap::new(),
         }
     }

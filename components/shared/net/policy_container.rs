@@ -7,6 +7,7 @@ use std::sync::Arc;
 use content_security_policy::CspList;
 use malloc_size_of_derive::MallocSizeOf;
 use serde::{Deserialize, Serialize};
+use servo_url::ImmutableOrigin;
 
 use crate::ReferrerPolicy;
 
@@ -39,6 +40,11 @@ impl RequestPolicyContainer {
 /// <https://html.spec.whatwg.org/multipage/#policy-containers>
 #[derive(Clone, Debug, Default, Deserialize, MallocSizeOf, Serialize)]
 pub struct PolicyContainer {
+    /// Native file authority bound to the local document's actual principal.
+    /// A cloned policy cannot grant access to a new opaque or network origin.
+    /// Referrers and the string "null" confer no authority.
+    #[serde(default)]
+    pub local_file_origin: Option<ImmutableOrigin>,
     #[ignore_malloc_size_of = "Defined in rust-content-security-policy"]
     /// <https://html.spec.whatwg.org/multipage/#policy-container-csp-list>
     pub csp_list: Option<CspList>,
@@ -69,18 +75,29 @@ impl PolicyContainer {
 
 /// <https://html.spec.whatwg.org/multipage/#embedder-policy>
 #[derive(Clone, Debug, Default, Deserialize, MallocSizeOf, Serialize)]
+#[serde(default)]
 pub struct EmbedderPolicy {
     /// <https://html.spec.whatwg.org/multipage/#embedder-policy-value-2>
     pub value: EmbedderPolicyValue,
+    pub reporting_endpoint: Option<String>,
+    pub report_only_value: EmbedderPolicyValue,
+    pub report_only_reporting_endpoint: Option<String>,
 }
 
 /// <https://html.spec.whatwg.org/multipage/#embedder-policy-value>
-#[derive(Clone, Copy, Debug, Default, Deserialize, MallocSizeOf, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, MallocSizeOf, PartialEq, Serialize)]
 pub enum EmbedderPolicyValue {
     /// "unsafe-none"
     #[default]
     UnsafeNone,
     /// "require-corp"
     RequireCorp,
-    // TODO "credentialless"
+    /// "credentialless"
+    Credentialless,
+}
+
+impl EmbedderPolicyValue {
+    pub fn compatible_with_cross_origin_isolation(self) -> bool {
+        !matches!(self, Self::UnsafeNone)
+    }
 }

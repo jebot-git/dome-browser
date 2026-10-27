@@ -41,7 +41,7 @@ use crate::sizing::{
     self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize, Size,
     SizeConstraint, Sizes,
 };
-use crate::style_ext::{AspectRatio, ContentBoxSizesAndPBM, LayoutStyle, PaddingBorderMargin};
+use crate::style_ext::{AspectRatio, ComputedValuesExt, ContentBoxSizesAndPBM, LayoutStyle, PaddingBorderMargin};
 use crate::{ConstraintSpace, ContainingBlock, ContainingBlockSize, IndefiniteContainingBlock};
 
 mod construct;
@@ -1297,13 +1297,19 @@ impl IndependentFormattingContext {
             if cache.depends_on_stretch_size {
                 update_cache(cache, stretch_size);
             }
-            content_box_sizes.inline.resolve(
+            let ratio_size = preferred_aspect_ratio.filter(|_| !self.is_replaced() && !is_table)
+                .map(|ratio| sizing::AspectRatioSizing::from_opposite(
+                    ratio, LogicalAxis::Inline, &content_box_sizes.block, available_block_size,
+                ));
+            content_box_sizes.inline.resolve_with_aspect_ratio(
                 LogicalAxis::Inline,
                 automatic_inline_size,
                 Au::zero,
                 Some(stretch_size),
                 || get_inline_content_sizes(cache),
                 is_table,
+                ratio_size,
+                !style.establishes_scroll_container(self.base.base_fragment_info.flags),
             )
         };
 
@@ -1618,10 +1624,13 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
         .map(|block_size| Au::zero().max(block_size - pbm_sums.block));
     let automatic_block_size = automatic_block_size(layout_context, base);
 
-    // TODO: support preferred aspect ratios on boxes that don't establish an independent
-    // formatting context.
-    let preferred_aspect_ratio =
-        context.and_then(|context| context.preferred_aspect_ratio(&pbm.padding_border_sums));
+    let preferred_aspect_ratio = context.map_or_else(
+        || style.preferred_aspect_ratio(None, &pbm.padding_border_sums),
+        |context| context.preferred_aspect_ratio(&pbm.padding_border_sums),
+    );
+    let non_replaced_ratio = preferred_aspect_ratio.filter(|_| {
+        context.is_none_or(|context| !context.is_replaced() && !context.is_table())
+    });
     let is_table = layout_style.is_table();
 
     // https://drafts.csswg.org/css2/#the-height-property
@@ -1645,7 +1654,7 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
             available_block_size,
         )
     };
-    let tentative_block_size = adjust_block_size_for_percentage_quirk(
+    let mut tentative_block_size = adjust_block_size_for_percentage_quirk(
         layout_context,
         tentative_block_size,
         containing_block,
@@ -1663,14 +1672,28 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
         ))
     };
     let justify_self = resolve_justify_self(style, containing_block.style, has_inline_parent);
-    let inline_size = content_box_sizes.inline.resolve(
+    let inline_ratio_size = non_replaced_ratio.map(|ratio| sizing::AspectRatioSizing::from_opposite(
+        ratio, LogicalAxis::Inline, &content_box_sizes.block, available_block_size,
+    ));
+    let inline_size = content_box_sizes.inline.resolve_with_aspect_ratio(
         LogicalAxis::Inline,
         automatic_inline_size(justify_self, context),
         Au::zero,
         Some(available_inline_size),
         get_inline_content_sizes,
         is_table,
+        inline_ratio_size,
+        !style.establishes_scroll_container(base.base_fragment_info.flags),
     );
+    if context.is_none() {
+        if let Some(ratio) = non_replaced_ratio {
+            let target = ratio.compute_dependent_size(LogicalAxis::Block, inline_size);
+            tentative_block_size = SizeConstraint::Definite(content_box_sizes.block.resolve_with_aspect_ratio(
+                LogicalAxis::Block, automatic_block_size, Au::zero, available_block_size,
+                || target.into(), false, Some(sizing::AspectRatioSizing::preferred(target)), false,
+            ));
+        }
+    }
 
     let containing_block_for_children = ContainingBlock {
         size: ContainingBlockSize {
@@ -2254,13 +2277,20 @@ impl IndependentFormattingContext {
                 .sizes
         };
 
-        let inline_size = content_box_sizes_and_pbm.content_box_sizes.inline.resolve(
+        let inline_ratio_size = preferred_aspect_ratio.filter(|_| !self.is_replaced() && !is_table)
+            .map(|ratio| sizing::AspectRatioSizing::from_opposite(
+                ratio, LogicalAxis::Inline, &content_box_sizes_and_pbm.content_box_sizes.block,
+                available_block_size,
+            ));
+        let inline_size = content_box_sizes_and_pbm.content_box_sizes.inline.resolve_with_aspect_ratio(
             LogicalAxis::Inline,
             automatic_block_size,
             Au::zero,
             Some(available_inline_size),
             get_content_size,
             is_table,
+            inline_ratio_size,
+            !style.establishes_scroll_container(self.base.base_fragment_info.flags),
         );
 
         let containing_block_for_children = ContainingBlock {

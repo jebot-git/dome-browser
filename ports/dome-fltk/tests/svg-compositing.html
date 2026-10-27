@@ -1,0 +1,23 @@
+<!doctype html><meta charset="utf-8"><title>SVG descendant compositing styles</title>
+<style>
+body{margin:0;background:white}svg{position:absolute;top:20px;width:60px;height:60px}
+#opacityCSS g{opacity:.5}#displayCSS rect{display:none}#visibilityCSS rect{visibility:hidden}
+#rootOpacityCSS{opacity:.5}#clipCSS g{clip-path:url(#cssClip)}#orderCSS rect{paint-order:stroke fill}
+</style>
+<svg id="opacityAttr" style="left:20px" width="60" height="60"><g opacity=".5"><rect width="60" height="60" fill="#14b45a"/></g></svg>
+<svg id="opacityCSS" style="left:100px" width="60" height="60"><g><rect width="60" height="60" fill="#14b45a"/></g></svg>
+<svg id="displayAttr" style="left:180px" width="60" height="60"><rect display="none" width="60" height="60" fill="#14b45a"/></svg>
+<svg id="displayCSS" style="left:260px" width="60" height="60"><rect width="60" height="60" fill="#14b45a"/></svg>
+<svg id="visibilityAttr" style="left:340px" width="60" height="60"><rect visibility="hidden" width="60" height="60" fill="#14b45a"/></svg>
+<svg id="visibilityCSS" style="left:420px" width="60" height="60"><rect width="60" height="60" fill="#14b45a"/></svg>
+<svg id="clipAttr" style="left:500px" width="60" height="60"><defs><clipPath id="attrClip"><rect width="30" height="60"/></clipPath></defs><g clip-path="url(#attrClip)"><rect width="60" height="60" fill="#14b45a"/></g></svg>
+<svg id="clipCSS" style="left:580px" width="60" height="60"><defs><clipPath id="cssClip"><rect width="30" height="60"/></clipPath></defs><g><rect width="60" height="60" fill="#14b45a"/></g></svg>
+<svg id="orderAttr" style="left:660px" width="60" height="60"><rect x="10" y="10" width="40" height="40" fill="#1464b4" stroke="#14b45a" stroke-width="20" paint-order="stroke fill"/></svg>
+<svg id="orderCSS" style="left:740px" width="60" height="60"><rect x="10" y="10" width="40" height="40" fill="#1464b4" stroke="#14b45a" stroke-width="20"/></svg>
+<div style="position:absolute;left:20px;top:120px;opacity:.5"><svg id="htmlOpacityControl" style="position:static" width="60" height="60"><rect width="60" height="60" fill="#14b45a"/></svg></div>
+<svg id="rootOpacityCSS" style="left:100px;top:120px" width="60" height="60"><rect width="60" height="60" fill="#14b45a"/></svg>
+<svg id="rootOpacityAttr" style="left:180px;top:120px" width="60" height="60" opacity=".5"><rect width="60" height="60" fill="#14b45a"/></svg>
+<svg id="rootOpacityImportant" style="; opacity:.5 !important; left:260px;top:120px" width="60" height="60"><rect width="60" height="60" fill="#14b45a"/></svg>
+<script>
+window.addEventListener('load',()=>fetch('/report',{method:'POST',body:JSON.stringify({styles:[...document.querySelectorAll('svg')].map(svg=>{const shape=svg.querySelector('g')||svg.querySelector('rect');const style=getComputedStyle(shape);return{id:svg.id,rootOpacity:getComputedStyle(svg).opacity,opacity:style.opacity,display:style.display,visibility:style.visibility,clipPath:style.clipPath,paintOrder:style.paintOrder}})})}));
+</script>

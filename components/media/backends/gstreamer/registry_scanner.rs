@@ -173,11 +173,11 @@ impl GStreamerRegistryScanner {
             self.supported_mime_types.insert("video/x-msvideo");
         }
 
-        if has_element_for_media_type(&demux_factories, "application/x-hls") {
-            self.supported_mime_types
-                .insert("application/vnd.apple.mpegurl");
-            self.supported_mime_types.insert("application/x-mpegurl");
-        }
+        // Servo supplies media through servosrc rather than an HTTP URI. Adaptive
+        // demuxers cannot resolve playlist-relative resources through that source,
+        // and their own network requests would bypass Servo's session and policy.
+        // Do not advertise HLS solely because the plugin is installed: sites can
+        // select a progressive MP4/WebM fallback instead.
 
         if has_element_for_media_type(&demux_factories, "application/x-wav") ||
             has_element_for_media_type(&demux_factories, "audio/x-wav")

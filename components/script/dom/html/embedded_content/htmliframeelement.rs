@@ -399,7 +399,7 @@ impl HTMLIFrameElement {
             Some(document.insecure_requests_policy()),
             document.has_trustworthy_ancestor_or_current_origin(),
             self.sandboxing_flag_set(),
-        );
+        ).with_cookie_site(document.cookie_site());
         load_data.destination = Destination::IFrame;
         load_data.policy_container = Some(window.as_global_scope().policy_container());
         load_data.srcdoc = String::from(
@@ -488,14 +488,14 @@ impl HTMLIFrameElement {
         // against simple typo self-includes but nothing more elaborate.
         let mut ancestor = window.GetParent();
         while let Some(a) = ancestor {
-            if let Some(ancestor_url) = a.document().map(|d| d.url()) &&
-                ancestor_url.scheme() == url.scheme() &&
-                ancestor_url.username() == url.username() &&
-                ancestor_url.password() == url.password() &&
-                ancestor_url.host() == url.host() &&
-                ancestor_url.port() == url.port() &&
-                ancestor_url.path() == url.path() &&
-                ancestor_url.query() == url.query()
+            if let Some(ancestor_url) = a.document().map(|d| d.url())
+                && ancestor_url.scheme() == url.scheme()
+                && ancestor_url.username() == url.username()
+                && ancestor_url.password() == url.password()
+                && ancestor_url.host() == url.host()
+                && ancestor_url.port() == url.port()
+                && ancestor_url.path() == url.path()
+                && ancestor_url.query() == url.query()
             {
                 return;
             }
@@ -520,7 +520,7 @@ impl HTMLIFrameElement {
             Some(document.insecure_requests_policy()),
             document.has_trustworthy_ancestor_or_current_origin(),
             self.sandboxing_flag_set(),
-        );
+        ).with_cookie_site(document.cookie_site());
         load_data.destination = Destination::IFrame;
         load_data.policy_container = Some(window.as_global_scope().policy_container());
         if propagate_encoding_to_child_document {
@@ -579,7 +579,7 @@ impl HTMLIFrameElement {
             Some(document.insecure_requests_policy()),
             document.has_trustworthy_ancestor_or_current_origin(),
             self.sandboxing_flag_set(),
-        );
+        ).with_cookie_site(document.cookie_site());
         load_data.is_initial_about_blank = true;
         load_data.destination = Destination::IFrame;
         load_data.policy_container = Some(window.as_global_scope().policy_container());
@@ -602,8 +602,8 @@ impl HTMLIFrameElement {
         );
         // > navigable target name
         // >     targetName
-        if let Some(window) = self.GetContentWindow() &&
-            let Some(window_name) = &*self.frozen_name.borrow()
+        if let Some(window) = self.GetContentWindow()
+            && let Some(window_name) = &*self.frozen_name.borrow()
         {
             window.set_name(window_name.as_str().into());
         }
@@ -635,8 +635,8 @@ impl HTMLIFrameElement {
         if !self.is_initial_blank_document() {
             self.pending_navigation.set(false);
         }
-        if self.pending_pipeline_id.get() != Some(new_pipeline_id) &&
-            reason == UpdatePipelineIdReason::Navigation
+        if self.pending_pipeline_id.get() != Some(new_pipeline_id)
+            && reason == UpdatePipelineIdReason::Navigation
         {
             return false;
         }
@@ -763,8 +763,8 @@ impl HTMLIFrameElement {
             // If this is the initial blank doc:
             // do not fire if there is a pending navigation,
             // or if the iframe has an src.
-            !self.pending_navigation.get() &&
-                !self.upcast::<Element>().has_attribute(&local_name!("src"))
+            !self.pending_navigation.get()
+                && !self.upcast::<Element>().has_attribute(&local_name!("src"))
         } else {
             // If this is not the initial blank doc:
             // do not fire if there is a pending navigation.
@@ -1274,6 +1274,11 @@ impl ResourceTimingListener for IframeContext {
 fn snapshot_self(iframe: &HTMLIFrameElement) -> TargetSnapshotParams {
     let child_navigable = iframe.GetContentWindow();
     TargetSnapshotParams {
+        container_embedder_policy: iframe
+            .owner_document()
+            .policy_container()
+            .embedder_policy
+            .value,
         sandboxing_flags: determine_creation_sandboxing_flags(
             child_navigable.as_deref(),
             Some(iframe.upcast()),

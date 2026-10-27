@@ -1,0 +1,30 @@
+<!doctype html><title>Inherited frame cosmetics</title>
+<style nonce=fixture>iframe{width:200px;height:180px;border:0}</style>
+<script nonce=fixture>
+addEventListener('load',async()=>{
+ try{
+  const frames=[],seen=new Set();
+  addEventListener('message',event=>{
+   const data=event.data;
+   if(!data||!['http','srcdoc','blank','opaque'].includes(data.frame)||seen.has(data.frame))return;
+   const frame=document.getElementById(data.frame);if(!frame||frame.contentWindow!==event.source)return;
+   seen.add(data.frame);frames.push({...data,messageOrigin:event.origin});
+   if(frames.length===4)fetch('/report',{method:'POST',body:JSON.stringify({frames})});
+  });
+  const html=await(await fetch('/child')).text();
+  for(const kind of ['http','srcdoc','blank','opaque']){
+   const frame=document.createElement('iframe');frame.id=kind;frame.referrerPolicy='no-referrer';
+   if(kind==='http')frame.src='/child-http';else if(kind==='srcdoc'||kind==='opaque')frame.srcdoc=html.replaceAll('__FRAME_ID__',kind);
+   if(kind==='opaque')frame.setAttribute('sandbox','allow-scripts');
+   document.body.append(frame);
+   if(kind==='blank'){
+    const doc=frame.contentDocument,parsed=new DOMParser().parseFromString(html.replaceAll('__FRAME_ID__',kind),'text/html');
+    const text=parsed.querySelector('script').textContent;parsed.querySelector('script').remove();
+    for(const node of [...parsed.head.childNodes])doc.head.append(doc.importNode(node,true));
+    for(const node of [...parsed.body.childNodes])doc.body.append(doc.importNode(node,true));
+    const script=doc.createElement('script');script.setAttribute('nonce','fixture');script.textContent=text;doc.body.append(script);
+   }
+  }
+ }catch(e){fetch('/report',{method:'POST',body:JSON.stringify({error:String(e)})});}
+});
+</script>

@@ -950,7 +950,7 @@ impl HTMLFormElement {
             Some(target_document.insecure_requests_policy()),
             target_document.has_trustworthy_ancestor_origin(),
             target_document.creation_sandboxing_flag_set_considering_parent_iframe(),
-        );
+        ).with_cookie_site(doc.cookie_site());
 
         // Step 26. Select the appropriate row in the table below based on scheme as given by the first cell of each row.
         // Then, select the appropriate cell on that row based on method as given in the first cell of each column.

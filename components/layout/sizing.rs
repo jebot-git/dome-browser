@@ -666,7 +666,83 @@ pub(crate) struct Sizes {
     pub max: Size<Au>,
 }
 
+/// Numeric size transfers are distinct from intrinsic content measurements.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AspectRatioSizing {
+    preferred: Option<Au>,
+    min: Au,
+    max: Option<Au>,
+}
+
+impl AspectRatioSizing {
+    pub(crate) fn preferred(size: Au) -> Self {
+        Self { preferred: Some(size), min: Au::zero(), max: None }
+    }
+
+    pub(crate) fn from_opposite(
+        ratio: AspectRatio, axis: LogicalAxis, opposite: &Sizes, stretch: Option<Au>,
+    ) -> Self {
+        // Subtracting border/padding can make a specified constraint negative.
+        // Floor the content size before converting back through the ratio.
+        let transfer = |size: Au| ratio.compute_dependent_size(axis, size.max(Au::zero()));
+        let preferred = opposite.resolve_extrinsic(Size::FitContent, Au::zero(), stretch)
+            .to_definite().map(transfer);
+        Self {
+            preferred,
+            min: opposite.min.maybe_resolve_extrinsic(stretch).map(transfer).unwrap_or_default(),
+            max: opposite.max.maybe_resolve_extrinsic(stretch).map(transfer),
+        }
+    }
+}
+
 impl Sizes {
+    /// Apply preferred-size and min/max transfers after measuring intrinsic
+    /// contents. An explicit size is never overwritten by the preferred ratio.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn resolve_with_aspect_ratio(
+        &self,
+        axis: LogicalAxis,
+        automatic_size: Size<Au>,
+        get_automatic_minimum_size: impl FnOnce() -> Au,
+        stretch_size: Option<Au>,
+        get_content_size: impl FnOnce() -> ContentSizes,
+        is_table: bool,
+        ratio: Option<AspectRatioSizing>,
+        content_based_minimum: bool,
+    ) -> Au {
+        let transfer = ratio.filter(|_| matches!(
+            self.preferred, Size::Initial | Size::MinContent | Size::MaxContent | Size::FitContent
+        ));
+        let Some(transfer) = transfer else {
+            return self.resolve(axis, automatic_size, get_automatic_minimum_size,
+                stretch_size, get_content_size, is_table);
+        };
+        let content = LazyCell::new(get_content_size);
+        let mut effective = self.clone();
+        if let Some(size) = transfer.preferred {
+            effective.preferred = Size::Numeric(size);
+        }
+        let (preferred, min, max) = effective.resolve_each(
+            automatic_size,
+            || {
+                let minimum = get_automatic_minimum_size();
+                if transfer.preferred.is_some() && content_based_minimum {
+                    // The automatic content minimum is capped by a definite
+                    // maximum; an explicit minimum still wins over that maximum.
+                    minimum.max(content.min_content.clamp_below_max(
+                        self.max.maybe_resolve_extrinsic(stretch_size),
+                    ))
+                } else { minimum }
+            },
+            stretch_size, || *content, is_table,
+        );
+        let max = match (max, transfer.max) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        preferred.clamp_between_extremums(min.max(transfer.min), max)
+    }
+
     #[inline]
     pub(crate) fn new(preferred: Size<Au>, min: Size<Au>, max: Size<Au>) -> Self {
         Self {
@@ -795,6 +871,7 @@ struct LazySizeData<'a> {
 pub(crate) struct LazySize<'a> {
     result: OnceCell<Au>,
     data: Option<LazySizeData<'a>>,
+    aspect_ratio_size: Cell<Option<(Au, bool)>>,
 }
 
 impl<'a> LazySize<'a> {
@@ -808,6 +885,7 @@ impl<'a> LazySize<'a> {
     ) -> Self {
         Self {
             result: OnceCell::new(),
+            aspect_ratio_size: Cell::new(None),
             data: Some(LazySizeData {
                 sizes,
                 axis,
@@ -830,7 +908,21 @@ impl<'a> LazySize<'a> {
         Self {
             result: OnceCell::new(),
             data: None,
+            aspect_ratio_size: Cell::new(None),
         }
+    }
+
+    pub(crate) fn set_aspect_ratio_size(&self, size: Au, content_based_minimum: bool) -> Option<Au> {
+        let data = self.data.as_ref()?;
+        if !matches!(data.sizes.preferred,
+            Size::Initial | Size::MinContent | Size::MaxContent | Size::FitContent) {
+            return None;
+        }
+        self.aspect_ratio_size.set(Some((size, content_based_minimum)));
+        Some(data.sizes.resolve_with_aspect_ratio(
+            data.axis, data.automatic_size, data.get_automatic_minimum_size,
+            data.stretch_size, || size.into(), data.is_table, Some(AspectRatioSizing::preferred(size)), false,
+        ))
     }
 
     /// Resolves the [`LazySize`] into [`Au`], caching the result.
@@ -842,13 +934,16 @@ impl<'a> LazySize<'a> {
             let Some(ref data) = self.data else {
                 return get_content_size();
             };
-            data.sizes.resolve(
+            let ratio = self.aspect_ratio_size.get();
+            data.sizes.resolve_with_aspect_ratio(
                 data.axis,
                 data.automatic_size,
                 data.get_automatic_minimum_size,
                 data.stretch_size,
                 || get_content_size().into(),
                 data.is_table,
+                ratio.map(|value| AspectRatioSizing::preferred(value.0)),
+                ratio.is_some_and(|value| value.1),
             )
         })
     }
@@ -860,6 +955,6 @@ impl From<Au> for LazySize<'_> {
     fn from(value: Au) -> Self {
         let result = OnceCell::new();
         result.set(value).unwrap();
-        LazySize { result, data: None }
+        LazySize { result, data: None, aspect_ratio_size: Cell::new(None) }
     }
 }

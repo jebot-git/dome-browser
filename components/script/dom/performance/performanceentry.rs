@@ -20,7 +20,6 @@ use super::performance::ToDOMHighResTimeStamp;
 use crate::dom::bindings::codegen::Bindings::PerformanceBinding::DOMHighResTimeStamp;
 use crate::dom::bindings::codegen::Bindings::PerformanceEntryBinding::PerformanceEntryMethods;
 use crate::dom::bindings::codegen::Bindings::PerformanceResourceTimingBinding::PerformanceResourceTimingMethods;
-use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::performance::performanceresourcetiming::PerformanceResourceTiming;
 
@@ -116,6 +115,11 @@ pub(crate) struct PerformanceEntry {
     #[no_trace]
     start_time: Option<CrossProcessInstant>,
 
+    // Entries retained across an initial about:blank navigation must keep the
+    // origin of their own timeline, even when the Window is reused.
+    #[no_trace]
+    time_origin: CrossProcessInstant,
+
     /// The duration of this [`PerformanceEntry`]. This is a [`time::Duration`],
     /// because it can be negative and `std::time::Duration` cannot be.
     ///
@@ -137,6 +141,7 @@ impl PerformanceEntry {
         entry_type: EntryType,
         start_time: Option<CrossProcessInstant>,
         duration: Duration,
+        time_origin: CrossProcessInstant,
     ) -> PerformanceEntry {
         PerformanceEntry {
             reflector_: Reflector::new(),
@@ -144,6 +149,7 @@ impl PerformanceEntry {
             entry_type,
             start_time,
             duration,
+            time_origin,
         }
     }
 
@@ -155,6 +161,13 @@ impl PerformanceEntry {
     /// <https://www.w3.org/TR/performance-timeline/#dom-performanceentry-starttime>
     pub(crate) fn start_time(&self) -> Option<CrossProcessInstant> {
         self.start_time
+    }
+
+    pub(crate) fn to_dom_high_res_time_stamp(
+        &self,
+        instant: Option<CrossProcessInstant>,
+    ) -> DOMHighResTimeStamp {
+        (instant.unwrap_or(self.time_origin) - self.time_origin).to_dom_high_res_time_stamp()
     }
 }
 
@@ -180,10 +193,8 @@ impl PerformanceEntryMethods<crate::DomTypeHolder> for PerformanceEntry {
     }
 
     /// <https://w3c.github.io/performance-timeline/#dom-performanceentry-starttime>
-    fn StartTime(&self, cx: &mut JSContext) -> DOMHighResTimeStamp {
-        self.global()
-            .performance(cx)
-            .maybe_to_dom_high_res_time_stamp(self.start_time)
+    fn StartTime(&self, _cx: &mut JSContext) -> DOMHighResTimeStamp {
+        self.to_dom_high_res_time_stamp(self.start_time)
     }
 
     /// <https://w3c.github.io/performance-timeline/#dom-performanceentry-duration>

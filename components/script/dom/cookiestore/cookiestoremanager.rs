@@ -109,6 +109,10 @@ impl CookieStoreManagerMethods<crate::DomTypeHolder> for CookieStoreManager {
         // Step 2. Let registration be this's registration.
         // Step 3. Let p be a new promise.
         let promise = Promise::new(cx, &self.global());
+        if !self.global().cookies_allowed() {
+            promise.reject_error(cx, Error::Security(Some("Third-party cookies are blocked".into())));
+            return promise;
+        }
         // Step 4.1. Let subscription list be registration's associated cookie
         // change subscription list.
 
@@ -145,6 +149,10 @@ impl CookieStoreManagerMethods<crate::DomTypeHolder> for CookieStoreManager {
         // Step 1. Let registration be this's registration.
         // Step 2. Let p be a new promise.
         let promise = Promise::new(cx, &self.global());
+        if !self.global().cookies_allowed() {
+            promise.reject_error(cx, Error::Security(Some("Third-party cookies are blocked".into())));
+            return promise;
+        }
         // Step 3.1. Let subscriptions be registration's associated cookie
         // change subscription list.
         let subscriptions = self.subscriptions.borrow();
@@ -166,6 +174,10 @@ impl CookieStoreManagerMethods<crate::DomTypeHolder> for CookieStoreManager {
         // Step 2. Let registration be this's registration.
         // Step 3. Let p be a new promise.
         let promise = Promise::new(cx, &self.global());
+        if !self.global().cookies_allowed() {
+            promise.reject_error(cx, Error::Security(Some("Third-party cookies are blocked".into())));
+            return promise;
+        }
         // Step 4.1. Let subscription list be registration's associated cookie
         // change subscription list.
 

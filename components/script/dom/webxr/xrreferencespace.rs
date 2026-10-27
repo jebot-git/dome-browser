@@ -2,10 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::{cell::Cell, rc::Rc};
+
 use dom_struct::dom_struct;
 use euclid::{Point2D, RigidTransform3D};
 use js::context::JSContext;
-use script_bindings::reflector::reflect_dom_object;
+use script_bindings::reflector::reflect_weak_referenceable_dom_object;
 use webxr_api::{self, Floor, Frame, Space};
 
 use crate::dom::bindings::codegen::Bindings::XRReferenceSpaceBinding::{
@@ -15,9 +17,10 @@ use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::xrboundedreferencespace::XRBoundedReferenceSpace;
 use crate::dom::window::Window;
 use crate::dom::xrrigidtransform::XRRigidTransform;
-use crate::dom::xrsession::{ApiPose, BaseTransform, XRSession, cast_transform};
+use crate::dom::xrsession::{ApiPose, ApiRigidTransform, BaseTransform, XRSession, cast_transform};
 use crate::dom::xrspace::XRSpace;
 
 #[dom_struct]
@@ -25,6 +28,7 @@ pub(crate) struct XRReferenceSpace {
     xrspace: XRSpace,
     offset: Dom<XRRigidTransform>,
     ty: XRReferenceSpaceType,
+    reset_listener_count: Cell<usize>,
 }
 
 impl XRReferenceSpace {
@@ -37,6 +41,7 @@ impl XRReferenceSpace {
             xrspace: XRSpace::new_inherited(session),
             offset: Dom::from_ref(offset),
             ty,
+            reset_listener_count: Cell::new(0),
         }
     }
 
@@ -57,11 +62,13 @@ impl XRReferenceSpace {
         ty: XRReferenceSpaceType,
         offset: &XRRigidTransform,
     ) -> DomRoot<XRReferenceSpace> {
-        reflect_dom_object(
+        let space = reflect_weak_referenceable_dom_object(
             cx,
-            Box::new(XRReferenceSpace::new_inherited(session, offset, ty)),
+            Rc::new(XRReferenceSpace::new_inherited(session, offset, ty)),
             global,
-        )
+        );
+        session.register_reference_space(&space);
+        space
     }
 
     pub(crate) fn space(&self) -> Space {
@@ -76,6 +83,34 @@ impl XRReferenceSpace {
         Space { base, offset }
     }
 
+    pub(crate) fn reset_transform(&self, delta: ApiRigidTransform) -> ApiRigidTransform {
+        webxr_api::util::offset_reference_space_reset(self.offset.transform(), delta)
+    }
+
+    pub(crate) fn reset_listener_added(&self) {
+        let count = self.reset_listener_count.get();
+        self.reset_listener_count.set(count + 1);
+        if count == 0 {
+            self.upcast::<XRSpace>().session().retain_reset_listener_space(self);
+        }
+    }
+
+    pub(crate) fn reset_listener_removed(&self) {
+        let count = self.reset_listener_count.get();
+        debug_assert!(count > 0);
+        self.reset_listener_count.set(count.saturating_sub(1));
+        if count == 1 {
+            self.upcast::<XRSpace>().session().release_reset_listener_space(self);
+        }
+    }
+
+    pub(crate) fn bounds_geometry(&self) -> Option<Vec<euclid::Point3D<f32, webxr_api::ApiSpace>>> {
+        let inverse = self.offset.transform().inverse();
+        Some(self.get_bounds()?.into_iter().map(|p| {
+            inverse.rotation.transform_point3d(euclid::Point3D::new(p.x, 0., p.y)) + inverse.translation
+        }).collect())
+    }
+
     pub(crate) fn ty(&self) -> XRReferenceSpaceType {
         self.ty
     }
@@ -86,13 +121,13 @@ impl XRReferenceSpaceMethods<crate::DomTypeHolder> for XRReferenceSpace {
     fn GetOffsetReferenceSpace(&self, cx: &mut JSContext, new: &XRRigidTransform) -> DomRoot<Self> {
         let offset = new.transform().then(&self.offset.transform());
         let offset = XRRigidTransform::new(cx, self.global().as_window(), offset);
-        Self::new_offset(
-            cx,
-            &self.global(),
-            self.upcast::<XRSpace>().session(),
-            self.ty,
-            &offset,
-        )
+        let session = self.upcast::<XRSpace>().session();
+        if self.is::<XRBoundedReferenceSpace>() {
+            let bounded = XRBoundedReferenceSpace::new_offset(cx, &self.global(), session, &offset);
+            DomRoot::from_ref(bounded.reference_space())
+        } else {
+            Self::new_offset(cx, &self.global(), session, self.ty, &offset)
+        }
     }
 
     // https://www.w3.org/TR/webxr/#dom-xrreferencespace-onreset

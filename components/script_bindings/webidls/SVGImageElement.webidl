@@ -10,7 +10,7 @@ interface SVGImageElement : SVGGraphicsElement {
   //[SameObject] readonly attribute SVGAnimatedLength width;
   //[SameObject] readonly attribute SVGAnimatedLength height;
   //[SameObject] readonly attribute SVGAnimatedPreserveAspectRatio preserveAspectRatio;
-  //attribute DOMString? crossOrigin;
+  attribute DOMString? crossOrigin;
 };
 
 //SVGImageElement includes SVGURIReference;

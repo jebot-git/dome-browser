@@ -2408,6 +2408,10 @@ impl Node {
         // tree order:
         if &*old_doc != document {
             for descendant in node.traverse_preorder(ShadowIncluding::Yes) {
+                // A common global registry can be stored implicitly through
+                // ownerDocument. Capture it before changing that document.
+                let previous_registry = descendant.downcast::<Element>()
+                    .and_then(Element::custom_element_registry);
                 // Step 3.1. Set inclusiveDescendant’s node document to document.
                 descendant.set_owner_doc(document);
 
@@ -2422,9 +2426,9 @@ impl Node {
                 //
                 // Note: `keep custom element registry null` is not yet implemented in servo.
                 if let Some(shadow_root) = descendant.downcast::<ShadowRoot>() {
-                    if shadow_root
+                    if !old_doc.is_registry_fragment_document() && shadow_root
                         .custom_element_registry()
-                        .is_none_or(|registry| {
+                        .map_or(!shadow_root.keep_custom_element_registry_null(), |registry| {
                             CustomElementRegistry::is_a_global_element_registry(Some(&*registry))
                         })
                     {
@@ -2450,14 +2454,20 @@ impl Node {
                     // registry’s is scoped is false, then set inclusiveDescendant’s
                     // custom element registry to document’s effective global
                     // custom element registry.
-                    if element
-                        .custom_element_registry()
-                        .is_none_or(|registry| !registry.is_scoped())
-                    {
+                    if old_doc.is_registry_fragment_document() {
+                        element.set_custom_element_registry(previous_registry.as_deref(), cx.no_gc());
+                    } else if previous_registry.as_ref().is_none_or(|registry| !registry.is_scoped()) {
+                        let parent = descendant.GetParentNode();
+                        let registry = if previous_registry.is_some() ||
+                            parent.as_ref().is_none_or(|parent| matches!(parent.type_id(),
+                                NodeTypeId::DocumentFragment(DocumentFragmentTypeId::DocumentFragment)))
+                        {
+                            document.custom_element_registry()
+                        } else {
+                            CustomElementRegistry::lookup_a_custom_element_registry(parent.as_deref().unwrap())
+                        };
                         element.set_custom_element_registry(
-                            document
-                                .effective_global_custom_element_registry()
-                                .as_deref(),
+                            registry.as_deref().filter(|registry| !registry.is_scoped()),
                             cx.no_gc(),
                         );
                     }
@@ -3183,6 +3193,9 @@ impl Node {
                 } else {
                     IsHTMLDocument::NonHTMLDocument
                 };
+                let scoped_registry = document
+                    .custom_element_registry()
+                    .filter(|registry| registry.is_scoped());
                 let window = document.window();
                 let loader = DocumentLoader::new(&document.loader());
                 let document = Document::new(
@@ -3211,7 +3224,9 @@ impl Node {
                 );
                 // Step 2. If node’s custom element registry’s is scoped is true,
                 // then set copy’s custom element registry to node’s custom element registry.
-                // TODO
+                if let Some(registry) = scoped_registry.as_deref() {
+                    document.set_custom_element_registry(registry);
+                }
                 DomRoot::upcast::<Node>(document)
             },
             // Step 2. If node is an element:
@@ -3219,11 +3234,15 @@ impl Node {
                 let element = node.downcast::<Element>().unwrap();
                 // Step 2.1. Let registry be node’s custom element registry.
                 // Step 2.2. If registry is null, then set registry to fallbackRegistry.
-                let registry = element.custom_element_registry().or(registry);
+                let registry = element.custom_element_registry().or_else(|| registry.clone());
                 // Step 2.3. If registry is a global custom element registry, then
                 // set registry to document’s effective global custom element registry.
                 let registry =
-                    if CustomElementRegistry::is_a_global_element_registry(registry.as_deref()) {
+                    if document.is_svg_snapshot_document() {
+                        // Renderer-only copies must not retain scoped registries
+                        // either: disconnected insertion can enqueue upgrades.
+                        None
+                    } else if CustomElementRegistry::is_a_global_element_registry(registry.as_deref()) {
                         document.effective_global_custom_element_registry()
                     } else {
                         registry
@@ -3236,7 +3255,7 @@ impl Node {
                     ns: element.namespace().clone(),
                     local: element.local_name().clone(),
                 };
-                let element = Element::create(
+                let element = Element::create_with_registry(
                     cx,
                     name,
                     element.get_is(),
@@ -3244,6 +3263,7 @@ impl Node {
                     ElementCreator::ScriptCreated,
                     CustomElementCreationMode::Asynchronous,
                     None,
+                    registry.as_deref(),
                 );
                 // TODO: Move this into `Element::create`
                 element.set_custom_element_registry(registry.as_deref(), cx.no_gc());
@@ -3285,7 +3305,11 @@ impl Node {
         // result of cloning child with document and the clone children flag set, to copy.
         if clone_children == CloneChildrenFlag::CloneChildren {
             for child in node.children() {
-                let child_copy = Node::clone(cx, &child, Some(&document), clone_children, None);
+                // The original import fallback applies to every light-tree
+                // descendant, independently of an ancestor's resolved registry.
+                let child_copy = Node::clone(
+                    cx, &child, Some(&document), clone_children, registry.clone(),
+                );
                 let _inserted_node = Node::pre_insert(cx, &child_copy, &copy, None);
             }
         }
@@ -3303,8 +3327,12 @@ impl Node {
                 // Step 7.2 Run attach a shadow root with copy, node’s shadow root’s mode, true,
                 // node’s shadow root’s serializable, node’s shadow root’s delegates focus,
                 // and node’s shadow root’s slot assignment.
+                let registry = if document.is_svg_snapshot_document() { None }
+                    else if shadow_root.custom_element_registry().as_ref().is_some_and(|registry| !registry.is_scoped()) {
+                        document.effective_global_custom_element_registry()
+                    } else { shadow_root.custom_element_registry() };
                 let copy_shadow_root =
-                    copy_elem.attach_shadow(
+                    copy_elem.attach_shadow_with_registry(
                         cx,
                         IsUserAgentWidget::No,
                         shadow_root.Mode(),
@@ -3312,11 +3340,13 @@ impl Node {
                         shadow_root.Serializable(),
                         shadow_root.DelegatesFocus(),
                         shadow_root.SlotAssignment(),
+                        registry.as_deref(),
                     )
                     .expect("placement of attached shadow root must be valid, as this is a copy of an existing one");
 
                 // Step 7.3 Set copy’s shadow root’s declarative to node’s shadow root’s declarative.
                 copy_shadow_root.set_declarative(shadow_root.is_declarative());
+                copy_shadow_root.set_keep_custom_element_registry_null(shadow_root.keep_custom_element_registry_null());
 
                 // Step 7.4 For each child child of node’s shadow root, in tree order: append the result of
                 // cloning child with document and the clone children flag set, to copy’s shadow root.

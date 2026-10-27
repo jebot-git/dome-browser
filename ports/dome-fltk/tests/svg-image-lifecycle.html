@@ -1,0 +1,36 @@
+<!doctype html><meta charset="utf-8"><title>SVG image completion after removal</title>
+<script>
+(async () => {
+    const svg = 'http://www.w3.org/2000/svg';
+    const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const checks = [], results = [];
+    const check = (name, passed) => checks.push({name, passed: !!passed});
+    await Promise.all(['immediate', 'delayed', 'parent-removed', 'failure'].map(async name => {
+        const root = document.createElementNS(svg, 'svg');
+        const image = document.createElementNS(svg, 'image');
+        const events = [];
+        image.setAttribute('width', '20');
+        image.setAttribute('height', '20');
+        image.setAttribute('href', '/timing-control.svg?control=lifecycle-' + name +
+            '&delay=600' + (name === 'failure' ? '&fail=1' : ''));
+        for (const type of ['load', 'error']) {
+            image.addEventListener(type, () => events.push({type, connected: image.isConnected}));
+        }
+        root.append(image);
+        document.documentElement.append(root);
+        if (name !== 'immediate') await wait(160);
+        if (name === 'parent-removed') root.remove();
+        else image.remove();
+        await wait(1600);
+        check(name + ': exactly one terminal event', events.length === 1);
+        check(name + ': correct completion kind', events[0]?.type === (name === 'failure' ? 'error' : 'load'));
+        check(name + ': completion arrives while detached', events[0]?.connected === false);
+        check(name + ': original document ownership retained', image.ownerDocument === document);
+        root.remove();
+        results.push({name, events});
+    }));
+    fetch('/report', {method: 'POST', body: JSON.stringify({checks, diagnostics: {results},
+        scope: 'Connection-triggered SVG image requests retain load/error completion after removal; source changes, adoption and document destruction remain distinct cancellation paths.'})});
+})().catch(error => fetch('/report', {method: 'POST', body: JSON.stringify({
+    checks: [{name: 'fixture completed', passed: false, error: String(error)}]})}));
+</script>

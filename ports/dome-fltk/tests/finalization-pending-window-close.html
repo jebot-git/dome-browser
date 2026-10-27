@@ -1,0 +1,30 @@
+<!doctype html><meta charset="utf-8"><title>Cleanup pending during window close</title>
+<script>
+'use strict';
+let sent = false;
+const registry = new FinalizationRegistry(held => {
+  if (held !== 'first' || sent) return;
+  sent = true;
+  for (let i = 0; i < 1500; i++) registry.register({i}, i);
+  // The harness closes the browser while this callback causes another GC.
+  // Its running callback and any newly queued tasks must remain rooted, then
+  // release their roots safely when the runtime is destroyed.
+  fetch('/report', {method: 'POST', body: JSON.stringify({checks: [
+    {name: 'cleanup callback reached before window-close request', passed: true}
+  ], scope: 'Lifecycle stress, not a fixed GC deadline assertion; correlate GC log with clean shutdown.'})});
+  pressure(65000);
+});
+registry.register({}, 'first');
+function pressure(count) {
+  for (let i = 0; i < count; i++) {
+    const node = document.createElement('span');
+    node.textContent = 'pending-cleanup-' + i;
+  }
+}
+setTimeout(() => pressure(45000), 150);
+setTimeout(() => {
+  if (!sent) fetch('/report', {method: 'POST', body: JSON.stringify({checks: [
+    {name: 'cleanup callback reached before window-close request', passed: false}
+  ], scope: 'Allocation-triggered diagnostic was inconclusive; inspect actual GC before attributing failure.'})});
+}, 10000);
+</script>

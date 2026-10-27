@@ -11,7 +11,7 @@ members = [
     "tests/unit/*",
 ]
 default-members = ["ports/servoshell"]
-exclude = [".cargo", "support/crown"]
+exclude = [".cargo", "support/crown", "third_party/stylo"]
 
 [workspace.package]
 version = "0.7.0"
@@ -230,6 +230,7 @@ serde_bytes = "0.11"
 serde_core = "1.0.226"
 serde_json = "1.0"
 serde_test = "1.0"
+sfv = "0.15"
 serde_with = "3.13"
 servo_arc = { git = "https://github.com/servo/stylo", rev = "633f43ad86de1372fd7106d265c00ffcdf022c35" }
 sha1 = "0.11"
@@ -450,6 +451,8 @@ lto = "thin"
 codegen-units = 1
 
 [patch.crates-io]
+html5ever = { path = "third_party/html5ever" }
+markup5ever = { path = "third_party/markup5ever" }
 # If you need to temporarily test Servo with a local fork of some upstream
 # crate, add that here. Use the form:
 #
@@ -493,3 +496,17 @@ codegen-units = 1
 #
 # [patch."https://github.com/servo/<repository>"]
 # <crate> = { path = "/path/to/local/checkout" }
+
+# Pinned Stylo source with Dome's SVG gradient-stop support. See its README.dome.md.
+[patch."https://github.com/servo/stylo"]
+selectors = { path = "third_party/stylo/selectors" }
+servo_arc = { path = "third_party/stylo/servo_arc" }
+stylo = { path = "third_party/stylo/style" }
+stylo_atoms = { path = "third_party/stylo/stylo_atoms" }
+stylo_dom = { path = "third_party/stylo/stylo_dom" }
+stylo_malloc_size_of = { path = "third_party/stylo/malloc_size_of" }
+stylo_static_prefs = { path = "third_party/stylo/stylo_static_prefs" }
+stylo_traits = { path = "third_party/stylo/style_traits" }
+stylo_derive = { path = "third_party/stylo/style_derive" }
+to_shmem = { path = "third_party/stylo/to_shmem" }
+to_shmem_derive = { path = "third_party/stylo/to_shmem_derive" }

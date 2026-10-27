@@ -269,6 +269,15 @@ impl WebResourceLoad {
         &self.request
     }
 
+    /// Continue loading after a privacy filter removes query fields. The network
+    /// layer rejects origin, credentials, path, fragment or retained-field changes.
+    /// This preserves the method, body and existing Fetch security checks.
+    pub fn remove_query_parameters(mut self, url: Url) {
+        if let Err(error) = self.responder.send(WebResourceResponseMsg::RemoveQueryParameters(url.into())) {
+            self.error_sender.raise_response_send_error(error);
+        }
+    }
+
     /// Intercept this [`WebResourceLoad`] and control the response via the returned
     /// [`InterceptedWebResourceLoad`].
     pub fn intercept(mut self, response: WebResourceResponse) -> InterceptedWebResourceLoad {
@@ -921,6 +930,12 @@ impl CreateNewWebViewRequest {
 /// instance. A [`WebView`]'s delegate needs to be set at the time of creation using
 /// [`WebViewBuilder::delegate`].
 pub trait WebViewDelegate {
+    /// Return CSS selectors to hide in this document, including newly seen tokens.
+    /// Applied as browser-owned user styles, without executing page JavaScript.
+    fn cosmetic_filters(&self, _webview: WebView, _request: embedder_traits::CosmeticFilterRequest) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Get the [`ScreenGeometry`] for this [`WebView`]. If this is unimplemented or returns `None`
     /// the screen will have the size of the [`WebView`]'s `RenderingContext` and `WebView` will be
     /// considered to be positioned at the screen's origin.
@@ -1230,7 +1245,11 @@ mod test {
                 .expect("Guaranteed by argument")
                 .into(),
             destination: content_security_policy::Destination::Document,
+            is_beacon: false,
+            is_websocket: false,
             referrer_url: None,
+            initiator_origin: None,
+            top_level_origin: None,
             is_for_main_frame: false,
             is_redirect: false,
         };

@@ -623,6 +623,11 @@ impl ServoInner {
                     }
                 }
             },
+            EmbedderMsg::CosmeticFilters(id, request, reply) => {
+                let selectors = self.get_webview_handle(id)
+                    .map(|view| view.delegate().cosmetic_filters(view, request)).unwrap_or_default();
+                let _ = reply.send(selectors);
+            },
             EmbedderMsg::ManageLogin(id, details, reply) => {
                 let result = self.get_webview_handle(id).and_then(|view| view.delegate().manage_login(view, details));
                 let _ = reply.send(result);
@@ -935,9 +940,10 @@ impl ServoInner {
                 webview_id,
                 new_back_forward_list,
                 current_list_index,
+                protocol_state,
             ) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
-                    webview.set_history(new_back_forward_list, current_list_index);
+                    webview.set_history(new_back_forward_list, current_list_index, protocol_state);
                 }
             },
             ConstellationToEmbedderMsg::Panic(webview_id, reason, backtrace) => {
@@ -976,6 +982,13 @@ impl Drop for ServoInner {
         self.shutdown_state.set(ShutdownState::ShuttingDown);
         while self.spin_event_loop() {
             std::thread::sleep(Duration::from_micros(500));
+        }
+        // Media initialization runs on a detached thread. A short-lived webview
+        // can finish before GStreamer has loaded its plugins. Wait for the backend
+        // to be ready before returning to the embedder, which may exit and unload
+        // GLib while those plugin constructors are still running.
+        if !opts::get().multiprocess {
+            drop(ServoMedia::get());
         }
     }
 }
@@ -1209,6 +1222,14 @@ impl Servo {
         let mut preferences = prefs::get().clone();
         preferences.set_value(name, value);
         prefs::set(preferences);
+        // In-process embedders share hot preferences and do not register the
+        // multiprocess observer. Cosmetic generation is an explicit document
+        // refresh notification, so deliver it to those script loops as well.
+        if name == "network_cosmetic_filter_generation" && !opts::get().multiprocess {
+            self.0.constellation_proxy.send(EmbedderToConstellationMessage::PreferencesUpdated(vec![
+                ("network_cosmetic_filter_generation", PrefValue::Int(prefs::get().network_cosmetic_filter_generation)),
+            ]));
+        }
     }
 
     pub fn network_manager<'a>(&'a self) -> Ref<'a, NetworkManager> {

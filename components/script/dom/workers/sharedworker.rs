@@ -48,6 +48,7 @@ use crate::dom::sharedworkerglobalscope::{
 use crate::dom::trustedtypes::trustedscripturl::TrustedScriptURL;
 use crate::dom::window::Window;
 use crate::dom::workerglobalscope::prepare_workerscope_init;
+use crate::runtime::script_runtime::ThreadSafeJSContext;
 use crate::tasks::task::TaskOnce;
 use crate::url::ensure_blob_referenced_by_url_is_kept_alive;
 
@@ -113,6 +114,7 @@ impl SharedWorkerSite {
 pub(crate) struct SharedWorkerStorageKey {
     origin: ImmutableOrigin,
     top_level_site: Option<SharedWorkerSite>,
+    cookie_site: Option<SharedWorkerSite>,
 }
 
 impl SharedWorkerStorageKey {
@@ -129,6 +131,7 @@ impl SharedWorkerStorageKey {
         SharedWorkerStorageKey {
             origin,
             top_level_site,
+            cookie_site: global.cookie_site().map(SharedWorkerSite::from_origin),
         }
     }
 }
@@ -153,6 +156,7 @@ struct SharedWorkerRegistration {
     extended_lifetime: bool,
     worker_is_secure_context: bool,
     closing: Arc<AtomicBool>,
+    context_for_interrupt: ThreadSafeJSContext,
     sender: Sender<SharedWorkerScriptMsg>,
     _control_sender: Sender<SharedWorkerControlMsg>,
 }
@@ -318,6 +322,26 @@ fn send_connect_to_created_worker(
 }
 
 impl SharedWorker {
+    /// End process-wide shared workers when their JS engine is shutting down.
+    /// Do not hold the registry lock while workers unregister during teardown.
+    pub(crate) fn shutdown_all() {
+        let registrations: Vec<_> = {
+            let (workers, _) = &*SHARED_WORKERS;
+            let workers = workers.lock().expect("SharedWorker registry poisoned");
+            workers.iter().filter_map(|entry| match &entry.state {
+                SharedWorkerRegistryState::Created(worker) => Some(worker.clone()),
+                _ => None,
+            }).collect()
+        };
+        for worker in registrations {
+            worker.closing.store(true, Ordering::SeqCst);
+            // Running JavaScript needs an interrupt; an idle event loop needs
+            // a control message to wake its channel selector.
+            worker.context_for_interrupt.request_interrupt_callback();
+            let _ = worker._control_sender.send(SharedWorkerControlMsg::Exit);
+        }
+    }
+
     pub(crate) fn unregister_shared_worker(id: Uuid) {
         let (workers, ready) = &*SHARED_WORKERS;
         let mut workers = workers.lock().expect("SharedWorker registry poisoned");
@@ -667,7 +691,7 @@ impl SharedWorkerMethods<crate::DomTypeHolder> for SharedWorker {
         };
 
         // Step 11.5.2. Let workerIsSecureContext be true if insideSettings is a secure context; otherwise, false.
-        let Ok(worker_is_secure_context) = setup_receiver.recv() else {
+        let Ok((worker_is_secure_context, context_for_interrupt)) = setup_receiver.recv() else {
             remove_creating_shared_worker(&shared_worker_key);
             SharedWorker::queue_simple_error(global, worker_addr);
             return Ok(worker);
@@ -680,6 +704,7 @@ impl SharedWorkerMethods<crate::DomTypeHolder> for SharedWorker {
             extended_lifetime,
             worker_is_secure_context,
             closing,
+            context_for_interrupt,
             sender,
             _control_sender: control_sender,
         };

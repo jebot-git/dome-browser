@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Stylesheet SVG paint-server references and fallback paint</title>
+<link rel="help" href="https://www.w3.org/TR/SVG2/painting.html#SpecifyingPaint">
+<link rel="match" href="svg-stylesheet-paint-reference-ref.html">
+<meta name="assert" content="Stylesheet paint servers retain same-document fill and stroke references and fallback colors.">
+<style>
+.squares { display:flex; gap:20px; }
+svg { width:100px; height:100px; background:red; }
+#fill rect { fill:url(#fillGradient); }
+#stroke rect { fill:green; stroke:url(#strokeGradient); stroke-width:20px; }
+#fallback rect { fill:url(#missingGradient) green; }
+</style>
+<p>There should be three green squares and no red.</p>
+<div class="squares">
+ <svg id="fill" viewBox="0 0 100 100">
+  <defs><linearGradient id="fillGradient"><stop offset="0" stop-color="green"/><stop offset="1" stop-color="green"/></linearGradient></defs>
+  <rect width="100" height="100"/>
+ </svg>
+ <svg id="stroke" viewBox="0 0 100 100">
+  <defs><linearGradient id="strokeGradient"><stop offset="0" stop-color="green"/><stop offset="1" stop-color="green"/></linearGradient></defs>
+  <rect x="10" y="10" width="80" height="80"/>
+ </svg>
+ <svg id="fallback" viewBox="0 0 100 100"><rect width="100" height="100"/></svg>
+</div>

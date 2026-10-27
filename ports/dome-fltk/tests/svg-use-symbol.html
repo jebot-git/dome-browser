@@ -1,0 +1,16 @@
+<!doctype html><meta charset=utf-8><title>SVG symbol instance viewports</title>
+<style>body{margin:0;background:white}.tile{position:absolute;top:20px;width:60px;height:60px}.symbol-fill{fill:var(--paint,red)}</style>
+<svg width="0" height="0" style="position:absolute"><defs>
+ <symbol id="shared-symbol" viewBox="0 0 10 10"><rect class="symbol-fill" width="10" height="10"/></symbol>
+ <svg id="shared-viewport" width="10" height="10" viewBox="0 0 10 10"><rect width="10" height="10"/></svg>
+</defs></svg>
+<svg class=tile style="left:20px"><defs><symbol id="local-symbol" viewBox="0 0 10 10"><rect width="10" height="10" fill="currentColor"/></symbol></defs><use href="#local-symbol" width="60" height="60" color="rgb(20,180,90)"/></svg>
+<svg class=tile style="left:100px"><use href="#shared-symbol" width="60" height="60" style="--paint:rgb(20,180,90)"/></svg>
+<svg class=tile style="left:180px"><use href="#shared-viewport" width="60" height="60" fill="rgb(20,180,90)"/></svg>
+<svg class=tile style="left:260px"><use href="#shared-symbol" width="30" height="60" style="--paint:rgb(20,180,90)"/></svg>
+<svg class=tile style="left:340px"><use href="#shared-symbol" width="60" height="60" style="display:none;--paint:red"/></svg>
+<svg class=tile style="left:420px"><symbol viewBox="0 0 10 10"><rect width="10" height="10" fill="red"/></symbol></svg>
+<script>addEventListener('load',()=>setTimeout(()=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[
+{name:'symbol viewBox stays unchanged',passed:document.getElementById('shared-symbol').getAttribute('viewBox')==='0 0 10 10'},
+{name:'source symbol is not duplicated in the document',passed:document.querySelectorAll('#shared-symbol').length===1}
+]})}),500));</script>

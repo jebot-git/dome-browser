@@ -174,10 +174,10 @@ impl From<ServoLayoutNode<'_>> for BaseFragmentInfo {
                 // TODO(mrobinson): It seems that anonymous boxes should take part in hit testing in some
                 // cases, but currently this means that the order of hit test results isn't as expected for
                 // some WPT tests. This needs more investigation.
-                PseudoElement::ServoAnonymousBox |
-                PseudoElement::ServoAnonymousTable |
-                PseudoElement::ServoAnonymousTableCell |
-                PseudoElement::ServoAnonymousTableRow => return Self::anonymous(),
+                PseudoElement::ServoAnonymousBox
+                | PseudoElement::ServoAnonymousTable
+                | PseudoElement::ServoAnonymousTableCell
+                | PseudoElement::ServoAnonymousTableRow => return Self::anonymous(),
                 // A `<br>` forces a new line using a `::before` pseudo-element. Both of them need to get
                 // this flag.
                 PseudoElement::Before if node.is_html_br_element() => {
@@ -199,6 +199,12 @@ impl From<ServoLayoutNode<'_>> for BaseFragmentInfo {
                 && element.local_name() == &local_name!("foreignObject")
         }) {
             flags.insert(FragmentFlags::IS_SVG_FOREIGN_OBJECT);
+        }
+
+        if node.as_element().is_some_and(|element| {
+            element.namespace() == &ns!(svg) && element.local_name() == &local_name!("svg")
+        }) {
+            flags.insert(FragmentFlags::IS_INLINE_SVG);
         }
 
         if let Some(element) = node.as_html_element() {
@@ -307,6 +313,8 @@ bitflags! {
         const IS_CONTAINER_TIMING_IGNORE = 1 << 15;
         /// An SVG foreignObject establishes the containing block for its CSS island.
         const IS_SVG_FOREIGN_OBJECT = 1 << 16;
+        /// Inline SVG snapshots retain visibility on individual vector descendants.
+        const IS_INLINE_SVG = 1 << 17;
     }
 }
 
@@ -316,8 +324,8 @@ impl FragmentFlags {
     ///
     /// TODO: `<marquee>` should also be compressible replaced.
     pub(crate) fn is_compressible_replaced(self) -> bool {
-        self.contains(Self::IS_REPLACED) ||
-            (self.contains(Self::IS_WIDGET) && !self.contains(Self::IS_BUTTON))
+        self.contains(Self::IS_REPLACED)
+            || (self.contains(Self::IS_WIDGET) && !self.contains(Self::IS_BUTTON))
     }
 }
 

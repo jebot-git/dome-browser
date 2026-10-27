@@ -14,8 +14,9 @@ use style::computed_values::font_style::T as FontStyle;
 use style::computed_values::font_width::T as FontWidth;
 use style::font_face::{ComputedFontStyleRange, ComputedFontWeightRange, ComputedFontWidthRange};
 use style::values::computed::font::FontWeight;
+use uuid::Uuid;
 
-use crate::{CSSFontFaceDescriptors, FontDescriptor, FontFaceRuleInfo, FontIdentifier};
+use crate::{CSSFontFaceDescriptors, FontData, FontDescriptor, FontFaceRuleInfo, FontIdentifier};
 
 /// A reference to a [`FontTemplate`] with shared ownership and mutability.
 #[derive(Clone, Debug, MallocSizeOf)]
@@ -145,6 +146,13 @@ pub struct FontTemplate {
     #[serde(skip)]
     #[conditional_malloc_size_of]
     pub font_face_rule: Option<ServoArc<FontFaceRuleInfo>>,
+    /// Identity of a script-created face, independent of its resource URL.
+    #[serde(skip)]
+    pub script_font_face_id: Option<Uuid>,
+    /// Sanitized bytes held until stylesheet installation, or owned by a
+    /// loaded script face even while detached from every document.
+    #[serde(skip)]
+    pub script_font_data: Option<FontData>,
 }
 
 impl Debug for FontTemplate {
@@ -167,6 +175,8 @@ impl FontTemplate {
             identifier,
             descriptor,
             font_face_rule,
+            script_font_face_id: None,
+            script_font_data: None,
         }
     }
 
@@ -183,6 +193,8 @@ impl FontTemplate {
             .descriptor
             .override_values_with_css_font_template_descriptors(css_font_template_descriptors);
         alias_template.font_face_rule = font_face_rule;
+        alias_template.script_font_face_id = None;
+        alias_template.script_font_data = None;
         Ok(alias_template)
     }
 

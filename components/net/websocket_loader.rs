@@ -33,13 +33,15 @@ use tokio::select;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio_rustls::TlsConnector;
 use tungstenite::error::{Error, ProtocolError, UrlError};
+use tungstenite::client::IntoClientRequest;
 use tungstenite::handshake::client::Response;
 use tungstenite::protocol::CloseFrame;
-use tungstenite::{ClientRequestBuilder, Message};
+use tungstenite::Message;
 
 use crate::async_runtime::spawn_task;
 use crate::connector::TlsConfig;
 use crate::cookie::ServoCookie;
+use crate::cookie_storage::CookieStorage;
 use crate::hosts::replace_host;
 use crate::http_loader::HttpState;
 
@@ -52,20 +54,18 @@ pub fn create_handshake_request(
     request: RequestBuilder,
     http_state: Arc<HttpState>,
 ) -> Result<net_traits::request::Request, Error> {
-    let origin = request.url.origin();
-
     let mut headers = HeaderMap::new();
+    let origin = request.client.as_ref().map(|client| match &client.origin {
+        net_traits::request::Origin::Origin(origin) => origin.ascii_serialization().into_owned(),
+        net_traits::request::Origin::Client => "null".to_owned(),
+    }).unwrap_or_else(|| "null".to_owned());
     headers.insert(
         "Origin",
-        HeaderValue::from_str(request.url.origin().ascii_serialization().as_ref())?,
+        HeaderValue::from_str(&origin)?,
     );
 
-    let host = format!(
-        "{}",
-        origin
-            .host()
-            .ok_or_else(|| Error::Url(UrlError::NoHostName))?
-    );
+    let host = request.url.host_str().ok_or_else(|| Error::Url(UrlError::NoHostName))?;
+    let host = format!("{host}{}", request.url.port().map(|port| format!(":{port}")).unwrap_or_default());
     headers.insert("Host", HeaderValue::from_str(&host)?);
 
     // https://websockets.spec.whatwg.org/#concept-websocket-establish
@@ -101,9 +101,10 @@ pub fn create_handshake_request(
         headers.insert("Sec-WebSocket-Protocol", HeaderValue::from_str(&protocols)?);
     }
 
-    let mut cookie_jar = http_state.cookie_jar.write();
+    let mut cookie_jar = CookieStorage::access(&http_state.cookie_jar);
     cookie_jar.remove_expired_cookies_for_url(&request.url);
-    if let Some(cookie_list) = cookie_jar.cookies_for_url(&request.url, CookieSource::HTTP) {
+    if (!servo_config::pref!(network_cookie_block_third_party) || request.is_first_party_for_cookies()) &&
+        let Some(cookie_list) = cookie_jar.cookies_for_url_with_context(&request.url, CookieSource::HTTP, request.cookie_context()) {
         headers.insert("Cookie", HeaderValue::from_str(&cookie_list)?);
     }
 
@@ -116,6 +117,24 @@ pub fn create_handshake_request(
     Ok(request.headers(headers).build())
 }
 
+/// Fetch removes Host before transport. Generate the transport defaults, then
+/// replace (rather than append) the Fetch-side handshake fields. This preserves
+/// its key and origin without duplicating single-valued protocol headers.
+pub fn websocket_transport_handshake(client: &net_traits::request::Request) -> Result<http::Request<()>, Error> {
+    let mut original_url = client.original_url();
+    if original_url.scheme() == "ws" && client.url().scheme() == "https" {
+        original_url.as_mut_url().set_scheme("wss").unwrap();
+    }
+    let mut handshake = original_url.as_str().into_client_request()?;
+    for (key, value) in client.headers.iter() {
+        handshake.headers_mut().insert(key.clone(), value.clone());
+    }
+    if servo_config::pref!(network_cookie_block_third_party) && !client.is_first_party_for_cookies() {
+        handshake.headers_mut().remove(header::COOKIE);
+    }
+    Ok(handshake)
+}
+
 /// Process an HTTP response resulting from a WS handshake.
 /// This ensures that any `Cookie` or HSTS headers are recognized.
 /// Returns an error if the protocol selected by the handshake doesn't
@@ -125,6 +144,8 @@ fn process_ws_response(
     response: &Response,
     resource_url: &ServoUrl,
     protocols: &[String],
+    cookies_allowed: bool,
+    cookie_context: net_traits::CookieContext,
 ) -> Result<Option<String>, Error> {
     trace!("processing websocket http response for {}", resource_url);
     let mut protocol_in_use = None;
@@ -138,16 +159,16 @@ fn process_ws_response(
         protocol_in_use = Some(protocol_name.to_string());
     }
 
-    let mut jar = http_state.cookie_jar.write();
+    let mut jar = CookieStorage::access(&http_state.cookie_jar);
     // TODO(eijebong): Replace thise once typed headers settled on a cookie impl
-    for cookie in response.headers().get_all(header::SET_COOKIE) {
+    for cookie in response.headers().get_all(header::SET_COOKIE).iter().filter(|_| cookies_allowed) {
         let cookie_bytes = cookie.as_bytes();
         if !ServoCookie::is_valid_name_or_value(cookie_bytes) {
             continue;
         }
         if let Ok(s) = std::str::from_utf8(cookie_bytes) &&
             let Some(cookie) =
-                ServoCookie::from_cookie_string(s, resource_url, CookieSource::HTTP)
+                ServoCookie::from_cookie_string(s, resource_url, CookieSource::HTTP) && cookie.same_site_allows_setting(cookie_context)
         {
             jar.push(cookie, resource_url, CookieSource::HTTP);
         }
@@ -333,26 +354,13 @@ pub(crate) async fn start_websocket(
     let socket = try_socket.map_err(Error::Io)?;
     let connector = TlsConnector::from(Arc::new(tls_config));
 
-    // TODO(pylbrecht): move request conversion to a separate function
-    let mut original_url = client.original_url();
-    if original_url.scheme() == "ws" && url.scheme() == "https" {
-        original_url.as_mut_url().set_scheme("wss").unwrap();
-    }
-    let mut builder =
-        ClientRequestBuilder::new(original_url.as_str().parse().expect("unable to parse URI"));
-    for (key, value) in client.headers.iter() {
-        builder = builder.with_header(
-            key.as_str(),
-            value
-                .to_str()
-                .expect("unable to convert header value to string"),
-        );
-    }
+    let handshake = websocket_transport_handshake(client)?;
 
     let (stream, response) =
-        client_async_tls_with_connector_and_config(builder, socket, Some(connector), None).await?;
+        client_async_tls_with_connector_and_config(handshake, socket, Some(connector), None).await?;
 
-    let protocol_in_use = process_ws_response(&http_state, &response, &url, protocols)?;
+    let protocol_in_use = process_ws_response(&http_state, &response, &url, protocols,
+        !servo_config::pref!(network_cookie_block_third_party) || client.is_first_party_for_cookies(), client.cookie_context())?;
 
     if !initiated_close.load(Ordering::SeqCst) {
         if resource_event_sender

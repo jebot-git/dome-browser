@@ -1,0 +1,43 @@
+<!doctype html><meta charset="utf-8"><title>SVG image reparent completion</title>
+<script>
+(async()=>{
+ const SVG='http://www.w3.org/2000/svg',wait=ms=>new Promise(r=>setTimeout(r,ms)),checks=[],results=[];
+ function roots(){return [0,1].map(()=>{const svg=document.createElementNS(SVG,'svg');svg.setAttribute('width',20);svg.setAttribute('height',20);document.documentElement.append(svg);return svg})}
+ async function run(name){
+  const parents=roots(),image=document.createElementNS(SVG,'image'),events=[];let next=1;
+  image.setAttribute('width',20);image.setAttribute('height',20);
+  const first=new Promise(resolve=>{image.onload=()=>{events.push('load');resolve(true);if(name==='handler-move'&&events.length<6){parents[next].append(image);next=1-next}};image.onerror=()=>{events.push('error');resolve(false)};setTimeout(()=>resolve(false),3000)});
+  image.setAttribute('href','/timing-control.svg?control=reparent-'+name+(name==='pending-move'?'&delay=500':''));parents[0].append(image);
+  if(name==='pending-move'){await wait(100);parents[1].append(image)}
+  const loaded=await first;checks.push({name:name+' initial resource loads',passed:loaded});
+  if(name==='completed-move')parents[1].append(image);
+  if(name==='completed-detach'){image.remove();await wait(50);parents[0].append(image)}
+  if(name==='repeat-move')for(let n=0;n<4;n++){parents[n%2].append(image);await wait(50)}
+  let cloneEvents=[];
+  if(name==='clone-control'){
+   const clone=image.cloneNode();clone.onload=()=>cloneEvents.push('load');clone.onerror=()=>cloneEvents.push('error');parents[1].append(clone);
+  }
+  await wait(1000);
+  checks.push({name:name+' keeps exactly one original load event',passed:events.length===1&&events[0]==='load'});
+  if(name==='clone-control')checks.push({name:'new public clone independently loads once',passed:cloneEvents.length===1&&cloneEvents[0]==='load'});
+  results.push({name,events,cloneEvents});parents.forEach(parent=>parent.remove());
+ }
+ async function baseRetarget(){
+  const cfg=await fetch('/config.json').then(response=>response.json());
+  const frame=document.createElement('iframe'),ready=new Promise(resolve=>frame.onload=resolve);
+  frame.srcdoc='<svg xmlns="'+SVG+'" width="20" height="20"></svg>';document.documentElement.append(frame);await ready;
+  const doc=frame.contentDocument,root=doc.querySelector('svg'),image=doc.createElementNS(SVG,'image'),events=[];
+  image.setAttribute('width',20);image.setAttribute('height',20);
+  const first=new Promise(resolve=>{image.onload=()=>{events.push('load');resolve(true)};image.onerror=()=>{events.push('error');resolve(false)};setTimeout(()=>resolve(false),3000)});
+  const href='timing-control.svg?control=reparent-base';image.setAttribute('href',href);root.append(image);
+  checks.push({name:'base-retarget initial resource loads',passed:await first});
+  const base=doc.createElement('base');base.href=cfg.crossOrigin+'/';doc.head.append(base);image.remove();root.append(image);
+  await wait(1000);
+  checks.push({name:'changed effective base URL starts a new load',passed:events.length===2&&events.every(event=>event==='load')});
+  checks.push({name:'base retarget preserves public href',passed:image.getAttribute('href')===href});
+  results.push({name:'base-retarget',events});frame.remove();
+ }
+ await Promise.all([...['completed-move','completed-detach','repeat-move','handler-move','pending-move','clone-control'].map(run),baseRetarget()]);
+ fetch('/report',{method:'POST',body:JSON.stringify({checks,diagnostics:{results},scope:'Same-document moves retain completed/pending request identity. Handler-driven moves are capped at6 to characterize a loop without unbounded load. Public clone is a positive control.'})});
+})().catch(error=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[{name:'fixture completed',passed:false,error:String(error)}]})}));
+</script>

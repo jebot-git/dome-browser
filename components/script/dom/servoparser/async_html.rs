@@ -80,6 +80,7 @@ enum ParseOperation {
         attrs: Vec<Attribute>,
         current_line: u64,
         had_duplicate_attributes: bool,
+        creation_context: Option<(ParseNodeId, Option<ParseNodeId>, bool)>,
     },
     CreateComment {
         text: String,
@@ -484,21 +485,35 @@ impl Tokenizer {
                 attrs,
                 current_line,
                 had_duplicate_attributes,
+                creation_context,
             } => {
                 self.current_line.set(current_line);
                 let attrs = attrs
                     .into_iter()
                     .map(|attr| ElementAttribute::new(attr.name, DOMString::from(attr.value)))
                     .collect();
+                let intended_parent = creation_context.and_then(|(node, fallback, before)| {
+                    let node = self.get_node(&node);
+                    if let Some(fallback) = fallback {
+                        node.GetParentNode().or_else(|| Some(DomRoot::from_ref(&**self.get_node(&fallback))))
+                    } else if before { node.GetParentNode() }
+                    else { Some(DomRoot::from_ref(&**node)) }
+                });
+                let creation_document = intended_parent.as_ref().map(|parent| parent.owner_doc())
+                    .unwrap_or_else(|| DomRoot::from_ref(&*self.document));
+                let registry = intended_parent.as_ref().map(|parent| {
+                    crate::dom::customelementregistry::CustomElementRegistry::lookup_a_custom_element_registry(parent)
+                }).unwrap_or_else(|| creation_document.custom_element_registry());
                 let element = create_element_for_token(
                     cx,
                     name,
                     attrs,
-                    &self.document,
+                    &creation_document,
                     ElementCreator::ParserCreated(current_line),
                     ParsingAlgorithm::Normal,
                     &self.custom_element_reaction_stack,
                     had_duplicate_attributes,
+                    registry.as_deref(),
                 );
                 self.insert_node(node, Dom::from_ref(element.upcast()));
             },
@@ -832,6 +847,16 @@ impl TreeSink for Sink {
         html_attrs: Vec<HtmlAttribute>,
         flags: ElementFlags,
     ) -> Self::Handle {
+        self.create_element_with_context(name, html_attrs, flags, None)
+    }
+
+    fn create_element_with_context(
+        &self,
+        name: QualName,
+        html_attrs: Vec<HtmlAttribute>,
+        flags: ElementFlags,
+        context: Option<(&Self::Handle, Option<&Self::Handle>, bool)>,
+    ) -> Self::Handle {
         let mut node = self.new_parse_node();
         node.qual_name = Some(name.clone());
         {
@@ -857,6 +882,8 @@ impl TreeSink for Sink {
             attrs,
             current_line: self.current_line.get(),
             had_duplicate_attributes: flags.had_duplicate_attributes,
+            creation_context: context.map(|(parent, fallback, before)|
+                (parent.id, fallback.map(|fallback| fallback.id), before)),
         });
         node
     }

@@ -6,6 +6,7 @@ pub(crate) mod accessibility_data;
 mod animation_manager;
 #[expect(clippy::module_inception, reason = "The interface name is Document")]
 pub(crate) mod document;
+mod cosmetic_filtering;
 pub(crate) mod document_embedder_controls;
 pub(crate) mod document_event_handler;
 pub(crate) mod documentfragment;

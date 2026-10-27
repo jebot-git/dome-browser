@@ -81,6 +81,7 @@ enum DocumentReadyState { "loading", "interactive", "complete" };
 enum DocumentVisibilityState { "visible", "hidden" };
 
 dictionary ElementCreationOptions {
+  CustomElementRegistry? customElementRegistry;
   DOMString is;
 };
 

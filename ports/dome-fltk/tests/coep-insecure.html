@@ -1,0 +1,11 @@
+<!doctype html><meta charset="utf-8"><title>COEP non-secure context regression</title>
+<script>
+(async()=>{
+ const checks=[];async function test(name,body){try{await body();checks.push({name,passed:true})}catch(error){checks.push({name,passed:false,error:String(error)})}}
+ const config=await(await fetch('/config.json')).json();
+ await test('control origin is not a secure context',async()=>{if(isSecureContext)throw new Error('Unexpected trustworthy origin')});
+ await test('Cache APIs remain hidden in a non-secure context',async()=>{if(typeof caches!=='undefined')throw new Error('Cache exposed')});
+ await test('non-secure context ignores require-corp response header',async()=>{const response=await fetch(config.crossOrigin+'/opaque',{mode:'no-cors'});if(response.type!=='opaque')throw new Error('Wrong response type')});
+ await fetch('/report',{method:'POST',body:JSON.stringify({checks})});
+})();
+</script>

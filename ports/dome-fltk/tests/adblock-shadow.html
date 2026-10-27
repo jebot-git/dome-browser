@@ -1,0 +1,32 @@
+<!doctype html><title>Shadow cosmetic fixture</title>
+<style nonce=fixture>.light-ad{display:block!important;width:100px;height:40px;background:red}.shadow-allowed{background:lime}</style>
+<div class=light-ad>Light ad</div>
+<script nonce=fixture>
+addEventListener('load',async()=>{
+ try{
+  const probes={};let closedHost,openRoot;
+  const style='.light-ad,.shadow-ad,.mutated-shadow-ad,.id-box,.site-ad,.shadow-allowed{display:block!important;width:100px;height:40px;background:red}.shadow-allowed{background:lime}';
+  function populate(root,prefix){
+   const sheet=document.createElement('style');sheet.setAttribute('nonce','fixture');sheet.textContent=style;root.append(sheet);
+   for(const token of ['light-ad','shadow-ad','shadow-id','site-ad','shadow-allowed']){
+    const node=document.createElement('div');node.className=token==='shadow-id'?'id-box':token;if(token==='shadow-id')node.id='shadow-id';node.textContent=prefix+' '+token;root.append(node);probes[prefix+'-'+token]=node;
+   }
+  }
+  for(const mode of ['open','closed']){
+   const host=document.createElement('div');host.id=mode;document.body.append(host);
+   const root=host.attachShadow({mode});populate(root,mode);
+   if(mode==='closed')closedHost=host;else openRoot=root;
+  }
+  const nested=document.createElement('div');openRoot.append(nested);populate(nested.attachShadow({mode:'closed'}),'nested');
+  const detached=document.createElement('div');populate(detached.attachShadow({mode:'closed'}),'reconnected');document.body.append(detached);
+  const snapshot=()=>Object.fromEntries(Object.entries(probes).map(([name,node])=>[name,getComputedStyle(node).display]));
+  await new Promise(resolve=>setTimeout(resolve,250));const initial=snapshot();
+  for(const [name,node]of Object.entries(probes)){if(name.endsWith('shadow-ad'))node.className='mutated-shadow-ad';if(name.endsWith('shadow-id'))node.id='mutated-shadow-id';}
+  await new Promise(resolve=>setTimeout(resolve,250));const mutated=snapshot();
+  history.pushState({},'', '/generic-off');await new Promise(resolve=>setTimeout(resolve,250));const genericOff=snapshot();
+  history.pushState({},'', '/progress');await new Promise(resolve=>setTimeout(resolve,250));const restored=snapshot();
+  const encapsulation=closedHost.shadowRoot===null&&document.styleSheets.length===1&&Object.values(probes).every(node=>node.parentNode.querySelectorAll('style').length===1);
+  fetch('/report',{method:'POST',body:JSON.stringify({initial,mutated,'generic-off':genericOff,restored,encapsulation})});
+ }catch(e){fetch('/report',{method:'POST',body:JSON.stringify({error:String(e)})});}
+});
+</script>

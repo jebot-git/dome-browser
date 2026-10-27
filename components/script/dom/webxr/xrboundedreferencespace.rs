@@ -2,10 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::rc::Rc;
+
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use js::rust::MutableHandleValue;
-use script_bindings::reflector::reflect_dom_object;
+use script_bindings::reflector::reflect_weak_referenceable_dom_object;
 
 use crate::dom::bindings::codegen::Bindings::XRBoundedReferenceSpaceBinding::XRBoundedReferenceSpaceMethods;
 use crate::dom::bindings::codegen::Bindings::XRReferenceSpaceBinding::XRReferenceSpaceType;
@@ -56,11 +58,13 @@ impl XRBoundedReferenceSpace {
         session: &XRSession,
         offset: &XRRigidTransform,
     ) -> DomRoot<XRBoundedReferenceSpace> {
-        reflect_dom_object(
+        let space = reflect_weak_referenceable_dom_object(
             cx,
-            Box::new(XRBoundedReferenceSpace::new_inherited(session, offset)),
+            Rc::new(XRBoundedReferenceSpace::new_inherited(session, offset)),
             global,
-        )
+        );
+        session.register_reference_space(space.reference_space());
+        space
     }
 
     pub(crate) fn reference_space(&self) -> &XRReferenceSpace {
@@ -71,7 +75,7 @@ impl XRBoundedReferenceSpace {
 impl XRBoundedReferenceSpaceMethods<crate::DomTypeHolder> for XRBoundedReferenceSpace {
     /// <https://www.w3.org/TR/webxr/#dom-xrboundedreferencespace-boundsgeometry>
     fn BoundsGeometry(&self, cx: &mut JSContext, retval: MutableHandleValue) {
-        if let Some(bounds) = self.reference_space.get_bounds() {
+        if let Some(bounds) = self.reference_space.bounds_geometry() {
             let points: Vec<DomRoot<DOMPointReadOnly>> = bounds
                 .into_iter()
                 .map(|point| {
@@ -79,8 +83,8 @@ impl XRBoundedReferenceSpaceMethods<crate::DomTypeHolder> for XRBoundedReference
                         cx,
                         &self.global(),
                         point.x.into(),
-                        0.0,
                         point.y.into(),
+                        point.z.into(),
                         1.0,
                     )
                 })

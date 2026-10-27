@@ -25,6 +25,7 @@ use embedder_traits::{
 };
 pub use from_script_message::*;
 use malloc_size_of_derive::MallocSizeOf;
+use net_traits::request::RequestClient;
 use paint_api::PinchZoomInfos;
 use paint_api::display_list::PaintTimingInfo;
 use profile_traits::mem::MemoryReportResult;
@@ -101,6 +102,13 @@ pub enum EmbedderToConstellationMessage {
     /// Evaluate a JavaScript string in the context of a `WebView`. When execution is complete or an
     /// error is encountered, a correpsonding message will be sent to the embedding layer.
     EvaluateJavaScript(WebViewId, JavaScriptEvaluationId, String),
+    /// Snapshot the active document for a native save/copy action. A context menu
+    /// identifies the originating frame; otherwise use the active top document.
+    GetDownloadClient(
+        WebViewId,
+        Option<EmbedderControlId>,
+        GenericCallback<Option<(ServoUrl, RequestClient)>>,
+    ),
     /// Create a memory report and return it via the [`GenericCallback`]
     CreateMemoryReport(GenericCallback<MemoryReportResult>),
     /// Sends the generated image key to the image cache associated with this pipeline.

@@ -50,6 +50,8 @@ use crate::request::{Request, RequestBuilder};
 use crate::response::{Response, ResponseInit};
 
 pub mod blob_url_store;
+pub mod cross_origin_resource_policy;
+mod embedder_policy;
 pub mod fetch;
 pub mod filemanager_thread;
 pub mod http_status;
@@ -267,6 +269,8 @@ pub enum FetchResponseMsg {
     // todo: send more info about the response (or perhaps the entire Response)
     ProcessResponse(RequestId, Result<FetchMetadata, NetworkError>),
     ProcessResponseChunk(RequestId, Bytes),
+    /// Native streamed transfers acknowledge a chunk only after its consumer finishes.
+    ProcessResponseChunkWithAck(RequestId, Bytes, GenericCallback<()>),
     ProcessResponseEOF(RequestId, Result<(), NetworkError>, ResourceFetchTiming),
     ProcessCspViolations(RequestId, Vec<csp::Violation>),
     ProcessContentLength(RequestId, usize),
@@ -278,6 +282,7 @@ impl FetchResponseMsg {
             FetchResponseMsg::ProcessRequestBody(id) |
             FetchResponseMsg::ProcessResponse(id, ..) |
             FetchResponseMsg::ProcessResponseChunk(id, ..) |
+            FetchResponseMsg::ProcessResponseChunkWithAck(id, ..) |
             FetchResponseMsg::ProcessResponseEOF(id, ..) |
             FetchResponseMsg::ProcessCspViolations(id, ..) |
             FetchResponseMsg::ProcessContentLength(id, _) => *id,
@@ -298,6 +303,13 @@ pub trait FetchTaskTarget {
 
     /// Fired when a chunk of response content is received
     fn process_response_chunk(&mut self, request: &Request, chunk: bytes::Bytes);
+
+    /// Deliver a flow-controlled native transfer chunk. Ordinary targets consume
+    /// it synchronously; asynchronous targets forward the acknowledgement.
+    fn process_response_chunk_with_ack(&mut self, request: &Request, chunk: Bytes, ack: GenericCallback<()>) {
+        self.process_response_chunk(request, chunk);
+        let _ = ack.send(());
+    }
 
     /// <https://fetch.spec.whatwg.org/#process-response-end-of-file>
     ///
@@ -376,6 +388,10 @@ impl FetchTaskTarget for GenericCallback<FetchResponseMsg> {
 
     fn process_response_chunk(&mut self, request: &Request, chunk: bytes::Bytes) {
         let _ = self.send(FetchResponseMsg::ProcessResponseChunk(request.id, chunk));
+    }
+
+    fn process_response_chunk_with_ack(&mut self, request: &Request, chunk: Bytes, ack: GenericCallback<()>) {
+        let _ = self.send(FetchResponseMsg::ProcessResponseChunkWithAck(request.id, chunk, ack));
     }
 
     fn process_response_eof(&mut self, request: &Request, response: &Response) {
@@ -809,8 +825,8 @@ pub enum CoreResourceMsg {
     EmbedderClearCookies(CookieOperationId),
     /// Clear session cookies on behalf of the embedder. The response is sent via NetToEmbedderMsg.
     EmbedderClearSessionCookies(CookieOperationId),
-    GetCookieDataForUrlAsync(CookieStoreId, ServoUrl, Option<String>),
-    GetAllCookieDataForUrlAsync(CookieStoreId, ServoUrl, Option<String>),
+    GetCookieDataForUrlAsync(CookieStoreId, ServoUrl, Option<String>, CookieSource),
+    GetAllCookieDataForUrlAsync(CookieStoreId, ServoUrl, Option<String>, CookieSource),
     DeleteCookiesForSites(Vec<String>, GenericSender<()>),
     /// This currently is used by unit tests and WebDriver only.
     /// When url is `None`, this clears cookies across all origins.
@@ -818,7 +834,7 @@ pub enum CoreResourceMsg {
     /// Delete all session cookies (cookies without an expiry or max-age).
     DeleteSessionCookies(GenericSender<()>),
     DeleteCookie(ServoUrl, String),
-    DeleteCookieAsync(CookieStoreId, ServoUrl, String),
+    DeleteCookieAsync(CookieStoreId, ServoUrl, String, CookieSource),
     NewCookieListener(
         CookieStoreId,
         GenericCallback<CookieAsyncResponse>,
@@ -986,6 +1002,11 @@ impl FetchThread {
                     assert!(preexisting_fetch.is_none());
                 },
                 Ok(ToFetchThreadMessage::FetchResponse(fetch_response_msg)) => {
+                    let (fetch_response_msg, ack) = match fetch_response_msg {
+                        FetchResponseMsg::ProcessResponseChunkWithAck(id, bytes, ack) =>
+                            (FetchResponseMsg::ProcessResponseChunk(id, bytes), Some(ack)),
+                        message => (message, None),
+                    };
                     let request_id = fetch_response_msg.request_id();
                     let fetch_finished =
                         matches!(fetch_response_msg, FetchResponseMsg::ProcessResponseEOF(..));
@@ -999,6 +1020,7 @@ impl FetchThread {
                     };
 
                     active_fetch.get_mut()(fetch_response_msg);
+                    if let Some(ack) = ack { let _ = ack.send(()); }
                     if fetch_finished {
                         let _ = active_fetch.remove();
                     }
@@ -1112,6 +1134,12 @@ pub struct ResourceCorsData {
 /// Metadata about a loaded resource, such as is obtained from HTTP headers.
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct Metadata {
+    /// Opaque state emitted only by an engine-registered native protocol.
+    #[serde(default)]
+    pub protocol_state: Option<String>,
+    /// Fetch response flag retained across filtered responses and Cache storage.
+    #[serde(default = "metadata_default_request_includes_credentials")]
+    pub request_includes_credentials: bool,
     /// Final URL after redirects.
     pub final_url: ServoUrl,
 
@@ -1143,10 +1171,14 @@ pub struct Metadata {
     pub tls_security_info: Option<TlsSecurityInfo>,
 }
 
+fn metadata_default_request_includes_credentials() -> bool { true }
+
 impl Metadata {
     /// Metadata with defaults for everything optional.
     pub fn default(url: ServoUrl) -> Self {
         Metadata {
+            protocol_state: None,
+            request_includes_credentials: true,
             final_url: url,
             location_url: None,
             content_type: None,
@@ -1226,6 +1258,45 @@ pub enum CookieSource {
     HTTP,
     /// A non-HTTP API
     NonHTTP,
+    /// Script cookie access in a cross-site ancestor context.
+    NonHTTPCrossSite,
+}
+
+impl CookieSource {
+    pub fn is_non_http(self) -> bool { self != Self::HTTP }
+}
+
+/// Context required by the cookie retrieval and storage algorithms. User
+/// third-party-cookie preferences are applied separately from SameSite.
+#[derive(Clone, Copy, Debug)]
+pub struct CookieContext {
+    pub same_site: bool,
+    pub top_level_navigation: bool,
+    pub safe_method: bool,
+}
+
+impl CookieContext {
+    pub const fn same_site() -> Self {
+        Self { same_site: true, top_level_navigation: false, safe_method: false }
+    }
+}
+
+/// cookie-rs ignores an invalid repeated SameSite value. The cookie algorithm
+/// instead gives the last attribute the Default enforcement value.
+pub fn parse_cookie_string(value: String) -> Result<Cookie<'static>, cookie::ParseError> {
+    let mut same_site = None;
+    for attribute in value.split(';').skip(1) {
+        let (name, value) = attribute.trim().split_once('=').unwrap_or((attribute.trim(), ""));
+        if name.trim().eq_ignore_ascii_case("samesite") {
+            same_site = Some(if value.trim().eq_ignore_ascii_case("strict") { Some(cookie::SameSite::Strict) }
+                else if value.trim().eq_ignore_ascii_case("lax") { Some(cookie::SameSite::Lax) }
+                else if value.trim().eq_ignore_ascii_case("none") { Some(cookie::SameSite::None) }
+                else { None });
+        }
+    }
+    let mut cookie = Cookie::parse(value)?;
+    if let Some(same_site) = same_site { cookie.set_same_site(same_site); }
+    Ok(cookie)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

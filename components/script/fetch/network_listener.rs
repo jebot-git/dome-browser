@@ -173,6 +173,10 @@ impl<Listener: FetchResponseListener> NetworkListener<Listener> {
                         FetchResponseMsg::ProcessResponseChunk(request_id, data) => {
                             fetch_listener.process_response_chunk(cx, &global, request_id, data)
                         },
+                        FetchResponseMsg::ProcessResponseChunkWithAck(request_id, data, ack) => {
+                            fetch_listener.process_response_chunk(cx, &global, request_id, data);
+                            let _ = ack.send(());
+                        },
                         FetchResponseMsg::ProcessResponseEOF(request_id, result, timing) => {
                             if let Some(fetch_listener) = context.take() {
                                 fetch_listener.process_response_eof(cx, &global, request_id, result, timing);

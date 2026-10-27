@@ -1,0 +1,47 @@
+<!doctype html><meta charset="utf-8"><title>Claimed blob worker origin policy</title>
+<script>
+(async()=>{
+ const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms)),params=new URLSearchParams(location.search);
+ const checks=[],results=[],frames=[],urls=[];
+ const config=await fetch('/local-fixture-config.json').then(response=>response.json());
+ const server=config.serverOrigin,local=location.protocol==='file:';
+ const workerSource=`onmessage=async()=>{let positive=false,fileAllowed=false;try{positive=(await(await fetch(${JSON.stringify(server+'/svg-image.svg?name=blob-worker-positive&cors=anonymous')})).text()).includes('<svg')}catch{}try{await fetch(${JSON.stringify(config.localImage)},{mode:'no-cors'});fileAllowed=true}catch{}postMessage({positive,fileAllowed,origin:self.origin})}`;
+ async function runWorker(url){return new Promise(resolve=>{
+  let worker,done=false;
+  function finish(result){if(done)return;done=true;if(worker)worker.terminate();resolve(result)}
+  try{worker=new Worker(url)}catch(error){finish({error:error.name,phase:'constructor'});return}
+  worker.onmessage=event=>finish({executed:true,...event.data});worker.onerror=event=>{event.preventDefault();finish({error:event.message||event.type,phase:'load'})};
+  worker.postMessage(null);setTimeout(()=>finish({error:'timeout'}),4000);
+ })}
+ if(params.has('child')){
+  const url=URL.createObjectURL(new Blob([workerSource],{type:'text/javascript'})),positive=await runWorker(url);
+  parent.postMessage({token:params.get('token'),url,positive},'*');return;
+ }
+ for(const mode of ['own','revoke-after-constructor']){
+  const url=URL.createObjectURL(new Blob([workerSource],{type:'text/javascript'}));urls.push(url);
+  const pending=runWorker(url);if(mode==='revoke-after-constructor')URL.revokeObjectURL(url);
+  const result=await pending;results.push({mode,...result});
+  checks.push({name:mode+' worker executes',passed:result.executed===true});
+  checks.push({name:mode+' retains HTTP positive control',passed:result.positive===true});
+  checks.push({name:mode+' preserves file authority boundary',passed:result.executed===true&&result.fileAllowed===local});
+ }
+ const revoked=URL.createObjectURL(new Blob([workerSource],{type:'text/javascript'}));URL.revokeObjectURL(revoked);
+ const negative=[['revoked-before-constructor',revoked],['unregistered-null-blob','blob:null/00000000-0000-4000-8000-000000000000']];
+ async function foreign(opaque){
+  const frame=document.createElement('iframe'),token=Math.random().toString(36),done=new Promise(resolve=>{
+   const listener=event=>{if(event.source===frame.contentWindow&&event.data?.token===token){removeEventListener('message',listener);resolve(event.data)}};
+   addEventListener('message',listener);setTimeout(()=>{removeEventListener('message',listener);resolve({error:'frame timeout'})},5000);
+  });frames.push(frame);
+  if(opaque){frame.sandbox='allow-scripts';frame.srcdoc='<script>const url=URL.createObjectURL(new Blob(['+JSON.stringify(workerSource)+'],{type:"text/javascript"}));parent.postMessage({token:'+JSON.stringify(token)+',url},"*")<\/script>'}
+  else{const foreignOrigin=local?server:(await fetch('/config.json').then(response=>response.json())).crossOrigin;frame.src=foreignOrigin+'/?child=1&token='+encodeURIComponent(token)}
+  document.documentElement.append(frame);return done;
+ }
+ const http=await foreign(false),opaque=await foreign(true);
+ checks.push({name:'foreign HTTP creator has its own working worker',passed:http.positive?.executed===true&&http.positive.positive===true&&http.positive.fileAllowed===false});
+ checks.push({name:'unrelated opaque creator executes and creates null-origin blob',passed:typeof opaque.url==='string'&&opaque.url.startsWith('blob:null/')});
+ if(http.url)negative.push(['foreign-HTTP-blob',http.url]);if(opaque.url)negative.push(['unrelated-opaque-blob',opaque.url]);
+ for(const [mode,url]of negative){const result=await runWorker(url);results.push({mode,...result});checks.push({name:mode+' cannot execute in parent',passed:!result.executed&&!!result.error&&result.error!=='timeout'})}
+ frames.forEach(frame=>frame.remove());urls.forEach(url=>URL.revokeObjectURL(url));
+ fetch('/report',{method:'POST',body:JSON.stringify({checks,diagnostics:{localTop:local,results,httpCreator:http.positive,opaqueBlobCreated:!!opaque.url},scope:'Same-principal blob workers preserve creator authority; claimed-before-revoke survives, revoked/missing/foreign/unrelated-opaque workers fail. Only synthetic local files and private profiles.'})});
+})().catch(error=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[{name:'fixture completed',passed:false,error:String(error)}]})}));
+</script>

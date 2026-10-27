@@ -33,6 +33,9 @@ pub enum SessionMode {
 pub struct SessionInit {
     /// The requesting document origin, for embedder consent UI.
     pub origin: String,
+    /// Trusted requesting top-level webview; never supplied by site script.
+    #[serde(default)]
+    pub webview_id: Option<servo_base::id::WebViewId>,
     pub required_features: Vec<String>,
     pub optional_features: Vec<String>,
     /// Secondary views are enabled with the `secondary-view` feature
@@ -228,7 +231,7 @@ impl Session {
         match event {
             FrameUpdateEvent::UpdateFloorTransform(floor) => self.floor_transform = floor,
             FrameUpdateEvent::UpdateViewports(vp) => self.viewports = vp,
-            FrameUpdateEvent::HitTestSourceAdded(_) => (),
+            FrameUpdateEvent::HitTestSourceAdded(_) | FrameUpdateEvent::ReferenceSpaceChanged(..) => (),
         }
     }
 

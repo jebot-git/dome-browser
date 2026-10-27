@@ -1,0 +1,31 @@
+<!doctype html><meta charset="utf-8"><title>SVG compositing invalidation</title>
+<style>
+body{margin:0;background:white}svg{position:absolute;top:20px;width:60px;height:60px}
+body.active #opacity g{opacity:.5}body.active #display rect{display:none}
+body.active #visibility rect{visibility:hidden}body.active #clip g{clip-path:url(#clipSource)}
+body.active #order rect{paint-order:stroke fill}body.active #root{opacity:.5}
+#rootCSSOverride{visibility:hidden}#rootCSSOverride rect{visibility:visible}
+body.active #rootAttrOverride rect,body.active #rootCSSOverride rect{visibility:hidden}
+</style>
+<svg id="opacity" style="left:20px"><g><rect width="60" height="60" fill="#14b45a"/></g></svg>
+<svg id="display" style="left:100px"><rect width="60" height="60" fill="#14b45a"/></svg>
+<svg id="visibility" style="left:180px"><rect width="60" height="60" fill="#14b45a"/></svg>
+<svg id="clip" style="left:260px"><defs><clipPath id="clipSource"><rect width="30" height="60"/></clipPath></defs><g><rect width="60" height="60" fill="#14b45a"/></g></svg>
+<svg id="order" style="left:340px"><rect x="10" y="10" width="40" height="40" fill="#1464b4" stroke="#14b45a" stroke-width="20"/></svg>
+<svg id="root" style="left:420px"><rect width="60" height="60" fill="#14b45a"/></svg>
+<svg id="rootAttrOverride" visibility="hidden" style="left:20px;top:120px"><rect visibility="visible" width="60" height="60" fill="#14b45a"/></svg>
+<svg id="rootCSSOverride" style="left:100px;top:120px"><rect width="60" height="60" fill="#14b45a"/></svg>
+<script>
+let phase=-1;
+async function advance(){
+ const requested=await(await fetch('/phase')).json();
+ if(requested!==phase){
+  phase=requested;document.body.classList.toggle('active',phase===1);
+  await new Promise(resolve=>setTimeout(resolve,400));
+  const values=[...document.querySelectorAll('svg')].map(svg=>{const element=svg.querySelector('g')||svg.querySelector('rect');const style=getComputedStyle(element);return{id:svg.id,opacity:style.opacity,display:style.display,visibility:style.visibility,clipPath:style.clipPath,paintOrder:style.paintOrder}});
+  await fetch('/report',{method:'POST',body:JSON.stringify({phase,values})});
+ }
+ setTimeout(advance,100);
+}
+addEventListener('load',advance);
+</script>

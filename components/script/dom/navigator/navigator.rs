@@ -608,6 +608,7 @@ impl NavigatorMethods<crate::DomTypeHolder> for Navigator {
         .method(http::Method::POST)
         .body(request_body)
         .keep_alive(true)
+        .is_beacon(true)
         .credentials_mode(CredentialsMode::Include)
         .headers(headers);
         // Step 7.2. Fetch req.

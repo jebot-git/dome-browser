@@ -1,0 +1,3 @@
+/svg-image.svg?name=adblock-$image
+@@/svg-image.svg?name=adblock-exception$image
+##.ad

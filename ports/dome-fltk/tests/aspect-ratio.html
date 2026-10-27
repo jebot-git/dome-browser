@@ -1,0 +1,61 @@
+<!doctype html><meta charset=utf-8><title>Non-replaced aspect ratio</title>
+<style>body{margin:8px}.host{position:relative;width:600px;min-height:220px;display:flow-root}.target{background:lime}.content{height:20px}.long{height:150px} .row{display:flex}.column{display:flex;flex-direction:column;width:200px}</style>
+<script>
+addEventListener('load',async()=>{
+ const checks=[],geometry=[];
+ const cases=[
+  ['block width','width:200px;aspect-ratio:2',200,100],
+  ['block height','height:100px;aspect-ratio:2',200,100],
+  ['content box','width:100px;padding:10px;border:5px solid;aspect-ratio:2',130,80],
+  ['border box','box-sizing:border-box;width:100px;padding:10px;border:5px solid;aspect-ratio:2',100,50],
+  ['auto ratio uses content box','box-sizing:border-box;width:100px;padding:10px;border:5px solid;aspect-ratio:auto 2',100,65],
+  ['content minimum','width:200px;aspect-ratio:2',200,150,'long'],
+  ['explicit zero minimum','width:200px;aspect-ratio:2;min-height:0',200,100,'long'],
+  ['scroll container','width:200px;aspect-ratio:2;overflow:auto',200,100,'long'],
+  ['hidden overflow','width:200px;aspect-ratio:2;overflow:hidden',200,100,'long'],
+  ['maximum height','width:200px;aspect-ratio:2;max-height:80px',200,80],
+  ['automatic content minimum respects maximum','width:200px;aspect-ratio:2;max-height:80px',200,80,'long'],
+  ['explicit minimum wins over maximum','width:200px;aspect-ratio:2;min-height:120px;max-height:80px',200,120],
+  ['minimum height','width:200px;aspect-ratio:2;min-height:120px',200,120],
+  ['clamped height transfer','height:100px;max-height:80px;aspect-ratio:2',160,80],
+  ['maximum height transfers to auto width','max-height:80px;aspect-ratio:2',160,80],
+  ['minimum height transfers to auto width','min-height:400px;aspect-ratio:2',800,400],
+  ['maximum width transfer','max-width:160px;aspect-ratio:2',160,80],
+  ['fixed height survives maximum width','height:100px;max-width:160px;aspect-ratio:2',160,100],
+  ['conflicting minimum and maximum','min-width:240px;max-height:80px;aspect-ratio:2',240,80],
+  ['minimum width transfer','width:200px;min-width:240px;aspect-ratio:2',240,120],
+  ['both dimensions definite','width:200px;height:80px;aspect-ratio:2',200,80],
+  ['fractional ratio','width:320px;aspect-ratio:1.6',320,200],
+  ['degenerate ratio','width:200px;aspect-ratio:0/1',200,20],
+  ['positioned width','position:absolute;width:160px;aspect-ratio:16/9',160,90],
+  ['positioned height','position:absolute;height:100px;aspect-ratio:2',200,100],
+  ['positioned content minimum','position:absolute;width:200px;aspect-ratio:2',200,150,'long'],
+  ['positioned zero minimum','position:absolute;width:200px;aspect-ratio:2;min-height:0',200,100,'long'],
+  ['float width','float:left;width:200px;aspect-ratio:2',200,100],
+  ['float height','float:left;height:100px;aspect-ratio:2',200,100],
+  ['inline block','display:inline-block;width:200px;aspect-ratio:2',200,100],
+  ['flex container','display:flex;width:200px;aspect-ratio:2',200,100],
+  ['grid container','display:grid;width:200px;aspect-ratio:2',200,100],
+  ['row item','width:200px;aspect-ratio:2;flex:none',200,100,'content','row'],
+  ['column item','aspect-ratio:2',200,100,'content','column'],
+  ['percentage descendant','width:200px;aspect-ratio:2',200,100,'percentage'],
+  ['row percentage descendant','width:200px;aspect-ratio:2;flex:none',200,100,'percentage','row'],
+ ];
+ try{
+  for(const [name,style,width,height,child='content',mode=''] of cases){
+   const host=document.createElement('section');host.className='host';
+   const parent=mode?document.createElement('div'):host;if(mode){parent.className=mode;host.append(parent);}
+   const target=document.createElement('div');target.className='target';target.style.cssText=style;
+   const content=document.createElement('div');content.className=child;if(child==='percentage')content.style.height='100%';
+   target.append(content);parent.append(target);document.body.append(host);
+   const rect=target.getBoundingClientRect();geometry.push({name,rect:[rect.width,rect.height],child:content.getBoundingClientRect().height});
+   checks.push({name,passed:Math.abs(rect.width-width)<.1&&Math.abs(rect.height-height)<.1,error:'expected '+width+'x'+height+', got '+rect.width+'x'+rect.height});
+   if(child==='percentage')checks.push({name:name+' resolves child percentage',passed:Math.abs(content.getBoundingClientRect().height-height)<.1});
+  }
+  const dynamic=document.createElement('div');dynamic.style.cssText='width:200px;aspect-ratio:2';document.body.append(dynamic);
+  const before=dynamic.getBoundingClientRect().height;dynamic.style.aspectRatio='4';
+  checks.push({name:'dynamic ratio invalidates layout',passed:Math.abs(before-100)<.1&&Math.abs(dynamic.getBoundingClientRect().height-50)<.1});
+ }catch(e){checks.push({name:'fixture completes',passed:false,error:String(e)});}
+ await fetch('/report',{method:'POST',body:JSON.stringify({checks,geometry})});
+});
+</script>

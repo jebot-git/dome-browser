@@ -1,0 +1,44 @@
+<!doctype html><meta charset="utf-8"><title>Font-face replacement retains loaded faces</title>
+<style id="faces">__FONT_FACES__</style>
+<style>
+@font-face{font-family:ReplacementControl;src:url(__BOLD_FONT__);font-weight:600}
+body{margin:0;background:black;color:white}
+.row{font-family:ReplacementFamily,monospace;font-size:48px;line-height:64px;font-synthesis:none}
+span{display:inline-block}#normal{font-weight:400}#semibold,#control,#fallback{font-weight:600}#bold{font-weight:700}
+#control{font-family:ReplacementControl,monospace}#fallback{font-family:monospace}
+</style>
+<div id="normal" class="row"><span>Happening now. 012345</span></div>
+<div id="semibold" class="row"><span>Happening now. 012345</span></div>
+<div id="bold" class="row"><span>Happening now. 012345</span></div>
+<div id="control" class="row"><span>Happening now. 012345</span></div>
+<div id="fallback" class="row"><span>Happening now. 012345</span></div>
+<script>
+addEventListener('load',async()=>{
+ const checks=[],stages={};
+ const measure=()=>Object.fromEntries(['normal','semibold','bold','control','fallback'].map(id=>[id,document.querySelector('#'+id+' span').getBoundingClientRect().width]));
+ const check=(name,passed)=>checks.push({name,passed});
+ const settle=async()=>{measure();await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));await document.fonts.ready;await new Promise(r=>setTimeout(r,200));};
+ await settle();stages.before=measure();const before=stages.before;
+ check('initial regular and bold faces differ',before.normal!==before.bold);
+ check('initial 600 matches explicit bold',before.semibold===before.bold&&before.semibold===before.control);
+ const original=document.getElementById('faces'),css=original.textContent;
+ const replacement=document.createElement('style');replacement.textContent=css+'\n/* distinct parsed stylesheet */ .fontReplacementMarker{color:inherit}';original.replaceWith(replacement);
+ await settle();stages.replaced=measure();const replaced=stages.replaced;
+ for(const key of ['normal','semibold','bold'])check('replacement preserves '+key+' face',replaced[key]===before[key]);
+ check('replacement preserves separate family using same font URL',replaced.control===before.control);
+ replacement.remove();await settle();stages.removed=measure();
+ check('removing rules uses fallback',stages.removed.semibold===stages.removed.fallback);
+ check('removing rules preserves other family',stages.removed.control===before.control);
+ const restored=document.createElement('style');restored.textContent=css+'\n/* restored */';document.head.appendChild(restored);
+ await settle();stages.restored=measure();
+ for(const key of ['normal','semibold','bold'])check('restoration preserves '+key+' face',stages.restored[key]===before[key]);
+ if(__CHECK_CSP__){
+  const policy=document.createElement('meta');policy.httpEquiv='Content-Security-Policy';policy.content="font-src 'none'";document.head.appendChild(policy);
+  const denied=document.createElement('style');denied.textContent=css+'\n/* new owner after restrictive policy */';restored.replaceWith(denied);
+  await settle();stages.denied=measure();
+  check('new font rule obeys restrictive CSP despite a cached URL',stages.denied.semibold===stages.denied.fallback);
+  check('CSP does not remove the already loaded independent face',stages.denied.control===before.control);
+ }
+ fetch('/report',{method:'POST',body:JSON.stringify({checks,stages})});
+});
+</script>

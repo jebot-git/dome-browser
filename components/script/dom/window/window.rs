@@ -284,6 +284,7 @@ struct PendingLayoutImageAncillaryData {
 #[dom_struct]
 pub(crate) struct Window {
     globalscope: GlobalScope,
+    idle_callbacks: crate::dom::idlecallback::IdleCallbacks,
     /// A `Weak` reference to this [`ScriptThread`] used to give to child [`Window`]s so
     /// they can more easily call methods on the [`ScriptThread`] without constantly having
     /// to pass it everywhere.
@@ -554,6 +555,7 @@ impl Window {
 
     #[expect(unsafe_code)]
     pub(crate) fn clear_js_runtime_for_script_deallocation(&self) {
+        crate::runtime::script_runtime::cancel_wasm_streams_for_global(self.as_global_scope());
         self.stop_geolocation_watches();
         self.as_global_scope()
             .remove_web_messaging_and_dedicated_workers_infra();
@@ -783,6 +785,11 @@ impl Window {
             for ancillary_data in nodes.get() {
                 match ancillary_data.destination {
                     LayoutImageDestination::BoxTreeConstruction => {
+                        if matches!(response.response, ImageResponse::FailedToLoadOrDecode) {
+                            if let Some(svg) = ancillary_data.node.downcast::<SVGSVGElement>() {
+                                svg.snapshot_failed(response.id, no_gc);
+                            }
+                        }
                         ancillary_data.node.dirty(no_gc, NodeDamage::Other);
                     },
                     LayoutImageDestination::DisplayListBuilding => {
@@ -812,6 +819,9 @@ impl Window {
             Entry::Vacant(_) => return,
         };
         for node in nodes.get() {
+            if let Some(svg) = node.downcast::<SVGSVGElement>() {
+                svg.snapshot_rasterized(response.image_id, no_gc);
+            }
             node.dirty(no_gc, NodeDamage::Other);
         }
         nodes.remove();
@@ -1006,6 +1016,7 @@ impl Window {
             has_trustworthy_ancestor_origin,
             policy_container,
             origin,
+            cookie_site,
         ) = if let Some(no_gc) = no_gc {
             let document = self.document_unrooted(no_gc);
             (
@@ -1014,6 +1025,7 @@ impl Window {
                 document.has_trustworthy_ancestor_or_current_origin(),
                 document.policy_container().clone(),
                 document.origin().clone(),
+                document.cookie_site(),
             )
         } else {
             let document = self.Document();
@@ -1023,10 +1035,13 @@ impl Window {
                 document.has_trustworthy_ancestor_or_current_origin(),
                 document.policy_container().clone(),
                 document.origin().clone(),
+                document.cookie_site(),
             )
         };
         RequestClient {
             preloaded_resources,
+            cookie_site,
+            cookie_client_is_null: false,
             policy_container,
             origin: Origin::Origin(origin.immutable().clone()),
             is_nested_browsing_context: !self.is_top_level(),
@@ -1043,6 +1058,10 @@ impl Window {
     pub(crate) fn with_timers<T>(&self, f: impl FnOnce(&OneshotTimers) -> T) -> T {
         let document = self.Document();
         f(document.timers())
+    }
+
+    pub(crate) fn idle_callbacks(&self) -> &crate::dom::idlecallback::IdleCallbacks {
+        &self.idle_callbacks
     }
 }
 
@@ -1192,6 +1211,18 @@ pub(crate) fn base64_atob(input: DOMString) -> Fallible<DOMString> {
 }
 
 impl WindowMethods<crate::DomTypeHolder> for Window {
+    fn RequestIdleCallback(
+        &self,
+        callback: RootedCallback<crate::dom::bindings::codegen::Bindings::IdleDeadlineBinding::IdleRequestCallback>,
+        options: &crate::dom::bindings::codegen::Bindings::IdleDeadlineBinding::IdleRequestOptions,
+    ) -> u32 {
+        self.request_idle_callback(callback, options)
+    }
+
+    fn CancelIdleCallback(&self, handle: u32) {
+        self.cancel_idle_callback(handle);
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#dom-alert>
     fn Alert_(&self) {
         // Step 2: If the method was invoked with no arguments, then let message be the
@@ -1487,9 +1518,9 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
             let is_auxiliary = window_proxy.is_auxiliary();
 
             // https://html.spec.whatwg.org/multipage/#script-closable
-            let is_script_closable = (self.is_top_level() && history_length == 1) ||
-                is_auxiliary ||
-                pref!(dom_allow_scripts_to_close_windows);
+            let is_script_closable = (self.is_top_level() && history_length == 1)
+                || is_auxiliary
+                || pref!(dom_allow_scripts_to_close_windows);
 
             // TODO: rest of Step 3:
             // Is the incumbent settings object's responsible browsing context familiar with current?
@@ -1530,19 +1561,11 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-window-customelements>
-    fn CustomElements(&self, cx: &mut JSContext) -> DomRoot<CustomElementRegistry> {
-        // Step 1: Assert: this's associated Document's custom element registry is
-        // a CustomElementRegistry object.
-        let document = self.Document();
-        if let Some(registry) = document.custom_element_registry() {
-            return registry;
-        }
-        // A Window's associated Document is always created with
-        // a new CustomElementRegistry object.
-        let registry = CustomElementRegistry::new(cx, self);
-        document.set_custom_element_registry(&registry);
-        // Step 2: Return this's associated Document's custom element registry.
-        registry
+    fn CustomElements(&self, _cx: &mut JSContext) -> DomRoot<CustomElementRegistry> {
+        // The document creates its registry before parsing begins; this getter
+        // must not leave earlier parser-created candidates with a null registry.
+        self.Document().custom_element_registry()
+            .expect("Window-associated document must have a custom element registry")
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-location>
@@ -1939,8 +1962,8 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
                 iframe
                     .browsing_context_id()
                     .as_ref()
-                    .map(BrowsingContextId::to_string) ==
-                    Some(browsing_context_id.to_string())
+                    .map(BrowsingContextId::to_string)
+                    == Some(browsing_context_id.to_string())
             })
             .and_then(|iframe| iframe.GetContentWindow())
     }
@@ -2384,10 +2407,10 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
                     return true;
                 }
                 match type_ {
-                    HTMLElementTypeId::HTMLEmbedElement |
-                    HTMLElementTypeId::HTMLFormElement |
-                    HTMLElementTypeId::HTMLImageElement |
-                    HTMLElementTypeId::HTMLObjectElement => {
+                    HTMLElementTypeId::HTMLEmbedElement
+                    | HTMLElementTypeId::HTMLFormElement
+                    | HTMLElementTypeId::HTMLImageElement
+                    | HTMLElementTypeId::HTMLObjectElement => {
                         elem.get_name().as_ref() == Some(&self.name)
                     },
                     _ => false,
@@ -2485,6 +2508,7 @@ impl Window {
     }
 
     pub(crate) fn clear_js_runtime(&self) {
+        crate::runtime::script_runtime::cancel_wasm_streams_for_global(self.as_global_scope());
         #[cfg(feature = "webxr")]
         self.end_xr_sessions_for_document_deactivation();
         self.stop_geolocation_watches();
@@ -2695,8 +2719,8 @@ impl Window {
         // layouts (for queries and scrolling) are not blocked, as they do not display
         // anything and script expects the layout to be up-to-date after they run.
         let pipeline_id = self.pipeline_id();
-        if reflow_goal == ReflowGoal::UpdateTheRendering &&
-            self.layout_blocker.get().layout_blocked()
+        if reflow_goal == ReflowGoal::UpdateTheRendering
+            && (self.layout_blocker.get().layout_blocked() || document.cosmetic_filter_render_blocked())
         {
             debug!("Suppressing pre-load-event reflow pipeline {pipeline_id}");
             return Default::default();
@@ -2715,6 +2739,7 @@ impl Window {
             selection.update_overlaps_document_selection_flags(cx.no_gc());
         }
 
+        document.invalidate_svg_use_snapshots_if_needed(cx);
         let restyle_reason = document.restyle_reason(cx.no_gc());
         document.clear_restyle_reasons();
         let restyle = if restyle_reason.needs_restyle() {
@@ -2727,8 +2752,8 @@ impl Window {
             // If the viewport changed and viewport units were used, all nodes need
             // to be restyled, because we currently do not track which ones rely on
             // viewport units.
-            if restyle_reason.contains(RestyleReason::ViewportChanged) &&
-                self.layout().device().used_viewport_size()
+            if restyle_reason.contains(RestyleReason::ViewportChanged)
+                && self.layout().device().used_viewport_size()
             {
                 document.dirty_all_nodes(cx.no_gc());
             }
@@ -2793,10 +2818,10 @@ impl Window {
             animations: document.animation_manager().sets(),
             animating_images: document.animation_manager().animating_images(),
             highlighted_dom_node: document.highlighted_dom_node().map(|node| node.to_opaque()),
-            frame_focused: self.webview_state().has_system_focus.get() &&
-                document.focus_handler().has_focus(),
-            halt_lcp: self.has_dispatched_scroll_event.get() ||
-                self.has_dispatched_input_event.get(),
+            frame_focused: self.webview_state().has_system_focus.get()
+                && document.focus_handler().has_focus(),
+            halt_lcp: self.has_dispatched_scroll_event.get()
+                || self.has_dispatched_input_event.get(),
             paint_timing_eligible: document.paint_timing_eligible(),
             paint_timing_info: document.paint_timing_info(),
             document_context,
@@ -2873,8 +2898,8 @@ impl Window {
         // See http://testthewebforward.org/docs/reftests.html
         // and https://web-platform-tests.org/writing-tests/crashtest.html
         if document.GetDocumentElement().is_some_and(|elem| {
-            elem.has_class(&atom!("reftest-wait"), CaseSensitivity::CaseSensitive) ||
-                elem.has_class(&Atom::from("test-wait"), CaseSensitivity::CaseSensitive)
+            elem.has_class(&atom!("reftest-wait"), CaseSensitivity::CaseSensitive)
+                || elem.has_class(&Atom::from("test-wait"), CaseSensitivity::CaseSensitive)
         }) {
             return;
         }
@@ -2887,8 +2912,8 @@ impl Window {
             return;
         }
 
-        if !self.pending_layout_images.borrow().is_empty() ||
-            !self.pending_images_for_rasterization.borrow().is_empty()
+        if !self.pending_layout_images.borrow().is_empty()
+            || !self.pending_images_for_rasterization.borrow().is_empty()
         {
             return;
         }
@@ -3443,7 +3468,7 @@ impl Window {
             Some(source_document.insecure_requests_policy()),
             source_document.has_trustworthy_ancestor_origin(),
             source_document.creation_sandboxing_flag_set_considering_parent_iframe(),
-        )
+        ).with_cookie_site(source_document.cookie_site())
     }
 
     /// Handle a potential change to the [`ViewportDetails`] of this [`Window`],
@@ -3478,8 +3503,8 @@ impl Window {
     ) {
         // We doesn't need to do anything if the following condition is fulfilled. Since there are no JS listener
         // to fire and we could reconstruct visual viewport from layout viewport in case JS access it.
-        if pinch_zoom_infos.rect == Rect::from_size(self.viewport_details().size) &&
-            self.visual_viewport.get().is_none()
+        if pinch_zoom_infos.rect == Rect::from_size(self.viewport_details().size)
+            && self.visual_viewport.get().is_none()
         {
             return;
         }
@@ -3574,6 +3599,43 @@ impl Window {
         // or unattached DOM nodes. Attached DOM nodes can't be GCd yet,
         // as the document might be reactivated later.
         self.gc(cx);
+    }
+
+    #[cfg(feature = "webxr")]
+    pub(crate) fn has_inline_xr_sessions(&self) -> bool {
+        self.navigator.get().and_then(|nav| nav.xr())
+            .is_some_and(|xr| xr.has_inline_sessions())
+    }
+
+    #[cfg(feature = "webxr")]
+    pub(crate) fn has_inline_xr_pointer(&self, pointer: i32) -> bool {
+        self.navigator.get().and_then(|nav| nav.xr())
+            .is_some_and(|xr| xr.has_inline_pointer(pointer))
+    }
+
+    #[cfg(feature = "webxr")]
+    pub(crate) fn inline_xr_pointer_event(&self, cx: &mut JSContext, pointer: i32,
+        action: crate::dom::xrsession::InlinePointerAction,
+        sample: Option<&crate::dom::xrsession::ScreenPointerSample>) {
+        if let Some(xr) = self.navigator.get().and_then(|nav| nav.xr()) {
+            xr.inline_pointer_event(cx, pointer, action, sample);
+        }
+    }
+
+    #[cfg(feature = "webxr")]
+    pub(crate) fn cancel_inline_xr_pointers(&self, cx: &mut JSContext) {
+        if let Some(xr) = self.navigator.get().and_then(|nav| nav.xr()) {
+            xr.cancel_inline_pointers(cx);
+        }
+    }
+
+    #[cfg(feature = "webxr")]
+    pub(crate) fn update_inline_xr_visibility(&self, cx: &mut JSContext, hidden: bool) {
+        if let Some(navigator) = self.navigator.get() {
+            if let Some(xr) = navigator.xr() {
+                xr.update_inline_visibility(cx, hidden);
+            }
+        }
     }
 
     #[cfg(feature = "webxr")]
@@ -3793,12 +3855,12 @@ impl Window {
 
         let document = self.Document();
         let fonts = document.Fonts(cx);
-        if !changed_web_fonts.removed_font_faces.is_empty() {
+        if !changed_web_fonts.removed_font_faces.is_empty() && pref!(dom_fontface_enabled) {
             fonts.notify_font_face_rules_removed(&changed_web_fonts.removed_font_faces);
         }
 
-        if !changed_web_fonts.removed_font_faces.is_empty() ||
-            changed_web_fonts.cascade_index_of_any_rule_changed
+        if !changed_web_fonts.removed_font_faces.is_empty()
+            || changed_web_fonts.cascade_index_of_any_rule_changed
         {
             // TODO: This should only dirty nodes that are rendered using any of the removed
             // web fonts!
@@ -3807,6 +3869,13 @@ impl Window {
 
         if !changed_web_fonts.added_font_faces.is_empty() {
             fonts.switch_to_loading(cx);
+
+            // The ready promise tracks native font loads independently of DOM
+            // FontFace objects. Creating those objects installs their interface
+            // constructor, bypassing its exposure preference after a CSS load.
+            if !pref!(dom_fontface_enabled) {
+                return;
+            }
 
             for new_web_font in changed_web_fonts.added_font_faces {
                 if let Some(font_face) = FontFace::new_for_web_font(cx, self.upcast(), new_web_font)
@@ -3882,6 +3951,9 @@ impl Window {
         for image in pending_images {
             let id = image.id;
             let node = unsafe { from_untrusted_node_address(image.node) };
+            if let Some(svg) = node.downcast::<SVGSVGElement>() {
+                svg.note_pending_snapshot_image(id);
+            }
 
             if let PendingImageState::Unrequested(ref url) = image.state {
                 fetch_image_for_layout(
@@ -3937,9 +4009,16 @@ impl Window {
             }
         }
 
+        let mut serialized_svg_elements = std::collections::HashSet::new();
         for node in pending_svg_element_for_serialization.into_iter() {
+            if !serialized_svg_elements.insert(node) {
+                continue;
+            }
             let node = unsafe { from_untrusted_node_address(node) };
             let svg = node.downcast::<SVGSVGElement>().unwrap();
+            // Restyling can queue an already serialized SVG. Evict its old
+            // resource/raster before replacing the computed-paint snapshot.
+            svg.invalidate_cached_serialized_subtree_and_rasterization_result(cx.no_gc());
             svg.serialize_and_cache_subtree(cx);
             node.dirty(cx.no_gc(), NodeDamage::Other);
         }
@@ -3963,8 +4042,8 @@ impl Window {
     /// <https://html.spec.whatwg.org/multipage/#sticky-activation>
     pub(crate) fn has_sticky_activation(&self) -> bool {
         // > When the current high resolution time given W is greater than or equal to the last activation timestamp in W, W is said to have sticky activation.
-        UserActivationTimestamp::TimeStamp(CrossProcessInstant::now()) >=
-            self.last_activation_timestamp.get()
+        UserActivationTimestamp::TimeStamp(CrossProcessInstant::now())
+            >= self.last_activation_timestamp.get()
     }
 
     /// <https://html.spec.whatwg.org/multipage/#transient-activation>
@@ -3972,10 +4051,9 @@ impl Window {
         // > When the current high resolution time given W is greater than or equal to the last activation timestamp in W, and less than the last activation
         // > timestamp in W plus the transient activation duration, then W is said to have transient activation.
         let current_time = CrossProcessInstant::now();
-        UserActivationTimestamp::TimeStamp(current_time) >= self.last_activation_timestamp.get() &&
-            UserActivationTimestamp::TimeStamp(current_time) <
-                self.last_activation_timestamp.get() +
-                    pref!(dom_transient_activation_duration_ms)
+        UserActivationTimestamp::TimeStamp(current_time) >= self.last_activation_timestamp.get()
+            && UserActivationTimestamp::TimeStamp(current_time)
+                < self.last_activation_timestamp.get() + pref!(dom_transient_activation_duration_ms)
     }
 
     pub(crate) fn consume_last_activation_timestamp(&self) {
@@ -4058,6 +4136,7 @@ impl Window {
         };
 
         let win = Box::new(Self {
+            idle_callbacks: Default::default(),
             webview_state,
             globalscope: GlobalScope::new_inherited(
                 #[cfg(feature = "devtools")]
@@ -4198,6 +4277,14 @@ impl Window {
         *self.layout.borrow_mut() = layout;
         self.set_viewport_details(viewport_details);
         self.navigation_start.set(navigation_start);
+
+        // The first navigation can reuse the initial about:blank Window, but
+        // the replacement document has its own performance timeline and time
+        // origin. Keep any externally held old Performance object intact.
+        if let Some(performance) = self.performance.get() {
+            performance.detach_document_timeline();
+        }
+        self.performance.set(None);
 
         // Step 6. Set settings object's creation URL to creationURL, settings object's top-level
         // creation URL to topLevelCreationURL, and settings object's top-level origin to topLevelOrigin.
@@ -4380,10 +4467,10 @@ fn is_named_element_with_name_attribute(elem: &Element) -> bool {
     };
     matches!(
         type_,
-        HTMLElementTypeId::HTMLEmbedElement |
-            HTMLElementTypeId::HTMLFormElement |
-            HTMLElementTypeId::HTMLImageElement |
-            HTMLElementTypeId::HTMLObjectElement
+        HTMLElementTypeId::HTMLEmbedElement
+            | HTMLElementTypeId::HTMLFormElement
+            | HTMLElementTypeId::HTMLImageElement
+            | HTMLElementTypeId::HTMLObjectElement
     )
 }
 

@@ -50,6 +50,7 @@ hyper_serde = { workspace = true }
 imsz = { workspace = true }
 ipc-channel = { workspace = true }
 itertools = { workspace = true }
+libc = { workspace = true }
 log = { workspace = true }
 malloc_size_of = { workspace = true }
 malloc_size_of_derive = { workspace = true }
@@ -72,6 +73,7 @@ rustls-pki-types = { workspace = true }
 rustls-platform-verifier = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 servo-base = { workspace = true }
 servo-config = { workspace = true }
 servo-default-resources = { workspace = true, optional = true }

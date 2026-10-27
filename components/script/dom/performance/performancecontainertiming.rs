@@ -48,6 +48,7 @@ impl PerformanceContainerTiming {
         paint_time: CrossProcessInstant,
         last_painted_element: Option<&Element>,
         root_element: Option<&Element>,
+        time_origin: CrossProcessInstant,
     ) -> PerformanceContainerTiming {
         PerformanceContainerTiming {
             entry: PerformanceEntry::new_inherited(
@@ -55,6 +56,7 @@ impl PerformanceContainerTiming {
                 EntryType::ContainerTiming,
                 Some(paint_time),
                 Duration::ZERO,
+                time_origin,
             ),
             identifier: identifier.traced(),
             intersection_rect,
@@ -78,6 +80,7 @@ impl PerformanceContainerTiming {
         last_painted_element: Option<&Element>,
         root_element: Option<&Element>,
     ) -> DomRoot<PerformanceContainerTiming> {
+        let time_origin = global.performance(cx).time_origin();
         reflect_dom_object(
             cx,
             Box::new(PerformanceContainerTiming::new_inherited(
@@ -88,6 +91,7 @@ impl PerformanceContainerTiming {
                 paint_time,
                 last_painted_element,
                 root_element,
+                time_origin,
             )),
             global,
         )
@@ -119,17 +123,14 @@ impl PerformanceContainerTimingMethods<crate::DomTypeHolder> for PerformanceCont
     }
 
     /// <https://wicg.github.io/container-timing/#dom-performancecontainertiming-firstrendertime>
-    fn FirstRenderTime(&self, cx: &mut JSContext) -> DOMHighResTimeStamp {
-        self.global()
-            .performance(cx)
-            .to_dom_high_res_time_stamp(self.first_render_time)
+    fn FirstRenderTime(&self, _cx: &mut JSContext) -> DOMHighResTimeStamp {
+        self.entry
+            .to_dom_high_res_time_stamp(Some(self.first_render_time))
     }
 
     /// <https://wicg.github.io/container-timing/#dom-performancecontainertiming-painttime>
-    fn PaintTime(&self, cx: &mut JSContext) -> DOMHighResTimeStamp {
-        self.global()
-            .performance(cx)
-            .to_dom_high_res_time_stamp(self.paint_time)
+    fn PaintTime(&self, _cx: &mut JSContext) -> DOMHighResTimeStamp {
+        self.entry.to_dom_high_res_time_stamp(Some(self.paint_time))
     }
 
     /// <https://wicg.github.io/container-timing/#dom-performancecontainertiming-lastpaintedelement>

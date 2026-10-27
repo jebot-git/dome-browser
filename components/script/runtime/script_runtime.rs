@@ -15,7 +15,8 @@ use std::io::{Write, stdout};
 use std::ops::{Deref, DerefMut};
 use std::os::raw::c_void;
 use std::ptr::NonNull;
-use std::rc::Weak;
+use std::rc::{Rc, Weak};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 use std::{os, ptr};
 
@@ -24,15 +25,15 @@ use js::context::JSContext;
 use js::conversions::jsstr_to_string;
 use js::gc::StackGCVector;
 use js::glue::{
-    DispatchablePointer, RUST_js_GetErrorMessage, RegisterScriptEnvironmentPreparer,
-    RunScriptEnvironmentPreparerClosure, SetBuildId, StreamConsumerConsumeChunk,
-    StreamConsumerNoteResponseURLs, StreamConsumerStreamEnd, StreamConsumerStreamError,
+    DispatchablePointer, RegisterScriptEnvironmentPreparer, RunScriptEnvironmentPreparerClosure,
+    SetBuildId, StreamConsumerConsumeChunk, StreamConsumerNoteResponseURLs,
+    StreamConsumerStreamEnd, StreamConsumerStreamError,
 };
 use js::jsapi::{
-    AsmJSOption, BuildIdCharVector, CompilationType, Dispatchable_MaybeShuttingDown, GCDescription,
-    GCOptions, GCProgress, GCReason, Handle as RawHandle, HandleObject, HandleString,
-    HandleValue as RawHandleValue, Heap, JSContext as RawJSContext, JSGCParamKey, JSGCStatus,
-    JSJitCompilerOption, JSObject, JSSecurityCallbacks, JSString, JSTracer, MimeType,
+    AsmJSOption, BuildIdCharVector, CompilationType, Dispatchable, Dispatchable_MaybeShuttingDown,
+    GCDescription, GCOptions, GCProgress, GCReason, Handle as RawHandle, HandleObject,
+    HandleString, HandleValue as RawHandleValue, Heap, JSContext as RawJSContext, JSGCParamKey,
+    JSGCStatus, JSJitCompilerOption, JSObject, JSSecurityCallbacks, JSString, JSTracer, MimeType,
     MutableHandleString, PromiseRejectionHandlingState, RuntimeCode,
     ScriptEnvironmentPreparer_Closure, SetProcessBuildIdOp, StreamConsumer as JSStreamConsumer,
 };
@@ -65,6 +66,7 @@ use servo_config::pref;
 use servo_url::ServoUrl;
 use style::thread_state::{self, ThreadState};
 
+use crate::dom::bindings::codegen::Bindings::HeadersBinding::HeadersMethods;
 use crate::dom::bindings::codegen::Bindings::ResponseBinding::Response_Binding::ResponseMethods;
 use crate::dom::bindings::codegen::Bindings::ResponseBinding::ResponseType as DOMResponseType;
 use crate::dom::bindings::codegen::UnionTypes::TrustedScriptOrString;
@@ -77,8 +79,8 @@ use crate::dom::bindings::refcounted::{
     LivePromiseReferences, Trusted, TrustedPromise, trace_refcounted_objects,
 };
 use crate::dom::bindings::reflector::DomGlobal;
-use crate::dom::bindings::root::trace_roots;
-use crate::dom::bindings::str::DOMString;
+use crate::dom::bindings::root::{DomRoot, trace_roots};
+use crate::dom::bindings::str::{ByteString, DOMString};
 use crate::dom::bindings::utils::DOM_CALLBACKS;
 use crate::dom::bindings::{principals, settings_stack};
 use crate::dom::console::{Console, stringify_handle_value};
@@ -92,6 +94,7 @@ use crate::dom::response::Response;
 use crate::dom::trustedtypes::trustedscript::TrustedScript;
 use crate::dom::window::Window;
 use crate::engine::handle::current_js_engine_handle;
+use crate::fetch::body::BodyMixin;
 use crate::messaging::{CommonScriptMsg, ScriptEventLoopSender};
 use crate::realms::enter_auto_realm;
 use crate::runtime::job_queue::{JobQueue, job_queue_clear};
@@ -381,8 +384,8 @@ unsafe extern "C" fn content_security_policy_allows(
         let csp_list = global.get_csp_list();
 
         // If we don't have any CSP checks to run, short-circuit all logic here
-        allowed = csp_list.is_none() ||
-            match runtime_code {
+        allowed = csp_list.is_none()
+            || match runtime_code {
                 RuntimeCode::JS => {
                     let parameter_strings = unsafe { Handle::from_raw(parameter_strings) };
                     let parameter_strings_length = parameter_strings.len();
@@ -537,6 +540,9 @@ pub(crate) fn notify_about_rejected_promises(cx: &mut JSContext, global: &Global
 struct RuntimeCallbackData {
     script_event_loop_sender: Option<ScriptEventLoopSender>,
     #[no_trace]
+    #[ignore_malloc_size_of = "Raw SpiderMonkey tasks, owned until run or shutdown"]
+    dispatchables: Arc<EventLoopDispatchQueue>,
+    #[no_trace]
     #[ignore_malloc_size_of = "ScriptThread measures its own memory itself."]
     script_thread: Option<Weak<ScriptThread>>,
 }
@@ -601,6 +607,16 @@ impl Runtime {
         let runtime_callback_data = Box::new(RuntimeCallbackData {
             script_event_loop_sender,
             script_thread: None,
+            dispatchables: Default::default(),
+        });
+        ASYNC_DISPATCH_QUEUE.with(|queue| {
+            assert!(
+                queue
+                    .borrow_mut()
+                    .replace(runtime_callback_data.dispatchables.clone())
+                    .is_none(),
+                "One SpiderMonkey runtime is allowed per thread"
+            );
         });
         let runtime_callback_data = Box::into_raw(runtime_callback_data);
 
@@ -610,6 +626,8 @@ impl Runtime {
                 Some(trace_rust_roots),
                 runtime_callback_data as *mut c_void,
             );
+
+            crate::runtime::finalization_registry::initialize(cx);
 
             JS_SetSecurityCallbacks(cx, &SECURITY_CALLBACKS);
 
@@ -652,25 +670,58 @@ impl Runtime {
         ) -> bool {
             let runtime_callback_data: &RuntimeCallbackData =
                 unsafe { &*(data as *mut RuntimeCallbackData) };
-            let Some(script_event_loop_sender) =
-                runtime_callback_data.script_event_loop_sender.as_ref()
-            else {
-                return false;
-            };
-
-            let runnable = Runnable(dispatchable);
+            let pending = runtime_callback_data.dispatchables.clone();
+            let key = dispatchable as usize;
+            let mut state = pending.state.lock().unwrap();
+            state.pending.insert(key, Runnable(dispatchable));
+            pending.ready.notify_one();
+            // mozjs glue transfers the wrapper's ownership to this callback.
+            // Accept during shutdown too, and run it on the owner thread below.
+            if state.closing {
+                return true;
+            }
+            let queued = pending.clone();
             let task = task!(dispatch_to_event_loop_message: move |cx| {
-                runnable.run(cx, Dispatchable_MaybeShuttingDown::NotShuttingDown);
+                let runnable = queued.state.lock().unwrap().pending.remove(&key);
+                if let Some(runnable) = runnable {
+                    runnable.run(cx, Dispatchable_MaybeShuttingDown::NotShuttingDown);
+                }
             });
-
-            script_event_loop_sender
-                .send(CommonScriptMsg::Task(
+            if let Some(sender) = runtime_callback_data.script_event_loop_sender.as_ref() {
+                let _ = sender.send(CommonScriptMsg::Task(
                     ScriptThreadEventCategory::NetworkEvent,
                     Box::new(task),
                     None, /* pipeline_id */
                     TaskSourceName::Networking,
-                ))
-                .is_ok()
+                ));
+            }
+            // If the ordinary task queue is already gone, the shutdown drain
+            // retains responsibility for this accepted dispatchable.
+            true
+        }
+
+        // mozjs's glue forwards its private wrapper as the closure for these
+        // two callbacks, unlike the dispatch callback above. They run on the
+        // owning JS thread; use its installed queue without interpreting that ABI.
+        unsafe extern "C" fn async_task_started(_data: *mut c_void, _task: *mut Dispatchable) {
+            ASYNC_DISPATCH_QUEUE.with(|queue| {
+                let queue = queue.borrow();
+                let queue = queue.as_ref().expect("Async task without its runtime");
+                queue.state.lock().unwrap().active += 1;
+            });
+        }
+
+        unsafe extern "C" fn async_task_finished(_data: *mut c_void, _task: *mut Dispatchable) {
+            ASYNC_DISPATCH_QUEUE.with(|queue| {
+                let queue = queue.borrow();
+                let queue = queue.as_ref().expect("Async task without its runtime");
+                let mut state = queue.state.lock().unwrap();
+                state.active = state
+                    .active
+                    .checked_sub(1)
+                    .expect("Unbalanced SpiderMonkey task lifecycle");
+                queue.ready.notify_one();
+            });
         }
 
         if have_event_loop_sender {
@@ -678,8 +729,8 @@ impl Runtime {
                 SetUpEventLoopDispatch(
                     cx,
                     Some(dispatch_to_event_loop),
-                    None,
-                    None,
+                    Some(async_task_started),
+                    Some(async_task_finished),
                     runtime_callback_data as *mut c_void,
                 );
             }
@@ -864,8 +915,41 @@ impl Runtime {
     }
 }
 
+#[expect(unsafe_code)]
 impl Drop for Runtime {
     fn drop(&mut self) {
+        crate::runtime::finalization_registry::shutdown(self.rt.cx());
+        // SpiderMonkey requires a terminal notification for every stream before
+        // shutting down its asynchronous compilation tasks and JS context.
+        let dispatch = self.runtime_callback_data.dispatchables.clone();
+        dispatch.state.lock().unwrap().closing = true;
+        cancel_all_wasm_streams();
+        unsafe {
+            js::rust::wrappers2::CancelAsyncTasks(self.rt.cx());
+        }
+        // Accepted dispatches own roots and must run even after the ordinary
+        // event loop stops. Background completions wake this owner-thread drain.
+        loop {
+            let pending = {
+                let mut state = dispatch.state.lock().unwrap();
+                while state.pending.is_empty() && state.active != 0 {
+                    state = dispatch.ready.wait(state).unwrap();
+                }
+                if state.pending.is_empty() && state.active == 0 {
+                    break;
+                }
+                std::mem::take(&mut state.pending)
+            };
+            for runnable in pending.into_values() {
+                runnable.run(self.rt.cx(), Dispatchable_MaybeShuttingDown::ShuttingDown);
+            }
+        }
+        unsafe {
+            js::rust::wrappers2::ShutdownAsyncTasks(self.rt.cx());
+        }
+        ASYNC_DISPATCH_QUEUE.with(|queue| {
+            queue.borrow_mut().take();
+        });
         // Clear our main microtask_queue.
         job_queue_clear(self.rt.cx_no_gc());
 
@@ -1003,6 +1087,7 @@ unsafe extern "C" fn trace_rust_roots(tr: *mut JSTracer, data: *mut os::raw::c_v
         return;
     }
     trace!("starting custom root handler");
+    unsafe { crate::runtime::finalization_registry::trace(tr) };
 
     let runtime_callback_data = unsafe { &*(data as *const RuntimeCallbackData) };
     if let Some(script_thread) = runtime_callback_data
@@ -1210,6 +1295,106 @@ pub(crate) fn get_reports(
     reports
 }
 
+// This registry belongs to the single JS runtime on this thread. It does not
+// contain untraced DOM references: owners are explicit GC roots, released on
+// every terminal path (including window/worker and runtime shutdown).
+thread_local! {
+    static ASYNC_DISPATCH_QUEUE: RefCell<Option<Arc<EventLoopDispatchQueue>>> = const { RefCell::new(None) };
+    static WASM_STREAMS: RefCell<HashMap<usize, Rc<WasmStream>>> = RefCell::new(HashMap::new());
+    static NEXT_WASM_STREAM: Cell<usize> = const { Cell::new(1) };
+}
+
+struct WasmStream {
+    id: usize,
+    consumer: RefCell<Option<StreamConsumer>>,
+    owner: RefCell<Option<DomRoot<GlobalScope>>>,
+}
+
+impl WasmStream {
+    fn new(owner: DomRoot<GlobalScope>, consumer: StreamConsumer) -> Rc<Self> {
+        let id = NEXT_WASM_STREAM.with(|next| {
+            let id = next.get();
+            next.set(id.checked_add(1).expect("WASM stream identifier overflow"));
+            id
+        });
+        let stream = Rc::new(Self {
+            id,
+            consumer: RefCell::new(Some(consumer)),
+            owner: RefCell::new(Some(owner)),
+        });
+        WASM_STREAMS.with(|streams| streams.borrow_mut().insert(id, stream.clone()));
+        stream
+    }
+
+    fn forget(&self) {
+        self.owner.borrow_mut().take();
+        WASM_STREAMS.with(|streams| streams.borrow_mut().remove(&self.id));
+    }
+
+    fn complete(&self, bytes: Vec<u8>) {
+        let Some(consumer) = self.consumer.borrow_mut().take() else {
+            return;
+        };
+        self.forget();
+        // A false return invalidates the native pointer. Do not notify it again.
+        if consumer.consume_chunk(&bytes) {
+            consumer.stream_end();
+        }
+    }
+
+    fn failed(&self, error: HandleValue) {
+        let Some(consumer) = self.consumer.borrow_mut().take() else {
+            return;
+        };
+        if let Some(owner) = self.owner.borrow_mut().take() {
+            owner.remember_wasm_stream_error(self.id, error);
+        }
+        self.forget();
+        consumer.stream_error(self.id);
+    }
+
+    fn cancel(&self) {
+        let consumer = self.consumer.borrow_mut().take();
+        self.forget();
+        if let Some(consumer) = consumer {
+            consumer.stream_error(0);
+        }
+    }
+}
+
+pub(crate) fn cancel_wasm_streams_for_global(global: &GlobalScope) {
+    let streams: Vec<_> = WASM_STREAMS.with(|streams| {
+        streams
+            .borrow()
+            .values()
+            .filter(|stream| {
+                stream
+                    .owner
+                    .borrow()
+                    .as_deref()
+                    .is_some_and(|owner| std::ptr::eq(owner, global))
+            })
+            .cloned()
+            .collect()
+    });
+    for stream in streams {
+        stream.cancel();
+    }
+}
+
+fn cancel_all_wasm_streams() {
+    let streams: Vec<_> = WASM_STREAMS.with(|streams| {
+        streams
+            .borrow_mut()
+            .drain()
+            .map(|(_, stream)| stream)
+            .collect()
+    });
+    for stream in streams {
+        stream.cancel();
+    }
+}
+
 pub(crate) struct StreamConsumer(*mut JSStreamConsumer);
 
 #[expect(unsafe_code)]
@@ -1277,11 +1462,25 @@ unsafe extern "C" fn consume_stream(
     if let Ok(unwrapped_source) =
         unsafe { root_from_handleobject::<Response>(cx, RustHandleObject::from_raw(obj)) }
     {
-        // Step 2.2 Let mimeType be the result of extracting a MIME type from response’s header list.
-        let mimetype = unwrapped_source.Headers(cx).extract_mime_type();
+        // WASM requires the complete header value; MIME parameters are forbidden.
+        let mimetype = unwrapped_source
+            .Headers(cx)
+            .Get(ByteString::new(b"Content-Type".to_vec()))
+            .ok()
+            .flatten();
 
         // Step 2.3 If mimeType is not `application/wasm`, return with a TypeError and abort these substeps.
-        if !&mimetype[..].eq_ignore_ascii_case(b"application/wasm") {
+        if !mimetype.as_ref().is_some_and(|value| {
+            let start = value
+                .iter()
+                .position(|b| !matches!(b, b' ' | b'\t'))
+                .unwrap_or(value.len());
+            let end = value
+                .iter()
+                .rposition(|b| !matches!(b, b' ' | b'\t'))
+                .map_or(start, |i| i + 1);
+            value[start..end].eq_ignore_ascii_case(b"application/wasm")
+        }) {
             throw_dom_exception(
                 cx,
                 &global,
@@ -1332,7 +1531,30 @@ unsafe extern "C" fn consume_stream(
             );
             return false;
         }
-        unwrapped_source.set_stream_consumer(Some(StreamConsumer(_consumer)));
+        let reader = match unwrapped_source.body() {
+            Some(body) => match body.acquire_default_reader(cx) {
+                Ok(reader) => Some(reader),
+                Err(error) => {
+                    throw_dom_exception(cx, &global, error);
+                    return false;
+                },
+            },
+            None => None,
+        };
+        let consumer = StreamConsumer(_consumer);
+        let url = unwrapped_source.Url().0;
+        consumer.note_response_urls((!url.is_empty()).then_some(url), None);
+        let stream = WasmStream::new(global.clone(), consumer);
+        if let Some(reader) = reader {
+            let success = stream.clone();
+            reader.read_all_bytes(
+                cx,
+                Rc::new(move |_, bytes| success.complete(bytes)),
+                Rc::new(move |_, error| stream.failed(error)),
+            );
+        } else {
+            stream.complete(Vec::new());
+        }
     } else {
         // Step 3 Upon rejection of source, return with reason.
         throw_dom_exception(
@@ -1346,10 +1568,30 @@ unsafe extern "C" fn consume_stream(
 }
 
 #[expect(unsafe_code)]
-unsafe extern "C" fn report_stream_error(_cx: *mut RawJSContext, error_code: usize) {
-    error!("Error initializing StreamConsumer: {:?}", unsafe {
-        RUST_js_GetErrorMessage(ptr::null_mut(), error_code as u32)
-    });
+unsafe extern "C" fn report_stream_error(raw_cx: *mut RawJSContext, error_code: usize) {
+    let mut cx = unsafe {
+        JSContext::from_ptr(NonNull::new(raw_cx).expect("JSContext should not be null in SM hook"))
+    };
+    let cx = &mut cx;
+    let mut realm = CurrentRealm::assert(cx);
+    let global = GlobalScope::from_current_realm(&mut realm);
+    if let Some(error) = global.take_wasm_stream_error(error_code) {
+        rooted!(&in(cx) let mut value = error.get());
+        drop(error);
+        if unsafe { js::rust::wrappers2::JS_WrapValue(cx, value.handle_mut()) } {
+            script_bindings::js::JS_SetPendingException(
+                cx,
+                value.handle(),
+                js::jsapi::ExceptionStackBehavior::Capture,
+            );
+        }
+    } else {
+        throw_dom_exception(
+            cx,
+            &global,
+            Error::Type(c"WebAssembly stream was cancelled".to_owned()),
+        );
+    }
 }
 
 #[expect(unsafe_code)]
@@ -1368,6 +1610,19 @@ unsafe extern "C" fn invoke_script_environment_preparer(
             report_pending_exception(cx);
         };
     });
+}
+
+#[derive(Default)]
+struct EventLoopDispatchQueue {
+    state: Mutex<EventLoopDispatch>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct EventLoopDispatch {
+    closing: bool,
+    active: usize,
+    pending: HashMap<usize, Runnable>,
 }
 
 pub(crate) struct Runnable(*mut DispatchablePointer);

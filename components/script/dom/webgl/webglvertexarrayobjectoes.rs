@@ -63,6 +63,10 @@ impl WebGLVertexArrayObjectOES {
         self.array_object.set_ever_bound();
     }
 
+    pub(crate) fn sync_element_array_buffer_cleanup(&self) {
+        self.array_object.sync_element_array_buffer_cleanup();
+    }
+
     pub(crate) fn element_array_buffer(&self) -> &MutNullableDom<WebGLBuffer> {
         self.array_object.element_array_buffer()
     }

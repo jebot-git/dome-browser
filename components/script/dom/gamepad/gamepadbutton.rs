@@ -63,6 +63,10 @@ impl GamepadButtonMethods<crate::DomTypeHolder> for GamepadButton {
 }
 
 impl GamepadButton {
+    pub(crate) fn state(&self) -> (bool, bool, f64) {
+        (self.pressed.get(), self.touched.get(), self.value.get())
+    }
+
     pub(crate) fn update(&self, pressed: bool, touched: bool, value: f64) {
         self.pressed.set(pressed);
         self.touched.set(touched);

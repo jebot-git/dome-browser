@@ -19,7 +19,7 @@ use js::jsval::{BooleanValue, JSVal, NullValue, ObjectValue, UndefinedValue};
 use js::realm::{AutoRealm, CurrentRealm};
 use js::rust::wrappers2::{Construct1, SameValue};
 use js::rust::{HandleObject, MutableHandleValue};
-use rustc_hash::{FxBuildHasher, FxHashSet};
+use rustc_hash::FxBuildHasher;
 use script_bindings::callback::HasCallbackHolder;
 use script_bindings::cell::DomRefCell;
 use script_bindings::js::JS_GetProperty;
@@ -90,7 +90,7 @@ pub(crate) struct CustomElementRegistry {
     is_scoped: Cell<bool>,
 
     /// <https://html.spec.whatwg.org/multipage/#scoped-document-set>
-    scoped_document_set: DomRefCell<FxHashSet<Dom<Document>>>,
+    scoped_document_set: DomRefCell<Vec<Dom<Document>>>,
 
     #[conditional_malloc_size_of]
     /// <https://html.spec.whatwg.org/multipage/#custom-element-definition-set>
@@ -142,6 +142,7 @@ impl CustomElementRegistry {
     /// <https://html.spec.whatwg.org/multipage/#htmlconstructor>
     /// Step 5. Let definition be the item in registry's custom element
     /// definition set with constructor equal to NewTarget.
+    #[expect(unsafe_code)]
     pub(crate) fn lookup_definition_by_constructor(
         &self,
         constructor: HandleObject,
@@ -150,7 +151,10 @@ impl CustomElementRegistry {
             .borrow()
             .0
             .values()
-            .find(|definition| definition.constructor.callback() == constructor.get())
+            .find(|definition| unsafe {
+                UnwrapObjectStatic(definition.constructor.callback()) ==
+                    UnwrapObjectStatic(constructor.get())
+            })
             .cloned()
     }
 
@@ -303,19 +307,10 @@ impl CustomElementRegistry {
             .traverse_preorder_unrooted(cx, ShadowIncluding::Yes)
             .filter_map(UnrootedDom::downcast::<Element>)
         {
-            // Note: If the registry is scoped, only include elements whose custom
-            // element registry is explicitly set to this registry. Otherwise,
-            // include elements with no explicit registry (they inherit the
-            // document's global registry) as well.
-            let registry_matches = if self.is_scoped.get() {
-                candidate
-                    .custom_element_registry()
-                    .is_some_and(|registry| *registry == *self)
-            } else {
-                candidate
-                    .custom_element_registry()
-                    .is_none_or(|registry| *registry == *self)
-            };
+            // Explicit null registries must stay outside global definitions too.
+            let registry_matches = candidate
+                .custom_element_registry()
+                .is_some_and(|registry| *registry == *self);
             if *candidate.local_name() == *local_name &&
                 *candidate.namespace() == ns!(html) &&
                 registry_matches &&
@@ -329,9 +324,11 @@ impl CustomElementRegistry {
     }
 
     pub(crate) fn add_scoped_document(&self, document: &Document) {
-        self.scoped_document_set
-            .borrow_mut()
-            .insert(Dom::from_ref(document));
+        if document.is_registry_fragment_document() || document.is_svg_snapshot_document() { return; }
+        let mut documents = self.scoped_document_set.borrow_mut();
+        if !documents.iter().any(|existing| std::ptr::eq(&**existing, document)) {
+            documents.push(Dom::from_ref(document));
+        }
     }
 }
 
@@ -735,7 +732,7 @@ impl CustomElementRegistryMethods<crate::DomTypeHolder> for CustomElementRegistr
             let registry_mismatch = root
                 .owner_doc()
                 .custom_element_registry()
-                .is_some_and(|registry| *registry != *self);
+                .is_none_or(|registry| *registry != *self);
             if is_document || registry_mismatch {
                 return Err(Error::NotSupported(Some(
                     "Initialize is not allowed on a non-scoped registry for this root".to_owned(),
@@ -766,11 +763,9 @@ impl CustomElementRegistryMethods<crate::DomTypeHolder> for CustomElementRegistr
             };
 
             // Step 4.2. If inclusiveDescendant's custom element registry is null:
-            // Note: A global registry (set by Node::adopt) is treated the same as null.
-            //       Both mean the element has no scoped registry, so it should get this one.
             if element
                 .custom_element_registry()
-                .is_none_or(|registry| Self::is_a_global_element_registry(Some(&*registry)))
+                .is_none()
             {
                 // Step 4.2.1. Set inclusiveDescendant's custom element registry to this.
                 element.set_custom_element_registry(Some(self), cx.no_gc());
@@ -779,9 +774,7 @@ impl CustomElementRegistryMethods<crate::DomTypeHolder> for CustomElementRegistr
                 // inclusiveDescendant's node document to this's scoped document set.
                 if self.is_scoped.get() {
                     let document = element.upcast::<Node>().owner_doc();
-                    self.scoped_document_set
-                        .borrow_mut()
-                        .insert(Dom::from_ref(&document));
+                    self.add_scoped_document(&document);
                 }
             // Step 4.3. If inclusiveDescendant's custom element registry is not this, then continue.
             } else if element
@@ -933,6 +926,13 @@ impl CustomElementDefinition {
         self.name == self.local_name
     }
 
+    /// The constructor's associated global, independently of its caller or
+    /// the document into which the element is being created.
+    #[expect(unsafe_code)]
+    pub(crate) fn constructor_global(&self) -> DomRoot<GlobalScope> {
+        unsafe { GlobalScope::from_object(self.constructor.callback()) }
+    }
+
     /// <https://dom.spec.whatwg.org/#concept-create-element> Step 5.1
     #[expect(unsafe_code)]
     pub(crate) fn create_element(
@@ -943,6 +943,10 @@ impl CustomElementDefinition {
         registry: Option<&CustomElementRegistry>,
     ) -> Fallible<DomRoot<Element>> {
         let window = document.window();
+        let reaction_stack = ScriptThread::custom_element_reaction_stack();
+        let active_constructor = reaction_stack.enter_constructor(
+            self.constructor.clone(), registry,
+        );
 
         // Step 5.1.1. Let C be definition’s constructor.
         rooted!(&in(cx) let constructor = ObjectValue(self.constructor.callback()));
@@ -1010,6 +1014,7 @@ impl CustomElementDefinition {
         // Step 5.1.3.11. Set result’s custom element registry to registry.
         element.set_custom_element_registry(registry, cx.no_gc());
 
+        drop(active_constructor);
         Ok(element)
     }
 
@@ -1029,6 +1034,12 @@ pub(crate) fn upgrade_element(
     if state != CustomElementState::Undefined && state != CustomElementState::Uncustomized {
         return;
     }
+
+    // Upgrade reactions can run from the backup microtask queue with no
+    // entered realm. Both argument wrapping and exception reporting belong to
+    // the constructor's realm, including when it differs from the element's.
+    let mut realm = AutoRealm::new(cx, NonNull::new(definition.constructor.callback()).unwrap());
+    let cx = &mut *realm;
 
     // Step 2. Set element's custom element definition to definition.
     element.set_custom_element_definition(Rc::clone(&definition), cx.no_gc());
@@ -1068,10 +1079,15 @@ pub(crate) fn upgrade_element(
         .borrow_mut()
         .push(ConstructionStackEntry::Element(Dom::from_ref(element)));
 
-    // Steps 7-8, successful case
+    // Save/restore the agent's active registry even when author code reenters
+    // an upgrade using the same constructor in another scoped registry.
+    let active_constructor = custom_element_reaction_stack.enter_constructor(
+        definition.constructor.clone(), element.custom_element_registry().as_deref(),
+    );
     let result = run_upgrade_constructor(cx, &definition, element);
 
-    // "regardless of whether the above steps threw an exception" step
+    // "regardless of whether the above steps threw an exception" steps
+    drop(active_constructor);
     definition.construction_stack.borrow_mut().pop();
 
     // Step 8 exception handling
@@ -1213,21 +1229,7 @@ pub(crate) fn try_upgrade_element(cx: &JSContext, element: &Element) {
     // Step 1. Let definition be the result of looking up a custom element
     // definition given element's custom element registry, element's namespace,
     // element's local name, and element's is value.
-    let lookup_registry = {
-        // TODO: Remove this fallback when Node::adopt is aligned according to specs.
-        //       Currently elements carry stale global registry from another document.
-        let registry = element.custom_element_registry();
-        if registry
-            .as_ref()
-            .is_some_and(|registry| registry.is_scoped())
-        {
-            registry
-        } else {
-            element
-                .owner_document_unrooted(cx.no_gc())
-                .custom_element_registry()
-        }
-    };
+    let lookup_registry = element.custom_element_registry();
     if let Some(definition) = CustomElementRegistry::lookup_custom_element_definition(
         lookup_registry.as_deref(),
         element.namespace(),
@@ -1297,6 +1299,27 @@ enum BackupElementQueueFlag {
     NotProcessing,
 }
 
+/// A stack implements the agent's active constructor map: the last matching
+/// entry wins, and dropping an invocation restores the previous mapping. The
+/// traced callback remains a movable GC edge rather than a raw-pointer key.
+#[derive(JSTraceable, MallocSizeOf)]
+struct ActiveConstructor {
+    constructor: TracedCallback<CustomElementConstructor>,
+    registry: Option<Dom<CustomElementRegistry>>,
+}
+
+#[must_use]
+pub(crate) struct ActiveConstructorGuard {
+    // One owner remains in ScriptThread, which traces all active entries.
+    reaction_stack: Rc<CustomElementReactionStack>,
+}
+
+impl Drop for ActiveConstructorGuard {
+    fn drop(&mut self) {
+        assert!(self.reaction_stack.active_constructors.borrow_mut().pop().is_some());
+    }
+}
+
 /// <https://html.spec.whatwg.org/multipage/#custom-element-reactions-stack>
 /// # Safety
 /// This can be shared inside an Rc because one of those Rc copies lives
@@ -1308,6 +1331,7 @@ pub(crate) struct CustomElementReactionStack {
     stack: DomRefCell<Vec<ElementQueue>>,
     backup_queue: ElementQueue,
     processing_backup_element_queue: Cell<BackupElementQueueFlag>,
+    active_constructors: DomRefCell<Vec<ActiveConstructor>>,
 }
 
 impl CustomElementReactionStack {
@@ -1316,7 +1340,30 @@ impl CustomElementReactionStack {
             stack: DomRefCell::new(Vec::new()),
             backup_queue: ElementQueue::new(),
             processing_backup_element_queue: Cell::new(BackupElementQueueFlag::NotProcessing),
+            active_constructors: Default::default(),
         }
+    }
+
+    pub(crate) fn enter_constructor(
+        self: &Rc<Self>,
+        constructor: TracedCallback<CustomElementConstructor>,
+        registry: Option<&CustomElementRegistry>,
+    ) -> ActiveConstructorGuard {
+        self.active_constructors.borrow_mut().push(ActiveConstructor {
+            constructor,
+            registry: registry.map(Dom::from_ref),
+        });
+        ActiveConstructorGuard { reaction_stack: self.clone() }
+    }
+
+    #[expect(unsafe_code)]
+    pub(crate) fn active_constructor_registry(
+        &self,
+        constructor: HandleObject,
+    ) -> Option<Option<DomRoot<CustomElementRegistry>>> {
+        self.active_constructors.borrow().iter().rev().find(|entry| unsafe {
+            UnwrapObjectStatic(entry.constructor.callback()) == UnwrapObjectStatic(constructor.get())
+        }).map(|entry| entry.registry.as_deref().map(DomRoot::from_ref))
     }
 
     pub(crate) fn push_new_element_queue(&self) {

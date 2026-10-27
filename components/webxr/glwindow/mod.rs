@@ -204,6 +204,7 @@ impl DeviceAPI for GlWindowDevice {
             sub_images,
             hit_test_results: vec![],
             predicted_display_time: 0.0,
+            predicted_display_instant: None,
         })
     }
 

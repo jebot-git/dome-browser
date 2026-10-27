@@ -2706,8 +2706,8 @@ impl FlexItemBox {
         preferred_aspect_ratio: Option<AspectRatio>,
         automatic_inline_size: Size<Au>,
         intrinsic_sizing_mode: IntrinsicSizingMode,
-    ) -> Au {
-        let content_block_size = || {
+    ) -> ContentSizes {
+        let content_block_sizes = || {
             let mut positioning_context = PositioningContext::default();
 
             // We are computing the intrinsic block size, so the tentative block size that we use
@@ -2737,14 +2737,21 @@ impl FlexItemBox {
                 )
             };
 
-            self.independent_formatting_context
+            let intrinsic = self.independent_formatting_context
                 .content_block_size_under_default_constraint(
                     flex_context.layout_context,
                     &mut positioning_context,
                     inline_size,
                     flex_context.containing_block,
                     preferred_aspect_ratio,
-                )
+                );
+            let transferred = preferred_aspect_ratio
+                .filter(|_| !self.independent_formatting_context.is_replaced())
+                .map(|ratio| ratio.compute_dependent_size(LogicalAxis::Block, inline_size))
+                .unwrap_or(intrinsic);
+            // The ratio supplies the flex base size after resolving the cross
+            // size. Preserve intrinsic content separately for min-size:auto.
+            ContentSizes { min_content: intrinsic, max_content: transferred }
         };
         match intrinsic_sizing_mode {
             IntrinsicSizingMode::Contribution => {
@@ -2759,7 +2766,7 @@ impl FlexItemBox {
                     Size::FitContent,
                     Au::zero,
                     stretch_size,
-                    || ContentSizes::from(content_block_size()),
+                    content_block_sizes,
                     // Tables have a special sizing in the block axis that handles collapsed rows
                     // by ignoring the sizing properties and instead relying on the content block size,
                     // which should indirectly take sizing properties into account.
@@ -2768,9 +2775,9 @@ impl FlexItemBox {
                     // Therefore, pretending that it's never a table tends to provide a better result.
                     false, /* is_table */
                 );
-                inner_block_size + pbm_auto_is_zero.main
+                (inner_block_size + pbm_auto_is_zero.main).into()
             },
-            IntrinsicSizingMode::Size => content_block_size(),
+            IntrinsicSizingMode::Size => content_block_sizes(),
         }
     }
 

@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Native image alternative-text rendering</title>
+<style>
+body {font:16px/20px monospace;background:white;color:#c00000}
+section {margin:4px 0}
+img, .label {font:inherit}
+</style>
+<script>
+addEventListener('load', async () => {
+ const checks=[], geometry=[];
+ const check=(name,passed,detail)=>checks.push({name,passed,error:detail||''});
+ const good='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
+ const pause=()=>new Promise(r=>setTimeout(r,100));
+ const size=e=>{const r=e.getBoundingClientRect();return [r.width,r.height]};
+ const equal=(a,b)=>Math.abs(a-b)<.2;
+ const load=(e,src)=>new Promise(resolve=>{e.onload=()=>resolve('load');e.onerror=()=>resolve('error');e.src=src});
+ const make=(alt,css,doc=document)=>{const host=doc.createElement('section'),e=doc.createElement('img');if(alt!==null)e.alt=alt;e.style.cssText=css;host.append(e);doc.body.append(host);return e};
+ const label=document.createElement('span');label.className='label';label.textContent='Fallback label';document.body.append(label);
+ const textWidth=size(label)[0];
+ const textBox=(name,e)=>{const r=size(e);geometry.push({name,rect:r,computed:[getComputedStyle(e).width,getComputedStyle(e).height],alt:e.getAttribute('alt')});check(name+' becomes inline text',r[1]>0&&r[1]<=24&&r[0]>=textWidth-.2&&r[0]<=textWidth+32,JSON.stringify(r))};
+ const rect=(name,e,w,h)=>{const r=size(e);geometry.push({name,rect:r,computed:[getComputedStyle(e).width,getComputedStyle(e).height],alt:e.getAttribute('alt')});check(name,equal(r[0],w)&&equal(r[1],h),JSON.stringify(r))};
+ const cases=[
+ ['network failure','/not-found','width:100px;aspect-ratio:1/5'],
+ ['decode failure','/bad-image','width:100px;aspect-ratio:1/5'],
+ ['definite dimensions','/not-found','width:100px;height:80px;aspect-ratio:1/5'],
+ ['height only','/not-found','height:80px;aspect-ratio:2'],
+ ['auto ratio','/not-found','width:100px;aspect-ratio:auto 1/5'],
+ ['natural text','/not-found',''],
+ ];
+ for(const [name,src,css] of cases){const e=make('Fallback label',css);const event=await load(e,src);await pause();check(name+' errors',event==='error');textBox(name,e);check(name+' leaves author DOM empty',e.childNodes.length===0&&e.textContent==='')}
+ for(const [name,alt] of [['empty alt',''],['missing alt',null]]){const e=make(alt,'width:100px;aspect-ratio:1/5');await load(e,'/not-found');await pause();rect(name+' stays replaced',e,100,500)}
+ for(const [name,css,h] of [['explicit ratio','width:100px;aspect-ratio:1/5',500],['auto natural ratio','width:100px;aspect-ratio:auto 1/5',100]]){const e=make('Fallback label',css);check(name+' loads',await load(e,good)==='load');await pause();rect(name+' retains image size',e,100,h)}
+ for(const display of ['block','inline-block']){const e=make('Fallback label',`display:${display};width:100px;aspect-ratio:1/5`);await load(e,'/not-found');await pause();rect(display+' ratio size',e,100,500)}
+ const emptyNatural=make('','');await load(emptyNatural,'/not-found?empty-natural');await pause();rect('empty alt natural size is zero',emptyNatural,0,0);
+ const replacement=make('Fallback label',`content:url("${good}");width:100px;height:80px`);await load(replacement,'/not-found?css-replacement');await pause();rect('CSS image replacement remains replaced',replacement,100,80);
+ const plainBlock=make('Fallback label','display:block;width:200px');await load(plainBlock,'/not-found?block-text');await pause();rect('block fallback lays out a text line',plainBlock,200,20);
+ const noSource=make('Fallback label','width:100px;height:80px');await pause();textBox('missing source',noSource);
+ const srcsetDone=new Promise(resolve=>{noSource.onerror=resolve;noSource.srcset='/batch-failure?404&srcset-pending'});await pause();rect('pending srcset replaces fallback text',noSource,100,80);await srcsetDone;await pause();textBox('failed srcset restores text',noSource);
+ const picture=document.createElement('picture'),source=document.createElement('source'),pictureImage=document.createElement('img');source.srcset='/batch-failure?404&picture-pending';pictureImage.alt='Fallback label';pictureImage.style.cssText='width:100px;height:80px';picture.append(source,pictureImage);const pictureDone=new Promise(resolve=>pictureImage.onerror=resolve);document.body.append(picture);await pause();rect('pending picture retains replaced box',pictureImage,100,80);await pictureDone;await pause();textBox('failed picture restores text',pictureImage);
+ const changedPicture=new Promise(resolve=>{pictureImage.onerror=resolve;source.srcset='/batch-failure?404&picture-change'});await pause();rect('pending picture mutation replaces text',pictureImage,100,80);await changedPicture;await pause();textBox('failed picture mutation restores text',pictureImage);
+ const emptySource=make('Fallback label','width:100px;height:80px');await load(emptySource,'');await pause();textBox('empty source',emptySource);
+ const dynamic=make('Fallback label','width:100px;height:80px');
+ await load(dynamic,good);await pause();rect('initial valid image',dynamic,100,80);
+ const pending=load(dynamic,'/batch-failure?404&image');await pause();rect('pending replacement retains current image',dynamic,100,80);await pending;await pause();textBox('valid to broken',dynamic);
+ const short=size(dynamic)[0];dynamic.alt='Fallback label extended';await pause();check('alt mutation updates native text',size(dynamic)[0]>short+30,JSON.stringify(size(dynamic)));
+ dynamic.alt='';await pause();rect('empty alt mutation restores image box',dynamic,100,80);
+ dynamic.alt='Fallback label';await pause();textBox('nonempty alt mutation restores text',dynamic);
+ dynamic.removeAttribute('alt');await pause();rect('alt removal restores image box',dynamic,100,80);
+ dynamic.alt='Fallback label';await pause();textBox('alt addition restores text',dynamic);
+ await load(dynamic,good);await pause();rect('broken to valid image',dynamic,100,80);
+ check('mutations leave author DOM empty',dynamic.childNodes.length===0&&dynamic.textContent==='');
+ fetch('/report',{method:'POST',body:JSON.stringify({checks,geometry,textWidth})});
+});
+</script>

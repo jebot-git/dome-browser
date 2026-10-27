@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use embedder_traits::{
     EmbedderControlId, EmbedderControlResponse, FilePickerRequest, FilterPattern,
 };
-use net::async_runtime::init_async_runtime;
+use net::test_util::create_embedder_proxy;
 use net::embedder::NetToEmbedderMsg;
 use net::filemanager_thread::FileManager;
 use net_traits::blob_url_store::{BlobTokenCommunicator, BlobURLStoreError};
@@ -26,7 +26,9 @@ use crate::create_generic_embedder_proxy_and_receiver;
 
 #[test]
 fn test_filemanager() {
-    let _runtime = init_async_runtime();
+    // Share the process-wide test runtime with the fetch fixtures. Creating a
+    // second runtime races their OnceLock initialization under the full suite.
+    let _runtime_initializer = create_embedder_proxy();
     let mut preferences = Preferences::default();
     preferences.dom_testing_html_input_element_select_files_enabled = true;
     servo_config::prefs::set(preferences);

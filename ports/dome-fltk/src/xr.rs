@@ -24,6 +24,40 @@ use webxr_api::{
     LayerGrandManager, LayerId, LayerInit, LayerManager, Native, Quitter, Session, SessionBuilder,
     SessionInit, SessionMode, View, ViewerPose, Viewports, Views, Visibility,
 };
+mod input;
+mod reference_space;
+mod inline;
+mod time;
+
+#[derive(Clone, Copy, Default)]
+struct PageFocus {
+    owner: Option<servo::WebViewId>,
+    focused: bool,
+    revision: u64,
+}
+
+/// Tracks trusted tab/chrome focus independently of the compositor's PID focus.
+#[derive(Clone, Default)]
+pub(crate) struct Focus(Rc<std::cell::Cell<PageFocus>>);
+impl Focus {
+    pub fn set(&self, owner: servo::WebViewId, focused: bool) {
+        let last = self.0.get();
+        if last.owner != Some(owner) || last.focused != focused {
+            self.0.set(PageFocus {
+                owner: Some(owner),
+                focused,
+                revision: last.revision.wrapping_add(1),
+            });
+        }
+    }
+    fn permits(&self, owner: servo::WebViewId) -> bool {
+        let current = self.0.get();
+        current.focused
+            && current.owner == Some(owner)
+            && unsafe { crate::ui::browser_ui_page_focused() != 0 }
+    }
+}
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 fn endpoint() -> Result<PathBuf> {
@@ -120,6 +154,8 @@ struct Hello {
     max_width: u32,
     max_height: u32,
     stage: bool,
+    #[serde(default)]
+    input_stream_version: u32,
 }
 impl Hello {
     fn parse(value: Value) -> Result<Self> {
@@ -158,7 +194,7 @@ pub fn probe() -> Result<Value> {
     Hello::parse(value.clone())?;
     Ok(value)
 }
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Copy, Serialize, Deserialize, Debug)]
 struct Pose {
     position: [f32; 3],
     orientation: [f32; 4],
@@ -209,6 +245,8 @@ struct Eye {
 struct HostFrame {
     frame_id: u64,
     time: i64,
+    #[serde(default)]
+    monotonic_time: Option<i64>,
     should_render: bool,
     visible: bool,
     focused: bool,
@@ -216,14 +254,70 @@ struct HostFrame {
     view_flags: u64,
     head: Pose,
     views: [Eye; 2],
+    #[serde(default)]
+    inputs: Vec<input::HostInput>,
+    #[serde(default)]
+    input_batch: Option<input::Batch>,
+    #[serde(default)]
+    reference_space: Option<reference_space::State>,
 }
 impl HostFrame {
+    fn input_allowed(&self) -> bool {
+        self.visible && self.focused && self.head_flags & 3 == 3 && self.view_flags & 3 == 3
+    }
+    fn web_frame(
+        &self,
+        anchor: RigidTransform3D<f32, Native, Native>,
+        clip: ClipPlanes,
+        clock: &time::Clock,
+    ) -> Frame {
+        let local = anchor.inverse();
+        let pose = if self.visible && self.head_flags & 3 == 3 && self.view_flags & 3 == 3 {
+            let view = |v: &Eye| View::<webxr_api::Viewer> {
+                transform: v.pose.transform::<webxr_api::Viewer, Native>().then(&local),
+                projection: fov_to_projection_matrix(
+                    v.fov.left,
+                    v.fov.right,
+                    v.fov.up,
+                    v.fov.down,
+                    clip,
+                ),
+            };
+            Some(ViewerPose {
+                transform: self
+                    .head
+                    .transform::<webxr_api::Viewer, Native>()
+                    .then(&local),
+                views: Views::Stereo(
+                    view(&self.views[0]).cast_unit(),
+                    view(&self.views[1]).cast_unit(),
+                ),
+            })
+        } else {
+            None
+        };
+        Frame {
+            pose,
+            inputs: input::frames(self, anchor),
+            events: vec![],
+            sub_images: vec![],
+            hit_test_results: vec![],
+            predicted_display_time: self.time as f64 / 1_000_000.,
+            predicted_display_instant: clock.instant(self.time, self.monotonic_time),
+        }
+    }
     fn valid(&self) -> bool {
-        self.frame_id > 0
+        self.reference_space.is_none_or(|state| state.valid())
+            && self.frame_id > 0
             && self.time > 0
+            && self.monotonic_time.is_none_or(|value| value > 0)
             && (!self.focused || self.visible)
-            && self.head.valid()
-            && self.views.iter().all(|v| v.pose.valid() && v.fov.valid())
+            && (self.head_flags & 3 != 3 || self.head.valid())
+            && self
+                .views
+                .iter()
+                .all(|v| (self.view_flags & 3 != 3 || v.pose.valid()) && v.fov.valid())
+            && input::valid_inputs(&self.inputs)
     }
 }
 fn backend(error: impl std::fmt::Debug) -> Error {
@@ -255,21 +349,27 @@ impl Drop for PendingLease {
 }
 pub struct Registry {
     connection: Option<Connection>,
+    focus: Focus,
 }
 impl Registry {
-    pub fn new(connection: Option<Connection>) -> Self {
-        Self { connection }
+    pub fn new(connection: Option<Connection>, focus: Focus) -> Self {
+        Self { connection, focus }
     }
 }
 impl servo::webxr::WebXrRegistry for Registry {
     fn register(&self, registry: &mut servo::webxr::MainThreadRegistry) {
+        registry.register(inline::Discovery);
         if let Some(connection) = self.connection.clone() {
-            registry.register(Discovery { connection });
+            registry.register(Discovery {
+                connection,
+                focus: self.focus.clone(),
+            });
         }
     }
 }
 struct Discovery {
     connection: Connection,
+    focus: Focus,
 }
 impl DiscoveryAPI<SurfmanGL> for Discovery {
     fn supports_session(&self, mode: SessionMode) -> bool {
@@ -284,6 +384,10 @@ impl DiscoveryAPI<SurfmanGL> for Discovery {
         if mode != SessionMode::ImmersiveVR {
             return Err(Error::NoMatchingDevice);
         }
+        let owner = init
+            .webview_id
+            .filter(|owner| self.focus.permits(*owner))
+            .ok_or_else(|| backend("WebXR requires the focused browser page"))?;
         let path = endpoint().map_err(backend)?;
         let hello =
             Hello::parse(rpc(&path, json!({"op":"hello","version":1}), &[]).map_err(backend)?)
@@ -307,10 +411,20 @@ impl DiscoveryAPI<SurfmanGL> for Discovery {
         {
             return Err(backend("WebXR permission denied"));
         }
+        // The accepted native dialog temporarily owns keyboard focus. Its
+        // teardown may restore page focus on the next event-loop iteration.
+        // Keep the trusted requesting tab check here; frame input remains
+        // independently gated by live native/page focus below.
+        if self.focus.0.get().owner != Some(owner) {
+            return Err(backend("The requesting WebXR tab is no longer active"));
+        }
+        let focus = self.focus.clone();
         let connection = self.connection.clone();
         let adapter = connection.create_adapter().map_err(backend)?;
         builder.run_on_main_thread(move |grand| {
-            BridgeDevice::new(path, hello, connection, adapter, features, grand)
+            BridgeDevice::new(
+                path, hello, connection, adapter, features, grand, focus, owner,
+            )
         })
     }
 }
@@ -325,7 +439,6 @@ struct BridgeDevice {
     chains: SwapChains<LayerId, Device>,
     grand: LayerGrandManager<SurfmanGL>,
     manager: Option<LayerManager>,
-    layer: Option<LayerId>,
     frame: Option<HostFrame>,
     anchor: Option<RigidTransform3D<f32, Native, Native>>,
     clip: ClipPlanes,
@@ -334,6 +447,12 @@ struct BridgeDevice {
     quitter: Option<Quitter>,
     ended: bool,
     visible: Option<(bool, bool)>,
+    inputs: Option<input::State>,
+    focus: Focus,
+    owner: servo::WebViewId,
+    focus_revision: u64,
+    clock: time::Clock,
+    reference_spaces: reference_space::Tracker,
 }
 impl BridgeDevice {
     fn new(
@@ -343,6 +462,8 @@ impl BridgeDevice {
         adapter: Adapter,
         features: Vec<String>,
         grand: LayerGrandManager<SurfmanGL>,
+        focus: Focus,
+        owner: servo::WebViewId,
     ) -> std::result::Result<Self, Error> {
         // A rejected or busy lease must not leave a live Surfman context behind.
         let begin = rpc(&path, json!({"op":"begin_session"}), &[]).map_err(backend)?;
@@ -356,19 +477,24 @@ impl BridgeDevice {
             token: token.clone(),
             armed: true,
         };
-        let initial: HostFrame = serde_json::from_value(
-            rpc(
-                &path,
-                json!({"op":"wait_frame","token":token,"after":0}),
-                &[],
-            )
-            .map_err(backend)?,
-        )
-        .map_err(backend)?;
+        let baseline_frame = begin["frame_id"].as_u64().unwrap_or(0);
+        let mut request = json!({"op":"wait_frame","token":token,"after":baseline_frame});
+        if hello.input_stream_version == 1 {
+            request["input_after"] = json!(0);
+        }
+        let initial: HostFrame =
+            serde_json::from_value(rpc(&path, request, &[]).map_err(backend)?).map_err(backend)?;
         if !initial.valid() || initial.head_flags & 3 != 3 || initial.view_flags & 3 != 3 {
             return Err(backend("Headset tracking is not currently valid"));
         }
         let initial_anchor = anchor(&initial.head);
+        let mut clock = time::Clock::default();
+        clock.observe(initial.time, initial.monotonic_time);
+        let inputs = if hello.input_stream_version == 1 {
+            Some(input::State::new(&initial).map_err(backend)?)
+        } else {
+            None
+        };
         let device = connection.create_device(&adapter).map_err(backend)?;
         let version = if device.gl_api() == GLApi::GLES {
             GLVersion::new(3, 0)
@@ -414,7 +540,7 @@ impl BridgeDevice {
             chains: SwapChains::new(),
             grand,
             manager: None,
-            layer: None,
+            reference_spaces: reference_space::Tracker::new(initial.reference_space),
             frame: Some(initial),
             anchor: Some(initial_anchor),
             clip: ClipPlanes::default(),
@@ -423,6 +549,11 @@ impl BridgeDevice {
             quitter: None,
             ended: false,
             visible: None,
+            inputs,
+            focus_revision: focus.0.get().revision,
+            focus,
+            owner,
+            clock,
         })
     }
     fn manager(&mut self) -> std::result::Result<&mut LayerManager, Error> {
@@ -444,6 +575,13 @@ impl BridgeDevice {
                 json!({"op":"end_session","token":self.token}),
                 &[],
             );
+            if let (Some(inputs), Some(frame), Some(anchor)) =
+                (&mut self.inputs, &self.frame, self.anchor)
+            {
+                for event in inputs.cancel(&frame.web_frame(anchor, self.clip, &self.clock)) {
+                    self.events.callback(event);
+                }
+            }
             self.events.callback(Event::SessionEnd);
             eprintln!("WEBXR browser lease ended; DomeD session preserved");
         }
@@ -463,7 +601,12 @@ impl BridgeDevice {
         let Some(frame) = self.frame.clone() else {
             return Ok(());
         };
-        if layers.is_empty() || !frame.should_render {
+        if layers.is_empty()
+            || !frame.should_render
+            || !frame.visible
+            || frame.head_flags & 3 != 3
+            || frame.view_flags & 3 != 3
+        {
             rpc(
                 &self.path,
                 json!({"op":"end_frame","token":self.token,"frame_id":frame.frame_id,"empty":true}),
@@ -551,9 +694,6 @@ impl DeviceAPI for BridgeDevice {
         context: ContextId,
         init: LayerInit,
     ) -> std::result::Result<LayerId, Error> {
-        if self.layer.is_some() {
-            return Err(backend("DomeD currently supports one projection layer"));
-        }
         // Surfman's projection viewports are native-sized. Scaling the backing
         // texture alone would send a clipped or incorrectly split stereo frame.
         if let LayerInit::WebGLLayer {
@@ -573,16 +713,13 @@ impl DeviceAPI for BridgeDevice {
         {
             return Err(backend("XR layer dimensions exceed the bridge limit"));
         }
-        let layer = self.manager()?.create_layer(context, init)?;
-        self.layer = Some(layer);
-        Ok(layer)
+        // Multiple WebGL layers may exist while updateRenderState selects the
+        // active base layer. The shared manager owns each allocation/lifetime.
+        self.manager()?.create_layer(context, init)
     }
     fn destroy_layer(&mut self, context: ContextId, layer: LayerId) {
         if let Ok(manager) = self.manager() {
             manager.destroy_layer(context, layer);
-        }
-        if self.layer == Some(layer) {
-            self.layer = None;
         }
     }
     fn viewports(&self) -> Viewports {
@@ -601,18 +738,18 @@ impl DeviceAPI for BridgeDevice {
             return None;
         }
         let after = self.frame.as_ref().map_or(0, |f| f.frame_id);
-        let value = match rpc(
-            &self.path,
-            json!({"op":"wait_frame","token":self.token,"after":after}),
-            &[],
-        ) {
+        let mut request = json!({"op":"wait_frame","token":self.token,"after":after});
+        if let Some(inputs) = &self.inputs {
+            request["input_after"] = json!(inputs.cursor());
+        }
+        let value = match rpc(&self.path, request, &[]) {
             Ok(v) => v,
             Err(e) => {
                 self.fail(e);
                 return None;
             },
         };
-        let frame: HostFrame = match serde_json::from_value(value) {
+        let mut frame: HostFrame = match serde_json::from_value(value) {
             Ok(f) => f,
             Err(e) => {
                 self.fail(e);
@@ -623,6 +760,12 @@ impl DeviceAPI for BridgeDevice {
             self.fail("Invalid or repeated tracking frame");
             return None;
         }
+        self.clock.observe(frame.time, frame.monotonic_time);
+        let page_allowed = self.focus.permits(self.owner);
+        frame.visible &= self.focus.0.get().owner == Some(self.owner);
+        let focus_changed = self.focus.0.get().revision != self.focus_revision;
+        self.focus_revision = self.focus.0.get().revision;
+        frame.focused &= page_allowed;
         let visibility = (frame.visible, frame.focused);
         if self.visible != Some(visibility) {
             self.visible = Some(visibility);
@@ -635,48 +778,38 @@ impl DeviceAPI for BridgeDevice {
                     Visibility::VisibleBlurred
                 }));
         }
-        let tracked = frame.head_flags & 3 == 3 && frame.view_flags & 3 == 3;
-        if tracked && self.anchor.is_none() {
-            let q = frame.head.orientation;
-            let yaw =
-                (2. * (q[3] * q[1] + q[0] * q[2])).atan2(1. - 2. * (q[1] * q[1] + q[2] * q[2]));
-            let rotation = Rotation3D::around_y(euclid::Angle::radians(yaw));
-            self.anchor = Some(RigidTransform3D::new(
-                rotation,
-                Vector3D::new(
-                    frame.head.position[0],
-                    frame.head.position[1],
-                    frame.head.position[2],
-                ),
-            ));
-        }
-        let pose = if tracked {
-            self.anchor.map(|anchor| {
-                let local = anchor.inverse();
-                let view = |v: &Eye| View::<webxr_api::Viewer> {
-                    transform: v.pose.transform::<webxr_api::Viewer, Native>().then(&local),
-                    projection: fov_to_projection_matrix(
-                        v.fov.left,
-                        v.fov.right,
-                        v.fov.up,
-                        v.fov.down,
-                        self.clip,
-                    ),
-                };
-                ViewerPose {
-                    transform: frame
-                        .head
-                        .transform::<webxr_api::Viewer, Native>()
-                        .then(&local),
-                    views: Views::Stereo(
-                        view(&frame.views[0]).cast_unit(),
-                        view(&frame.views[1]).cast_unit(),
-                    ),
-                }
-            })
-        } else {
-            None
+        let anchor = self.anchor.unwrap_or_else(|| anchor(&frame.head));
+        let reset_events = match self.reference_spaces.frame_events(frame.reference_space, anchor, self.hello.stage) {
+            Ok(events) => events,
+            Err(error) => { self.fail(error); return None; },
         };
+        let origin_changed = !reset_events.is_empty();
+        if let Some(inputs) = &mut self.inputs {
+            match inputs.update(
+                &frame,
+                anchor,
+                self.clip,
+                &self.clock,
+                !page_allowed || focus_changed || origin_changed,
+            ) {
+                Ok(events) => {
+                    for event in events {
+                        self.events.callback(event);
+                    }
+                },
+                Err(error) => {
+                    self.fail(error);
+                    return None;
+                },
+            }
+        }
+        let mut web_frame = frame.web_frame(anchor, self.clip, &self.clock);
+        web_frame.events.extend(reset_events);
+        // An older host has no controller extension, even if a future transport
+        // happens to include fields the legacy stereo client doesn't understand.
+        if self.inputs.is_none() {
+            web_frame.inputs.clear();
+        }
         let sub_images = match self.manager().and_then(|m| m.begin_frame(layers)) {
             Ok(images) => images,
             Err(e) => {
@@ -684,18 +817,11 @@ impl DeviceAPI for BridgeDevice {
                 return None;
             },
         };
-        let time = frame.time as f64 / 1_000_000.;
-        let events = vec![];
+        web_frame.sub_images = sub_images;
         self.frame = Some(frame);
-        Some(Frame {
-            pose,
-            inputs: vec![],
-            events,
-            sub_images,
-            hit_test_results: vec![],
-            predicted_display_time: time,
-        })
+        Some(web_frame)
     }
+
     fn end_animation_frame(&mut self, layers: &[(ContextId, LayerId)]) {
         if !self.ended {
             if let Err(error) = self.submit(layers) {
@@ -704,7 +830,9 @@ impl DeviceAPI for BridgeDevice {
         }
     }
     fn initial_inputs(&self) -> Vec<InputSource> {
-        vec![]
+        self.inputs
+            .as_ref()
+            .map_or_else(Vec::new, input::State::sources)
     }
     fn set_event_dest(
         &mut self,

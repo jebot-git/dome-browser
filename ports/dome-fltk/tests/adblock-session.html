@@ -1,0 +1,64 @@
+<!doctype html><meta charset=utf-8><title>Adblock session stress</title>
+<style nonce=fixture>
+body{margin:0;font:14px monospace}#control{position:fixed;left:10px;top:10px;width:40px;height:40px;background:lime}
+.ad,.shadow-ad,#late-ad{display:block!important;color:red}#content{padding-top:60px}iframe{width:100px;height:60px}
+</style>
+<div id=control></div><div class=ad id=initial-ad>Initial advertising control</div><div id=content></div><div id=transient></div>
+<script nonce=fixture>
+(async()=>{
+ const duration=__DURATION_MS__,enabled=__FILTER_ENABLED__;
+ const checks=[],samples=[],network=[],gaps=[];let failed=false,frames=0,networkCycles=0,shadowCycles=0,iframeCycles=0;
+ const check=(name,passed,error='')=>{checks.push({name,passed,error});if(!passed)failed=true};
+ const frame=()=>new Promise(r=>requestAnimationFrame(r));
+ const hidden=e=>getComputedStyle(e).display==='none';
+ const waitHidden=async(elements)=>{
+  const start=performance.now();
+  while(elements.some(e=>hidden(e)!==enabled)&&performance.now()-start<2000)await frame();
+  return elements.every(e=>hidden(e)===enabled);
+ };
+ try{
+  const base=document.createDocumentFragment();for(let i=0;i<4000;i++){const e=document.createElement('span');e.className='ordinary-'+i;e.textContent='Content ';base.append(e)}content.append(base);
+  check('initial cosmetic rule has expected state',await waitHidden([document.getElementById('initial-ad')]));
+  const started=performance.now();let last=started,nextSample=started,nextNetwork=started,nextTree=started;
+  while(performance.now()-started<duration&&!failed){
+   await frame();const now=performance.now();gaps.push(now-last);last=now;frames++;
+   control.className='control-rotation-'+frames;control.style.transform=`translateX(${frames%200}px)`;
+   if(frames%8===0){
+    const fragment=document.createDocumentFragment();for(let i=0;i<64;i++){const n=document.createElement('span');n.className=`churn-${frames}-${i}`;n.textContent='Changing ';fragment.append(n)}
+    for(let i=0;i<64;i++)content.firstChild.remove();content.append(fragment);
+   }
+   if(!(!hidden(control)&&control.getBoundingClientRect().width===40)){check('legitimate layout remains readable',false);break}
+   if(now>=nextNetwork){
+    nextNetwork=now+2000;const sequence=++networkCycles;
+    network.push(fetch('/privacy-probe?n='+sequence).then(()=>!enabled,()=>enabled));
+    navigator.sendBeacon('/privacy-beacon?n='+sequence,'fixture');
+    network.push(fetch('/legitimate-probe?n='+sequence).then(r=>r.ok,()=>false));
+   }
+   if(now>=nextTree){
+    nextTree=now+5000;transient.replaceChildren();
+    const host=document.createElement('div');transient.append(host);const root=host.attachShadow({mode:shadowCycles%2?'closed':'open'});
+    const ad=document.createElement('div');ad.className='shadow-ad';ad.textContent='Shadow advertising control';root.append(ad);shadowCycles++;
+    const late=document.createElement('div');late.id='late-ad';late.textContent='Late advertising control';transient.append(late);
+    check('dynamic shadow and late-id filters '+shadowCycles,await waitHidden([ad,late]));
+    if(shadowCycles%2===0){
+     const child=document.createElement('iframe');transient.append(child);
+     await new Promise(resolve=>{child.onload=resolve;child.srcdoc='<!doctype html><div class=ad>Child advertising control</div><div id=legit>Child content</div>'});iframeCycles++;
+     const childAd=child.contentDocument.querySelector('.ad'),childLegit=child.contentDocument.querySelector('#legit');
+     const begun=performance.now();while((child.contentWindow.getComputedStyle(childAd).display==='none')!==enabled&&performance.now()-begun<2000)await frame();
+     check('inherited child filtering '+iframeCycles,(child.contentWindow.getComputedStyle(childAd).display==='none')===enabled&&childLegit.getBoundingClientRect().height>0);
+    }
+   }
+   if(now>=nextSample){
+    nextSample=now+10000;samples.push({elapsed:now-started,frames,rows:content.childElementCount,shadowCycles,iframeCycles});
+    fetch('/checkpoint',{method:'POST',body:JSON.stringify(samples[samples.length-1])}).catch(()=>{});
+   }
+  }
+  transient.replaceChildren();await frame();
+  check('privacy requests and positive controls settle',(await Promise.all(network)).every(Boolean));
+  check('bounded connected DOM',content.childElementCount===4000,String(content.childElementCount));
+  check('sustained animation progress',frames>=duration/100,String(frames));
+  check('initial ad remains in expected state',hidden(document.getElementById('initial-ad'))===enabled);
+  const ordered=gaps.slice().sort((a,b)=>a-b);
+  fetch('/report',{method:'POST',body:JSON.stringify({checks,frames,networkCycles,shadowCycles,iframeCycles,samples,elapsed:performance.now()-started,medianGap:ordered[Math.floor(ordered.length/2)],p95Gap:ordered[Math.floor(ordered.length*.95)],maxGap:ordered[ordered.length-1],enabled})});
+ }catch(e){check('fixture completes',false,String(e));fetch('/report',{method:'POST',body:JSON.stringify({checks,frames,networkCycles,shadowCycles,iframeCycles,samples})})}
+})();</script>

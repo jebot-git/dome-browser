@@ -27,7 +27,7 @@ use js::realm::CurrentRealm;
 use js::rust::{HandleValue, MutableHandleValue, ParentRuntime};
 use mime::Mime;
 use net_traits::blob_url_store::UrlWithBlobClaim;
-use net_traits::policy_container::PolicyContainer;
+use net_traits::policy_container::{EmbedderPolicy, PolicyContainer};
 use net_traits::request::{
     CredentialsMode, Destination, InsecureRequestsPolicy, ParserMetadata, RequestBuilder, RequestId,
 };
@@ -46,7 +46,7 @@ use servo_base::id::{PipelineId, PipelineNamespace, WorkerId};
 #[cfg(feature = "webgl")]
 use servo_canvas_traits::webgl::WebGLChan;
 use servo_constellation_traits::WorkerGlobalScopeInit;
-use servo_url::{MutableOrigin, ServoUrl};
+use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
 use style::Atom;
 use timers::TimerScheduler;
 use uuid::Uuid;
@@ -157,6 +157,7 @@ pub(crate) fn prepare_workerscope_init(
         animation_frame_provider_supported,
         pipeline_id: global.pipeline_id(),
         origin: global.origin().immutable().clone(),
+        cookie_site: global.cookie_site(),
         inherited_secure_context: Some(global.is_secure_context()),
         unminify_js: global.unminify_js(),
         #[cfg(feature = "webgl")]
@@ -220,8 +221,8 @@ impl FetchResponseListener for ScriptFetchContext {
         if response
             .as_ref()
             .inspect_err(|e| error!("error loading script {} ({:?})", self.url, e))
-            .is_err() ||
-            self.response.is_none()
+            .is_err()
+            || self.response.is_none()
         {
             scope.on_complete(cx, None);
             return;
@@ -331,6 +332,7 @@ pub(crate) struct WorkerGlobalScope {
     /// <https://html.spec.whatwg.org/multipage/#the-workerglobalscope-common-interface:policy-container>
     #[conditional_malloc_size_of]
     policy_container: DomRefCell<Arc<PolicyContainer>>,
+    embedder_policy_check_failed: Cell<bool>,
 
     #[no_trace]
     /// A `Sender` for sending messages to devtools. This is unused but is stored here to
@@ -359,6 +361,9 @@ pub(crate) struct WorkerGlobalScope {
 
     #[no_trace]
     insecure_requests_policy: InsecureRequestsPolicy,
+
+    #[no_trace]
+    cookie_site: Option<ImmutableOrigin>,
 
     /// <https://w3c.github.io/reporting/#windoworworkerglobalscope-registered-reporting-observer-list>
     reporting_observer_list: DomRefCell<Vec<Dom<ReportingObserver>>>,
@@ -455,6 +460,7 @@ impl WorkerGlobalScope {
             #[cfg(feature = "webcrypto")]
             crypto: Default::default(),
             policy_container: Default::default(),
+            embedder_policy_check_failed: Cell::new(false),
             #[cfg(feature = "devtools")]
             devtools_receiver,
             #[cfg(feature = "devtools")]
@@ -464,6 +470,7 @@ impl WorkerGlobalScope {
             timer_scheduler: RefCell::default(),
             timers: Default::default(),
             insecure_requests_policy,
+            cookie_site: init.cookie_site,
             trusted_types: Default::default(),
             reporting_observer_list: Default::default(),
             report_list: Default::default(),
@@ -514,12 +521,17 @@ impl WorkerGlobalScope {
     }
 
     /// Returns a policy value that should be used by fetches initiated by this worker.
+    pub(crate) fn cookie_site(&self) -> Option<ImmutableOrigin> {
+        self.cookie_site.clone()
+    }
+
     pub(crate) fn insecure_requests_policy(&self) -> InsecureRequestsPolicy {
         self.insecure_requests_policy
     }
 
     /// Clear various items when the worker event-loop shuts-down.
     pub(crate) fn clear_js_runtime(&self) {
+        crate::runtime::script_runtime::cancel_wasm_streams_for_global(self.upcast());
         self.upcast::<GlobalScope>()
             .remove_web_messaging_and_dedicated_workers_infra();
 
@@ -659,11 +671,20 @@ impl WorkerGlobalScope {
             //
             // Step 1. If response's URL's scheme is "blob", then return a clone of response's URL's
             // blob URL entry's environment's policy container.
-            self.set_csp_list(parent_policy_container.csp_list.clone());
-            self.set_referrer_policy(parent_policy_container.get_referrer_policy());
+            *self.policy_container.borrow_mut() = Arc::new(parent_policy_container.clone());
             return;
         }
+        // Local-scheme workers inherited their creator's native authority above.
+        // A fetched network worker must never retain a local creator's grant.
+        Arc::make_mut(&mut *self.policy_container.borrow_mut()).local_file_origin =
+            (metadata.final_url.scheme() == "file")
+                .then(|| self.globalscope.origin().immutable().clone());
         // Step 3. Set result's CSP list to the result of parsing a response's Content Security Policies given response.
+        Arc::make_mut(&mut *self.policy_container.borrow_mut()).embedder_policy =
+            EmbedderPolicy::from_headers(
+                metadata.headers.as_ref().map(|headers| &**headers),
+                self.upcast::<GlobalScope>().is_secure_context(),
+            );
         self.set_csp_list(parse_csp_list_from_metadata(&metadata.headers));
         // Step 5. Set result's referrer policy to the result of parsing the `Referrer-Policy`
         // header given response. [REFERRERPOLICY]
@@ -678,6 +699,13 @@ impl WorkerGlobalScope {
     /// onComplete algorithm defined inside <https://html.spec.whatwg.org/multipage/#run-a-worker>
     #[expect(unsafe_code)]
     pub(crate) fn on_complete(&self, cx: &mut JSContext, script: Option<Script>) {
+        if self.embedder_policy_check_failed.get() {
+            if let Some(dedicated) = self.downcast::<DedicatedWorkerGlobalScope>() {
+                dedicated.forward_simple_error_at_worker();
+            }
+            self.close();
+            return;
+        }
         // Step 1. If script is null or if script's error to rethrow is non-null, then:
         let script = match script {
             Some(Script::Classic(script)) if !script.has_rethrow_error() => Script::Classic(script),
@@ -754,6 +782,18 @@ impl WorkerGlobalScope {
 
         // Step 3. Initialize worker global scope's policy container given worker global scope, response, and inside settings.
         self.initialize_policy_container_for_worker_global_scope(metadata, policy_container);
+        self.embedder_policy_check_failed.set(
+            self.is::<DedicatedWorkerGlobalScope>()
+                && policy_container
+                    .embedder_policy
+                    .value
+                    .compatible_with_cross_origin_isolation()
+                && !self
+                    .policy_container()
+                    .embedder_policy
+                    .value
+                    .compatible_with_cross_origin_isolation(),
+        );
         self.set_endpoints_list(ReportingEndpoint::parse_reporting_endpoints_header(
             &metadata.final_url.clone(),
             &metadata.headers,

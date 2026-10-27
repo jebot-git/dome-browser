@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
 Name=Dome Browser
-Comment=Browse the web with Servo and FLTK
+Comment=Browse the web and smallnet with Servo and FLTK
 Exec=dome-browser %u
 Icon=org.domed.Browser
 Terminal=false
 Categories=Network;WebBrowser;
-MimeType=text/html;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+MimeType=text/html;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;x-scheme-handler/whois;x-scheme-handler/rwhois;x-scheme-handler/fsp;x-scheme-handler/titan;x-scheme-handler/scorpion;x-scheme-handler/scorpions;x-scheme-handler/gopher;x-scheme-handler/gopher+;x-scheme-handler/gophers;x-scheme-handler/gemini;x-scheme-handler/mercury;x-scheme-handler/guppy;x-scheme-handler/dict;x-scheme-handler/cso;x-scheme-handler/ph;x-scheme-handler/news;x-scheme-handler/nntp;x-scheme-handler/nex;x-scheme-handler/spartan;x-scheme-handler/finger;x-scheme-handler/ftp;x-scheme-handler/scroll;
 StartupWMClass=org.domed.Browser

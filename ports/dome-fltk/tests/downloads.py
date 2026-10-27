@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Exercise native save actions, browser cookies, XDG paths and bitmap clipboard."""
-import contextlib, http.server, io, os, signal, subprocess, sys, tempfile, threading, time
+import argparse, contextlib, hashlib, http.server, io, json, os, signal, subprocess, sys, tempfile, threading, time
 from pathlib import Path
+from urllib.parse import urlsplit, parse_qs
 signal.pthread_sigmask(signal.SIG_SETMASK, [])
 if os.environ.get('DOME_DOWNLOAD_TEST_BUS') != '1':
     os.execvpe('dbus-run-session', ['dbus-run-session', '--', sys.executable, *sys.argv],
               {**os.environ, 'DOME_DOWNLOAD_TEST_BUS': '1'})
-from Xlib import X, XK, display
+from Xlib import X, XK, display, protocol
 from Xlib.ext import xtest
 from PIL import Image
 source = Path(__file__).resolve().parents[3]
-artifacts = source.parent/'artifacts/browser-download-tests'
-artifacts.mkdir(parents=True, exist_ok=True)
+p=argparse.ArgumentParser(description=__doc__)
+p.add_argument('--binary',type=Path,default=Path(os.environ.get('DOME_BROWSER_BINARY',source/'target/debug/dome-browser')))
+p.add_argument('--output',type=Path,required=True)
+a=p.parse_args();binary=a.binary.resolve();artifacts=a.output.resolve();artifacts.mkdir(parents=True,exist_ok=False)
+checks=[];driver_sha=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 image_bytes = io.BytesIO()
 Image.new('RGB', (7, 5), (20, 100, 220)).save(image_bytes, format='PNG')
 png = image_bytes.getvalue()
@@ -21,7 +25,19 @@ class Server(http.server.BaseHTTPRequestHandler):
         hits.append((self.path, self.headers.get('Cookie', '')))
         data, kind, disposition = b'', 'text/html', None
         status = 200
-        if self.path == '/':
+        parsed=urlsplit(self.path);case=parse_qs(parsed.query).get('case',['same'])[0]
+        if parsed.path == '/seed':
+            data=b'<title>Download context seed</title>Local download fixture ready'
+        elif parsed.path == '/frames':
+            host='localhost' if case=='cross' else '127.0.0.1'
+            sandbox=' sandbox="allow-scripts"' if case=='opaque' else ''
+            data=(f'<title>Download frame {case}</title><iframe{sandbox} style="position:absolute;left:0;top:0;width:500px;height:160px;border:0" src="http://{host}:{self.server.server_port}/frame?case={case}"></iframe>').encode()
+        elif parsed.path == '/frame':
+            data=(f'<body style="margin:20px"><a href="/frame-file?case={case}">Download frame resource {case}</a>').encode()
+        elif parsed.path == '/frame-file':
+            data=('frame '+case+' cookies='+self.headers.get('Cookie','')).encode()
+            kind='application/octet-stream';disposition=f'attachment; filename=frame-{case}.txt'
+        elif self.path == '/':
             data = b'''<title>Dome Download Fixture</title><style>body{margin:20px}a,img{display:block;margin-bottom:25px}img{width:70px;height:50px}</style>
             <a href="/file">Download fixture</a><img src="/image.png"><a href="/missing">Missing file</a>
             <script>addEventListener('load',()=>fetch('/ready?crypto='+!!globalThis.crypto+'&observer='+!!globalThis.IntersectionObserver+'&sheets='+('adoptedStyleSheets' in document)))</script>'''
@@ -35,7 +51,8 @@ class Server(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header('Content-Type', kind)
         self.send_header('Content-Length', str(len(data)))
-        if self.path == '/': self.send_header('Set-Cookie', 'fixture=secret; Path=/; HttpOnly; SameSite=Lax')
+        if parsed.path == '/frame':self.send_header('Content-Security-Policy',"default-src 'none'")
+        if self.path == '/' or parsed.path == '/seed': self.send_header('Set-Cookie', 'fixture=secret; Path=/; HttpOnly; SameSite=Lax')
         if disposition: self.send_header('Content-Disposition', disposition)
         self.end_headers()
         self.wfile.write(data)
@@ -49,6 +66,7 @@ def wait(fn, seconds=45):
         time.sleep(.05)
     raise AssertionError('Timed out: '+repr(fn))
 def check(ok, text):
+    checks.append({'name':text,'passed':bool(ok)})
     assert ok, text
     print('PASS', text, flush=True)
 with tempfile.TemporaryDirectory(prefix='dome-download-') as temporary:
@@ -65,20 +83,36 @@ with tempfile.TemporaryDirectory(prefix='dome-download-') as temporary:
     downloads = root/'Custom Downloads'
     (config/'user-dirs.dirs').write_text(f'XDG_DOWNLOAD_DIR="{downloads}"\n')
     env = {**os.environ,'DISPLAY':screen,'FLTK_BACKEND':'x11','LIBGL_ALWAYS_SOFTWARE':'1',
+           'HOME':str(root),'XDG_RUNTIME_DIR':str(root),'XDG_CACHE_HOME':str(root/'cache'),'XDG_STATE_HOME':str(root/'state'),
            'XDG_CONFIG_HOME':str(config),'XDG_DATA_HOME':str(root/'data'), 'DOME_BROWSER_TRACE':'1'}
     env.pop('WAYLAND_DISPLAY',None)
     env.pop('WAYLAND_SOCKET',None)
+    for name in list(env):
+        if name in ['MOZ_GCTIMER','DOME_BROWSER_GC_PROFILE'] or name.startswith(('DOME_BROWSER_FRAME_CAPTURE','DOME_BROWSER_LAYOUT_CAPTURE','DOME_BROWSER_MEMORY_CAPTURE')):env.pop(name,None)
     log = (artifacts/'browser.log').open('w')
-    binary = Path(os.environ.get('DOME_BROWSER_BINARY', source/'target/debug/dome-browser'))
     app = subprocess.Popen([str(binary),'--software','--profile',str(root/'profile'),f'http://127.0.0.1:{server.server_port}/'],env=env,stdout=log,stderr=log)
     def windows(): return x.screen().root.query_tree().children
-    def key(name, control=False):
+    def key(name, control=False, shift=False):
         code = x.keysym_to_keycode(XK.string_to_keysym(name))
         ctrl = x.keysym_to_keycode(XK.string_to_keysym('Control_L'))
         if control: xtest.fake_input(x,X.KeyPress,ctrl)
+        if shift:xtest.fake_input(x,X.KeyPress,x.keysym_to_keycode(XK.XK_Shift_L))
         xtest.fake_input(x,X.KeyPress,code);xtest.fake_input(x,X.KeyRelease,code)
         if control: xtest.fake_input(x,X.KeyRelease,ctrl)
+        if shift:xtest.fake_input(x,X.KeyRelease,x.keysym_to_keycode(XK.XK_Shift_L))
         x.sync();time.sleep(.15)
+    def navigate(url, title):
+        main.set_input_focus(X.RevertToParent,X.CurrentTime);x.sync()
+        key('l',control=True);key('a',control=True)
+        for character in url:
+            symbol=XK.string_to_keysym(character) or ord(character)
+            code=x.keysym_to_keycode(symbol)
+            shifted=x.keycode_to_keysym(code,0)!=symbol and x.keycode_to_keysym(code,1)==symbol
+            if shifted:xtest.fake_input(x,X.KeyPress,x.keysym_to_keycode(XK.XK_Shift_L))
+            xtest.fake_input(x,X.KeyPress,code);xtest.fake_input(x,X.KeyRelease,code)
+            if shifted:xtest.fake_input(x,X.KeyRelease,x.keysym_to_keycode(XK.XK_Shift_L))
+            x.sync();time.sleep(.02)
+        key('Return');wait(lambda:title in str(main.get_wm_name()));time.sleep(.5)
     def context(px,py,up=0):
         g=main.get_geometry()
         xtest.fake_input(x,X.MotionNotify,x=g.x+px,y=g.y+py)
@@ -88,10 +122,9 @@ with tempfile.TemporaryDirectory(prefix='dome-download-') as temporary:
         raw = x.screen().root.get_image(0,0,1400,1000,X.ZPixmap,0xffffffff)
         Image.frombytes('RGB',(1400,1000),raw.data,'raw','BGRX').save(artifacts/'context-menu.png')
         print('POPUP',g.x,g.y,g.width,g.height,flush=True)
-        # FLTK menu rows use the configured UI font; click the final row.
-        xtest.fake_input(x,X.MotionNotify,x=g.x+g.width//2,y=g.y+g.height-12-up*((g.height-3)//6))
-        xtest.fake_input(x,X.ButtonPress,1);xtest.fake_input(x,X.ButtonRelease,1)
-        x.sync();time.sleep(.3)
+        xtest.fake_input(x,X.MotionNotify,x=2,y=2);x.sync();time.sleep(.1)
+        for _ in range(up+1):key('Tab',shift=True)
+        key('Return');time.sleep(.3)
     def clipboard(target):
         owner = x.screen().root.create_window(0,0,1,1,0,X.CopyFromParent,event_mask=X.PropertyChangeMask)
         prop = x.intern_atom('DOME_TEST_CLIP')
@@ -114,11 +147,11 @@ with tempfile.TemporaryDirectory(prefix='dome-download-') as temporary:
         check(any(p=='/ready?crypto=true&observer=true&sheets=true' for p,_ in hits),'GitHub-required browser APIs are exposed')
         time.sleep(.7)
         # Native chrome reserves 120 pixels with the local menu visible.
-        context(90,147)
+        context(90,147,up=1)
         saved=downloads/'report test.bin'
         wait(lambda:saved.exists() and saved.stat().st_size>0)
         check(saved.read_bytes()==b'authenticated file\x00\xff\n','Save Link preserves binary bytes and uses browser HttpOnly cookies')
-        context(90,147)
+        context(90,147,up=1)
         wait(lambda:(downloads/'report test (1).bin').exists())
         check(saved.read_bytes()==b'authenticated file\x00\xff\n','Repeated saves preserve the existing file')
         context(45,207,up=1)
@@ -136,14 +169,31 @@ with tempfile.TemporaryDirectory(prefix='dome-download-') as temporary:
         wait(lambda:(downloads/'page.html').exists())
         check(b'Dome Download Fixture' in (downloads/'page.html').read_bytes(),'Ctrl+S saves the page source in the XDG Downloads directory')
         before=set(downloads.iterdir())
-        context(80,270)
+        context(80,270,up=1)
         wait(lambda:any(p=='/missing' for p,_ in hits))
         time.sleep(.5)
         check(set(downloads.iterdir())==before,'HTTP errors do not leave a downloaded file')
+        navigate(f'http://localhost:{server.server_port}/seed','Download context seed')
+        cookie_file=root/'profile'/'ck.txt'
+        check(wait(lambda:cookie_file.exists() and 'localhost' in cookie_file.read_text()),'Second local site is ready for frame download checks')
+        for case in ['same','cross','opaque','again']:
+            source_url=f'http://127.0.0.1:{server.server_port}/frames?case={case}'
+            navigate(source_url,'Download frame '+case)
+            wait(lambda:any(path=='/frame?case='+case for path,_ in hits));time.sleep(.3)
+            context(90,147,up=1)
+            target=downloads/('frame-'+case+'.txt')
+            wait(lambda:target.exists())
+            expected='fixture=secret' if case in ['same','again'] else ''
+            check(target.read_bytes()==('frame '+case+' cookies='+expected).encode(),case+': native save uses originating frame document context')
+            session=json.loads((root/'profile'/'session.json').read_text())
+            check(session['tabs'][session['active']]['url']==source_url,case+': saving leaves top-level navigation unchanged')
+        main.send_event(protocol.event.ClientMessage(window=main,client_type=x.intern_atom('WM_PROTOCOLS'),data=(32,[x.intern_atom('WM_DELETE_WINDOW'),X.CurrentTime,0,0,0])),event_mask=0);x.sync()
+        check(app.wait(timeout=20)==0,'Browser closes cleanly after save and clipboard operations')
         print('All download and clipboard checks passed',flush=True)
     finally:
-        app.terminate()
+        if app.poll() is None:app.terminate()
         with contextlib.suppress(subprocess.TimeoutExpired):app.wait(timeout=10)
         if app.poll() is None:app.kill();app.wait()
         xvfb.terminate();xvfb.wait(timeout=10)
         server.shutdown();log.close()
+        (artifacts/'report.json').write_text(json.dumps({'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'driver_sha256':driver_sha,'checks':checks,'passed':len(checks)==18 and all(c['passed'] for c in checks),'scope':'Private HTTP save/copy regression, authenticated downloads, originating frame contexts, filenames, clipboard pixels and clean close.'},indent=2)+'\n')

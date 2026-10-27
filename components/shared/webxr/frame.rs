@@ -7,7 +7,7 @@ use malloc_size_of_derive::MallocSizeOf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Floor, HitTestId, HitTestResult, InputFrame, Native, SubImages, Viewer, Viewports, Views,
+    ApiSpace, BaseSpace, Floor, HitTestId, HitTestResult, InputFrame, Native, SubImages, Viewer, Viewports, Views,
 };
 
 /// The per-frame data that is provided by the device.
@@ -31,10 +31,17 @@ pub struct Frame {
 
     /// The average point in time this XRFrame is expected to be displayed on the devices' display
     pub predicted_display_time: f64,
+
+    /// The corresponding local monotonic instant, before conversion to the
+    /// requesting document's performance timeline. None denotes an estimate.
+    #[serde(default)]
+    pub predicted_display_instant: Option<servo_base::cross_process_instant::CrossProcessInstant>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, MallocSizeOf)]
 pub enum FrameUpdateEvent {
+    /// Applied before animation callbacks using the new native origin.
+    ReferenceSpaceChanged(#[ignore_malloc_size_of = "BaseSpace is a fixed-size identifier"] BaseSpace, Option<RigidTransform3D<f32, ApiSpace, ApiSpace>>),
     UpdateFloorTransform(Option<RigidTransform3D<f32, Native, Floor>>),
     UpdateViewports(Viewports),
     HitTestSourceAdded(HitTestId),

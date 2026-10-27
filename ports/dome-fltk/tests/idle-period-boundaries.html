@@ -1,0 +1,20 @@
+<!doctype html><meta charset=utf-8><title>Idle callback boundaries</title>
+<script nonce=fixture>
+addEventListener('load',()=>setTimeout(async()=>{
+ try{
+  const zero=await new Promise(resolve=>requestIdleCallback(deadline=>resolve({
+   timed:deadline.didTimeout,remaining:deadline.timeRemaining()}),{timeout:0}));
+  const events=[];let canceled;
+  await new Promise(resolve=>{
+   requestIdleCallback(deadline=>{
+    events.push({name:'A',now:performance.now(),end:performance.now()+deadline.timeRemaining()});
+    cancelIdleCallback(canceled);
+    requestIdleCallback(()=>{events.push({name:'D',now:performance.now()});resolve()});
+   });
+   canceled=requestIdleCallback(()=>events.push({name:'canceled',now:performance.now()}));
+   requestIdleCallback(()=>events.push({name:'C',now:performance.now()}));
+  });
+  fetch('/report',{method:'POST',body:JSON.stringify({zero,events})});
+ }catch(e){fetch('/report',{method:'POST',body:JSON.stringify({error:String(e)})})}
+},50));
+</script>

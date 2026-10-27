@@ -10,14 +10,12 @@ use bitflags::bitflags;
 use content_security_policy::sandboxing_directive::SandboxingFlagSet;
 use js::context::JSContext;
 use js::gc::Handle;
-use js::jsapi::{
-    ExceptionStackBehavior, Heap, JSObject, JSScript, ModuleErrorBehaviour, SetScriptPrivate,
-};
+use js::jsapi::{ExceptionStackBehavior, Heap, JSScript, SetScriptPrivate};
 use js::jsval::{JSVal, PrivateValue, UndefinedValue};
 use js::panic::maybe_resume_unwind;
+use js::realm::CurrentRealm;
 use js::rust::wrappers2::{
     Compile1, JS_ClearPendingException, JS_ExecuteScript, JS_GetScriptPrivate, ModuleEvaluate,
-    ThrowOnModuleEvaluationFailure,
 };
 use js::rust::{
     CompileOptionsWrapper, HandleValue, MutableHandleValue, transform_str_to_source_text,
@@ -30,14 +28,29 @@ use servo_url::ServoUrl;
 
 use crate::DomTypeHolder;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
-use crate::dom::bindings::error::{Error, ErrorInfo, ErrorResult, report_pending_exception};
+use crate::dom::bindings::error::{
+    Error, ErrorInfo, ErrorResult, ErrorToJsval, report_pending_exception,
+};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::promise::promisenativehandler::{Callback, PromiseNativeHandler};
+use crate::dom::promise::{Promise, RootedPromise};
 use crate::dom::window::Window;
 use crate::realms::enter_auto_realm;
 use crate::scripting::fetching_options::{BaseScript, ScriptFetchOptions};
 use crate::scripting::script_module::{ModuleTree, RethrowError};
 use crate::unminify::{ScriptSource, unminify_js};
+
+/// Module evaluation can stay pending across top-level await. Only its eventual
+/// rejection is an exception; a pending promise is not an undefined failure.
+#[derive(JSTraceable, MallocSizeOf)]
+struct ModuleEvaluationRejectionHandler;
+
+impl Callback for ModuleEvaluationRejectionHandler {
+    fn callback(&self, cx: &mut CurrentRealm, reason: HandleValue) {
+        GlobalScope::from_current_realm(cx).report_an_exception(cx, reason);
+    }
+}
 
 /// Options that were used when creating a script.
 #[derive(Clone, Copy, JSTraceable, MallocSizeOf)]
@@ -277,61 +290,70 @@ impl GlobalScope {
         &self,
         cx: &mut JSContext,
         module_tree: RootedTraceableBox<Rc<ModuleTree>>,
-        _rethrow_errors: bool,
-    ) {
-        // Step 1. Let settings be the settings object of script.
-        // NOTE(pylbrecht): "settings" is `self` here.
-
-        // Step 2. Check if we can run script with settings. If this returns "do not run", then
-        // return a promise resolved with undefined.
+        prevent_error_reporting: bool,
+    ) -> RootedPromise {
+        // Steps 1-2. A script that cannot run returns a resolved promise.
         if !self.can_run_script() {
-            return;
+            return Promise::new_resolved(cx, self, UndefinedValue());
         }
 
-        // Step 3. Record module script execution start time given script.
+        // Step 3. Record module script execution start time.
         // TODO
-
         let mut realm = enter_auto_realm(cx, self);
         let cx = &mut realm.current_realm();
 
         // Step 4. Prepare to run script given settings.
         run_a_script::<DomTypeHolder, _, _>(cx, self, |cx| {
-            // Step 6. If script's error to rethrow is not null, then set evaluationPromise to a
-            // promise rejected with script's error to rethrow.
-            if let Some(exception) = module_tree.rethrow_error() {
-                JS_SetPendingException(cx, exception.handle(), ExceptionStackBehavior::Capture);
-                report_pending_exception(cx);
-                return;
-            }
-
-            // Step 7.1. Otherwise: Let record be script's record.
-            let record = module_tree.record().unwrap();
-
-            // Step 7.2. Set evaluationPromise to record.Evaluate().
-            rooted!(&in(cx) let mut rval = UndefinedValue());
-            let ok = unsafe { ModuleEvaluate(cx, record.handle(), rval.handle_mut()) };
-            assert!(ok, "module evaluation failed");
-
-            rooted!(&in(cx) let mut evaluation_promise = std::ptr::null_mut::<JSObject>());
-            if rval.is_object() {
-                evaluation_promise.set(rval.to_object());
-            }
-
-            // Step 8. If preventErrorReporting is false, then upon rejection of evaluationPromise
-            // with reason, report an exception given by reason for script's settings object's
-            // global object.
-            let throw_result = unsafe {
-                ThrowOnModuleEvaluationFailure(
-                    cx,
-                    evaluation_promise.handle(),
-                    ModuleErrorBehaviour::ThrowModuleErrorsSync,
-                )
+            // Steps 6-7. Keep the actual evaluation promise, including a pending
+            // top-level-await evaluation. The synchronous SpiderMonkey failure
+            // helper only accepts settled promises and cannot be used here.
+            let evaluation_promise = if let Some(exception) = module_tree.rethrow_error() {
+                Promise::new_rejected(cx, self, exception.handle())
+            } else {
+                let record = module_tree.record().unwrap();
+                rooted!(&in(cx) let mut rval = UndefinedValue());
+                if !unsafe { ModuleEvaluate(cx, record.handle(), rval.handle_mut()) } {
+                    if JS_IsExceptionPending(cx) {
+                        let exception = RethrowError::from_pending_exception(cx);
+                        Promise::new_rejected(cx, self, exception.handle())
+                    } else {
+                        // Evaluation can be aborted without a pending exception,
+                        // including when a module worker is terminated (step 7.2).
+                        rooted!(&in(cx) let mut reason = UndefinedValue());
+                        Error::QuotaExceeded {
+                            quota: None,
+                            requested: None,
+                        }
+                        .to_jsval(cx, self, reason.handle_mut());
+                        Promise::new_rejected(cx, self, reason.handle())
+                    }
+                } else if rval.is_object() {
+                    rooted!(&in(cx) let object = rval.to_object());
+                    Promise::new_with_js_promise(cx, object.handle())
+                } else {
+                    // SpiderMonkey can return undefined when asynchronous module
+                    // evaluation is disabled; that is a successful completion.
+                    Promise::new_resolved(cx, self, UndefinedValue())
+                }
             };
 
-            if !throw_result {
-                report_pending_exception(cx);
+            // Step 8. Attach a rejection reaction immediately so that module
+            // errors are reported once through error events, not again as
+            // unhandled promise rejections. Fulfillment needs no reporting.
+            if !prevent_error_reporting {
+                let handler = PromiseNativeHandler::new(
+                    cx,
+                    self,
+                    None,
+                    Some(Box::new(ModuleEvaluationRejectionHandler)),
+                );
+                evaluation_promise.append_native_handler(cx, &handler);
             }
-        });
+
+            // Steps 9-10. run_a_script performs cleanup; return the evaluation
+            // promise to the caller instead of treating a pending result as an error.
+            evaluation_promise
+        })
     }
 
     /// <https://html.spec.whatwg.org/multipage/#check-if-we-can-run-script>
@@ -348,8 +370,8 @@ impl GlobalScope {
         // does not have its sandboxed scripts browsing context flag set.
         if let Some(window) = self.downcast::<Window>() {
             let doc = window.Document();
-            doc.is_fully_active() &&
-                !doc.has_active_sandboxing_flag(
+            doc.is_fully_active()
+                && !doc.has_active_sandboxing_flag(
                     SandboxingFlagSet::SANDBOXED_SCRIPTS_BROWSING_CONTEXT_FLAG,
                 )
         } else {

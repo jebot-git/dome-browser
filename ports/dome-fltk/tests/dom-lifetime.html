@@ -1,0 +1,22 @@
+<!doctype html><meta charset=utf-8><title>Reduced DOM lifetime</title><style>body{font:14px monospace}</style><div id=host></div>
+<script>
+(async()=>{
+ const checks=[],marks=[],started=performance.now();
+ const check=(name,passed,error='')=>checks.push({name,passed,error});
+ const pause=ms=>new Promise(r=>setTimeout(r,ms));
+ const mark=name=>marks.push({name,elapsed:performance.now()-started,connected:host.childElementCount});
+ const make=()=>{const fragment=document.createDocumentFragment();for(let i=0;i<1024;i++){const node=document.createElement('span');node.textContent='Row ';fragment.append(node)}return fragment};
+ try{
+  mark('baseline');await pause(3000);
+  for(let i=0;i<256;i++){make();if(i%8===0)await pause(0)}
+  mark('detached allocations complete');await pause(5000);
+  check('detached allocation leaves no connected elements',host.childElementCount===0);
+  for(let i=0;i<256;i++){host.replaceChildren(make());if(i%8===0){host.getBoundingClientRect();await pause(0)}}
+  mark('connected replacements complete');await pause(5000);
+  check('connected replacement stays bounded',host.childElementCount===1024);
+  check('remaining content renders',host.getBoundingClientRect().height>0);
+  host.replaceChildren();host.getBoundingClientRect();mark('cleared');await pause(5000);
+  check('final DOM cleared',host.childElementCount===0);
+ }catch(e){check('fixture completes',false,String(e))}
+ fetch('/report',{method:'POST',body:JSON.stringify({checks,marks,elapsed:performance.now()-started,allocatedSpans:524288})});
+})();</script>

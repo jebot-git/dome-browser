@@ -28,7 +28,7 @@ use crate::dom::eventtarget::EventTarget;
 use crate::dom::gamepad::Gamepad;
 use crate::dom::promise::{Promise, RootedPromise};
 use crate::dom::window::Window;
-use crate::dom::xrsession::XRSession;
+use crate::dom::xrsession::{InlinePointerAction, ScreenPointerSample, XRSession};
 use crate::dom::xrtest::XRTest;
 use crate::event_loop::script_thread::ScriptThread;
 
@@ -45,6 +45,37 @@ pub(crate) struct XRSystem {
 }
 
 impl XRSystem {
+    pub(crate) fn has_inline_sessions(&self) -> bool {
+        !self.active_inline_sessions.borrow().is_empty()
+    }
+
+    pub(crate) fn has_inline_pointer(&self, pointer: i32) -> bool {
+        self.active_inline_sessions.borrow().iter().any(|session| session.has_inline_pointer(pointer))
+    }
+
+    pub(crate) fn inline_pointer_event(&self, cx: &mut JSContext, pointer: i32,
+        action: InlinePointerAction, sample: Option<&ScreenPointerSample>) {
+        let sessions: Vec<_> = self.active_inline_sessions.borrow().iter()
+            .map(|session| DomRoot::from_ref(&**session)).collect();
+        for session in sessions { session.inline_pointer_event(cx, pointer, action, sample); }
+    }
+
+    pub(crate) fn cancel_inline_pointers(&self, cx: &mut JSContext) {
+        let sessions: Vec<_> = self.active_inline_sessions.borrow().iter()
+            .map(|session| DomRoot::from_ref(&**session)).collect();
+        for session in sessions { session.cancel_inline_pointers(cx); }
+    }
+
+    pub(crate) fn update_inline_visibility(&self, cx: &mut JSContext, hidden: bool) {
+        // Event handlers can end sessions; don't retain the list borrow while
+        // firing visibility events into script.
+        let sessions: Vec<_> = self.active_inline_sessions.borrow().iter()
+            .map(|session| DomRoot::from_ref(&**session)).collect();
+        for session in sessions {
+            session.update_inline_visibility(cx, hidden);
+        }
+    }
+
     pub(crate) fn end_sessions_for_document_deactivation(&self) {
         if let Some(session) = self.active_immersive_session.get() {
             session.end_for_document_deactivation();
@@ -78,15 +109,20 @@ impl XRSystem {
         self.pending_immersive_session.get() || self.active_immersive_session.get().is_some()
     }
 
+    pub(crate) fn has_active_immersive_session(&self) -> bool {
+        self.active_immersive_session.get().is_some()
+    }
+
     pub(crate) fn set_pending(&self) {
         self.pending_immersive_session.set(true)
     }
 
-    pub(crate) fn set_active_immersive_session(&self, session: &XRSession) {
+    pub(crate) fn set_active_immersive_session(&self, cx: &mut JSContext, session: &XRSession) {
         // XXXManishearth when we support non-immersive (inline) sessions we should
         // ensure they never reach these codepaths
         self.pending_immersive_session.set(false);
-        self.active_immersive_session.set(Some(session))
+        self.active_immersive_session.set(Some(session));
+        self.cancel_inline_pointers(cx);
     }
 
     /// <https://immersive-web.github.io/webxr/#ref-for-eventdef-xrsession-end>
@@ -229,6 +265,7 @@ impl XRSystemMethods<crate::DomTypeHolder> for XRSystem {
         }
 
         let init = SessionInit {
+            webview_id: Some(global.as_window().webview_id()),
             origin: global.origin().immutable().ascii_serialization().into_owned(),
             required_features,
             optional_features,
@@ -295,7 +332,7 @@ impl XRSystem {
                 .borrow_mut()
                 .push(Dom::from_ref(&*session));
         } else {
-            self.set_active_immersive_session(&session);
+            self.set_active_immersive_session(cx, &session);
         }
         promise.resolve_native(cx, &session);
         // https://github.com/immersive-web/webxr/issues/961

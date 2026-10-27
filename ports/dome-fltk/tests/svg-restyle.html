@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Inline SVG computed paint invalidation</title>
+<style>
+body { margin: 0; background: white }
+.panel { display: inline-block; vertical-align: top; width: 100px; height: 100px }
+svg { display: block; width: 100px; height: 100px }
+#inherited { color: red }
+#class rect { fill: red }
+#class.active rect { fill: rgb(20,180,90) }
+#variable { --paint: red }
+#variable rect { fill: var(--paint) }
+</style>
+<style id="sheet">#cssom rect { fill: red }</style>
+<div class="panel" id="inherited"><svg viewBox="0 0 100 100"><rect id="inherited-paint" width="100" height="100" fill="currentColor"/></svg></div><div class="panel" id="class"><svg viewBox="0 0 100 100"><rect width="100" height="100"/></svg></div><div class="panel" id="cssom"><svg viewBox="0 0 100 100"><rect width="100" height="100"/></svg></div><div class="panel" id="variable"><svg viewBox="0 0 100 100"><rect width="100" height="100"/></svg></div><div class="panel"><svg viewBox="0 0 100 100"><rect width="100" height="100" fill="rgb(20,180,90)"/></svg></div>
+<script>
+let phase = -1;
+const colors = ['red', 'rgb(20,180,90)', 'red'];
+async function advance() {
+  const requested = await (await fetch('/phase')).json();
+  if (requested !== phase) {
+    phase = requested;
+    const green = phase === 1;
+    document.getElementById('inherited').style.color = colors[phase];
+    document.getElementById('class').classList.toggle('active', green);
+    document.getElementById('sheet').sheet.cssRules[0].style.fill = colors[phase];
+    document.getElementById('variable').style.setProperty('--paint', colors[phase]);
+    // Allow the initial paint or restyle to be displayed before reporting.
+    await new Promise(resolve => setTimeout(resolve, 400));
+    const values = ['inherited','class','cssom','variable'].map(id => {
+      const style = getComputedStyle(document.querySelector('#'+id+' rect'));
+      return {color: style.color, fill: style.fill};
+    });
+    await fetch('/report', {method: 'POST', body: JSON.stringify({phase, values})});
+  }
+  setTimeout(advance, 100);
+}
+window.addEventListener('load', advance);
+</script>
