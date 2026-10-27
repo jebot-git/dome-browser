@@ -1,0 +1,162 @@
+{
+  "completed_utc": "2026-10-27T14:50:37.297779+00:00",
+  "implementation_commit": "89592bb386053e13dc3e25173b8fee818e240ae9",
+  "implementation_tree": "62e442b5d180ba75572ff614a8d2365bd3a41958",
+  "candidate_sha256": "3830475bb36458721411c2bcc6008fbd2531443b22d8cb11fa1d8f4d4e2b6e62",
+  "test_embedder_sha256": "4204c1edc82b7b0215a9f59a92d111b2ef80743d2056005c232dfc975ce7f41b",
+  "source_manifest_verified_before_tests": true,
+  "selected_units": 200,
+  "runtime_checks": 3131,
+  "upstream_cases": 33,
+  "regression_jobs": 22,
+  "all_passed": true,
+  "units": [
+    {
+      "name": "frontend",
+      "passed": 182,
+      "log_sha256": "9e0aefdd3c6bab62204ff81de2546038ac8413d0cd17efbed8bc581d6e14ce1b"
+    },
+    {
+      "name": "geometry",
+      "passed": 7,
+      "log_sha256": "4485e33551a74e65d233d952e719ae458398a6e9511928e74847412ca40a9a6f"
+    },
+    {
+      "name": "pointer-ids",
+      "passed": 2,
+      "log_sha256": "23ac8b9b4afb5537082af4301332bf68e5eed36a921d5d4248f3e1500be40347"
+    },
+    {
+      "name": "pen-payload",
+      "passed": 3,
+      "log_sha256": "8ffff15f07f10247be681c488f143f130e44cb23cce6d12263fef1fe949699d2"
+    },
+    {
+      "name": "factory",
+      "passed": 1,
+      "log_sha256": "32815701220cc6870560c4592e3eb7c0cead9ee1be9cf2fe18f1a5415c97fbfd"
+    },
+    {
+      "name": "renderer",
+      "passed": 5,
+      "log_sha256": "0eb8d7791a603188caf633cd73c0caf0a243ec5defd449905fd6138770a00985"
+    }
+  ],
+  "suites": [
+    {
+      "name": "layers-upstream",
+      "upstream_cases": 22,
+      "report_sha256": "d072dfafa3f2215087678b38b2cd43806b54caba5411b381046cab36907c710c"
+    },
+    {
+      "name": "layer-scaling",
+      "runtime_checks": 369,
+      "report_sha256": "f503cff9f0b3664e42e82117467b94c6e5182e4afa56fc0dfa29b164ef2e7fa4"
+    },
+    {
+      "name": "bounded",
+      "runtime_checks": 21,
+      "report_sha256": "10535e3bbfe30b3d90c2fbc520a47cbf0166ef51e7b8992a691b04e0c9a52868"
+    },
+    {
+      "name": "reset-upstream",
+      "upstream_cases": 4,
+      "report_sha256": "16f905b0c3845c6aa4c8efdfcebe1d8cecc1ee072eaa1cc00eaf3d272f17cb39"
+    },
+    {
+      "name": "general-new",
+      "runtime_checks": 46,
+      "report_sha256": "90ae9fa47a09d413d31d88329faa5e9b44df0d28fe73493d31a325e823e1066a"
+    },
+    {
+      "name": "general-old",
+      "runtime_checks": 46,
+      "report_sha256": "90ae9fa47a09d413d31d88329faa5e9b44df0d28fe73493d31a325e823e1066a"
+    },
+    {
+      "name": "native-touch",
+      "runtime_checks": 22,
+      "report_sha256": "c57fa2adefec30239e4c5bb6ec1dc661b34e36aae8bee7f6f00a47e6a6901668"
+    },
+    {
+      "name": "mouse-inline",
+      "runtime_checks": 31,
+      "report_sha256": "7572ca0d6c7871bb49b3aa72c7c0f7c66642be0fb98fa27e5ca060b0e77bb681"
+    },
+    {
+      "name": "controller",
+      "runtime_checks": 60,
+      "report_sha256": "38c4a398c31290f29708218a59dc614764ac1cb036168db2fa1a50d640f43b23"
+    },
+    {
+      "name": "mouse-immersive",
+      "runtime_checks": 35,
+      "report_sha256": "e0541a18ab96f32b754cc42a8fc6a20a749000be4c58b7ea1ccdb1e7016363c8"
+    },
+    {
+      "name": "reset",
+      "runtime_checks": 101,
+      "report_sha256": "564a1f1becf5be19d285e6aea94ad901616f97b47549eaa163aeef906784afc4"
+    },
+    {
+      "name": "engine-touch",
+      "runtime_checks": 43,
+      "report_sha256": "d2e87ae7abc8a465c0139bf8939c1cc5fb20da6f87b1762c1e0332ce99f702da"
+    },
+    {
+      "name": "visibility",
+      "runtime_checks": 77,
+      "report_sha256": "7f931f0dac16b4839c21ce1db0eca1b5f995e09910201e1a4aff3a7ba9f80c32"
+    },
+    {
+      "name": "frame-same",
+      "runtime_checks": 17,
+      "report_sha256": "c8206cb861c5b8ed07ed637bf0ea5aac70025aeba7b31449e1e3ecab8589d6d9"
+    },
+    {
+      "name": "frame-cross",
+      "runtime_checks": 17,
+      "report_sha256": "9dc1e73698fe52e7a1ed08e042d4ab40099f69b7f71ccf22b497c848dfa70372"
+    },
+    {
+      "name": "outcomes",
+      "runtime_checks": 9,
+      "report_sha256": "3ea178e01294ab974c3ac19b029a8e42305727f31f66155b7cfc2bf1055ec4d2"
+    },
+    {
+      "name": "native-pen",
+      "runtime_checks": 87,
+      "report_sha256": "048fff2726b5dd8404a743e177d9064e0d2e55665da7fb32fdac64be1f709f5e"
+    },
+    {
+      "name": "upstream",
+      "upstream_cases": 7,
+      "report_sha256": "a99da0ca994603720f1081c561c99ae70951b66490b792f769228bbf6bb866cf"
+    },
+    {
+      "name": "layer-attributes",
+      "runtime_checks": 1037,
+      "report_sha256": "ba97b3d2d73d37c63c5b71f7e0a6f07d7b81a3a9bce49908daea153524100963"
+    },
+    {
+      "name": "layer-attributes-opaque-context",
+      "runtime_checks": 1037,
+      "report_sha256": "09714c4eff3511155022f0b41968f157d85b1eec88c88c0892ea7644a6dcb1c0"
+    },
+    {
+      "name": "compatibility-native",
+      "runtime_checks": 45,
+      "report_sha256": "9a065a127a5910d9f0fb07b83172a199a01202ca5a627645509f68416cca3c75"
+    },
+    {
+      "name": "compatibility-nohost",
+      "runtime_checks": 31,
+      "report_sha256": "b150000cbadd158fbd2c70793bb76c416d1ba9903b4a2f8de7f6b38444b31fe5"
+    }
+  ],
+  "physical_device_validation": false,
+  "installed": false,
+  "sessions_restarted": false,
+  "scope": "Optimized Linux FLTK/Servo candidate; isolated native fixtures and selected upstream assertions; optional Windows OpenXR not compiled",
+  "artifacts_directory": "artifacts/servo-rendering-goal/publication-regression-2026-10-27"
+}
