@@ -168,6 +168,35 @@ pub struct Session {
     dynamic_viewport_scaling: bool,
 }
 
+/// A session response that has not yet been adopted by a live document. Keep
+/// this guard inside queued tasks so cancelling or dropping a task aborts the
+/// backend session instead of losing its only content-side handle.
+pub struct PendingSession {
+    session: Option<Session>,
+}
+
+impl PendingSession {
+    pub fn new(session: Session) -> Self {
+        Self {
+            session: Some(session),
+        }
+    }
+
+    pub fn into_session(mut self) -> Session {
+        self.session
+            .take()
+            .expect("Session response already adopted")
+    }
+}
+
+impl Drop for PendingSession {
+    fn drop(&mut self) {
+        if let Some(session) = &mut self.session {
+            session.abort_session();
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, MallocSizeOf)]
 pub struct SessionId(pub(crate) u32);
 

@@ -1,0 +1,40 @@
+<!doctype html><meta charset=utf-8><title>Native pending XR request cleanup</title><body>
+<button id=start>Request from child and close it</button><button id=next hidden>Start fresh session</button>
+<script>
+let order=0,count=0;const packets=[];const post=(type,data)=>fetch('/event',{method:'POST',body:JSON.stringify({order:++order,type,data})});
+const check=(passed,name)=>{count++;post('check',{passed:!!passed,name});if(!passed)throw Error(name)};
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function wait(fn){const end=performance.now()+7000;while(performance.now()<end){if(await fn())return;await sleep(25)}throw Error('Native request cleanup timed out')}
+const ops=()=>fetch('/host-ops').then(response=>response.json());const rect=element=>{const r=element.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height}};
+const input=element=>({start:rect(element),ratio:devicePixelRatio,viewport:[innerWidth,innerHeight]});
+addEventListener('message',event=>{if(event.data?.pendingNativeChild)packets.push(event.data)});
+const fail=error=>post('error',{message:String(error)+'\n'+error.stack});
+(async()=>{
+ await fetch('/host-control',{method:'POST',body:JSON.stringify({op:'active'})});
+ const frames={};for(const mode of ['inline','immersive-vr']){const frame=document.createElement('iframe');frame.allow='xr-spatial-tracking *';frame.src='/pending-native-child?mode='+mode;document.body.append(frame);frames[mode]=frame}
+ await wait(()=>packets.filter(packet=>packet.stage==='ready').length===2);
+ document.getElementById('start').onclick=async()=>{
+  try{
+   frames['immersive-vr'].contentWindow.pendingBegin();
+   await wait(async()=>(await ops()).filter(op=>op==='end_session').length===1);
+   check(packets.some(packet=>packet.mode==='immersive-vr'&&packet.stage==='removed'),'The immersive requesting child closes before response adoption');
+   check(!packets.some(packet=>packet.stage==='late-resolution'),'The removed child never adopts the returned native session');
+   check((await ops()).filter(op=>op==='begin_session').length===1,'The cancelled request releases its one native lease');
+   frames.inline.contentWindow.pendingBegin();await sleep(300);
+   check(packets.some(packet=>packet.mode==='inline'&&packet.stage==='removed'),'A pending viewer-only inline child also closes cleanly');
+   check((await ops()).filter(op=>op==='begin_session').length===1,'Viewer-only inline teardown opens no additional native lease');
+   const next=document.getElementById('next');next.hidden=false;post('continue',input(next));
+  }catch(error){fail(error)}
+ };
+ document.getElementById('next').onclick=async()=>{
+  try{
+   const session=await navigator.xr.requestSession('immersive-vr');check(!!session,'A fresh live document can create a native immersive session');
+   await session.end();await wait(async()=>(await ops()).filter(op=>op==='end_session').length===2);
+   check(!packets.some(packet=>packet.stage==='late-resolution'),'Old cancelled responses cannot replace the fresh session');
+   check((await ops()).filter(op=>op==='begin_session').length===2,'The fresh session uses a separate consented lease and releases it');
+   post('done',{count,kind:'pending-sessions'});
+  }catch(error){fail(error)}
+ };
+ post('ready',input(document.getElementById('start')));
+})().catch(fail);
+</script>

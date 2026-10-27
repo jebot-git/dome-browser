@@ -45,7 +45,7 @@ pub use mock::{
 };
 pub use registry::{DeviceChange, MainThreadRegistry, Registry};
 pub use session::{
-    EnvironmentBlendMode, MainThreadSession, Quitter, Session, SessionBuilder, SessionId,
+    EnvironmentBlendMode, MainThreadSession, PendingSession, Quitter, Session, SessionBuilder, SessionId,
     SessionInit, SessionMode, SessionThread,
 };
 pub use space::{ApiSpace, BaseSpace, Space};

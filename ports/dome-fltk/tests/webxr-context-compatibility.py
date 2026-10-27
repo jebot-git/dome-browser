@@ -15,11 +15,13 @@ p=argparse.ArgumentParser(description=__doc__)
 for name in ['binary','native-fixture','compositor','output']:p.add_argument('--'+name,type=Path,required=True)
 p.add_argument('--no-xr-host',action='store_true',help='Check failure without an immersive device')
 p.add_argument('--devicechange',action='store_true',help='Validate notifications and observer lifecycle against the real bridge fixture')
+p.add_argument('--pending-sessions',action='store_true',help='Validate cleanup when a native session response outlives its requesting frame')
 p.add_argument('--device-selection',action='store_true',help='Validate compatibility invalidation without XR event listeners')
 p.add_argument('--policy-denied',action='store_true',help='Validate response policy with a live private host available')
 p.add_argument('--context-loss',action='store_true',help='Lose and recreate active immersive WebGL contexts')
 a=p.parse_args()
 if a.device_selection:a.devicechange=True
+if a.pending_sessions and (a.devicechange or a.policy_denied or a.context_loss or a.no_xr_host):p.error('Pending-session validation uses its own native scenario')
 if a.devicechange and (a.policy_denied or a.context_loss or a.no_xr_host):p.error('Device-change mode uses its own live bridge scenario')
 if a.policy_denied and (a.context_loss or a.no_xr_host):p.error('Policy scenario uses its own live-host mode')
 if a.context_loss and a.no_xr_host:p.error('context loss requires the private XR host')
@@ -60,6 +62,18 @@ try:
   host_log=stack.enter_context((out/'native-host.log').open('w'))
   backend=runtime/'host.sock';host=subprocess.Popen([str(a.native_fixture.resolve()),str(backend)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=host_log,text=True,bufsize=1);stack.callback(stop,host)
   assert select.select([host.stdout],[],[],5)[0] and json.loads(host.stdout.readline())['ready']
+  host_lock=threading.Lock()
+  def host_command(value):
+   with host_lock:
+    host.stdin.write(json.dumps(value)+'\n');host.stdin.flush();assert select.select([host.stdout],[],[],5)[0];ack=json.loads(host.stdout.readline());assert ack['ok'];return ack
+  if a.pending_sessions:
+   publisher_stop=threading.Event()
+   def publish_frames():
+    while not publisher_stop.is_set():
+     host_command({'op':'publish'});publisher_stop.wait(.02)
+   publisher=threading.Thread(target=publish_frames,daemon=True);publisher.start()
+   def stop_publisher():publisher_stop.set();publisher.join(timeout=2)
+   stack.callback(stop_publisher)
   class Relay(socketserver.BaseRequestHandler):
    def handle(self):
     timing={'start':time.monotonic(),'phase':'read'};host_timings.append(timing)
@@ -88,8 +102,10 @@ try:
   class Site(http.server.BaseHTTPRequestHandler):
    def log_message(self,*_):pass
    def do_GET(self):
-    b=json.dumps(host_ops).encode() if self.path=='/host-ops' else (Path(__file__).with_name('webxr-device-selection-native.html') if a.device_selection else Path(__file__).with_name('webxr-devicechange-native.html') if a.devicechange else Path(__file__).with_name('webxr-permissions-policy-native.html') if a.policy_denied else Path(__file__).with_suffix('.html')).read_bytes()
-    if a.device_selection and self.path.startswith('/selection-observer'):
+    b=json.dumps(host_ops).encode() if self.path=='/host-ops' else (Path(__file__).with_name('webxr-pending-session-native.html') if a.pending_sessions else Path(__file__).with_name('webxr-device-selection-native.html') if a.device_selection else Path(__file__).with_name('webxr-devicechange-native.html') if a.devicechange else Path(__file__).with_name('webxr-permissions-policy-native.html') if a.policy_denied else Path(__file__).with_suffix('.html')).read_bytes()
+    if a.pending_sessions and self.path.startswith('/pending-native-child'):
+     b=Path(__file__).with_name('webxr-pending-session-native-child.html').read_bytes()
+    elif a.device_selection and self.path.startswith('/selection-observer'):
      b=Path(__file__).with_name('webxr-device-selection-native-child.html').read_bytes()
     elif a.device_selection and self.path.startswith('/selection-idle'):
      b=b'''<script>parent.postMessage({selectionObserver:true,tag:'idle',ready:true},'*');addEventListener('message',e=>{if(e.data.selectionCommand==='back')history.back()});</script>'''
@@ -102,7 +118,7 @@ try:
     self.end_headers();self.wfile.write(b)
    def do_POST(self):
     value=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-    if a.devicechange and self.path=='/host-control':
+    if (a.devicechange or a.pending_sessions) and self.path=='/host-control':
      if value['op']=='replace-endpoint':
       replacement=Server(str(runtime/'replacement.sock'),Relay);stack.callback(replacement.server_close);stack.callback(replacement.shutdown)
       os.replace(runtime/'replacement.sock',runtime/'proxy.sock');threading.Thread(target=replacement.serve_forever,daemon=True).start();ack={'ok':True}
@@ -110,7 +126,7 @@ try:
      elif value['op']=='restore-endpoint':os.rename(runtime/'hidden.sock',runtime/'proxy.sock');ack={'ok':True}
      else:
       assert value['op'] in ['active','suspend','publish']
-      host.stdin.write(json.dumps(value)+'\n');host.stdin.flush();assert select.select([host.stdout],[],[],5)[0];ack=json.loads(host.stdout.readline());assert ack['ok']
+      ack=host_command(value)
      b=json.dumps(ack).encode();self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(b)));self.end_headers();self.wfile.write(b);return
     if self.path=='/availability':availability['enabled']=bool(value)
     else:events.append(value)
@@ -122,19 +138,26 @@ try:
   ready=wait(lambda:next((e['data'] for e in events if e['type']=='ready'),None))
   window=wait(lambda:next((w for w in fixture.wayland.windows() if w.value()['client_pid']==child.pid),None))
   if not a.devicechange:
-   window.set_input_focus();g=window.get_geometry();ratio=ready['ratio'];top=g.height-ready['viewport'][1]*ratio-28;v=ready['start'];c=fixture.connection
-   xtest.fake_input(c,X.MotionNotify,x=g.x+int((v['x']+v['width']/2)*ratio),y=g.y+int(top+(v['y']+v['height']/2)*ratio));xtest.fake_input(c,X.ButtonPress,1);xtest.fake_input(c,X.ButtonRelease,1);c.sync()
-   if not a.no_xr_host and not a.policy_denied:
-    consent=wait(lambda:next((w for w in fixture.wayland.windows() if w.get_wm_name()=='Enter immersive WebXR'),None));consent.set_input_focus();code=c.keysym_to_keycode(XK.string_to_keysym('Return'));xtest.fake_input(c,X.KeyPress,code);xtest.fake_input(c,X.KeyRelease,code);c.sync()
+   def click_start(info):
+    window.set_input_focus();g=window.get_geometry();ratio=info['ratio'];top=g.height-info['viewport'][1]*ratio-28;v=info['start'];c=fixture.connection
+    xtest.fake_input(c,X.MotionNotify,x=g.x+int((v['x']+v['width']/2)*ratio),y=g.y+int(top+(v['y']+v['height']/2)*ratio));xtest.fake_input(c,X.ButtonPress,1);xtest.fake_input(c,X.ButtonRelease,1);c.sync()
+   def consent():
+    dialog=wait(lambda:next((w for w in fixture.wayland.windows() if w.get_wm_name()=='Enter immersive WebXR'),None));dialog.set_input_focus();c=fixture.connection;code=c.keysym_to_keycode(XK.string_to_keysym('Return'));xtest.fake_input(c,X.KeyPress,code);xtest.fake_input(c,X.KeyRelease,code);c.sync()
+   click_start(ready)
+   if not a.no_xr_host and not a.policy_denied:consent()
+   if a.pending_sessions:
+    next_step=wait(lambda:next((e['data'] for e in events if e['type']=='continue'),None));click_start(next_step);consent()
   def completed():
    if any(e['type']=='error' for e in events):return True
    done=next((e['data'] for e in events if e['type']=='done'),None)
    return done and sum(e['type']=='check' for e in events)==done['count']
   wait(completed)
-  check(not [e for e in events if e['type']=='error'],'Device-change observer validation completes' if a.devicechange else 'Both WebGL versions complete context compatibility validation')
-  done=next(e['data'] for e in events if e['type']=='done');check((done.get('kind')==('device-selection' if a.device_selection else 'devicechange')) if a.devicechange else (done['versions']==['webgl','webgl2'] and done['noHost']==a.no_xr_host),'The requested observer lifecycle scenario completes' if a.devicechange else 'The requested native device mode covers both WebGL versions')
+  check(not [e for e in events if e['type']=='error'],'Pending native request cleanup completes' if a.pending_sessions else 'Device-change observer validation completes' if a.devicechange else 'Both WebGL versions complete context compatibility validation')
+  done=next(e['data'] for e in events if e['type']=='done');check((done.get('kind')=='pending-sessions') if a.pending_sessions else (done.get('kind')==('device-selection' if a.device_selection else 'devicechange')) if a.devicechange else (done['versions']==['webgl','webgl2'] and done['noHost']==a.no_xr_host),'The pending native request scenario completes' if a.pending_sessions else 'The requested observer lifecycle scenario completes' if a.devicechange else 'The requested native device mode covers both WebGL versions')
   for event in sorted([e for e in events if e['type']=='check'],key=lambda e:e['order']):check(event['data']['passed'],event['data']['name'])
-  if a.devicechange:
+  if a.pending_sessions:
+   check(host_ops.count('begin_session')==2 and host_ops.count('end_session')==2 and not captures,'Cancelled and completed native requests release both leases without submitting pixel buffers')
+  elif a.devicechange:
    check(bool(host_ops) and all(op=='hello' for op in host_ops) and not captures,'Availability monitoring never opens a lease or reads tracking')
   elif a.no_xr_host or a.policy_denied:
    check(not host_ops and not captures,'No immersive host is contacted or leased when policy denies tracking' if a.policy_denied else 'No immersive host is contacted or leased when unavailable')
@@ -142,10 +165,10 @@ try:
    check(host_ops.count('begin_session')==1 and host_ops.count('end_session')==1,'Only the explicitly consented immersive session consumes a lease')
    for marker in ([70,71,78,79] if a.context_loss else [70,71]):
     capture=wait(lambda:next((v for v in reversed(captures) if v['marker']==marker),None));im=Image.open(capture['path']);h=capture['header'];check(h['layer_flags']==2 and list(im.getpixel((31,im.height//2)))==[255,0,marker,255] and list(im.getpixel((95,im.height//2)))==[0,255,marker,255],'Negotiated '+('WebGL 1' if marker in [70,78] else 'WebGL 2')+' context submits correct stereo pixels')
-  check(child.poll() is None,'Browser survives native availability transitions and observer cleanup' if a.devicechange else 'Browser survives context negotiation, device absence and reconnection')
-  if a.context_loss or a.policy_denied or a.devicechange:
+  check(child.poll() is None,'Browser survives pending request cancellation and fresh session creation' if a.pending_sessions else 'Browser survives native availability transitions and observer cleanup' if a.devicechange else 'Browser survives context negotiation, device absence and reconnection')
+  if a.context_loss or a.policy_denied or a.devicechange or a.pending_sessions:
    fixture.wayland.api('/api/action',{'op':'close','id':window.id})
    check(child.wait(timeout=10)==0,'Browser closes cleanly after native XR validation')
 except BaseException as ex:failure=str(ex);raise
 finally:
- (out/'report.json').write_text(json.dumps(dict(passed=failure is None and bool(checks),failure=failure,checks=checks,events=events,captures=captures,relay_errors=errors,host_operations=host_ops,host_timings=host_timings,no_xr_host=a.no_xr_host,context_loss=a.context_loss,policy_denied=a.policy_denied,devicechange=a.devicechange,device_selection=a.device_selection,simulated_capabilities=caps,binary_sha256=hashlib.sha256(a.binary.read_bytes()).hexdigest(),scope='Real browser and native DomeD availability notifications with a private synthetic XR host; no headset claim' if a.devicechange else 'Real browser, WebGL GPU buffers and native DomeD bridge with a private synthetic XR host; no headset claim'),indent=2))
+ (out/'report.json').write_text(json.dumps(dict(passed=failure is None and bool(checks),failure=failure,checks=checks,events=events,captures=captures,relay_errors=errors,host_operations=host_ops,host_timings=host_timings,no_xr_host=a.no_xr_host,context_loss=a.context_loss,policy_denied=a.policy_denied,devicechange=a.devicechange,device_selection=a.device_selection,pending_sessions=a.pending_sessions,simulated_capabilities=caps,binary_sha256=hashlib.sha256(a.binary.read_bytes()).hexdigest(),scope='Real browser request cleanup and native DomeD bridge with a private continuously published synthetic XR host; no pixel buffers submitted and no headset claim' if a.pending_sessions else 'Real browser and native DomeD availability notifications with a private synthetic XR host; no headset claim' if a.devicechange else 'Real browser, WebGL GPU buffers and native DomeD bridge with a private synthetic XR host; no headset claim'),indent=2))

@@ -711,6 +711,10 @@ device, preserving it during active sessions. Device replacement clears context
 compatibility without losing ordinary graphics resources; retained history
 documents reconcile their contexts on resume. See
 [device selection and compatibility](docs/WEBXR_DEVICE_SELECTION.md).
+Deferred session requests are owned by their document activation. Removing or
+navigating that document cancels unadopted backend sessions; stale history
+responses cannot replace a fresh request. See
+[XR request lifetime](docs/WEBXR_REQUEST_LIFETIME.md).
 
 ## Validation
 

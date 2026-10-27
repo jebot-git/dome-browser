@@ -365,3 +365,104 @@ fn frame_production_failure_ends_session_and_releases_selection() {
         assert!(registry.sessions.is_empty());
     }
 }
+
+#[test]
+fn pending_response_drop_aborts_the_unadopted_backend() {
+    let mut registry = registry();
+    registry.register(discovery(true, false, true));
+    let session = registry
+        .request_session(SessionMode::Inline, init())
+        .unwrap();
+    let pending = crate::PendingSession::new(session);
+    assert_eq!(registry.active_sessions.len(), 1);
+    drop(pending);
+    registry.run_one_frame();
+    assert!(registry.active_sessions.is_empty());
+    assert!(registry.sessions.is_empty());
+}
+
+#[test]
+fn pending_response_adoption_keeps_the_session_live() {
+    let mut registry = registry();
+    registry.register(discovery(true, false, true));
+    let session = registry
+        .request_session(SessionMode::Inline, init())
+        .unwrap();
+    let mut session = crate::PendingSession::new(session).into_session();
+    registry.run_one_frame();
+    assert_eq!(registry.active_sessions.len(), 1);
+    session.end_session();
+    registry.run_one_frame();
+    assert!(registry.active_sessions.is_empty());
+}
+
+#[test]
+fn pending_document_cancellation_is_scoped_to_pipeline_and_generation() {
+    let mut registry = registry();
+    registry.register(discovery(true, false, true));
+    let a = pipeline(1);
+    let b = pipeline(2);
+    let first = DocumentSessionOwner {
+        pipeline: a,
+        generation: 1,
+    };
+    let newer = DocumentSessionOwner {
+        pipeline: a,
+        generation: 2,
+    };
+    let other = DocumentSessionOwner {
+        pipeline: b,
+        generation: 1,
+    };
+    let _sessions = [first, newer, other].map(|owner| {
+        registry
+            .request_session_owned(SessionMode::Inline, init(), Some(owner))
+            .unwrap()
+    });
+    registry.handle_msg(RegistryMsg::CancelDocumentSessions(a, 1));
+    registry.run_one_frame();
+    assert_eq!(registry.active_sessions.len(), 2);
+    assert!(registry.draining_sessions.is_empty());
+    assert!(registry.active_sessions.iter().all(|session| {
+        session
+            .owner
+            .is_some_and(|owner| owner.pipeline == b || owner.generation == 2)
+    }));
+    registry.handle_msg(RegistryMsg::CancelDocumentSessions(a, 1));
+    registry.run_one_frame();
+    assert_eq!(registry.active_sessions.len(), 2);
+    registry.handle_msg(RegistryMsg::CancelDocumentSessions(a, 2));
+    registry.handle_msg(RegistryMsg::CancelDocumentSessions(b, 1));
+    registry.run_one_frame();
+    assert!(registry.active_sessions.is_empty());
+    assert!(registry.draining_sessions.is_empty());
+}
+
+#[test]
+fn pending_document_cancellation_closes_a_response_retained_outside_the_dom() {
+    let mut registry = registry();
+    registry.register(discovery(true, false, true));
+    registry.supports_session(SessionMode::ImmersiveVR).unwrap();
+    let mut client = registry.registry();
+    let (send, receive) = mpsc::channel();
+    client.request_session_for_document(
+        pipeline(1),
+        1,
+        SessionMode::Inline,
+        init(),
+        ProfileGenericCallback::new(move |response| {
+            send.send(response).unwrap();
+        })
+        .unwrap(),
+    );
+    client.cancel_document_sessions(pipeline(1), 1);
+    registry.run_one_frame();
+    let _response = receive
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(registry.active_sessions.is_empty());
+    registry.register_discovery(Box::new(discovery(false, true, true)), true);
+    assert!(registry.supports_session(SessionMode::ImmersiveAR).is_ok());
+}

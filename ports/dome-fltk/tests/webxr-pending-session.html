@@ -1,0 +1,58 @@
+<!doctype html><meta charset=utf-8><title>XR pending request lifecycle</title><body><script>
+const state=window.test={ready:true,finished:false,error:null,checks:[],cases:[],events:[],children:{}};state.snapshot=()=>({...state,snapshot:undefined});
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const check=(value,label)=>{if(!value)throw Error(label);state.checks.push(label)};
+async function wait(fn){const end=performance.now()+5000;while(performance.now()<end){if(fn())return;await sleep(10)}throw Error('Child request lifecycle timed out')}
+const xr=navigator.xr,identity=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
+function init(modes){return {supportedModes:modes,supportedFeatures:['viewer','local'],viewerOrigin:{position:[0,0,0],orientation:[0,0,0,1]},views:['left','right'].map(eye=>({eye,resolution:{width:16,height:16},projectionMatrix:identity,viewOffset:{position:[0,0,0],orientation:[0,0,0,1]}}))}}
+window.pendingChildState=(tag,stage,error,data={})=>{state.children[tag]={stage,error,...data};state.events.push({tag,stage,error,...data})};
+async function scenario(mode,control){
+ const name=mode+' '+(control?'completed before removal':'removed with pending request');
+ try{
+  await xr.test.simulateDeviceConnection(init(['inline','immersive-vr']));check(await xr.isSessionSupported('immersive-vr'),name+': initial VR device is selected');
+  const frame=document.createElement('iframe');frame.allow='xr-spatial-tracking *';
+  function child(mode,control,tag){
+   const owner=parent,xr=navigator.xr;let request;
+   xr.test.simulateUserActivation(()=>{request=xr.requestSession(mode)});
+   owner.pendingChildState(tag,'requested');
+   if(control){request.then(session=>session.end()).then(()=>{frameElement.remove();owner.pendingChildState(tag,'removed')},error=>owner.pendingChildState(tag,'error',String(error)))}
+   else{frameElement.remove();owner.pendingChildState(tag,'removed');request.catch(()=>{})}
+  }
+  frame.srcdoc='<script>('+child.toString()+')('+JSON.stringify(mode)+','+JSON.stringify(control)+','+JSON.stringify(name)+');<\/script>';document.body.append(frame);
+  await wait(()=>state.children[name]?.stage==='removed'||state.children[name]?.stage==='error');check(!state.children[name].error,name+': child request begins successfully');
+  await sleep(200);await xr.test.simulateDeviceConnection(init(['immersive-ar']));
+  check(await xr.isSessionSupported('immersive-ar')===true&&await xr.isSessionSupported('immersive-vr')===false,name+': a closed child does not pin the previous device');
+  state.cases.push({name,passed:true});
+ }catch(error){state.cases.push({name,passed:false,error:String(error)+'\n'+error.stack})}
+ finally{await xr.test.disconnectAllDevices();await sleep(100)}
+}
+async function historyScenario(mode){
+ const name=mode+' navigation and retained history';let frame;
+ try{
+  await xr.test.simulateDeviceConnection(init(['inline','immersive-vr']));await xr.isSessionSupported('immersive-vr');
+  function child(mode,tag){
+   const owner=parent,xr=navigator.xr;let inactive=false,late=0;window.pendingLate=()=>late;
+   addEventListener('pagehide',()=>{inactive=true;owner.pendingChildState(tag,'hidden')});
+   addEventListener('pageshow',()=>{if(inactive){
+    let fresh;xr.test.simulateUserActivation(()=>{fresh=xr.requestSession(mode)});
+    fresh.then(session=>{window.pendingFresh=session;owner.pendingChildState(tag,'fresh',null,{late})},error=>owner.pendingChildState(tag,'error',String(error)));
+   }else owner.pendingChildState(tag,'ready')});
+   window.pendingNavigate=()=>{let request;xr.test.simulateUserActivation(()=>{request=xr.requestSession(mode)});
+   request.then(()=>{if(inactive)late++},()=>{});location.assign('/idle?tag='+encodeURIComponent(tag));};
+  }
+  frame=document.createElement('iframe');frame.allow='xr-spatial-tracking *';frame.srcdoc='<script>('+child.toString()+')('+JSON.stringify(mode)+','+JSON.stringify(name)+');<\/script>';document.body.append(frame);
+  await wait(()=>state.children[name]?.stage==='ready');frame.contentWindow.pendingNavigate();
+  await wait(()=>state.children[name]?.stage==='idle');await sleep(150);
+  const ar=await xr.test.simulateDeviceConnection(init(['immersive-ar']));check(await xr.isSessionSupported('immersive-ar'),name+': navigation releases the old session');
+  await ar.disconnect();check(await xr.isSessionSupported('immersive-vr'),name+': VR remains available for a fresh request');
+  frame.contentWindow.postMessage('back','*');await wait(()=>['fresh','error'].includes(state.children[name]?.stage));
+  check(!state.children[name].error,name+': restored document creates a fresh session');await sleep(100);
+  check(frame.contentWindow.pendingLate()===0,name+': an old request is never adopted after restoration');
+  await xr.test.simulateDeviceConnection(init(['immersive-ar']));check(await xr.isSessionSupported('immersive-vr')&&!await xr.isSessionSupported('immersive-ar'),name+': the fresh session retains its device');
+  await frame.contentWindow.pendingFresh.end();check(await xr.isSessionSupported('immersive-ar'),name+': fresh request cleanup remains independent');
+  state.cases.push({name,passed:true});
+ }catch(error){state.cases.push({name,passed:false,error:String(error)+'\n'+error.stack})}
+ finally{frame?.remove();await xr.test.disconnectAllDevices();await sleep(100)}
+}
+(async()=>{for(const mode of ['inline','immersive-vr']){await scenario(mode,false);await scenario(mode,true);await historyScenario(mode)}const failed=state.cases.filter(row=>!row.passed);if(failed.length)state.error=JSON.stringify(failed);state.finished=true})().catch(error=>{state.error=String(error)+'\n'+error.stack;state.finished=true});
+</script>

@@ -1,0 +1,9 @@
+<!doctype html><meta charset=utf-8><body><script>
+const mode=new URL(location).searchParams.get('mode'),owner=parent;
+window.pendingBegin=()=>{
+ const promise=navigator.xr.requestSession(mode);
+ frameElement.remove();owner.postMessage({pendingNativeChild:true,mode,stage:'removed'},'*');
+ promise.then(()=>owner.postMessage({pendingNativeChild:true,mode,stage:'late-resolution'},'*'),()=>{});
+};
+owner.postMessage({pendingNativeChild:true,mode,stage:'ready'},'*');
+</script>

@@ -13,7 +13,7 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object;
 use servo_base::id::PipelineId;
 use servo_config::pref;
-use webxr_api::{Error as XRError, Session, SessionInit, SessionMode};
+use webxr_api::{Error as XRError, PendingSession, Session, SessionInit, SessionMode};
 use stylo_atoms::Atom;
 
 use crate::conversions::Convert;
@@ -39,6 +39,7 @@ pub(crate) struct XRSystem {
     eventtarget: EventTarget,
     gamepads: DomRefCell<Vec<Dom<Gamepad>>>,
     pending_immersive_session: Cell<bool>,
+    session_request_generation: Cell<u64>,
     device_change_listener_count: Cell<u32>,
     active_immersive_session: MutNullableDom<XRSession>,
     active_inline_sessions: DomRefCell<Vec<Dom<XRSession>>>,
@@ -108,12 +109,22 @@ impl XRSystem {
     }
 
     pub(crate) fn end_sessions_for_document_deactivation(&self) {
+        let generation = self.session_request_generation.get();
+        self.session_request_generation
+            .set(generation.wrapping_add(1));
+        self.pending_immersive_session.set(false);
+        if let Some(registry) = self.global().as_window().webxr_registry() {
+            registry.cancel_document_sessions(self.pipeline, generation);
+        }
         if let Some(session) = self.active_immersive_session.get() {
             session.end_for_document_deactivation();
+            session.dirty_layers();
         }
+        self.active_immersive_session.set(None);
         for session in self.active_inline_sessions.borrow().iter() {
             session.end_for_document_deactivation();
         }
+        self.active_inline_sessions.borrow_mut().clear();
     }
 
     fn new_inherited(pipeline: PipelineId) -> XRSystem {
@@ -121,6 +132,7 @@ impl XRSystem {
             eventtarget: EventTarget::new_inherited(),
             gamepads: DomRefCell::new(Vec::new()),
             pending_immersive_session: Cell::new(false),
+            session_request_generation: Cell::new(1),
             device_change_listener_count: Cell::new(0),
             active_immersive_session: Default::default(),
             active_inline_sessions: DomRefCell::new(Vec::new()),
@@ -259,6 +271,7 @@ impl XRSystemMethods<crate::DomTypeHolder> for XRSystem {
             return promise;
         }
 
+        let generation = self.session_request_generation.get();
         if mode != XRSessionMode::Inline {
             if !ScriptThread::is_user_interacting() {
                 if pref!(dom_webxr_unsafe_assume_user_intent) {
@@ -346,6 +359,17 @@ impl XRSystemMethods<crate::DomTypeHolder> for XRSystem {
             optional_features.retain(|feature| !spatial(feature));
         }
 
+        if generation != self.session_request_generation.get()
+            || !window.Document().is_fully_active()
+        {
+            if generation == self.session_request_generation.get() && mode != XRSessionMode::Inline
+            {
+                self.pending_immersive_session.set(false);
+            }
+            promise.reject_error(realm, Error::InvalidState(None));
+            return promise;
+        }
+
         let init = SessionInit {
             webview_id: Some(global.as_window().webview_id()),
             origin: global
@@ -358,36 +382,38 @@ impl XRSystemMethods<crate::DomTypeHolder> for XRSystem {
             first_person_observer_view: pref!(dom_webxr_first_person_observer_view),
         };
 
-        let mut trusted = Some(TrustedPromise::from(&promise));
-        let this = Trusted::new(self);
+        let mut trusted = Some((Trusted::new(self), TrustedPromise::from(&promise)));
         let task_source = global
             .task_manager()
             .dom_manipulation_task_source()
             .to_sendable();
         let callback = ProfileGenericCallback::new(move |message| {
-            let Some(trusted) = trusted.take() else {
-                error!("requestSession callback called more than once");
+            let Some((this, promise)) = trusted.take() else {
                 return;
             };
-            let this = this.clone();
-            let message: Result<Session, webxr_api::Error> = if let Ok(message) = message {
-                message
-            } else {
-                error!("requestSession callback given incorrect payload");
-                return;
-            };
+            let message: Result<Session, XRError> =
+                message.unwrap_or(Err(XRError::CommunicationError));
+            let response = message.map(PendingSession::new);
             task_source.queue(task!(request_session: move |cx| {
-                this.root().session_obtained(cx, message, &trusted.root(cx), mode);
+                this.root().session_obtained(cx, response, &promise.root(cx), mode, generation);
             }));
-        })
-        .expect("Could not create callback");
-        if let Some(mut r) = window.webxr_registry() {
-            r.request_session(mode.convert(), init, callback);
-        } else {
-            if mode != XRSessionMode::Inline {
-                self.pending_immersive_session.set(false);
-            }
-            promise.reject_error(realm, Error::NotSupported(None));
+        });
+        match (callback, window.webxr_registry()) {
+            (Ok(callback), Some(mut registry)) => {
+                registry.request_session_for_document(
+                    self.pipeline,
+                    generation,
+                    mode.convert(),
+                    init,
+                    callback,
+                );
+            },
+            _ => {
+                if mode != XRSessionMode::Inline {
+                    self.pending_immersive_session.set(false);
+                }
+                promise.reject_error(realm, Error::NotSupported(None));
+            },
         }
         promise
     }
@@ -402,12 +428,23 @@ impl XRSystem {
     fn session_obtained(
         &self,
         cx: &mut JSContext,
-        response: Result<Session, XRError>,
+        response: Result<PendingSession, XRError>,
         promise: &RootedPromise,
         mode: XRSessionMode,
+        generation: u64,
     ) {
+        if generation != self.session_request_generation.get()
+            || !self.global().as_window().Document().is_fully_active()
+        {
+            if generation == self.session_request_generation.get() && mode != XRSessionMode::Inline
+            {
+                self.pending_immersive_session.set(false);
+            }
+            promise.reject_error(cx, Error::InvalidState(None));
+            return;
+        }
         let session = match response {
-            Ok(session) => session,
+            Ok(session) => session.into_session(),
             Err(e) => {
                 warn!("Error requesting XR session: {:?}", e);
                 if mode != XRSessionMode::Inline {

@@ -1,0 +1,375 @@
+{
+  "completed_utc": "2026-10-27T21:36:51.461975+00:00",
+  "source_base_commit": "d0252fbd1cf8b49155b05389f2d169d8e7fed21f",
+  "candidate_sha256": "f6bab4685f61bfe57ad089b0505e5cf7446381fdec2f78dde1ab2d4269e49dc4",
+  "test_embedder_sha256": "b612a3b24abc3b335a39b691f056b00b38e361749dbb365f5ceca3674ef4ba1a",
+  "compiled_inputs_unchanged": true,
+  "source_file_sha256": {
+    "components/script/dom/webxr/xrsystem.rs": "6737bfb48752eae8d0d84c2ab2c1b2fe9bb1e29c4d8b448cca836414af3d4b28",
+    "components/shared/webxr/lib.rs": "999977dd1fc3f786f19384307998a22745e4feca030290a66dc91332a65058c3",
+    "components/shared/webxr/registry.rs": "65b652827c894c7a65b18a782e76871f6ea639f2c171f2691da2ea9a2c0bb219",
+    "components/shared/webxr/registry_tests.rs": "403e214d96c704afaf31e84bd944d0b511dcf940eb03a0bbcef8c30a85ffc0a3",
+    "components/shared/webxr/session.rs": "15526527f6fa8a6d326aeccb4959a693f3f93e087676a2ca683a8c1b3c171df2",
+    "ports/dome-fltk/README.md": "e0a46d41c4e366fa41cb627eef3e3f5fc021c483d2dabfedc8af8ec221d14e99",
+    "ports/dome-fltk/tests/webxr-context-compatibility.py": "78396c0fa09456612eb7090ce9d1db768403b691dffdc520139c1855db39bd07",
+    "ports/dome-fltk/docs/WEBXR_REQUEST_LIFETIME.md": "a35c5ddb7f4fad631f373e21caedbd45adf84531f15c58cfd5d232947b4bfae2",
+    "ports/dome-fltk/tests/webxr-pending-session-native-child.html": "a66791da33faf3ea7e599dc28e274475763c10da3bfac0e5e88c777360f9989a",
+    "ports/dome-fltk/tests/webxr-pending-session-native.html": "2cb333a45762a12ce8c49e9dff1886af1f6fa0f05b71fa73f04d0bd02fcdf04b",
+    "ports/dome-fltk/tests/webxr-pending-session.html": "ee04b5325b0f425c27c8be28adfd50401146ae5fd33b9f6db7cfc9237263bcfc",
+    "ports/dome-fltk/tests/webxr-pending-session.py": "96a46ac645df723e4fa74fb5b8458a83516bc5b19fe3d95b552244467553da61"
+  },
+  "selected_units": 238,
+  "runtime_checks": 7535,
+  "worker_shutdown_cases": 3,
+  "upstream_passed_cases": 563,
+  "upstream_optional_unsupported": 4,
+  "regression_jobs": 48,
+  "all_required_passed": true,
+  "initial_regression_failures": [
+    {
+      "evidence": "reset-runner-failure.json",
+      "classification": "Runner referenced nonexistent historical fixture-r1; corrected to validated fixture-r2. Original exit result retained; retry overwrote initial log, explicitly recorded; passing report retained separately"
+    },
+    {
+      "report": "r1-pending-mock/report.json",
+      "classification": "History fixture navigated before initial load finished, replacing its entry; corrected by starting request/navigation after pageshow; same binary passes retained-history assertions in r1-pending-mock-r2"
+    }
+  ],
+  "additional_pen_confirmations": 0,
+  "all_original_upstream_assertions_passed": false,
+  "upstream_obsolete_expectation_cases": 1,
+  "compiled_input_count": 58,
+  "units": [
+    {
+      "name": "selection",
+      "passed": 11,
+      "log_sha256": "7c1b7f60a94dbca4ad00d1d356ad3ea4e24d274c5afce2c573fc376e6cd8cf4c"
+    },
+    {
+      "name": "permissions-policy",
+      "passed": 15,
+      "log_sha256": "195d5cb44087486406e50c8eeeaeeb10806547a80c3ba6cdf5a2bed76297706b"
+    },
+    {
+      "name": "frontend",
+      "passed": 187,
+      "log_sha256": "815426747acfdff336008b9b3b8b29cf58bd929e5e2a99a371ba1efa2de6159e"
+    },
+    {
+      "name": "geometry",
+      "passed": 10,
+      "log_sha256": "eca8ad1f93460370890b83ce0aaaf3ba2684853e831f0b4d13e0feba954f0c0d"
+    },
+    {
+      "name": "pointer-ids",
+      "passed": 2,
+      "log_sha256": "af31eb0215697a1e70510036f57894b9407042175b62a6ff6cc18cab18f863fb"
+    },
+    {
+      "name": "pen-payload",
+      "passed": 3,
+      "log_sha256": "6a3589cb3f7511a3f933b4fdbed6e8d11174610ae941228b3b98cbf78f08b273"
+    },
+    {
+      "name": "factory",
+      "passed": 1,
+      "log_sha256": "e7e7241bf74d2bd0f8aa1ffc64f5b3b795ff11ac7d748f021b81c021e4a5fa41"
+    },
+    {
+      "name": "secondary",
+      "passed": 4,
+      "log_sha256": "183ce5bf9d998f9ed2a8338fa5976394b406af85fb48441c717edff98ed93d01"
+    },
+    {
+      "name": "renderer",
+      "passed": 5,
+      "log_sha256": "c19ad8df57376d3833f903418d26dba823a07a664491efe5853566879795e9bb"
+    }
+  ],
+  "suites": [
+    {
+      "name": "general-old",
+      "runtime_checks": 46,
+      "report_sha256": "90ae9fa47a09d413d31d88329faa5e9b44df0d28fe73493d31a325e823e1066a"
+    },
+    {
+      "name": "general-new",
+      "runtime_checks": 46,
+      "report_sha256": "90ae9fa47a09d413d31d88329faa5e9b44df0d28fe73493d31a325e823e1066a"
+    },
+    {
+      "name": "native-touch",
+      "runtime_checks": 22,
+      "report_sha256": "c57fa2adefec30239e4c5bb6ec1dc661b34e36aae8bee7f6f00a47e6a6901668"
+    },
+    {
+      "name": "mouse-inline",
+      "runtime_checks": 34,
+      "report_sha256": "a6ad2c12aa0c396450aa78dbc26dd1d958c33c7dcc4b94e805a6c3c5ea1ca89f"
+    },
+    {
+      "name": "controller",
+      "runtime_checks": 60,
+      "report_sha256": "36740273aff4b1659ef3201e9b4ba0119ac907ac7df01e97fa7b03e2a3f012c6"
+    },
+    {
+      "name": "reset",
+      "runtime_checks": 101,
+      "report_sha256": "2819a00510f4366e68126269f78e8e5d0fed87bbcc92d4059fe47e92b7d88e4e"
+    },
+    {
+      "name": "mouse-immersive",
+      "runtime_checks": 38,
+      "report_sha256": "a69d9eb58eb8666406a0d3a187cc5c5c44da2021198beed5e3d9a8eee7f31080"
+    },
+    {
+      "name": "engine-touch",
+      "runtime_checks": 43,
+      "report_sha256": "1215b85cfb386771adc70ab5cdb8687893fd08de06a7d50cd47007f476b4d204"
+    },
+    {
+      "name": "visibility",
+      "runtime_checks": 77,
+      "report_sha256": "9dcc952a415994d7f49bc4daa097e54969d77cdb38f0a2a7778bc58005a0dd1f"
+    },
+    {
+      "name": "frame-same",
+      "runtime_checks": 17,
+      "report_sha256": "c8206cb861c5b8ed07ed637bf0ea5aac70025aeba7b31449e1e3ecab8589d6d9"
+    },
+    {
+      "name": "frame-cross",
+      "runtime_checks": 17,
+      "report_sha256": "9dc1e73698fe52e7a1ed08e042d4ab40099f69b7f71ccf22b497c848dfa70372"
+    },
+    {
+      "name": "outcomes",
+      "runtime_checks": 9,
+      "report_sha256": "3ea178e01294ab974c3ac19b029a8e42305727f31f66155b7cfc2bf1055ec4d2"
+    },
+    {
+      "name": "upstream",
+      "upstream_passed_cases": 7,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "840153742d3b5c6a8e1e21b2ab28ae5e16ecee4a5d73b0f5bffeb9801ebf354e"
+    },
+    {
+      "name": "native-pen",
+      "runtime_checks": 87,
+      "report_sha256": "048fff2726b5dd8404a743e177d9064e0d2e55665da7fb32fdac64be1f709f5e"
+    },
+    {
+      "name": "layers-upstream",
+      "upstream_passed_cases": 22,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "ecd2305a3622eaf888a467b5582aac971095ac579b19b3f2469a2f83603f9ddd"
+    },
+    {
+      "name": "layer-scaling",
+      "runtime_checks": 369,
+      "report_sha256": "96d33160861467526e6753985097791df4ed0967e25c54c3cc4a6b37631cc43a"
+    },
+    {
+      "name": "bounded",
+      "runtime_checks": 21,
+      "report_sha256": "e40eab1662f40d8c0aae98dc326d297816c6ed6b3f418dfb43fd03465b2fac9f"
+    },
+    {
+      "name": "reset-upstream",
+      "upstream_passed_cases": 4,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "31b789642df1293c179f39bc7ab8516a5e59c1162b6023aaacde4b39800c5071"
+    },
+    {
+      "name": "layer-attributes",
+      "runtime_checks": 1037,
+      "report_sha256": "5cc500a88a6b5a4d9bf7e433f4dfca3a7d4efec18e15fd43f912fc5636a16dec"
+    },
+    {
+      "name": "layer-attributes-opaque-context",
+      "runtime_checks": 1037,
+      "report_sha256": "3315fb2ce943ef792c60e2e92baf99a817759a78e6c9aec0b328ddbc231e41c4"
+    },
+    {
+      "name": "compatibility-nohost",
+      "runtime_checks": 31,
+      "report_sha256": "4529df71da66933f7ae0afaabaf1c3f52d49852ee60705c4717b0e029a4e12a5"
+    },
+    {
+      "name": "compatibility-native",
+      "runtime_checks": 45,
+      "report_sha256": "a6808457a2ce9a27f3b0bcad624b09b4db7550c4c95c688d228df10c05c950a2"
+    },
+    {
+      "name": "dynamic-upstream",
+      "upstream_passed_cases": 24,
+      "upstream_optional_unsupported": 4,
+      "report_sha256": "7af1034955fd55e925286d43f7fa3b2ce93ffd38cd95c6b8ec0b5ba61df122fd"
+    },
+    {
+      "name": "dynamic",
+      "runtime_checks": 610,
+      "report_sha256": "42342305423ad0bf07730d87f966f305a41209100f01821cf063dde3d16a28e2"
+    },
+    {
+      "name": "secondary",
+      "runtime_checks": 624,
+      "report_sha256": "aaec71ee7d91febff91d4daeb5243134d727c5ff56a81595f508c14b6515efc3"
+    },
+    {
+      "name": "secondary-upstream",
+      "upstream_passed_cases": 12,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "3aa2acb06f86404a42c6dc430065194645dc6bd685b70cbff68e191ebd86cae6"
+    },
+    {
+      "name": "pdf-new",
+      "runtime_checks": 25,
+      "report_sha256": "eefa744c6da643614e0911e0cbdf4dae75cdf5847c7cb61f8db255878eb1240a"
+    },
+    {
+      "name": "pdf-old",
+      "runtime_checks": 25,
+      "report_sha256": "eefa744c6da643614e0911e0cbdf4dae75cdf5847c7cb61f8db255878eb1240a"
+    },
+    {
+      "name": "history-new",
+      "runtime_checks": 13,
+      "report_sha256": "c211e10c326b4045e72dda915eb271cbb93f98b60f215b036ed333c27c987f20"
+    },
+    {
+      "name": "history-old",
+      "runtime_checks": 13,
+      "report_sha256": "c211e10c326b4045e72dda915eb271cbb93f98b60f215b036ed333c27c987f20"
+    },
+    {
+      "name": "external-links",
+      "runtime_checks": 63,
+      "report_sha256": "1cb98142842e1201e78d7fa76c42501eccde2c0d0c0165098aae34c775b1725d"
+    },
+    {
+      "name": "wasm-streams",
+      "runtime_checks": 17,
+      "report_sha256": "25ac26090aeef2340b1403306f0c59075e7235bff8595745ca84f2b4e8960546"
+    },
+    {
+      "name": "downloads",
+      "runtime_checks": 18,
+      "report_sha256": "895fc8016fdb11eba93e56e7b5ab7480edd51eab0c0b64d98eafe6c86b287979"
+    },
+    {
+      "name": "webgl-loss",
+      "runtime_checks": 280,
+      "upstream_passed_cases": 489,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "2d438e962339c6b5239105c7a2f5e296c3e5ad28a32f4afc1f7701d6a7b9dcb9"
+    },
+    {
+      "name": "worker-shutdown",
+      "worker_shutdown_cases": 3,
+      "report_sha256": "a2d04f056e87c4ee22f05265e0125a15b3832b54da19f1337850e069d9b1fb92"
+    },
+    {
+      "name": "xr-loss",
+      "runtime_checks": 68,
+      "report_sha256": "130313c235f90dbc3c652a340b62622edfffee75b4acaa18b129b719f8b656e4"
+    },
+    {
+      "name": "webgl-gc",
+      "runtime_checks": 16,
+      "report_sha256": "67497a64b4269e908c395bbc08bb52cdfafbc9484240680fee35339c51feffa8"
+    },
+    {
+      "name": "policy-mock",
+      "runtime_checks": 575,
+      "document_scenarios": 34,
+      "report_sha256": "b62d5923bf06a775e8331b2fcdd1df2f5313c1c3df73ee57e7dde9df7980728a"
+    },
+    {
+      "name": "policy-upstream",
+      "runtime_checks": 2,
+      "upstream_passed_cases": 3,
+      "upstream_obsolete_expectation_cases": 1,
+      "all_original_upstream_assertions_passed": false,
+      "report_sha256": "66aafb590501ec866f73a471c60afd54f6d44cd0e47a75e5d13f42eaece2ffb7"
+    },
+    {
+      "name": "policy-history",
+      "runtime_checks": 1874,
+      "document_scenarios": 115,
+      "report_sha256": "ccd46cc8bad72c1e45a0a9fc215167302c1d452e6004de8b68463a45ae9147b7"
+    },
+    {
+      "name": "policy-native",
+      "runtime_checks": 23,
+      "report_sha256": "3e44421e768d3fb94ea1846524801019ed7039707c486926dbc41d09ef6bcf69"
+    },
+    {
+      "name": "devicechange-mock",
+      "runtime_checks": 37,
+      "report_sha256": "000d235e7dc9b909b92856eac92496090bc5ecfba2ed970c7ff8a361d9f9b4fd"
+    },
+    {
+      "name": "devicechange-upstream",
+      "runtime_checks": 2,
+      "upstream_passed_cases": 2,
+      "report_sha256": "cc6179c0c6e94950b459b6892f15fde2bc0fdd277fefb5485d3e486d07ae95f7"
+    },
+    {
+      "name": "devicechange-native",
+      "runtime_checks": 30,
+      "report_sha256": "e46ef5b271d44a6ca5c7e77d02dd97904491e2cb46e1a8769e0d565c2611e997"
+    },
+    {
+      "name": "selection-mock",
+      "runtime_checks": 26,
+      "report_sha256": "31574d7938182c8c993dd4638ad4fb06f1fea1f780adc9ec17dcc51217357af5"
+    },
+    {
+      "name": "selection-native",
+      "runtime_checks": 18,
+      "report_sha256": "7ce8a90cd064c0e9a37c52804bd8e6a114734ba8ddfbeccbebdd5e70928b5b57"
+    },
+    {
+      "name": "pending-mock",
+      "runtime_checks": 26,
+      "report_sha256": "f6fa78e0b3c6487f13ece5e3aa5083ef8bc84d637817ac2e273e8d9ae94df8ca"
+    },
+    {
+      "name": "pending-native",
+      "runtime_checks": 13,
+      "report_sha256": "24327fea9d712d170775239394795bc3a518d2dc3726497771d3afb4420d7789"
+    }
+  ],
+  "initial_reports": [
+    "before/report.json",
+    "native-before/report.json",
+    "native-before-r2/report.json"
+  ],
+  "remaining": [
+    "Automatic cancellation of pending native consent UI on navigation",
+    "Automatic GPU-reset detection, adapter migration and capability changes",
+    "Permissions Policy reporting/report-only delivery and further feature registrations",
+    "DomeD shell touch/stylus interactions beyond native client surfaces",
+    "Dynamic scaling on optional native backends",
+    "Physical device validation",
+    "Continuous stability, web adblocking/privacy and local workstation protection maintenance",
+    "Final standards-focused Discord/x.com rendering"
+  ],
+  "unadvertised_features": [
+    "OffscreenCanvas"
+  ],
+  "physical_device_validation": false,
+  "optional_windows_openxr_compiled": false,
+  "installed": false,
+  "sessions_restarted": false,
+  "artifacts_directory": "artifacts/servo-rendering-goal/webxr-pending-session-v1",
+  "native_baseline_qualification": "native-before used a single tracking frame and could expire before request setup; native-before-r2 publishes continuously and reproduces missing end_session; both reports retained",
+  "host_selected_units": 172,
+  "host_units_retained_from": "webxr-devicechange-v1; host source unchanged this milestone",
+  "host_units_rerun": false,
+  "host_full_unit_log_sha256": "cabcd3ee2284e54579605e4c55bade3687a6ee772f5708a885b149e508cfbb95",
+  "host_unit_log_sha256": "1266e331c2576930ade5910a3ffcfe178e20168e2b56ba5b7299bce595c2b034",
+  "native_host_sha256": "6c7169466c431a0ce2b79ef93c4e98d9312babc14ab3b93d3b1bd8467801e727",
+  "host_compiled_inputs_unchanged": true
+}

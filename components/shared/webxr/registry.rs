@@ -32,9 +32,17 @@ struct DiscoveryEntry<GL> {
 }
 
 struct ActiveSession {
+    id: SessionId,
+    owner: Option<DocumentSessionOwner>,
     active: Arc<SessionActivity>,
     abort: Quitter,
     monitor_devices: bool,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct DocumentSessionOwner {
+    pipeline: PipelineId,
+    generation: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -147,7 +155,32 @@ impl Registry {
     ) {
         let _ = self
             .sender
-            .send(RegistryMsg::RequestSession(mode, init, dest));
+            .send(RegistryMsg::RequestSession(mode, init, None, dest));
+        self.waker.wake();
+    }
+
+    pub fn request_session_for_document(
+        &mut self,
+        pipeline: PipelineId,
+        generation: u64,
+        mode: SessionMode,
+        init: SessionInit,
+        dest: ProfileGenericCallback<Result<Session, Error>>,
+    ) {
+        let owner = DocumentSessionOwner {
+            pipeline,
+            generation,
+        };
+        let _ = self
+            .sender
+            .send(RegistryMsg::RequestSession(mode, init, Some(owner), dest));
+        self.waker.wake();
+    }
+
+    pub fn cancel_document_sessions(&self, pipeline: PipelineId, generation: u64) {
+        let _ = self
+            .sender
+            .send(RegistryMsg::CancelDocumentSessions(pipeline, generation));
         self.waker.wake();
     }
 
@@ -224,6 +257,7 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
     }
 
     fn reap_finished_sessions(&mut self) {
+        self.draining_sessions.retain(|active| !active.is_closed());
         let draining = &mut self.draining_sessions;
         self.active_sessions.retain(|session| {
             if session.active.is_active() {
@@ -433,8 +467,33 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
             RegistryMsg::SupportsSession(mode, dest) => {
                 let _ = dest.send(self.supports_session(mode));
             },
-            RegistryMsg::RequestSession(mode, init, dest) => {
-                let _ = dest.send(self.request_session(mode, init));
+            RegistryMsg::RequestSession(mode, init, owner, dest) => {
+                let response = self.request_session_owned(mode, init, owner);
+                let id = response.as_ref().ok().map(Session::id);
+                if dest.send(response).is_err() {
+                    if let Some(id) = id {
+                        for session in &self.active_sessions {
+                            if session.id == id {
+                                session.active.begin_closing();
+                                session.abort.abort();
+                            }
+                        }
+                        self.configure_device_observation();
+                    }
+                }
+            },
+            RegistryMsg::CancelDocumentSessions(pipeline, generation) => {
+                // Request and cancellation messages from the document share
+                // this FIFO. No retired-document map is needed after cleanup.
+                for session in &self.active_sessions {
+                    if session.owner.is_some_and(|owner| {
+                        owner.pipeline == pipeline && owner.generation <= generation
+                    }) {
+                        session.active.begin_closing();
+                        session.abort.abort();
+                    }
+                }
+                self.configure_device_observation();
             },
             RegistryMsg::SimulateDeviceConnection(init, dest) => {
                 let _ = dest.send(self.simulate_device_connection(init));
@@ -459,7 +518,17 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
         }
     }
 
+    #[cfg(test)]
     fn request_session(&mut self, mode: SessionMode, init: SessionInit) -> Result<Session, Error> {
+        self.request_session_owned(mode, init, None)
+    }
+
+    fn request_session_owned(
+        &mut self,
+        mode: SessionMode,
+        init: SessionInit,
+        owner: Option<DocumentSessionOwner>,
+    ) -> Result<Session, Error> {
         if mode != SessionMode::Inline {
             self.refresh_selection();
         }
@@ -499,6 +568,8 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
                             )
                         });
                     self.active_sessions.push(ActiveSession {
+                        id,
+                        owner,
                         active,
                         abort: session.abort_handle(),
                         monitor_devices,
@@ -547,8 +618,10 @@ enum RegistryMsg {
     RequestSession(
         SessionMode,
         SessionInit,
+        Option<DocumentSessionOwner>,
         ProfileGenericCallback<Result<Session, Error>>,
     ),
+    CancelDocumentSessions(PipelineId, u64),
     SupportsSession(SessionMode, ProfileGenericCallback<Result<(), Error>>),
     SimulateDeviceConnection(
         MockDeviceInit,
