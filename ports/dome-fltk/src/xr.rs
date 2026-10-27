@@ -28,6 +28,7 @@ mod input;
 mod reference_space;
 mod inline;
 mod time;
+mod availability;
 
 #[derive(Clone, Copy, Default)]
 struct PageFocus {
@@ -101,9 +102,14 @@ fn endpoint() -> Result<PathBuf> {
     Ok(runtime.join(format!("dome-webxr-{port}.sock")))
 }
 fn rpc(path: &std::path::Path, request: Value, rgba: &[u8]) -> Result<Value> {
-    let mut stream = UnixStream::connect(path)?;
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    rpc_with_timeout(path, request, rgba, Duration::from_secs(2))
+}
+fn rpc_with_timeout(path: &std::path::Path, request: Value, rgba: &[u8], timeout: Duration) -> Result<Value> {
+    let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
+    socket.connect_timeout(&socket2::SockAddr::unix(path)?, timeout)?;
+    let mut stream = UnixStream::from(socket);
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
     let mut peer = unsafe { std::mem::zeroed::<libc::ucred>() };
     let mut size = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
     use std::os::fd::AsRawFd;
@@ -194,6 +200,17 @@ pub fn probe() -> Result<Value> {
     Hello::parse(value.clone())?;
     Ok(value)
 }
+fn availability_key() -> Option<availability::Key> {
+    let path = endpoint().ok()?;
+    let before = std::fs::symlink_metadata(&path).ok()?;
+    let value = rpc_with_timeout(&path, json!({"op":"hello","version":1}), &[], Duration::from_millis(250)).ok()?;
+    Hello::parse(value.clone()).ok()?;
+    if value.get("active").is_some_and(|active| active.as_bool() != Some(true)) { return None; }
+    let after = std::fs::symlink_metadata(&path).ok()?;
+    if (before.dev(), before.ino()) != (after.dev(), after.ino()) { return None; }
+    Some((after.dev(), after.ino(), after.ctime(), after.ctime_nsec(), value["availability_generation"].as_u64().unwrap_or(0), value["name"].as_str().unwrap_or("").to_owned()))
+}
+
 #[derive(Clone, Copy, Serialize, Deserialize, Debug)]
 struct Pose {
     position: [f32; 3],
@@ -363,6 +380,7 @@ impl servo::webxr::WebXrRegistry for Registry {
             registry.register(Discovery {
                 connection,
                 focus: self.focus.clone(),
+                availability: availability::Monitor::new(availability_key),
             });
         }
     }
@@ -370,15 +388,20 @@ impl servo::webxr::WebXrRegistry for Registry {
 struct Discovery {
     connection: Connection,
     focus: Focus,
+    availability: availability::Monitor,
 }
 impl DiscoveryAPI<SurfmanGL> for Discovery {
+    fn set_device_change_callback(&mut self, callback: Option<servo::profile_traits::generic_callback::GenericCallback<()>>) {
+        self.availability.observe(callback);
+    }
+
     fn check_context_compatibility(&self, context: ContextId, manager: &LayerGrandManager<SurfmanGL>) -> std::result::Result<(), Error> {
         let adapter = self.connection.create_adapter().map_err(backend)?;
         webxr::compatibility::check(manager, context, self.connection.clone(), adapter)
     }
 
     fn supports_session(&self, mode: SessionMode) -> bool {
-        mode == SessionMode::ImmersiveVR && probe().is_ok()
+        mode == SessionMode::ImmersiveVR && probe().is_ok_and(|value| value.get("active").is_none_or(|active| active.as_bool() == Some(true)))
     }
     fn request_session(
         &mut self,

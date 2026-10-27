@@ -1,0 +1,64 @@
+<!doctype html><meta charset=utf-8><title>XR device-change lifecycle</title><body>
+<script>
+const state=window.test={ready:true,finished:false,error:null,checks:[],events:[]};state.snapshot=()=>({...state,snapshot:undefined});
+const check=(value,label)=>{if(!value)throw Error(label);state.checks.push(label)};
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function wait(fn){const end=performance.now()+5000;while(performance.now()<end){if(fn())return;await sleep(10)}throw Error('Device event timed out')}
+const xr=navigator.xr,identity=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
+let normal=0,once=0,aborted=0,property=0;
+const record=event=>{property++;state.events.push({trusted:event.isTrusted,bubbles:event.bubbles,cancelable:event.cancelable,composed:event.composed,target:event.target===xr,current:event.currentTarget===xr,activation:navigator.userActivation.isActive})};
+const listener=()=>normal++,onceListener=()=>once++;
+function init(modes=['immersive-vr']){return {supportedModes:modes,supportedFeatures:['viewer','local'],viewerOrigin:{position:[0,0,0],orientation:[0,0,0,1]},views:['left','right'].map(eye=>({eye,resolution:{width:16,height:16},projectionMatrix:identity,viewOffset:{position:[0,0,0],orientation:[0,0,0,1]}}))}}
+async function change(fn,expected){await fn();await wait(()=>property===expected);await sleep(25)}
+async function main(){
+ check('ondevicechange'in xr&&xr.ondevicechange===null,'The devicechange handler attribute is exposed and initially null');
+ xr.ondevicechange=record;xr.addEventListener('devicechange',listener);xr.addEventListener('devicechange',listener);xr.addEventListener('devicechange',onceListener,{once:true});
+ const abort=new AbortController();xr.addEventListener('devicechange',()=>aborted++,{signal:abort.signal});abort.abort();
+ check(xr.ondevicechange===record,'The property returns its assigned callback');
+ await sleep(75);check(property===0,'Installing listeners does not manufacture an initial event');
+ let inline=await xr.test.simulateDeviceConnection(init(['inline']));await sleep(100);check(property===0,'Adding an inline-only device does not emit an immersive availability event');await inline.disconnect();await sleep(100);check(property===0,'Removing an inline-only device does not emit an immersive availability event');
+ let first,second,ar,quiet;
+ await change(async()=>{first=await xr.test.simulateDeviceConnection(init())},1);
+ check(normal===1&&once===1&&aborted===0,'Duplicates, once listeners and aborted listeners retain EventTarget semantics');
+ check(await xr.isSessionSupported('immersive-vr')===true,'Availability queries see the newly connected VR device');
+ await change(async()=>{second=await xr.test.simulateDeviceConnection(init())},2);
+ check(normal===2&&once===1,'A second device emits a change even while VR remains available');
+ await change(()=>first.disconnect(),3);check(await xr.isSessionSupported('immersive-vr')===true,'Disconnecting one of two devices preserves support');
+ await Promise.all([first.disconnect(),first.disconnect()]);await sleep(150);check(property===3,'Repeated disconnection does not manufacture extra events');
+ await change(()=>second.disconnect(),4);check(await xr.isSessionSupported('immersive-vr')===false,'Disconnecting the final VR device updates support');
+ check(await xr.isSessionSupported('inline')===true,'Inline support remains available after immersive disconnection');
+ await change(async()=>{ar=await xr.test.simulateDeviceConnection(init(['immersive-ar']))},5);
+ check(await xr.isSessionSupported('immersive-ar')===true&&await xr.isSessionSupported('immersive-vr')===false,'AR availability changes independently of VR');
+ check(state.events.every(e=>e.trusted&&!e.bubbles&&!e.cancelable&&!e.composed&&e.target&&e.current&&!e.activation),'Availability events are trusted, use the XRSystem target and do not grant user activation');
+ xr.removeEventListener('devicechange',listener);xr.ondevicechange=null;
+ quiet=await xr.test.simulateDeviceConnection(init());await sleep(150);check(property===5&&normal===5,'Removing the final listeners stops delivery');
+ xr.ondevicechange=record;await sleep(100);check(property===5,'Resubscribing does not replay changes from the previous observer');
+ await change(()=>ar.disconnect(),6);check(await xr.isSessionSupported('immersive-vr')===true&&await xr.isSessionSupported('immersive-ar')===false,'Resubscription observes subsequent device changes');
+ xr.ondevicechange=null;
+ let messages=[];addEventListener('message',event=>{if(event.data?.deviceObserver)messages.push(event.data)});
+ async function child(allow,tag){
+  const frame=document.createElement('iframe');frame.allow=allow;
+  frame.srcdoc='<script>let count=0;navigator.xr.ondevicechange=e=>parent.postMessage({deviceObserver:true,tag:'+JSON.stringify(tag)+',count:++count,trusted:e.isTrusted},"*");parent.postMessage({deviceObserver:true,tag:'+JSON.stringify(tag)+',ready:true},"*");<\/script>';
+  document.body.append(frame);await wait(()=>messages.some(m=>m.tag===tag&&m.ready));await xr.isSessionSupported('immersive-vr');return frame;
+ }
+ const denied=await child("xr-spatial-tracking 'none'",'denied');const allowed=await child('xr-spatial-tracking *','allowed');
+ let extra=await xr.test.simulateDeviceConnection(init());await wait(()=>messages.some(m=>m.tag==='allowed'&&m.count===1));await sleep(100);
+ check(!messages.some(m=>m.tag==='denied'&&m.count),'A policy-denied document receives no availability events');
+ check(messages.some(m=>m.tag==='allowed'&&m.count===1&&m.trusted),'An authorized child receives its own trusted event');
+ allowed.remove();denied.remove();const before=messages.filter(m=>m.count).length;
+ await extra.disconnect();await sleep(200);check(messages.filter(m=>m.count).length===before,'Detached observers cannot receive late availability events');
+ const onceOnly=()=>once++;xr.addEventListener('devicechange',onceOnly,{once:true});await xr.isSessionSupported('immersive-vr');await quiet.disconnect();await wait(()=>once===2);
+ check(once===2&&property===6,'A sole once listener receives its event and removes itself');
+ let last=await xr.test.simulateDeviceConnection(init());await sleep(100);await last.disconnect();await sleep(100);check(once===2,'The removed once listener does not resume observation');
+ await xr.test.disconnectAllDevices();check(true,'All simulated devices and observer cleanup settle');
+ for(let iteration=0;iteration<12;iteration++){
+  const immediate=await xr.test.simulateDeviceConnection(init());
+  let notified=false;const immediateListener=()=>{notified=true};
+  xr.addEventListener('devicechange',immediateListener,{once:true});
+  await immediate.disconnect();await wait(()=>notified);
+  check(notified,'Immediate disconnect follows listener registration, iteration '+iteration);
+ }
+ state.finished=true;
+}
+main().catch(error=>{state.error=error.stack||String(error);state.finished=true});
+</script>

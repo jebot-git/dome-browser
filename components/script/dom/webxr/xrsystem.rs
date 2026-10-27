@@ -14,6 +14,7 @@ use script_bindings::reflector::reflect_dom_object;
 use servo_base::id::PipelineId;
 use servo_config::pref;
 use webxr_api::{Error as XRError, Session, SessionInit, SessionMode};
+use stylo_atoms::Atom;
 
 use crate::conversions::Convert;
 use crate::dom::bindings::codegen::Bindings::XRSystemBinding::{
@@ -38,6 +39,9 @@ pub(crate) struct XRSystem {
     eventtarget: EventTarget,
     gamepads: DomRefCell<Vec<Dom<Gamepad>>>,
     pending_immersive_session: Cell<bool>,
+    device_change_listener_count: Cell<u32>,
+    device_change_generation: Cell<u64>,
+    device_change_observing: Cell<bool>,
     active_immersive_session: MutNullableDom<XRSession>,
     active_inline_sessions: DomRefCell<Vec<Dom<XRSession>>>,
     test: MutNullableDom<XRTest>,
@@ -46,6 +50,98 @@ pub(crate) struct XRSystem {
 }
 
 impl XRSystem {
+    pub(crate) fn device_change_listener_added(&self) {
+        self.device_change_listener_count
+            .set(self.device_change_listener_count.get().saturating_add(1));
+        self.resume_device_changes();
+    }
+
+    pub(crate) fn device_change_listener_removed(&self) {
+        self.device_change_listener_count
+            .set(self.device_change_listener_count.get().saturating_sub(1));
+        if self.device_change_listener_count.get() == 0 {
+            self.stop_device_changes();
+        }
+    }
+
+    pub(crate) fn clear_device_change_listeners(&self) {
+        self.device_change_listener_count.set(0);
+        self.stop_device_changes();
+    }
+
+    pub(crate) fn stop_device_changes(&self) {
+        if !self.device_change_observing.replace(false) {
+            return;
+        }
+        if let Some(registry) = self.global().as_window().webxr_registry() {
+            registry
+                .stop_observing_device_changes(self.pipeline, self.device_change_generation.get());
+        }
+        self.device_change_generation
+            .set(self.device_change_generation.get().wrapping_add(1));
+    }
+
+    pub(crate) fn resume_device_changes(&self) {
+        if self.device_change_observing.get() || self.device_change_listener_count.get() == 0 {
+            return;
+        }
+        let global = self.global();
+        let window = global.as_window();
+        if !window.Document().allowed_to_use_policy_feature(
+            net_traits::permissions_policy::PolicyFeature::XrSpatialTracking,
+        ) {
+            return;
+        }
+        let Some(registry) = window.webxr_registry() else {
+            return;
+        };
+        let pipeline = self.pipeline;
+        let generation = self.device_change_generation.get().wrapping_add(1);
+        let tasks = global
+            .task_manager()
+            .dom_manipulation_task_source()
+            .to_sendable();
+        // Only IDs and a sendable task source cross threads, never a strong DOM
+        // root. A queued event must still belong to the same active observer.
+        let callback = ProfileGenericCallback::new(move |message: Result<(), _>| {
+            if message.is_err() {
+                return;
+            }
+            tasks.queue(task!(xr_device_change: move |cx| {
+                if let Some(window) = ScriptThread::find_window(pipeline) {
+                    window.notify_xr_device_change(cx, generation);
+                }
+            }));
+        });
+        if let Ok(callback) = callback {
+            if registry
+                .observe_device_changes(pipeline, generation, callback)
+                .is_ok()
+            {
+                self.device_change_generation.set(generation);
+                self.device_change_observing.set(true);
+            }
+        }
+    }
+
+    pub(crate) fn device_changed(&self, cx: &mut JSContext, generation: u64) {
+        if !self.device_change_observing.get()
+            || self.device_change_generation.get() != generation
+            || self.device_change_listener_count.get() == 0
+            || !self
+                .global()
+                .as_window()
+                .Document()
+                .allowed_to_use_policy_feature(
+                    net_traits::permissions_policy::PolicyFeature::XrSpatialTracking,
+                )
+        {
+            return;
+        }
+        self.upcast::<EventTarget>()
+            .fire_event(cx, Atom::from("devicechange"));
+    }
+
     pub(crate) fn has_inline_sessions(&self) -> bool {
         !self.active_inline_sessions.borrow().is_empty()
     }
@@ -78,6 +174,7 @@ impl XRSystem {
     }
 
     pub(crate) fn end_sessions_for_document_deactivation(&self) {
+        self.stop_device_changes();
         if let Some(session) = self.active_immersive_session.get() {
             session.end_for_document_deactivation();
         }
@@ -91,6 +188,9 @@ impl XRSystem {
             eventtarget: EventTarget::new_inherited(),
             gamepads: DomRefCell::new(Vec::new()),
             pending_immersive_session: Cell::new(false),
+            device_change_listener_count: Cell::new(0),
+            device_change_generation: Cell::new(0),
+            device_change_observing: Cell::new(false),
             active_immersive_session: Default::default(),
             active_inline_sessions: DomRefCell::new(Vec::new()),
             test: Default::default(),
@@ -154,6 +254,8 @@ impl Convert<SessionMode> for XRSessionMode {
 }
 
 impl XRSystemMethods<crate::DomTypeHolder> for XRSystem {
+    event_handler!(devicechange, GetOndevicechange, SetOndevicechange);
+
     /// <https://immersive-web.github.io/webxr/#dom-xr-issessionsupported>
     fn IsSessionSupported(&self, cx: &mut CurrentRealm, mode: XRSessionMode) -> RootedPromise {
         // XXXManishearth this should select an XR device first

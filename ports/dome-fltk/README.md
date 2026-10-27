@@ -699,6 +699,13 @@ Broader WebXR feature/conformance coverage, auxiliary default actions, DomeD
 shell touch interaction and physical touchscreen/tablet/controller/runtime
 validation of the staged revisions remain follow-up work.
 
+Authorized active documents can observe immersive-device availability through
+`navigator.xr.ondevicechange`. Native observation stops when the final listener
+is removed, its document becomes inactive, or its browsing context is destroyed.
+It uses capability handshakes without entering XR or reading tracking data.
+DomeD runtime suspension and endpoint replacement are covered by the private
+bridge fixture. See [device-change behavior and validation](docs/WEBXR_DEVICECHANGE.md).
+
 ## Validation
 
 ```sh

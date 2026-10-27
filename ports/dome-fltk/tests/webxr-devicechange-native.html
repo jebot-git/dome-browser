@@ -1,0 +1,66 @@
+<!doctype html><meta charset=utf-8><title>Native XR device availability</title><body>
+<script>
+let order=0,count=0;const post=(type,data)=>fetch('/event',{method:'POST',body:JSON.stringify({order:++order,type,data})});
+const check=(passed,name)=>{count++;post('check',{passed:!!passed,name})};
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function wait(fn){const end=performance.now()+5000;while(performance.now()<end){if(await fn())return;await sleep(25)}throw Error('Native availability event timed out')}
+async function control(op){const response=await fetch('/host-control',{method:'POST',body:JSON.stringify({op})});const ack=await response.json();if(!ack.ok)throw Error('Host command failed')}
+const ops=()=>fetch('/host-ops').then(r=>r.json());
+let rootEvents=0,normal=0,once=0,aborted=0;const metadata=[];let packets=[];
+addEventListener('message',event=>{if(event.data?.availabilityObserver)packets.push(event.data)});
+const handler=event=>{rootEvents++;metadata.push({trusted:event.isTrusted,target:event.target===navigator.xr,current:event.currentTarget===navigator.xr,bubbles:event.bubbles,cancelable:event.cancelable,composed:event.composed,activation:navigator.userActivation.isActive})};
+const listener=()=>normal++;
+async function createFrame(tag,allow,role='observer'){
+ const frame=document.createElement('iframe');frame.allow=allow;frame.src='/'+role+'?tag='+tag;document.body.append(frame);
+ await wait(()=>packets.some(p=>p.tag===tag&&p.ready));return frame;
+}
+const current=tag=>packets.filter(p=>p.tag===tag).at(-1);
+async function main(){
+ post('ready',{devicechange:true});
+ const denied=await createFrame('denied',"xr-spatial-tracking 'none'");
+ await control('active');await sleep(1100);
+ check(current('denied').count===0,'A policy-denied document receives no device-change event');
+ check((await ops()).length===0,'Denied listeners do not contact the native bridge');denied.remove();
+ const xr=navigator.xr;
+ check('ondevicechange'in xr&&xr.ondevicechange===null,'The system browser exposes the handler attribute');
+ xr.ondevicechange=handler;xr.addEventListener('devicechange',listener);xr.addEventListener('devicechange',listener);
+ xr.addEventListener('devicechange',()=>once++,{once:true});const abort=new AbortController();xr.addEventListener('devicechange',()=>aborted++,{signal:abort.signal});abort.abort();
+ check(await xr.isSessionSupported('immersive-vr')===true,'The live bridge reports available VR');
+ await sleep(1100);check(rootEvents===0,'Listener registration establishes a baseline without an initial event');
+ await control('publish');await control('publish');await sleep(650);check(rootEvents===0,'Ordinary tracking publication does not change device availability');
+ await control('suspend');await wait(()=>rootEvents===1);
+ check(await xr.isSessionSupported('immersive-vr')===false,'Suspending the native session updates support');
+ check(await xr.isSessionSupported('inline')===true,'Inline remains supported while native XR is inactive');
+ check(normal===1&&once===1&&aborted===0,'Native delivery preserves duplicate, once and aborted listener behavior');
+ await control('suspend');await sleep(650);check(rootEvents===1,'Repeated suspension does not emit duplicate notifications');
+ await control('active');await wait(()=>rootEvents===2);check(normal===2&&once===1,'Reactivation emits a new event without reviving a once listener');
+ const observed=await createFrame('observed','xr-spatial-tracking *');await sleep(100);
+ await control('suspend');await wait(()=>rootEvents===3&&current('observed').count===1);
+ check(true,'Two authorized documents independently receive the same native transition');
+ xr.removeEventListener('devicechange',listener);xr.ondevicechange=null;
+ await control('active');await wait(()=>current('observed').count===2);await sleep(100);
+ check(rootEvents===3&&normal===3,'Removing one document observer leaves the other observer working');
+ // An inactive history document keeps its listener but must not keep a native
+ // observation alive. Return to the retained document and verify rearming.
+ observed.contentWindow.postMessage({availabilityCommand:'idle'},'*');await wait(()=>packets.some(p=>p.tag==='idle'&&p.ready));await sleep(800);
+ let stopped=(await ops()).length;await control('suspend');await control('active');await sleep(1100);
+ check((await ops()).length===stopped,'Inactive history documents stop native availability polling');
+ check(current('observed').count===2,'An inactive document receives no late event');
+ observed.contentWindow.postMessage({availabilityCommand:'back'},'*');await wait(()=>current('observed')?.ready&&current('observed').count===2);await sleep(1100);
+ await control('suspend');await wait(()=>current('observed').count===3);
+ check(true,'History reactivation resumes the retained observer');
+ observed.remove();await sleep(800);stopped=(await ops()).length;await control('active');await sleep(1100);
+ check((await ops()).length===stopped,'Removing the last observer stops native polling');
+ check(rootEvents===3,'Destroyed observers do not redirect events to the parent');
+ xr.ondevicechange=handler;await sleep(1100);check(rootEvents===3,'A replacement observation does not replay the old generation');
+ await control('suspend');await wait(()=>rootEvents===4);check(true,'A fresh observation receives subsequent availability changes');
+ check(metadata.every(e=>e.trusted&&e.target&&e.current&&!e.bubbles&&!e.cancelable&&!e.composed&&!e.activation),'Native availability events have standard flags and never grant activation');
+ await control('active');await wait(()=>rootEvents===5);
+ await control('replace-endpoint');await wait(()=>rootEvents===6);check(await xr.isSessionSupported('immersive-vr'),'Replacing the native endpoint emits a change while retaining VR availability');
+ await control('hide-endpoint');await wait(()=>rootEvents===7);check(await xr.isSessionSupported('immersive-vr')===false,'Removing the native endpoint reports device loss');
+ await control('restore-endpoint');await wait(()=>rootEvents===8);check(await xr.isSessionSupported('immersive-vr'),'Restoring the native endpoint reports device reconnection');
+ xr.ondevicechange=null;await sleep(700);const all=await ops();check(all.length>0&&all.every(op=>op==='hello'),'Monitoring uses capability handshakes without a lease or tracking request');
+ post('done',{count,kind:'devicechange',rootEvents,normal,once,aborted});
+}
+main().catch(error=>post('error',{name:error.name,message:error.message,stack:error.stack}));
+</script>

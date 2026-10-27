@@ -2419,6 +2419,7 @@ dependencies = [
  "servo-webxr",
  "servo-webxr-api",
  "sha2 0.11.1",
+ "socket2",
  "surfman",
  "tokio",
  "tokio-rustls",

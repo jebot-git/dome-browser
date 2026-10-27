@@ -23,6 +23,12 @@ pub trait DiscoveryAPI<GL>: 'static {
     ) -> Result<Session, Error>;
     fn supports_session(&self, mode: SessionMode) -> bool;
 
+    /// Observe changes to immersive-device availability without starting a
+    /// session. None stops observation; implementations must not retain a DOM
+    /// object or perform tracking in order to answer availability.
+    fn set_device_change_callback(&mut self, _callback: Option<ProfileGenericCallback<()>>) {}
+
+
     /// Verify that a context can supply surfaces to this immersive device.
     /// This must not begin a session, consume a lease or request tracking data.
     fn check_context_compatibility(
@@ -106,6 +112,10 @@ pub trait DeviceAPI: 'static {
 }
 
 impl<GL: 'static> DiscoveryAPI<GL> for Box<dyn DiscoveryAPI<GL>> {
+    fn set_device_change_callback(&mut self, callback: Option<ProfileGenericCallback<()>>) {
+        (**self).set_device_change_callback(callback);
+    }
+
     fn check_context_compatibility(
         &self,
         context: ContextId,

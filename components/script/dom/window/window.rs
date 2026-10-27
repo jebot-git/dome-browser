@@ -3639,6 +3639,13 @@ impl Window {
     }
 
     #[cfg(feature = "webxr")]
+    pub(crate) fn notify_xr_device_change(&self, cx: &mut JSContext, generation: u64) {
+        if let Some(xr) = self.navigator.get().and_then(|navigator| navigator.xr()) {
+            xr.device_changed(cx, generation);
+        }
+    }
+
+    #[cfg(feature = "webxr")]
     fn end_xr_sessions_for_document_deactivation(&self) {
         if let Some(navigator) = self.navigator.get() {
             if let Some(xr) = navigator.xr() {
@@ -3653,6 +3660,10 @@ impl Window {
 
         // Set the window proxy to be this object.
         self.window_proxy().set_currently_active(cx, self);
+        #[cfg(feature = "webxr")]
+        if let Some(xr) = self.navigator.get().and_then(|navigator| navigator.xr()) {
+            xr.resume_device_changes();
+        }
 
         // Push the document title to `Paint` since we are
         // activating this document due to a navigation.

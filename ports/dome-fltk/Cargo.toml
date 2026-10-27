@@ -6,6 +6,7 @@ license = "GPL-3.0-or-later"
 publish = false
 
 [dependencies]
+socket2 = { workspace = true }
 servo-base = { workspace = true }
 servo = { workspace = true, features = ["baked-in-resources", "js_jit", "webxr", "clipboard", "webcrypto", "media-gstreamer"] }
 image = { workspace = true }

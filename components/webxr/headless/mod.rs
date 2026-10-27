@@ -85,6 +85,8 @@ struct HeadlessDeviceData {
     inputs: Vec<InputInfo>,
     sessions: Vec<PerSessionData>,
     disconnected: bool,
+    immersive: bool,
+    device_change_callback: Option<ProfileGenericCallback<()>>,
     world: Option<MockWorld>,
     next_id: u32,
     bounds_geometry: Vec<Point2D<f32, Floor>>,
@@ -124,6 +126,8 @@ impl MockDiscoveryAPI<SurfmanGL> for HeadlessMockDiscovery {
             inputs: vec![],
             sessions: vec![],
             disconnected: false,
+            immersive: init.supports_vr || init.supports_ar,
+            device_change_callback: None,
             world: init.world,
             next_id: 0,
             bounds_geometry: vec![],
@@ -152,6 +156,10 @@ fn run_loop(receiver: GenericReceiver<MockDeviceMsg>, data: Arc<Mutex<HeadlessDe
 }
 
 impl DiscoveryAPI<SurfmanGL> for HeadlessDiscovery {
+    fn set_device_change_callback(&mut self, callback: Option<ProfileGenericCallback<()>>) {
+        self.data.lock().unwrap().device_change_callback = callback;
+    }
+
     fn check_context_compatibility(
         &self,
         context: ContextId,
@@ -626,6 +634,9 @@ impl HeadlessDeviceData {
             },
             MockDeviceMsg::Disconnect(s) => {
                 self.disconnected = true;
+                if self.immersive {
+                    if let Some(callback) = &self.device_change_callback { let _ = callback.send(()); }
+                }
                 with_all_sessions!(self, |s| s.quitter.as_ref().map(|q| q.quit()));
                 // notify the client that we're done disconnecting
                 let _ = s.send(());
@@ -733,6 +744,8 @@ mod secondary_views_tests {
             inputs: vec![],
             sessions: vec![],
             disconnected: false,
+            immersive: true,
+            device_change_callback: None,
             world: None,
             next_id: 0,
             bounds_geometry: vec![],

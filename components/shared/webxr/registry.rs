@@ -7,6 +7,8 @@ use log::warn;
 use profile_traits::generic_callback::GenericCallback as ProfileGenericCallback;
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::{self, GenericCallback, GenericReceiver, GenericSender};
+use servo_base::id::PipelineId;
+use std::collections::HashMap;
 
 use crate::{
     ContextId, DiscoveryAPI, Error, GLTypes, LayerGrandManager, MainThreadSession, MockDeviceInit,
@@ -28,6 +30,8 @@ pub struct MainThreadRegistry<GL> {
     waker: MainThreadWakerImpl,
     grand_manager: LayerGrandManager<GL>,
     next_session_id: u32,
+    device_watchers: HashMap<PipelineId, (u64, ProfileGenericCallback<()>)>,
+    device_watch_epoch: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -48,6 +52,42 @@ impl MainThreadWakerImpl {
 }
 
 impl Registry {
+    /// Serialize simulated disconnection with observer registration. Both
+    /// originate on the document thread, but the mock device has its own worker.
+    pub fn disconnect_mock_device(
+        &self,
+        device: GenericSender<MockDeviceMsg>,
+        callback: ProfileGenericCallback<()>,
+    ) -> Result<(), Error> {
+        self.sender
+            .send(RegistryMsg::DisconnectMockDevice(device, callback))
+            .map_err(|_| Error::CommunicationError)?;
+        self.waker.wake();
+        Ok(())
+    }
+
+    pub fn observe_device_changes(
+        &self,
+        pipeline: PipelineId,
+        generation: u64,
+        callback: ProfileGenericCallback<()>,
+    ) -> Result<(), Error> {
+        self.sender
+            .send(RegistryMsg::ObserveDeviceChanges(
+                pipeline, generation, callback,
+            ))
+            .map_err(|_| Error::CommunicationError)?;
+        self.waker.wake();
+        Ok(())
+    }
+
+    pub fn stop_observing_device_changes(&self, pipeline: PipelineId, generation: u64) {
+        let _ = self.sender.send(RegistryMsg::StopObservingDeviceChanges(
+            pipeline, generation,
+        ));
+        self.waker.wake();
+    }
+
     pub fn check_context_compatibility(
         &mut self,
         context: ContextId,
@@ -113,6 +153,8 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
             waker,
             grand_manager,
             next_session_id: 0,
+            device_watchers: HashMap::new(),
+            device_watch_epoch: 0,
         })
     }
 
@@ -127,7 +169,57 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
     where
         D: DiscoveryAPI<GL>,
     {
-        self.discoveries.push(Box::new(discovery));
+        self.register_discovery(Box::new(discovery), false);
+    }
+
+    fn device_change_callback(&self) -> Option<ProfileGenericCallback<()>> {
+        let sender = self.sender.clone();
+        let waker = self.waker.clone();
+        let epoch = self.device_watch_epoch;
+        ProfileGenericCallback::new(move |_| {
+            let _ = sender.send(RegistryMsg::DeviceAvailabilityChanged(epoch));
+            waker.wake();
+        })
+        .ok()
+    }
+
+    fn configure_device_observation(&mut self, observing: bool) {
+        self.device_watch_epoch = self.device_watch_epoch.wrapping_add(1);
+        for index in 0..self.discoveries.len() {
+            let callback = if observing {
+                self.device_change_callback()
+            } else {
+                None
+            };
+            self.discoveries[index].set_device_change_callback(callback);
+        }
+    }
+
+    fn notify_device_changes(&mut self) {
+        let had_watchers = !self.device_watchers.is_empty();
+        self.device_watchers
+            .retain(|_, (_, callback)| callback.send(()).is_ok());
+        if had_watchers && self.device_watchers.is_empty() {
+            self.configure_device_observation(false);
+        }
+    }
+
+    fn register_discovery(&mut self, mut discovery: Box<dyn DiscoveryAPI<GL>>, first: bool) {
+        let observing = !self.device_watchers.is_empty();
+        let immersive = observing
+            && (discovery.supports_session(SessionMode::ImmersiveVR)
+                || discovery.supports_session(SessionMode::ImmersiveAR));
+        if observing {
+            discovery.set_device_change_callback(self.device_change_callback());
+        }
+        if first {
+            self.discoveries.insert(0, discovery);
+        } else {
+            self.discoveries.push(discovery);
+        }
+        if immersive {
+            self.notify_device_changes();
+        }
     }
 
     pub fn register_mock<D>(&mut self, discovery: D)
@@ -160,6 +252,39 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
 
     fn handle_msg(&mut self, msg: RegistryMsg) {
         match msg {
+            RegistryMsg::DisconnectMockDevice(device, callback) => {
+                if device
+                    .send(MockDeviceMsg::Disconnect(callback.clone()))
+                    .is_err()
+                {
+                    let _ = callback.send(());
+                }
+            },
+            RegistryMsg::ObserveDeviceChanges(pipeline, generation, callback) => {
+                let start = self.device_watchers.is_empty();
+                self.device_watchers
+                    .insert(pipeline, (generation, callback));
+                if start {
+                    self.configure_device_observation(true);
+                }
+            },
+            RegistryMsg::StopObservingDeviceChanges(pipeline, generation) => {
+                if self
+                    .device_watchers
+                    .get(&pipeline)
+                    .is_some_and(|(current, _)| *current == generation)
+                {
+                    self.device_watchers.remove(&pipeline);
+                    if self.device_watchers.is_empty() {
+                        self.configure_device_observation(false);
+                    }
+                }
+            },
+            RegistryMsg::DeviceAvailabilityChanged(epoch) => {
+                if epoch == self.device_watch_epoch {
+                    self.notify_device_changes();
+                }
+            },
             RegistryMsg::CheckContextCompatibility(context, dest) => {
                 let result = self
                     .discoveries
@@ -213,22 +338,32 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
         &mut self,
         init: MockDeviceInit,
     ) -> Result<GenericSender<MockDeviceMsg>, Error> {
+        let mut obtained = None;
         for mock in &mut self.mocks {
             let Some((sender, receiver)) = generic_channel::channel() else {
                 return Err(Error::CommunicationError);
             };
             if let Ok(discovery) = mock.simulate_device_connection(init.clone(), receiver) {
-                self.discoveries.insert(0, discovery);
-                return Ok(sender);
+                obtained = Some((sender, discovery));
+                break;
             }
         }
-        Err(Error::NoMatchingDevice)
+        if let Some((sender, discovery)) = obtained {
+            self.register_discovery(discovery, true);
+            Ok(sender)
+        } else {
+            Err(Error::NoMatchingDevice)
+        }
     }
 }
 
 #[derive(Serialize, Deserialize)]
 #[expect(clippy::large_enum_variant)]
 enum RegistryMsg {
+    DisconnectMockDevice(GenericSender<MockDeviceMsg>, ProfileGenericCallback<()>),
+    ObserveDeviceChanges(PipelineId, u64, ProfileGenericCallback<()>),
+    StopObservingDeviceChanges(PipelineId, u64),
+    DeviceAvailabilityChanged(u64),
     CheckContextCompatibility(ContextId, ProfileGenericCallback<Result<(), Error>>),
     RequestSession(
         SessionMode,

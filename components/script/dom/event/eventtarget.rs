@@ -476,6 +476,10 @@ impl EventTarget {
     /// Notify the global about a listener being added for a given event type.
     fn notify_listener_added(&self, ty: &Atom) {
         #[cfg(feature = "webxr")]
+        if *ty == Atom::from("devicechange") && let Some(system) = self.downcast::<crate::dom::xrsystem::XRSystem>() {
+            system.device_change_listener_added();
+        }
+        #[cfg(feature = "webxr")]
         if *ty == atom!("reset") && let Some(space) = self.downcast::<crate::dom::xrreferencespace::XRReferenceSpace>() {
             space.reset_listener_added();
         }
@@ -486,6 +490,10 @@ impl EventTarget {
 
     /// Notify the global about a listener being removed for a given event type.
     fn notify_listener_removed(&self, ty: &Atom) {
+        #[cfg(feature = "webxr")]
+        if *ty == Atom::from("devicechange") && let Some(system) = self.downcast::<crate::dom::xrsystem::XRSystem>() {
+            system.device_change_listener_removed();
+        }
         #[cfg(feature = "webxr")]
         if *ty == atom!("reset") && let Some(space) = self.downcast::<crate::dom::xrreferencespace::XRReferenceSpace>() {
             space.reset_listener_removed();
@@ -518,6 +526,10 @@ impl EventTarget {
     }
 
     pub(crate) fn remove_all_listeners(&self, cx: &JSContext) {
+        #[cfg(feature = "webxr")]
+        if let Some(system) = self.downcast::<crate::dom::xrsystem::XRSystem>() {
+            system.clear_device_change_listeners();
+        }
         // Take the whole map out first, so the listener-removed notifications
         // below run without holding a borrow on `handlers`.
         rooted!(&in(cx) let handlers = self.handlers.safe_borrow_mut(cx.no_gc()).take());

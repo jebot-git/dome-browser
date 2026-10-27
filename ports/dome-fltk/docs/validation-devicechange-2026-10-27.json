@@ -1,0 +1,351 @@
+{
+  "completed_utc": "2026-10-27T20:12:19.691259+00:00",
+  "source_base_commit": "3d3ca10589890865f4a56741e1ca603cf30a0e46",
+  "candidate_sha256": "54d483a483c2f7be29007ead2e25a738528e9a67a5ec3746df4973cba2a83f48",
+  "test_embedder_sha256": "f03e08ea4d832d107b44040934d0711fe1921038720f1dedb2fbded28ac6fa25",
+  "compiled_inputs_unchanged": true,
+  "source_file_sha256": {
+    "Cargo.lock": "e6c8f588568355cdeaeb50436c422fcf8019a7de95c241ac0f0dee373a6a4953",
+    "Cargo.toml": "89c9861d1c459cae01ba6717371de946c6b8f4154a9539658f3c1050515c3495",
+    "components/script/dom/event/eventtarget.rs": "677083468dc4ace3d1bdd5392e3dc282d2d370c6531dda5cbac92f88d1e2746a",
+    "components/script/dom/webxr/fakexrdevice.rs": "5bb083e984b0d742466b09cb6d21c5e6d16570664f713c5759e8542a8bacc6b0",
+    "components/script/dom/webxr/xrsystem.rs": "28edd03a4a7a7212060c75cfc3f7568f18f0ccd64742478ffb9ef2d798f2779c",
+    "components/script/dom/window/window.rs": "ef5dc4758d75592ebac5385b011b688f4c975693dc327bd73bc4f19595ccbd79",
+    "components/script_bindings/webidls/XRSystem.webidl": "74e56bfaaee3f605f19b4026608cbefac78cb4548715f8e5c61e6f5fe4ee2ec1",
+    "components/shared/webxr/device.rs": "090e44c1c5b8a493176b08c3354a3b536f85881d940e07ba17a290ea145b4c8b",
+    "components/shared/webxr/registry.rs": "b77c0fad1cba05ffb550858fda26de27490ed5be2c609be81595bd6f9c48fd77",
+    "components/webxr/headless/mod.rs": "b6bd1ec4c9f771031aa86b880a278dab89508c697024f9853384682a45f62446",
+    "ports/dome-fltk/Cargo.toml": "d3c91626599a571cf8951a8f477ba371dd8c3d28411e39183c68e5f36ca0ee57",
+    "ports/dome-fltk/README.md": "2e890d61cef13d4e5b7e405a076ff436d76dee08565287f5bf65948a12c7d128",
+    "ports/dome-fltk/docs/PERMISSIONS_POLICY.md": "b2e030d35d304c6e0a0c758ec94c081976dcb41b464898bbb64aa50b7e1b00c0",
+    "ports/dome-fltk/src/xr.rs": "4e9acb0caea45fe5161bf1ffdd2c5867d9ad212c999b6b87f57ff892bce52010",
+    "ports/dome-fltk/tests/webxr-context-compatibility.py": "92c37330157f29d6ec886334bd4685b5631e7f6fef9f8ff567afcae31821b6f7",
+    "ports/dome-fltk/docs/WEBXR_DEVICECHANGE.md": "9e3d4fa40779992e9c772a991b8b47f5f29a4038c027a491aee3e82ce335217f",
+    "ports/dome-fltk/src/xr/availability.rs": "0b33bb2c61282c437dd7d7c4a6146046d7ff209422678bbc49634fd28f849134",
+    "ports/dome-fltk/tests/webxr-devicechange-native.html": "7fcad5fe6796f0d7edab55f61053b697903de3530c83ae102b9f01db6f3862b6",
+    "ports/dome-fltk/tests/webxr-devicechange-wpt.py": "2e7ba33ace0545ba114e8a342053e57a5f4e17a14360ccf125e505ef3938e0fe",
+    "ports/dome-fltk/tests/webxr-devicechange.html": "b8db1a7af2e854110650657e472aa7f27f74ab23ab00bcda75ab34a3a09f678e",
+    "ports/dome-fltk/tests/webxr-devicechange.py": "766889ecc71b7b6fad75b07356f3a2c87f19a199479f6db716c47854415a146e"
+  },
+  "selected_units": 227,
+  "runtime_checks": 7452,
+  "worker_shutdown_cases": 3,
+  "upstream_passed_cases": 563,
+  "upstream_optional_unsupported": 4,
+  "regression_jobs": 44,
+  "all_required_passed": true,
+  "initial_regression_failures": [
+    "r1-devicechange-mock/report.json",
+    "r1-devicechange-upstream/report.json"
+  ],
+  "additional_pen_confirmations": 0,
+  "all_original_upstream_assertions_passed": false,
+  "upstream_obsolete_expectation_cases": 1,
+  "compiled_input_count": 55,
+  "units": [
+    {
+      "name": "permissions-policy",
+      "passed": 15,
+      "log_sha256": "8d70039eadd75c5439eec3e97dbdf56fdc01b837f1d1ff59fb7cde484dae9f67"
+    },
+    {
+      "name": "frontend",
+      "passed": 187,
+      "log_sha256": "489e4d5b2f6fe04ef17cdcf3dbb38bfe8994870a69fbba37b5f86129586a9481"
+    },
+    {
+      "name": "geometry",
+      "passed": 10,
+      "log_sha256": "c1ea0ee87ba6e892857c42cb398c533bc1362413a563f2dc50eb4acf8de5ff6a"
+    },
+    {
+      "name": "pointer-ids",
+      "passed": 2,
+      "log_sha256": "6f64e54cd133b381b7f38fac017210fc8a9383b182c3841ac39ef319008ebb3c"
+    },
+    {
+      "name": "pen-payload",
+      "passed": 3,
+      "log_sha256": "7080416f53673877b87eba9e155350592645d4cb609ecce9e1395a5029f6c1de"
+    },
+    {
+      "name": "factory",
+      "passed": 1,
+      "log_sha256": "6aecbb39ff86f2fab0930850522440b8154b21315648c187aca7f4a770cfca45"
+    },
+    {
+      "name": "secondary",
+      "passed": 4,
+      "log_sha256": "8d4ff5ffaeb137dda6cd41e83f534521e60375711c33d92faeed9a220c6b5b33"
+    },
+    {
+      "name": "renderer",
+      "passed": 5,
+      "log_sha256": "774b677cec42de6db8b3a737b4981a51407929781c3f6643cf0a412ef3c0e00a"
+    }
+  ],
+  "suites": [
+    {
+      "name": "general-new",
+      "runtime_checks": 46,
+      "report_sha256": "90ae9fa47a09d413d31d88329faa5e9b44df0d28fe73493d31a325e823e1066a"
+    },
+    {
+      "name": "general-old",
+      "runtime_checks": 46,
+      "report_sha256": "90ae9fa47a09d413d31d88329faa5e9b44df0d28fe73493d31a325e823e1066a"
+    },
+    {
+      "name": "native-touch",
+      "runtime_checks": 22,
+      "report_sha256": "c57fa2adefec30239e4c5bb6ec1dc661b34e36aae8bee7f6f00a47e6a6901668"
+    },
+    {
+      "name": "mouse-inline",
+      "runtime_checks": 34,
+      "report_sha256": "0d748807d5e3ec859b17bc127d8cf4dcc2dc752c0ce9d75fcc8bfb66bd30bb9e"
+    },
+    {
+      "name": "controller",
+      "runtime_checks": 60,
+      "report_sha256": "ca644dc09f7a2ce31ed974e87286f0762183a3fa481ae37c18d67a1a4b737682"
+    },
+    {
+      "name": "mouse-immersive",
+      "runtime_checks": 38,
+      "report_sha256": "66438419b109d128a173ff7671e4f6ec26b72e8e7c00248a957c1b3c07d42fb1"
+    },
+    {
+      "name": "reset",
+      "runtime_checks": 101,
+      "report_sha256": "6a4a1a5387548832196bed89ee20789cfc0eca3ffb44c3e45ecb7eebf316f853"
+    },
+    {
+      "name": "engine-touch",
+      "runtime_checks": 43,
+      "report_sha256": "91c95f09e83043d9764c0f6d9f1f2d54778b89e442d943fff55fabe9ed210a42"
+    },
+    {
+      "name": "visibility",
+      "runtime_checks": 77,
+      "report_sha256": "42818f6bcadea0a8edf51f35f9f8d50fa31118512e757179b9a13783718c8686"
+    },
+    {
+      "name": "frame-same",
+      "runtime_checks": 17,
+      "report_sha256": "c8206cb861c5b8ed07ed637bf0ea5aac70025aeba7b31449e1e3ecab8589d6d9"
+    },
+    {
+      "name": "frame-cross",
+      "runtime_checks": 17,
+      "report_sha256": "9dc1e73698fe52e7a1ed08e042d4ab40099f69b7f71ccf22b497c848dfa70372"
+    },
+    {
+      "name": "outcomes",
+      "runtime_checks": 9,
+      "report_sha256": "3ea178e01294ab974c3ac19b029a8e42305727f31f66155b7cfc2bf1055ec4d2"
+    },
+    {
+      "name": "native-pen",
+      "runtime_checks": 87,
+      "report_sha256": "048fff2726b5dd8404a743e177d9064e0d2e55665da7fb32fdac64be1f709f5e"
+    },
+    {
+      "name": "upstream",
+      "upstream_passed_cases": 7,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "6ba5f0cb1dbb3221d2b03482fd275bf3a35a7c00c53ecfb7c7a76e46f62c5808"
+    },
+    {
+      "name": "layers-upstream",
+      "upstream_passed_cases": 22,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "a75bbdd6e128674f3c1cb811b131400e6c5b206a7779d3db7f93f4ae7453b90c"
+    },
+    {
+      "name": "layer-scaling",
+      "runtime_checks": 369,
+      "report_sha256": "4f195e48c97ef8c795e24f34f00628f65f7da72ed20224b649f676b677c2f238"
+    },
+    {
+      "name": "bounded",
+      "runtime_checks": 21,
+      "report_sha256": "84f8dec42d5583655af5bb40ddacd0a6b5ae335901876c76e454fbb5cb580f6d"
+    },
+    {
+      "name": "reset-upstream",
+      "upstream_passed_cases": 4,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "d9a8614d973d5f158f7c946f66c7b290672ddd60b0b2b083a1e4d9a9e76ebeec"
+    },
+    {
+      "name": "layer-attributes",
+      "runtime_checks": 1037,
+      "report_sha256": "3f46fe255b65f10cd10bd4a51abd4739588101b40d26db1452c8a6af77ccb207"
+    },
+    {
+      "name": "layer-attributes-opaque-context",
+      "runtime_checks": 1037,
+      "report_sha256": "1fa0154fc019ae436ebbc1729ea8a28995bca23bde4e59c1af781951da96f43d"
+    },
+    {
+      "name": "compatibility-native",
+      "runtime_checks": 45,
+      "report_sha256": "6e684b42d58106cea178b0a881e4ef926f4582a1489cf48f0dc833f6937804f5"
+    },
+    {
+      "name": "compatibility-nohost",
+      "runtime_checks": 31,
+      "report_sha256": "b827022fe63e1883967bf76d05beb15db923fc865b841c274d8304428679446f"
+    },
+    {
+      "name": "dynamic-upstream",
+      "upstream_passed_cases": 24,
+      "upstream_optional_unsupported": 4,
+      "report_sha256": "4ab7c133a42f33a63f96b521cba78b8f8b49e043f67555122b4b1799366849ed"
+    },
+    {
+      "name": "dynamic",
+      "runtime_checks": 610,
+      "report_sha256": "98761165575d80bcdeb2d432d966dd760b9f8e16833aba8937230b165b68c5bb"
+    },
+    {
+      "name": "secondary",
+      "runtime_checks": 624,
+      "report_sha256": "f08104e5989a406d9ed812dbc896c1a7a35f8f435c8d1f0230463b58a5816183"
+    },
+    {
+      "name": "secondary-upstream",
+      "upstream_passed_cases": 12,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "a3cec583acb867f2330ec187f4441aa8ade6dde2a4d8ce25218f9507c0398102"
+    },
+    {
+      "name": "pdf-new",
+      "runtime_checks": 25,
+      "report_sha256": "1c77293f3fc127e9289a9c4df94309b20fc37eeca6719f8436ce42173306ceac"
+    },
+    {
+      "name": "pdf-old",
+      "runtime_checks": 25,
+      "report_sha256": "1c77293f3fc127e9289a9c4df94309b20fc37eeca6719f8436ce42173306ceac"
+    },
+    {
+      "name": "history-new",
+      "runtime_checks": 13,
+      "report_sha256": "154ce13cd46f3f7479e5399a66d5b5de7651ed80dabebd0300bc70371c7a1da8"
+    },
+    {
+      "name": "history-old",
+      "runtime_checks": 13,
+      "report_sha256": "154ce13cd46f3f7479e5399a66d5b5de7651ed80dabebd0300bc70371c7a1da8"
+    },
+    {
+      "name": "external-links",
+      "runtime_checks": 63,
+      "report_sha256": "11c29fadd8ecd1eeb5839d121174e7fba797cde019a1f78a9c151ff2c537f097"
+    },
+    {
+      "name": "wasm-streams",
+      "runtime_checks": 17,
+      "report_sha256": "6c46f4ebde8dbd12a60c1a6f984885e7f944a115accdd1b456b2965829a8142c"
+    },
+    {
+      "name": "downloads",
+      "runtime_checks": 18,
+      "report_sha256": "3d81f1dd3297099c0b4e37a6ee4157c80a8d49ba2fe107dc49c39f8a0526967a"
+    },
+    {
+      "name": "webgl-loss",
+      "runtime_checks": 280,
+      "upstream_passed_cases": 489,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "5b89c0ea3f127bc1dbe18f91c9502ad8daefd2ac2cac9db02ff9753463fdbdb7"
+    },
+    {
+      "name": "worker-shutdown",
+      "worker_shutdown_cases": 3,
+      "report_sha256": "f8a69f0441ab3cceaf6161b330933a57343a84996d7577807f0022fcb6161efa"
+    },
+    {
+      "name": "xr-loss",
+      "runtime_checks": 68,
+      "report_sha256": "c1ef03698050355462ce28fae4f15f26919e29fab5a8937a16ec4282018b1cac"
+    },
+    {
+      "name": "webgl-gc",
+      "runtime_checks": 16,
+      "report_sha256": "51ec12ef71369d725d5073c77847b78c83b48868acd3bb1faf22615f4475a985"
+    },
+    {
+      "name": "policy-mock",
+      "runtime_checks": 575,
+      "document_scenarios": 34,
+      "report_sha256": "f797bff7884558c80cd610f641dc040d2cab9e18fab55fe7dd1977618675a819"
+    },
+    {
+      "name": "policy-upstream",
+      "runtime_checks": 2,
+      "upstream_passed_cases": 3,
+      "upstream_obsolete_expectation_cases": 1,
+      "all_original_upstream_assertions_passed": false,
+      "report_sha256": "af596aab7e6208b2079b10909d641ee3fdabaace132975c0b95d113a9cf57bd6"
+    },
+    {
+      "name": "policy-history",
+      "runtime_checks": 1874,
+      "document_scenarios": 115,
+      "report_sha256": "a03a96d39c1561fb9f54476b3ef97477044da801f3d79baf5b5a056f387fd986"
+    },
+    {
+      "name": "policy-native",
+      "runtime_checks": 23,
+      "report_sha256": "cb689981a02168ae58948a796fd7da4f7e6c84d57721216df830065c1812ceee"
+    },
+    {
+      "name": "devicechange-mock",
+      "runtime_checks": 37,
+      "report_sha256": "4cc07bf21ef156ca38b475f84b67ac79c437138c3aa9472f6007436451cc1505"
+    },
+    {
+      "name": "devicechange-upstream",
+      "runtime_checks": 2,
+      "upstream_passed_cases": 2,
+      "report_sha256": "09e22cb011a44beabf279319080a1c72a13a87dd9d466cd84922c34396bb13f1"
+    },
+    {
+      "name": "devicechange-native",
+      "runtime_checks": 30,
+      "report_sha256": "f474eccc4fc09c0f35115506d530c158fddf409a6c30ccb149e23f00fe968fda"
+    }
+  ],
+  "initial_reports": [
+    "upstream-before/report.json",
+    "r1-devicechange-mock/report.json",
+    "r1-devicechange-upstream/report.json",
+    "r1-devicechange-upstream-diagnostic/report.json"
+  ],
+  "remaining": [
+    "Automatic GPU-reset detection, adapter migration and capability changes",
+    "Permissions Policy reporting/report-only delivery and further feature registrations",
+    "DomeD shell touch/stylus interactions beyond native client surfaces",
+    "Dynamic scaling on optional native backends",
+    "Central immersive-device selection and XR-compatible flag invalidation on device changes",
+    "Physical device validation",
+    "Continuous stability, web adblocking/privacy and local workstation protection maintenance",
+    "Final standards-focused Discord/x.com rendering"
+  ],
+  "unadvertised_features": [
+    "OffscreenCanvas"
+  ],
+  "physical_device_validation": false,
+  "optional_windows_openxr_compiled": false,
+  "installed": false,
+  "sessions_restarted": false,
+  "artifacts_directory": "artifacts/servo-rendering-goal/webxr-devicechange-v1",
+  "host_selected_units": 172,
+  "host_full_unit_log_sha256": "cabcd3ee2284e54579605e4c55bade3687a6ee772f5708a885b149e508cfbb95",
+  "host_unit_log_sha256": "1266e331c2576930ade5910a3ffcfe178e20168e2b56ba5b7299bce595c2b034",
+  "native_host_sha256": "6c7169466c431a0ce2b79ef93c4e98d9312babc14ab3b93d3b1bd8467801e727",
+  "host_compiled_inputs_unchanged": true
+}

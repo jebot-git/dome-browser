@@ -92,12 +92,16 @@ impl FakeXRDevice {
                 device.root().finish_disconnect();
             }));
         });
-        if callback.is_err()
-            || self
-                .sender
-                .send(MockDeviceMsg::Disconnect(callback.unwrap()))
-                .is_err()
-        {
+        let sent = match callback {
+            Ok(callback) => match self.global().as_window().webxr_registry() {
+                Some(registry) => registry
+                    .disconnect_mock_device(self.sender.clone(), callback)
+                    .is_ok(),
+                None => self.sender.send(MockDeviceMsg::Disconnect(callback)).is_ok(),
+            },
+            Err(_) => false,
+        };
+        if !sent {
             self.finish_disconnect();
         }
     }

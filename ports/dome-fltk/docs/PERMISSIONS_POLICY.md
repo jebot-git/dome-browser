@@ -59,10 +59,13 @@ immersive-recovery suites remain regression controls. Repeated and concurrent
 mock-device disconnection and subsequent cleanup must all settle; the production
 browser continues to leave the mock API disabled.
 
+Positive WebXR availability notifications are described separately in
+[WebXR device availability](WEBXR_DEVICECHANGE.md), including observer lifetime
+and native bridge behavior. A passing denied-devicechange WPT case alone does
+not establish positive event support.
+
 Remaining work includes Permissions Policy reporting / report-only delivery,
-additional feature registrations and their API integrations, and positive
-WebXR `devicechange` event delivery. A passing denied-devicechange WPT case
-does not establish positive event support. Automatic GPU-reset recovery,
+additional feature registrations and their API integrations. Automatic GPU-reset recovery,
 graphics-adapter migration and broader physical-device compliance validation
 also remain outside this milestone. OffscreenCanvas is not advertised by the
 shipping browser and is not covered by these policy checks.
