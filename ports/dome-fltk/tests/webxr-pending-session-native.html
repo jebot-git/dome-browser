@@ -16,22 +16,22 @@ const fail=error=>post('error',{message:String(error)+'\n'+error.stack});
  document.getElementById('start').onclick=async()=>{
   try{
    frames['immersive-vr'].contentWindow.pendingBegin();
-   await wait(async()=>(await ops()).filter(op=>op==='end_session').length===1);
-   check(packets.some(packet=>packet.mode==='immersive-vr'&&packet.stage==='removed'),'The immersive requesting child closes before response adoption');
+   await sleep(300);
+   check(packets.some(packet=>packet.mode==='immersive-vr'&&packet.stage==='removed'),'The immersive requesting child closes while its request is pending');
    check(!packets.some(packet=>packet.stage==='late-resolution'),'The removed child never adopts the returned native session');
-   check((await ops()).filter(op=>op==='begin_session').length===1,'The cancelled request releases its one native lease');
+   check((await ops()).filter(op=>op==='begin_session').length===0,'The cancelled request opens no native lease');
    frames.inline.contentWindow.pendingBegin();await sleep(300);
    check(packets.some(packet=>packet.mode==='inline'&&packet.stage==='removed'),'A pending viewer-only inline child also closes cleanly');
-   check((await ops()).filter(op=>op==='begin_session').length===1,'Viewer-only inline teardown opens no additional native lease');
+   check((await ops()).filter(op=>op==='begin_session').length===0,'Viewer-only inline teardown opens no native lease');
    const next=document.getElementById('next');next.hidden=false;post('continue',input(next));
   }catch(error){fail(error)}
  };
  document.getElementById('next').onclick=async()=>{
   try{
    const session=await navigator.xr.requestSession('immersive-vr');check(!!session,'A fresh live document can create a native immersive session');
-   await session.end();await wait(async()=>(await ops()).filter(op=>op==='end_session').length===2);
+   await session.end();await wait(async()=>(await ops()).filter(op=>op==='end_session').length===1);
    check(!packets.some(packet=>packet.stage==='late-resolution'),'Old cancelled responses cannot replace the fresh session');
-   check((await ops()).filter(op=>op==='begin_session').length===2,'The fresh session uses a separate consented lease and releases it');
+   check((await ops()).filter(op=>op==='begin_session').length===1,'The fresh session alone uses a consented lease and releases it');
    post('done',{count,kind:'pending-sessions'});
   }catch(error){fail(error)}
  };

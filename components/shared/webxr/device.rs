@@ -10,7 +10,7 @@ use profile_traits::generic_callback::GenericCallback as ProfileGenericCallback;
 use crate::{
     ContextId, EnvironmentBlendMode, Error, Event, Floor, Frame, HitTestId, HitTestSource,
     InputSource, LayerGrandManager, LayerId, LayerInfo, LayerInit, Native, Quitter, Session,
-    SessionBuilder, SessionInit, SessionMode, Viewports,
+    SessionBuilder, SessionId, SessionInit, SessionMode, Viewports,
 };
 
 /// A trait for discovering XR devices
@@ -30,6 +30,21 @@ pub trait DiscoveryAPI<GL>: 'static {
         xr: SessionBuilder<GL>,
     ) -> Result<Session, Error>;
     fn supports_session(&self, mode: SessionMode) -> bool;
+
+    /// Prepare consent asynchronously without creating a session or holding up
+    /// the browser event loop. False leaves this request pending for a later poll.
+    fn prepare_session(
+        &mut self,
+        _id: SessionId,
+        _mode: SessionMode,
+        _init: &SessionInit,
+    ) -> Result<bool, Error> {
+        Ok(true)
+    }
+
+    /// Release any UI/resources for a pending preparation. Also called after
+    /// successful creation so backend preparation state never outlives a request.
+    fn cancel_session_preparation(&mut self, _id: SessionId) {}
 
     fn immersive_device_state(&self) -> Option<ImmersiveDeviceState> {
         let supports_vr = self.supports_session(SessionMode::ImmersiveVR);
@@ -129,6 +144,18 @@ pub trait DeviceAPI: 'static {
 }
 
 impl<GL: 'static> DiscoveryAPI<GL> for Box<dyn DiscoveryAPI<GL>> {
+    fn prepare_session(
+        &mut self,
+        id: SessionId,
+        mode: SessionMode,
+        init: &SessionInit,
+    ) -> Result<bool, Error> {
+        (**self).prepare_session(id, mode, init)
+    }
+    fn cancel_session_preparation(&mut self, id: SessionId) {
+        (**self).cancel_session_preparation(id);
+    }
+
     fn immersive_device_state(&self) -> Option<ImmersiveDeviceState> {
         (**self).immersive_device_state()
     }

@@ -10,7 +10,7 @@ use std::{
     os::unix::{fs::MetadataExt, net::UnixStream},
     path::PathBuf,
     rc::Rc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use surfman::chains::{SwapChainAPI, SwapChains, SwapChainsAPI};
 use surfman::{
@@ -22,7 +22,7 @@ use webxr_api::util::{ClipPlanes, fov_to_projection_matrix};
 use webxr_api::{
     ContextId, DeviceAPI, DiscoveryAPI, Error, Event, EventBuffer, Floor, Frame, InputSource,
     LayerGrandManager, LayerId, LayerInfo, LayerInit, LayerManager, Native, Quitter, Session, SessionBuilder,
-    SessionInit, SessionMode, View, ViewerPose, Viewports, Views, Visibility,
+    SessionId, SessionInit, SessionMode, View, ViewerPose, Viewports, Views, Visibility,
 };
 mod input;
 mod reference_space;
@@ -381,6 +381,9 @@ impl servo::webxr::WebXrRegistry for Registry {
                 connection,
                 focus: self.focus.clone(),
                 availability: availability::Monitor::new(availability_key),
+                pending_consent: None,
+                approved_request: None,
+                focus_settle: None,
             });
         }
     }
@@ -389,6 +392,9 @@ struct Discovery {
     connection: Connection,
     focus: Focus,
     availability: availability::Monitor,
+    pending_consent: Option<(SessionId, servo::WebViewId, crate::ui::ConsentDialog)>,
+    approved_request: Option<SessionId>,
+    focus_settle: Option<(servo::WebViewId, Instant)>,
 }
 impl DiscoveryAPI<SurfmanGL> for Discovery {
     fn immersive_device_state(&self) -> Option<webxr_api::ImmersiveDeviceState> {
@@ -414,6 +420,58 @@ impl DiscoveryAPI<SurfmanGL> for Discovery {
     fn supports_session(&self, mode: SessionMode) -> bool {
         mode == SessionMode::ImmersiveVR && probe().is_ok_and(|value| value.get("active").is_none_or(|active| active.as_bool() == Some(true)))
     }
+    fn prepare_session(&mut self, id: SessionId, mode: SessionMode, init: &SessionInit) -> std::result::Result<bool, Error> {
+        if mode != SessionMode::ImmersiveVR || init.origin == "null" {
+            return Err(Error::NoMatchingDevice);
+        }
+        let owner = init.webview_id.ok_or_else(|| backend("Missing requesting WebXR tab"))?;
+        if let Some((pending_id, _, dialog)) = &self.pending_consent {
+            if *pending_id != id || self.focus.0.get().owner != Some(owner) {
+                return Err(backend("The requesting WebXR tab is no longer active"));
+            }
+            match dialog.poll() {
+                crate::ui::ConsentAnswer::Pending => return Ok(false),
+                crate::ui::ConsentAnswer::Deny => return Err(backend("WebXR permission denied")),
+                crate::ui::ConsentAnswer::Allow => {
+                    self.pending_consent.take();
+                    self.focus_settle = Some((owner, Instant::now()));
+                    self.approved_request = Some(id);
+                    return Ok(true);
+                },
+            }
+        }
+        if !self.focus.permits(owner) {
+            // Native keyboard focus may arrive after the prompt's unmap. Keep
+            // a queued, still-owned request pending briefly; never bypass the
+            // real native/page focus check or carry this across a tab switch.
+            if self.focus.0.get().owner == Some(owner) && self.focus_settle.as_ref().is_some_and(|(restoring, since)| {
+                *restoring == owner && since.elapsed() < Duration::from_secs(1)
+            }) {
+                return Ok(false);
+            }
+            self.focus_settle = None;
+            return Err(backend("WebXR requires the focused browser page"));
+        }
+        self.focus_settle = None;
+        let hello = Hello::parse(probe().map_err(backend)?).map_err(backend)?;
+        init.validate(mode, &if hello.stage { vec!["local-floor".into()] } else { vec![] })?;
+        let dialog = crate::ui::ConsentDialog::new("Enter immersive WebXR", &format!(
+            "{}\n\nAllow this site to use headset tracking and display immersive content in DomeD's XR session?\n\nLeaving the page ends only this browser session.", init.origin
+        )).ok_or_else(|| backend("WebXR consent window unavailable"))?;
+        self.pending_consent = Some((id, owner, dialog));
+        Ok(false)
+    }
+
+    fn cancel_session_preparation(&mut self, id: SessionId) {
+        if self.pending_consent.as_ref().is_some_and(|(pending, _, _)| *pending == id) {
+            if let Some((_, owner, dialog)) = self.pending_consent.take() {
+                drop(dialog);
+                self.focus_settle = Some((owner, Instant::now()));
+            }
+        }
+        if self.approved_request == Some(id) { self.approved_request = None; }
+    }
+
     fn request_session(
         &mut self,
         mode: SessionMode,
@@ -425,7 +483,7 @@ impl DiscoveryAPI<SurfmanGL> for Discovery {
         }
         let owner = init
             .webview_id
-            .filter(|owner| self.focus.permits(*owner))
+            .filter(|owner| self.focus.0.get().owner == Some(*owner))
             .ok_or_else(|| backend("WebXR requires the focused browser page"))?;
         let path = endpoint().map_err(backend)?;
         let hello =
@@ -439,16 +497,8 @@ impl DiscoveryAPI<SurfmanGL> for Discovery {
                 vec![]
             },
         )?;
-        if init.origin == "null"
-            || !crate::ui::ask(
-                "Enter immersive WebXR",
-                &format!(
-                    "{}\n\nAllow this site to use headset tracking and display immersive content in DomeD's XR session?\n\nLeaving the page ends only this browser session.",
-                    init.origin
-                ),
-            )
-        {
-            return Err(backend("WebXR permission denied"));
+        if init.origin == "null" || self.approved_request.take() != Some(builder.id()) {
+            return Err(backend("WebXR requires an accepted live consent request"));
         }
         // The accepted native dialog temporarily owns keyboard focus. Its
         // teardown may restore page focus on the next event-loop iteration.

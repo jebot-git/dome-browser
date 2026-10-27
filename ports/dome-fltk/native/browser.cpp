@@ -6,6 +6,7 @@
 #include "wallet.h"
 #include <FL/Fl_Double_Window.H>
 #include <FL/Fl_Button.H>
+#include <FL/Fl_Return_Button.H>
 #include <FL/Fl_Input.H>
 #include <FL/Fl_Text_Editor.H>
 #include <FL/Fl_Choice.H>
@@ -130,6 +131,9 @@ public:
     return result;
   }
 };
+bool keyboardFocused=false;
+int reportedPageFocus=-1;
+void reportPageFocus(bool focused);
 class Page : public Fl_Widget {
   std::vector<uint8_t> pixels;
   unsigned pw=0,ph=0;
@@ -155,8 +159,8 @@ public:
     int px=Fl::event_x()-x(),py=Fl::event_y()-y();
     switch(event) {
       case FL_ENTER: return 1;
-      case FL_FOCUS: emit(9,1); return 1;
-      case FL_UNFOCUS: emit(9,0); return 1;
+      case FL_FOCUS: reportPageFocus(true); return 1;
+      case FL_UNFOCUS: reportPageFocus(false); return 1;
       case FL_PUSH: take_focus(); emit(11,1,Fl::event_button(),px,py); return 1;
       case FL_RELEASE: emit(11,0,Fl::event_button(),px,py); return 1;
       case FL_MOVE: case FL_DRAG: emit(12,px,py,Fl::event_state()); return 1;
@@ -258,6 +262,22 @@ public:
   }
 };
 std::unique_ptr<Browser> browser;
+Fl_Event_Dispatch previousDispatch=nullptr;
+void reportPageFocus(bool focused){
+  focused=focused && keyboardFocused && browser && browser->shown() && !Fl::modal();
+  if(reportedPageFocus!=int(focused)){reportedPageFocus=focused;emit(9,focused?1:0);}
+}
+int nativeDispatch(int event,Fl_Window *window){
+  const bool root=browser && window==browser.get();
+  if(root && (event==FL_FOCUS || event==FL_UNFOCUS))keyboardFocused=event==FL_FOCUS;
+  int result=previousDispatch?previousDispatch(event,window):Fl::handle_(event,window);
+  // FLTK may retain the same focused widget across a native keyboard leave /
+  // enter without sending that widget another FL_FOCUS. Report the window
+  // transition after its normal dispatch, using actual native ownership.
+  if(root && (event==FL_FOCUS || event==FL_UNFOCUS))reportPageFocus(Fl::focus()==browser->page);
+  return result;
+}
+
 GDBusConnection *applicationBus=nullptr;
 GDBusNodeInfo *applicationInfo=nullptr;
 guint applicationObject=0;
@@ -309,7 +329,7 @@ extern "C" int browser_ui_open(const char *url) {
     },nullptr,nullptr,{nullptr}};
     applicationObject=g_dbus_connection_register_object(applicationBus,"/org/domed/Browser",applicationInfo->interfaces[0],&vtable,nullptr,nullptr,nullptr);
   }
-  Fl::lock();dx::init();browser=std::make_unique<Browser>();browser->show();browser->layout();if(fl_wl_set_touch_handler)fl_wl_set_touch_handler(nativeTouch,nullptr);setNativePenHandler=(decltype(setNativePenHandler))dlsym(RTLD_DEFAULT,"fl_wl_set_pen_handler");if(setNativePenHandler)setNativePenHandler(nativePen,nullptr);return 1;
+  Fl::lock();dx::init();previousDispatch=Fl::event_dispatch();Fl::event_dispatch(nativeDispatch);browser=std::make_unique<Browser>();browser->show();browser->layout();if(fl_wl_set_touch_handler)fl_wl_set_touch_handler(nativeTouch,nullptr);setNativePenHandler=(decltype(setNativePenHandler))dlsym(RTLD_DEFAULT,"fl_wl_set_pen_handler");if(setNativePenHandler)setNativePenHandler(nativePen,nullptr);return 1;
 }
 extern "C" void browser_ui_wait(double seconds) {
   while(g_main_context_iteration(nullptr,false)){}
@@ -317,13 +337,13 @@ extern "C" void browser_ui_wait(double seconds) {
   if(revision!=dx::font_revision){revision=dx::font_revision;browser->layout();emit(15,browser_ui_light());}
 }
 extern "C" int browser_ui_poll(BrowserEvent *e) {if(events.empty())return 0;*e=events.front();events.pop_front();return 1;}
-extern "C" int browser_ui_page_focused(){return browser && Fl::focus()==browser->page && !Fl::modal();}
+extern "C" int browser_ui_page_focused(){return browser && keyboardFocused && Fl::focus()==browser->page && !Fl::modal();}
 extern "C" int browser_ui_visible(){
   if(!browser || !browser->visible_r())return 0;
   return !fl_wl_window_suspended || fl_wl_window_suspended(browser.get())!=1;
 }
 extern "C" void browser_ui_wake(){Fl::awake();}
-extern "C" void browser_ui_close(){if(setNativePenHandler)setNativePenHandler(nullptr,nullptr);setNativePenHandler=nullptr;if(fl_wl_set_touch_handler)fl_wl_set_touch_handler(nullptr,nullptr);browser_ui_smallnet_form_close();browser.reset();if(applicationBus){if(applicationObject)g_dbus_connection_unregister_object(applicationBus,applicationObject);g_object_unref(applicationBus);applicationBus=nullptr;}if(applicationInfo){g_dbus_node_info_unref(applicationInfo);applicationInfo=nullptr;}}
+extern "C" void browser_ui_close(){if(Fl::event_dispatch()==nativeDispatch)Fl::event_dispatch(previousDispatch);keyboardFocused=false;reportedPageFocus=-1;if(setNativePenHandler)setNativePenHandler(nullptr,nullptr);setNativePenHandler=nullptr;if(fl_wl_set_touch_handler)fl_wl_set_touch_handler(nullptr,nullptr);browser_ui_smallnet_form_close();browser.reset();if(applicationBus){if(applicationObject)g_dbus_connection_unregister_object(applicationBus,applicationObject);g_object_unref(applicationBus);applicationBus=nullptr;}if(applicationInfo){g_dbus_node_info_unref(applicationInfo);applicationInfo=nullptr;}}
 extern "C" void browser_ui_frame(const uint8_t *p,unsigned w,unsigned h){browser->page->frame(p,w,h);}
 extern "C" void browser_ui_title(const char *title,const char *url,int back,int forward){browser->copy_label((flatCaption(title,false,160)+" — Dome Browser").c_str());if(Fl::focus()!=browser->address)browser->address->setUrl(url);if(back)browser->back->activate();else browser->back->deactivate();if(forward)browser->forward->activate();else browser->forward->deactivate();}
 extern "C" void browser_ui_tabs(const char *text,int active){try{auto data=Json::parse(text);std::vector<std::string> labels;int index=0;for(const auto &item:data)labels.push_back(std::to_string(++index)+". "+item.get<std::string>());browser->tabs->assign(labels,active);}catch(...){} }
@@ -331,6 +351,46 @@ extern "C" void browser_ui_status(const char *text){browser->status->copy_label(
 extern "C" void browser_ui_cursor(int cursor){static const Fl_Cursor cursors[]={FL_CURSOR_DEFAULT,FL_CURSOR_HAND,FL_CURSOR_INSERT,FL_CURSOR_NWSE,FL_CURSOR_NS,FL_CURSOR_WE,FL_CURSOR_NESW,FL_CURSOR_MOVE};browser->cursor(cursors[std::clamp(cursor,0,7)]);}
 extern "C" void browser_ui_fullscreen(int enabled){if(browser->fullscreenMode==bool(enabled))return;std::string title=browser->label()?browser->label():"Dome Browser";browser->fullscreenMode=enabled;if(enabled)browser->fullscreen();else browser->fullscreen_off();browser->copy_label(title.c_str());browser->layout();}
 extern "C" int browser_ui_ask(const char *title,const char *message){fl_message_title(title);return fl_choice("%s","Deny","Allow",nullptr,message)==1;}
+namespace {
+struct ConsentPrompt {
+  Fl_Widget_Tracker previousFocus;
+  Fl_Double_Window window;
+  Fl_Box text;
+  Fl_Button deny;
+  Fl_Return_Button allow;
+  int answer=0;
+  ConsentPrompt(const char *title,const char *message,int width,int height)
+    :previousFocus(Fl::focus()),window(width,height),text(20,16,width-40,height-80),
+     deny(width-220,height-48,90,28,"Deny"),allow(width-120,height-48,100,28,"Allow"){
+    window.copy_label(title);text.copy_label(message);
+    text.align(FL_ALIGN_WRAP|FL_ALIGN_INSIDE|FL_ALIGN_TOP_LEFT);
+    window.callback([](Fl_Widget *w,void *data){static_cast<ConsentPrompt *>(data)->answer=-1;w->hide();},this);
+    deny.callback([](Fl_Widget *,void *data){auto &d=*static_cast<ConsentPrompt *>(data);d.answer=-1;d.window.hide();},this);
+    allow.callback([](Fl_Widget *,void *data){auto &d=*static_cast<ConsentPrompt *>(data);d.answer=1;d.window.hide();},this);
+    window.end();dx::style(&window);window.set_modal();window.show();
+  }
+  ~ConsentPrompt(){window.hide();}
+};
+}
+extern "C" void *browser_ui_consent_open(const char *title,const char *message){
+  if(!browser || !browser->shown())return nullptr;
+  return new ConsentPrompt(title,message,std::max(540,dx::size*34),std::max(260,dx::size*13+70));
+}
+extern "C" int browser_ui_consent_poll(void *dialog){
+  auto &d=*static_cast<ConsentPrompt *>(dialog);
+  if(!browser || !browser->shown())return -1;
+  return d.window.shown()?0:(d.answer==1?1:-1);
+}
+extern "C" void browser_ui_consent_close(void *dialog){
+  auto *prompt=static_cast<ConsentPrompt *>(dialog);
+  if(!prompt)return;
+  Fl_Widget_Tracker previous(prompt->previousFocus.widget());
+  const bool restore=!Fl::focus() || prompt->window.contains(Fl::focus());
+  delete prompt;
+  // The modal and all of its widgets must be gone before focus is restored.
+  if(restore && browser && browser->shown() && !previous.deleted())Fl::focus(previous.widget());
+  reportPageFocus(browser && Fl::focus()==browser->page);
+}
 extern "C" const char *browser_ui_prompt(const char *message,const char *value){fl_message_title("Dome Browser");const char *answer=fl_input("%s",value,message);if(!answer)return nullptr;returned=answer;return returned.c_str();}
 extern "C" const char *browser_ui_password(const char *message){fl_message_title("Dome Browser");const char *answer=fl_password("%s","",message);if(!answer)return nullptr;returned=answer;return returned.c_str();}
 extern "C" int browser_ui_color(unsigned char *red,unsigned char *green,unsigned char *blue){return fl_color_chooser("Choose a color",*red,*green,*blue);}

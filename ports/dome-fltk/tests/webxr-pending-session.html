@@ -42,7 +42,7 @@ async function historyScenario(mode){
   }
   frame=document.createElement('iframe');frame.allow='xr-spatial-tracking *';frame.srcdoc='<script>('+child.toString()+')('+JSON.stringify(mode)+','+JSON.stringify(name)+');<\/script>';document.body.append(frame);
   await wait(()=>state.children[name]?.stage==='ready');frame.contentWindow.pendingNavigate();
-  await wait(()=>state.children[name]?.stage==='idle');await sleep(150);
+  await wait(()=>state.events.some(event=>event.tag===name&&event.stage==='idle'));await sleep(150);
   const ar=await xr.test.simulateDeviceConnection(init(['immersive-ar']));check(await xr.isSessionSupported('immersive-ar'),name+': navigation releases the old session');
   await ar.disconnect();check(await xr.isSessionSupported('immersive-vr'),name+': VR remains available for a fresh request');
   frame.contentWindow.postMessage('back','*');await wait(()=>['fresh','error'].includes(state.children[name]?.stage));

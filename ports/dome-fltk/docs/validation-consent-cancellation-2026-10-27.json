@@ -1,0 +1,426 @@
+{
+  "completed_utc": "2026-10-27T22:51:12.342365+00:00",
+  "source_base_commit": "63af1547210784b1be86115decc7f1cf32ef5b0a",
+  "candidate_sha256": "28c6eaccfd16568c3a3087ded1c1a2e37e049305bcf8947b10e9cc5d5a121270",
+  "test_embedder_sha256": "0af2052dcd3c6630f6887bdb1ea646aa08f9498d1c7b18028455944ce87d6da8",
+  "compiled_inputs_unchanged": true,
+  "source_file_sha256": {
+    "components/shared/webxr/device.rs": "9e060b311eaadf4ad7b1172664698b30dff78c5b4e8fd2160799f947b700acf3",
+    "components/shared/webxr/registry.rs": "106e8937462d7debe780497386dcab0361318a79d3d78317f92696ccef5f40a1",
+    "components/shared/webxr/registry_tests.rs": "dcdd00e0538db43d6e00ad4a5740e142a1c99efac49ac90f40c4dc53a464a62a",
+    "ports/dome-fltk/docs/WEBXR_REQUEST_LIFETIME.md": "fb19f776ff54123f4b5709e9369880e4491e79a48b3b71ccc3dadb21641f99ce",
+    "ports/dome-fltk/native/browser.cpp": "bc061a3ae68d7ade2b3f1dccfc6ee7e363b7646c27fb8269744f15fcc76046f1",
+    "ports/dome-fltk/native/browser.h": "2d152d67a4e5ba0bf455d54d49905d5481bde524775ca0ca7403b08c117478d6",
+    "ports/dome-fltk/src/ui.rs": "63cdec3c1a53d16104b3f8f5a882b9ccf4d84504ae0a0f2cbd9b8a0e173b9e03",
+    "ports/dome-fltk/src/xr.rs": "2a25ae1f5b016c58d0c08a91395d6bea169bafabfa65546c5c8150fefc45f8dc",
+    "ports/dome-fltk/tests/webxr-context-compatibility.py": "b071f1e15cad37272e38ab0cf426ca69b19fd9f876d4ddb3a788167cef51b0b9",
+    "ports/dome-fltk/tests/webxr-pending-session-native.html": "5bcb00cbd86610dac176212f91df4cbfacc87a434fe23c10735175ba49a2c1ea",
+    "ports/dome-fltk/tests/webxr-pending-session.html": "3afb2463d04dfac9871ec4f7b5619c435b95ea6a2ee784eefef50af661ad08df",
+    "ports/dome-fltk/tests/webxr-consent-cancellation-child.html": "83c3ec4221b09b83d792871c1d95017b9bcfcec5784efd62f46c3d02b2c8b04b",
+    "ports/dome-fltk/tests/webxr-consent-cancellation.html": "7519143ff3d8a0dc76c6a09b1c0d33ca2c228437a4ce72961a1755231cc4e07f"
+  },
+  "selected_units": 249,
+  "runtime_checks": 7562,
+  "worker_shutdown_cases": 3,
+  "upstream_passed_cases": 563,
+  "upstream_optional_unsupported": 4,
+  "regression_jobs": 49,
+  "all_required_passed": true,
+  "initial_regression_failures": [
+    {
+      "report": "r1-pending-mock/report.json",
+      "classification": "Fixture latest-stage readiness was overwritten by a late pagehide; corrected event-history readiness passes on the same R1 binary in r1-pending-mock-r2/report.json."
+    },
+    {
+      "report": "r1-consent-native/report.json",
+      "classification": "Live removal/navigation/history checks pass; following queued request rejects on stale native focus."
+    },
+    {
+      "report": "r2-consent-native/report.json",
+      "classification": "Harness queried a Surface after its asynchronous destruction; corrected by a single compositor-scene snapshot."
+    },
+    {
+      "report": "r2-consent-native-r2/report.json",
+      "classification": "Queued focus rejection persists after core ordering correction; R3 fixes native keyboard-focus reporting, post-destruction focus restoration and bounded same-owner focus settling."
+    },
+    {
+      "report": "focus-diagnostic/report.json",
+      "classification": "Diagnostic-only binary confirms cached=false, native=true, owner=true before rejection; not shipped."
+    }
+  ],
+  "additional_pen_confirmations": 0,
+  "all_original_upstream_assertions_passed": false,
+  "upstream_obsolete_expectation_cases": 1,
+  "compiled_input_count": 61,
+  "units": [
+    {
+      "name": "selection",
+      "passed": 22,
+      "log_sha256": "c1c050d80f9f74fc99980b9f8d0890d98ad1cd9401a70aa7c38523a533b8a248"
+    },
+    {
+      "name": "permissions-policy",
+      "passed": 15,
+      "log_sha256": "074ccce77f3645a120bc711a9ff37023d462eb54cd00c5b42bb2df374688e917"
+    },
+    {
+      "name": "frontend",
+      "passed": 187,
+      "log_sha256": "ab2675fb94b4ce721aa150b8e1d65b8ae3790ba6d564de02e1a32bc0131aa03c"
+    },
+    {
+      "name": "geometry",
+      "passed": 10,
+      "log_sha256": "45307da0a977738469e8b34e2545be8826e661dab2746c6466edc9e774106970"
+    },
+    {
+      "name": "pointer-ids",
+      "passed": 2,
+      "log_sha256": "a1b1973eb948d21ed86cfdc93e8d5f7305070a29d9457960132ae20e9563e2e1"
+    },
+    {
+      "name": "pen-payload",
+      "passed": 3,
+      "log_sha256": "effa2ca67e09d5c01921c43abf49f1f7caa77cdfc5bfb8c8a149022bee1611f4"
+    },
+    {
+      "name": "factory",
+      "passed": 1,
+      "log_sha256": "1717aba12a96aa592dd029d5d3a64bfc5fad5a6c83b531c2440866f38973c96d"
+    },
+    {
+      "name": "secondary",
+      "passed": 4,
+      "log_sha256": "d94aa5bb3b6e90eee10c9742293e889e080e4f47b4a0bc990945656f44d18ff1"
+    },
+    {
+      "name": "renderer",
+      "passed": 5,
+      "log_sha256": "829ed967a9f7a4e12d981a6a8b71994ceb2705344ea2962b5e59bfbfba260477"
+    }
+  ],
+  "suites": [
+    {
+      "name": "general-new",
+      "runtime_checks": 46,
+      "report_sha256": "90ae9fa47a09d413d31d88329faa5e9b44df0d28fe73493d31a325e823e1066a"
+    },
+    {
+      "name": "general-old",
+      "runtime_checks": 46,
+      "report_sha256": "90ae9fa47a09d413d31d88329faa5e9b44df0d28fe73493d31a325e823e1066a"
+    },
+    {
+      "name": "native-touch",
+      "runtime_checks": 22,
+      "report_sha256": "c57fa2adefec30239e4c5bb6ec1dc661b34e36aae8bee7f6f00a47e6a6901668"
+    },
+    {
+      "name": "mouse-inline",
+      "runtime_checks": 34,
+      "report_sha256": "3f80fb5a950fcd9f2d088ea87e9bec9fbd62d1281332d45e5cac65e08ad68f31"
+    },
+    {
+      "name": "controller",
+      "runtime_checks": 60,
+      "report_sha256": "312f123067c11a411d22447ebf12eda641f1f93edf30c365cae299b7600ec09a"
+    },
+    {
+      "name": "mouse-immersive",
+      "runtime_checks": 38,
+      "report_sha256": "80165a4a4528905c8cf69ec530631f5c8001a0b5858ac120d41bac1ad8a0183c"
+    },
+    {
+      "name": "reset",
+      "runtime_checks": 101,
+      "report_sha256": "59b199d7089e8451afba8b24d836fef9af110dfc0b3166c1275d6c9bbb5bfaff"
+    },
+    {
+      "name": "engine-touch",
+      "runtime_checks": 43,
+      "report_sha256": "f480292e94b0a52690736daffc00e508dce8db6c909a1ddcffccf6c871f18f65"
+    },
+    {
+      "name": "visibility",
+      "runtime_checks": 77,
+      "report_sha256": "8fdb99b749d3404b16c8fe7fa4aa3d2c635427dd7193175a29b12100e0a723f7"
+    },
+    {
+      "name": "frame-same",
+      "runtime_checks": 17,
+      "report_sha256": "c8206cb861c5b8ed07ed637bf0ea5aac70025aeba7b31449e1e3ecab8589d6d9"
+    },
+    {
+      "name": "frame-cross",
+      "runtime_checks": 17,
+      "report_sha256": "9dc1e73698fe52e7a1ed08e042d4ab40099f69b7f71ccf22b497c848dfa70372"
+    },
+    {
+      "name": "outcomes",
+      "runtime_checks": 9,
+      "report_sha256": "3ea178e01294ab974c3ac19b029a8e42305727f31f66155b7cfc2bf1055ec4d2"
+    },
+    {
+      "name": "upstream",
+      "upstream_passed_cases": 7,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "03ea9c9e978a6330a273bc9a798d9c3c1f4c9f8ae16a1f39c1deb8f452ae5d74"
+    },
+    {
+      "name": "native-pen",
+      "runtime_checks": 87,
+      "report_sha256": "048fff2726b5dd8404a743e177d9064e0d2e55665da7fb32fdac64be1f709f5e"
+    },
+    {
+      "name": "layers-upstream",
+      "upstream_passed_cases": 22,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "b1d78ff320c6e08622e408bb960f7d387cd3981b0a388cdd1de933912e6de7e6"
+    },
+    {
+      "name": "layer-scaling",
+      "runtime_checks": 369,
+      "report_sha256": "a3d77e8396e939ec97382b3249bc8977db98b71bc7f539af471255ccc0997b22"
+    },
+    {
+      "name": "bounded",
+      "runtime_checks": 21,
+      "report_sha256": "8642cf8939e3726148f11cf8a4de1163f283f23b20a8ea691c1998d86c0fae90"
+    },
+    {
+      "name": "reset-upstream",
+      "upstream_passed_cases": 4,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "fe95d45d6bc2d8227af09c67b828e5a61e7bb45177cee3ad03f6b9400d6b2185"
+    },
+    {
+      "name": "layer-attributes",
+      "runtime_checks": 1037,
+      "report_sha256": "15af409f24f886dbedf89ea08f6465665055a99136e67f674ce7f393ca4d5cfb"
+    },
+    {
+      "name": "layer-attributes-opaque-context",
+      "runtime_checks": 1037,
+      "report_sha256": "6212c02faeb89c5c0038388220aa26fffe400d15dc6c28caa90a3c8bdef0e4e3"
+    },
+    {
+      "name": "compatibility-native",
+      "runtime_checks": 45,
+      "report_sha256": "c394f18571a6ae764d2140c77ce7c0697f22e4df9fa69ef819ea2af606a64634"
+    },
+    {
+      "name": "compatibility-nohost",
+      "runtime_checks": 31,
+      "report_sha256": "33e51e8f047c349c6f0a2fb026280c921e9b2a862ec8a008e73885148ad8f4d0"
+    },
+    {
+      "name": "dynamic-upstream",
+      "upstream_passed_cases": 24,
+      "upstream_optional_unsupported": 4,
+      "report_sha256": "3a0db004f9c2e3f12a8753eae98213f79d8ee89116d64061cbfb1447b92398f6"
+    },
+    {
+      "name": "dynamic",
+      "runtime_checks": 610,
+      "report_sha256": "2faa3935c6597b2b7c59ef4bf5c510217be9fbdcace5c1492e56b73032a716aa"
+    },
+    {
+      "name": "secondary",
+      "runtime_checks": 624,
+      "report_sha256": "29a094f9b75f491101ab248c80d596b46755cf3d618c317b1c44adb1135c9d60"
+    },
+    {
+      "name": "secondary-upstream",
+      "upstream_passed_cases": 12,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "25cd8650996def3020d80d42e62a25f9f08a1ffc2cd889ae1681e91ccd10994b"
+    },
+    {
+      "name": "pdf-new",
+      "runtime_checks": 25,
+      "report_sha256": "d0fcacc931359e997f4a7fb0a15d94ac02fd5a12f8b004164759e0124885a4e6"
+    },
+    {
+      "name": "pdf-old",
+      "runtime_checks": 25,
+      "report_sha256": "d0fcacc931359e997f4a7fb0a15d94ac02fd5a12f8b004164759e0124885a4e6"
+    },
+    {
+      "name": "history-new",
+      "runtime_checks": 13,
+      "report_sha256": "25f18a1f725397ee70276ed054d791c9e3de03e9bd10bbc9d64e845ca2b850b2"
+    },
+    {
+      "name": "history-old",
+      "runtime_checks": 13,
+      "report_sha256": "25f18a1f725397ee70276ed054d791c9e3de03e9bd10bbc9d64e845ca2b850b2"
+    },
+    {
+      "name": "external-links",
+      "runtime_checks": 63,
+      "report_sha256": "e4c1e74a99024f5ad439d7570c10c9e7b546d112ae237565a3c55b04b70a4ea5"
+    },
+    {
+      "name": "wasm-streams",
+      "runtime_checks": 17,
+      "report_sha256": "210c4055bd2a46bf536343990fa5d59e6536891ccfe23836ac9f6f8397545693"
+    },
+    {
+      "name": "downloads",
+      "runtime_checks": 18,
+      "report_sha256": "18cfc80664e1700f0da47195ff32be470eb803eb536fc321e8d04bccacb1eb8e"
+    },
+    {
+      "name": "webgl-loss",
+      "runtime_checks": 280,
+      "upstream_passed_cases": 489,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "b40b3c21506c926211008f2fb87c5f2572814e52e455aa8ca95a9cb10234e953"
+    },
+    {
+      "name": "worker-shutdown",
+      "worker_shutdown_cases": 3,
+      "report_sha256": "20a8f346e2a97114ef704e4942975156763f912279ad5ccc284b157c289df9ab"
+    },
+    {
+      "name": "xr-loss",
+      "runtime_checks": 68,
+      "report_sha256": "28d4fe5bef6ff91e16632faf161bb305721f5c3dab85a51e33f627b989059a45"
+    },
+    {
+      "name": "webgl-gc",
+      "runtime_checks": 16,
+      "report_sha256": "2bac262db3e6f9d86b8290740e8b28bb66d2fa2ae58d7df4c2ecd9d2a23cbc5a"
+    },
+    {
+      "name": "policy-mock",
+      "runtime_checks": 575,
+      "document_scenarios": 34,
+      "report_sha256": "7fd466a202c949c6cd3451648521dd30355626d0379ac440bcee21591fb25211"
+    },
+    {
+      "name": "policy-upstream",
+      "runtime_checks": 2,
+      "upstream_passed_cases": 3,
+      "upstream_obsolete_expectation_cases": 1,
+      "all_original_upstream_assertions_passed": false,
+      "report_sha256": "52ac39d2ed0722d86644badcb42438fc1d1468dbc66dc56856bcf455fda74273"
+    },
+    {
+      "name": "policy-history",
+      "runtime_checks": 1874,
+      "document_scenarios": 115,
+      "report_sha256": "04180427f4dc51a885a257fd8b77c2aff3094b52afb80dd7b69b257d4c002f81"
+    },
+    {
+      "name": "policy-native",
+      "runtime_checks": 23,
+      "report_sha256": "32344aef6480080e890cabebcf02d05b2fdaa833b564929ddfcf4c948210bdfb"
+    },
+    {
+      "name": "devicechange-mock",
+      "runtime_checks": 37,
+      "report_sha256": "2868ea241d1595219475ee586e937d2f50ec398465212d1e071934d5d9d6e3c4"
+    },
+    {
+      "name": "devicechange-upstream",
+      "runtime_checks": 2,
+      "upstream_passed_cases": 2,
+      "report_sha256": "20b6aba116f5fd3994b0fb0d7b8ddae9f2f77de810c6c10b095515bb214c9bbd"
+    },
+    {
+      "name": "devicechange-native",
+      "runtime_checks": 30,
+      "report_sha256": "7da255d9f2419bb903583445ae79502b0e4f7c5151c2d6bdbf80df3b0a42b50c"
+    },
+    {
+      "name": "selection-mock",
+      "runtime_checks": 26,
+      "report_sha256": "71af8a370c2ed1e8baedc06c723db15fa82dff4b2508118a046d601bb3fd49a7"
+    },
+    {
+      "name": "selection-native",
+      "runtime_checks": 18,
+      "report_sha256": "8782a73a01506063db791e963ec76169be54507cab0b37e5e6403a20b89bf2e8"
+    },
+    {
+      "name": "pending-mock",
+      "runtime_checks": 26,
+      "report_sha256": "785f34cdcf308ef1f166cdb2e8dfe000439b28115c7721893f5ba8fd2bb602f6"
+    },
+    {
+      "name": "pending-native",
+      "runtime_checks": 14,
+      "report_sha256": "8b95d187a9f4f7bd8a47be21d4d7e150866ae5f48411cd369127569991e70b3c"
+    },
+    {
+      "name": "consent-native",
+      "runtime_checks": 26,
+      "report_sha256": "ae4bfdcdc24aef043665ba9c5c6112bec9edbc3f07ce04c82c3047c301522e83"
+    }
+  ],
+  "initial_reports": [
+    "before/report.json",
+    "r1-consent-native/report.json",
+    "r1-pending-mock/report.json"
+  ],
+  "remaining": [
+    "Automatic GPU-reset detection, adapter migration and capability changes",
+    "Permissions Policy reporting/report-only delivery and further feature registrations",
+    "DomeD shell touch/stylus interactions beyond native client surfaces",
+    "Dynamic scaling on optional native backends",
+    "Physical device validation",
+    "Continuous stability, web adblocking/privacy and local workstation protection maintenance",
+    "Final standards-focused Discord/x.com rendering"
+  ],
+  "unadvertised_features": [
+    "OffscreenCanvas"
+  ],
+  "physical_device_validation": false,
+  "optional_windows_openxr_compiled": false,
+  "installed": false,
+  "sessions_restarted": false,
+  "artifacts_directory": "artifacts/servo-rendering-goal/webxr-consent-cancellation-v1",
+  "native_baseline_qualification": "The old blocking consent prompt prevents the test HTTP poll completing, so the after-display removal phase is not reached in before/report.json. Existing installed pending-session fixture required answering consent after synchronous frame removal. The new candidate must complete navigation and removal while consent is displayed, without any session lease until an explicitly accepted live request.",
+  "discarded_approach": "check-r1 and blocking-approach-source retain an unshipped synchronous cancellation-channel prototype; asynchronous preparation chosen to preserve the normal browser event loop",
+  "initial_unit_failures": [
+    {
+      "log": "registry-units-before-r2.log",
+      "result": "17 pass, 3 fail: device identity generation and UI iteration ordering"
+    },
+    {
+      "log": "registry-units-r2.log",
+      "result": "19 pass, 1 fail: generation-scope test needed to pump the second request on the next UI iteration; corrected test sequencing in registry-units-r3.log"
+    },
+    {
+      "log": "registry-units-before-wake.log",
+      "result": "21 pass, 1 fail: deferred request did not schedule a continuation; corrected and 22 pass in registry-units-r4.log"
+    }
+  ],
+  "release_check": {
+    "passed": true,
+    "log": "check-r5.log",
+    "log_sha256": "61e670848c027885f81abf4da9e225ae76e90e2f3cb518c99f7d806389361bec"
+  },
+  "build_provenance": {
+    "initial_log": "build-r3.log",
+    "confirmation_log": "build-r3-confirm.log",
+    "manifest": "source-manifest-r3.json",
+    "capture_timing": "After initial R3 build and before a matching Cargo freshness-confirmation build; no source edits during compilation"
+  },
+  "visual_review": {
+    "passed": true,
+    "scope": "Queued and fresh native consent screenshots inspected; readable text, separate denial/allow controls and session appearance respected",
+    "files_sha256": {
+      "consent-queued.png": "06158c1f4da014fa49b33eb00fc5b9fc8f44fcaf5bb991437c5387aa8193ab08",
+      "consent-fresh.png": "06158c1f4da014fa49b33eb00fc5b9fc8f44fcaf5bb991437c5387aa8193ab08"
+    }
+  },
+  "host_selected_units": 172,
+  "host_units_retained_from": "webxr-devicechange-v1; host source unchanged this milestone",
+  "host_units_rerun": false,
+  "host_full_unit_log_sha256": "cabcd3ee2284e54579605e4c55bade3687a6ee772f5708a885b149e508cfbb95",
+  "host_unit_log_sha256": "1266e331c2576930ade5910a3ffcfe178e20168e2b56ba5b7299bce595c2b034",
+  "native_host_sha256": "6c7169466c431a0ce2b79ef93c4e98d9312babc14ab3b93d3b1bd8467801e727",
+  "host_compiled_inputs_unchanged": true
+}

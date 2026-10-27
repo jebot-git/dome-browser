@@ -9,7 +9,7 @@ use profile_traits::generic_callback::GenericCallback as ProfileGenericCallback;
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::{self, GenericCallback, GenericReceiver, GenericSender};
 use servo_base::id::PipelineId;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use crate::{
@@ -37,6 +37,15 @@ struct ActiveSession {
     active: Arc<SessionActivity>,
     abort: Quitter,
     monitor_devices: bool,
+}
+
+struct QueuedSessionRequest {
+    mode: SessionMode,
+    init: SessionInit,
+    owner: Option<DocumentSessionOwner>,
+    destination: ProfileGenericCallback<Result<Session, Error>>,
+    preparing: Option<(u64, SessionId, u64)>,
+    tried: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -68,6 +77,8 @@ pub struct MainThreadRegistry<GL> {
     device_generation: u64,
     enumerated_devices: bool,
     active_sessions: Vec<ActiveSession>,
+    pending_requests: VecDeque<QueuedSessionRequest>,
+    defer_immersive_preparation: bool,
     draining_sessions: Vec<Arc<SessionActivity>>,
     pending_device_change: bool,
     device_change_serial: u64,
@@ -225,6 +236,8 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
             device_generation: 0,
             enumerated_devices: false,
             active_sessions: Vec::new(),
+            pending_requests: VecDeque::new(),
+            defer_immersive_preparation: false,
             draining_sessions: Vec::new(),
             pending_device_change: false,
             device_change_serial: 0,
@@ -401,6 +414,7 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
         while let Ok(msg) = self.receiver.try_recv() {
             self.handle_msg(msg);
         }
+        self.poll_session_requests();
         for session in &mut self.sessions {
             session.run_one_frame();
         }
@@ -468,21 +482,29 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
                 let _ = dest.send(self.supports_session(mode));
             },
             RegistryMsg::RequestSession(mode, init, owner, dest) => {
-                let response = self.request_session_owned(mode, init, owner);
-                let id = response.as_ref().ok().map(Session::id);
-                if dest.send(response).is_err() {
-                    if let Some(id) = id {
-                        for session in &self.active_sessions {
-                            if session.id == id {
-                                session.active.begin_closing();
-                                session.abort.abort();
-                            }
-                        }
-                        self.configure_device_observation();
-                    }
-                }
+                self.pending_requests.push_back(QueuedSessionRequest {
+                    mode,
+                    init,
+                    owner,
+                    destination: dest,
+                    preparing: None,
+                    tried: Vec::new(),
+                });
             },
             RegistryMsg::CancelDocumentSessions(pipeline, generation) => {
+                let pending = std::mem::take(&mut self.pending_requests);
+                for request in pending {
+                    if request.owner.is_some_and(|owner| {
+                        owner.pipeline == pipeline && owner.generation <= generation
+                    }) {
+                        self.defer_immersive_preparation |=
+                            request.mode != SessionMode::Inline && request.preparing.is_some();
+                        self.cancel_preparation(request.preparing);
+                        let _ = request.destination.send(Err(Error::CommunicationError));
+                    } else {
+                        self.pending_requests.push_back(request);
+                    }
+                }
                 // Request and cancellation messages from the document share
                 // this FIFO. No retired-document map is needed after cleanup.
                 for session in &self.active_sessions {
@@ -498,6 +520,118 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
             RegistryMsg::SimulateDeviceConnection(init, dest) => {
                 let _ = dest.send(self.simulate_device_connection(init));
             },
+        }
+    }
+
+    fn cancel_preparation(&mut self, preparing: Option<(u64, SessionId, u64)>) {
+        if let Some((device, id, _)) = preparing {
+            if let Some(entry) = self.discoveries.iter_mut().find(|entry| entry.id == device) {
+                entry.device.cancel_session_preparation(id);
+            }
+        }
+    }
+
+    fn deliver_session(
+        &mut self,
+        destination: ProfileGenericCallback<Result<Session, Error>>,
+        response: Result<Session, Error>,
+    ) {
+        let id = response.as_ref().ok().map(Session::id);
+        if destination.send(response).is_err() {
+            if let Some(id) = id {
+                for session in &self.active_sessions {
+                    if session.id == id {
+                        session.active.begin_closing();
+                        session.abort.abort();
+                    }
+                }
+                self.configure_device_observation();
+            }
+        }
+    }
+
+    fn poll_session_requests(&mut self) {
+        // Let the normal browser loop consume focus restoration from a closed
+        // native prompt before another immersive preparation is presented.
+        let mut immersive_ui_changed = std::mem::take(&mut self.defer_immersive_preparation);
+        let mut immersive_pending = immersive_ui_changed;
+        let mut needs_next_iteration = false;
+        for _ in 0..self.pending_requests.len() {
+            let Some(mut request) = self.pending_requests.pop_front() else {
+                break;
+            };
+            if request.mode != SessionMode::Inline && immersive_pending {
+                needs_next_iteration |= immersive_ui_changed;
+                self.pending_requests.push_back(request);
+                continue;
+            }
+            if request.mode != SessionMode::Inline {
+                self.refresh_selection();
+            }
+            if request.preparing.is_none() {
+                let device = self
+                    .discoveries
+                    .iter()
+                    .find(|entry| {
+                        !request.tried.contains(&entry.id)
+                            && (request.mode == SessionMode::Inline
+                                || self.selected_device.map(|(id, _)| id) == Some(entry.id))
+                            && entry.device.supports_session(request.mode)
+                    })
+                    .map(|entry| entry.id);
+                let Some(device) = device else {
+                    self.deliver_session(request.destination, Err(Error::NoMatchingDevice));
+                    continue;
+                };
+                let id = SessionId(self.next_session_id);
+                self.next_session_id += 1;
+                request.preparing = Some((device, id, self.device_generation));
+            }
+            let (device, id, generation) = request.preparing.unwrap();
+            let preparation = if request.mode != SessionMode::Inline
+                && (self.selected_device.map(|(id, _)| id) != Some(device)
+                    || generation != self.device_generation)
+            {
+                Err(Error::NoMatchingDevice)
+            } else {
+                self.discoveries
+                    .iter_mut()
+                    .find(|entry| entry.id == device)
+                    .ok_or(Error::NoMatchingDevice)
+                    .and_then(|entry| {
+                        entry
+                            .device
+                            .prepare_session(id, request.mode, &request.init)
+                    })
+            };
+            let response = match preparation {
+                Ok(false) => {
+                    immersive_pending |= request.mode != SessionMode::Inline;
+                    self.pending_requests.push_back(request);
+                    continue;
+                },
+                Ok(true) => self.request_session_prepared(
+                    request.mode,
+                    request.init.clone(),
+                    request.owner,
+                    request.preparing,
+                ),
+                Err(error) => Err(error),
+            };
+            self.cancel_preparation(request.preparing);
+            immersive_pending |= request.mode != SessionMode::Inline;
+            immersive_ui_changed |= request.mode != SessionMode::Inline;
+            if response.is_err() && request.mode == SessionMode::Inline {
+                request.tried.push(device);
+                request.preparing = None;
+                needs_next_iteration = true;
+                self.pending_requests.push_back(request);
+                continue;
+            }
+            self.deliver_session(request.destination, response);
+        }
+        if needs_next_iteration {
+            self.waker.wake();
         }
     }
 
@@ -523,16 +657,35 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
         self.request_session_owned(mode, init, None)
     }
 
+    #[cfg(test)]
     fn request_session_owned(
         &mut self,
         mode: SessionMode,
         init: SessionInit,
         owner: Option<DocumentSessionOwner>,
     ) -> Result<Session, Error> {
+        self.request_session_prepared(mode, init, owner, None)
+    }
+
+    fn request_session_prepared(
+        &mut self,
+        mode: SessionMode,
+        init: SessionInit,
+        owner: Option<DocumentSessionOwner>,
+        prepared: Option<(u64, SessionId, u64)>,
+    ) -> Result<Session, Error> {
         if mode != SessionMode::Inline {
             self.refresh_selection();
         }
+        if mode != SessionMode::Inline
+            && prepared.is_some_and(|(_, _, generation)| generation != self.device_generation)
+        {
+            return Err(Error::NoMatchingDevice);
+        }
         for entry in &mut self.discoveries {
+            if prepared.is_some_and(|(device, _, _)| device != entry.id) {
+                continue;
+            }
             if mode != SessionMode::Inline
                 && self.selected_device.map(|(id, _)| id) != Some(entry.id)
             {
@@ -541,8 +694,13 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
             if !entry.device.supports_session(mode) {
                 continue;
             }
-            let id = SessionId(self.next_session_id);
-            self.next_session_id += 1;
+            let id = if let Some((_, id, _)) = prepared {
+                id
+            } else {
+                let id = SessionId(self.next_session_id);
+                self.next_session_id += 1;
+                id
+            };
             let active = Arc::new(SessionActivity::new());
             let xr = SessionBuilder::new(
                 &mut self.sessions,

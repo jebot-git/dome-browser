@@ -1,0 +1,46 @@
+<!doctype html><meta charset=utf-8><title>XR consent request lifetime</title><body><button id=start>Start consent test</button><script>
+let order=0,count=0,frame,queuedFrame,tag='remove';const packets=[];
+const post=(type,data)=>fetch('/event',{method:'POST',body:JSON.stringify({order:++order,type,data})});
+const check=(passed,name)=>{count++;post('check',{passed:!!passed,name});if(!passed)throw Error(name)};
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function wait(fn){const end=performance.now()+12000;while(performance.now()<end){if(await fn())return;await sleep(25)}throw Error('Consent lifecycle timed out: '+tag)}
+const ops=()=>fetch('/host-ops').then(r=>r.json()),status=()=>fetch('/consent-status').then(r=>r.json());
+const button=document.getElementById('start');const input=()=>{const r=button.getBoundingClientRect();return{tag,start:{x:r.x,y:r.y,width:r.width,height:r.height},ratio:devicePixelRatio,viewport:[innerWidth,innerHeight]}};
+addEventListener('message',e=>{if(e.data?.consentChild)packets.push(e.data)});
+async function child(role=tag){const target=document.createElement('iframe');target.allow='xr-spatial-tracking *';target.src='/consent-child?tag='+role;document.body.append(target);await wait(()=>packets.some(p=>p.stage==='ready'&&p.tag===role));return target}
+button.onclick=async()=>{
+ try{
+  if(tag==='remove'||tag==='navigate'){
+   frame.contentWindow.beginConsentRequest();await wait(async()=>(await status()).seen===tag);
+   check(!(await ops()).includes('begin_session'),tag+': displaying consent does not open a lease');
+   if(tag==='remove')frame.remove();else{frame.contentWindow.location.assign('/consent-idle');await wait(()=>packets.some(p=>p.stage==='idle'))}
+   await wait(async()=>(await status()).closed===tag);check(true,tag+': document deactivation dismisses pending consent without answering');
+   check(!(await ops()).includes('begin_session'),tag+': cancelled consent never opens a lease');
+   if(tag==='navigate'){
+    frame.contentWindow.postMessage('back','*');await wait(()=>packets.some(p=>p.stage==='restored'));await sleep(200);
+    check(!packets.some(p=>p.stage==='unexpected-resolution'), 'History restoration never adopts the retired request');frame.remove();
+   }
+   if(tag==='remove'){tag='navigate';frame=await child()}else{tag='queued';frame=await child('queued-a');queuedFrame=await child('queued-b')}
+  }else if(tag==='queued'){
+   frame.contentWindow.beginConsentRequest();const waiting=queuedFrame.contentWindow.beginQueuedRequest();
+   await wait(async()=>(await status()).seen===tag);frame.remove();
+   await wait(async()=>(await status()).closed===tag);check(true,'Cancelling the first queued request closes its consent window');
+   const session=await waiting;check(!!session,'The next live queued request can obtain its own consent');
+   await session.end();await wait(async()=>(await ops()).filter(x=>x==='end_session').length===1);
+   check((await ops()).filter(x=>x==='begin_session').length===1,'The cancelled queued request opens no lease');
+   check(!packets.some(p=>p.stage==='unexpected-resolution'),'The old queued response cannot replace the accepted request');
+   queuedFrame.remove();tag='deny';
+  }else if(tag==='deny'){
+   let denied=false;try{await navigator.xr.requestSession('immersive-vr')}catch(_){denied=true}
+   check(denied,'Closing consent denies the live request');check((await ops()).filter(x=>x==='begin_session').length===1,'Denied consent opens no additional lease');tag='fresh';
+  }else{
+   const session=await navigator.xr.requestSession('immersive-vr');check(!!session,'A fresh accepted request succeeds after cancellation and denial');
+   await session.end();await wait(async()=>(await ops()).filter(x=>x==='end_session').length===2);
+   check((await ops()).filter(x=>x==='begin_session').length===2,'Only explicitly accepted live requests begin sessions');
+   check(!packets.some(p=>p.stage==='unexpected-resolution'),'Retired requests remain unadopted after fresh session completion');post('done',{count,kind:'consent-cancellation'});return;
+  }
+  post('continue',input());
+ }catch(error){post('error',{message:String(error)+'\n'+error.stack})}
+};
+(async()=>{await fetch('/host-control',{method:'POST',body:JSON.stringify({op:'active'})});frame=await child();post('ready',input())})().catch(error=>post('error',{message:String(error)+'\n'+error.stack}));
+</script>

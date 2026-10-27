@@ -1,0 +1,9 @@
+<!doctype html><meta charset=utf-8><body><script>
+const owner=parent,tag=new URL(location).searchParams.get('tag');let shows=0,late=0;
+const post=stage=>owner.postMessage({consentChild:true,tag,stage,late},'*');
+addEventListener('pageshow',()=>post(++shows===1?'ready':'restored'));
+window.beginQueuedRequest=()=>navigator.xr.requestSession('immersive-vr');
+window.beginConsentRequest=()=>{
+ navigator.xr.requestSession('immersive-vr').then(session=>{late++;post('unexpected-resolution');session.end()},()=>post('rejected'));
+};
+</script>

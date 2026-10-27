@@ -441,7 +441,9 @@ fn pending_document_cancellation_is_scoped_to_pipeline_and_generation() {
 #[test]
 fn pending_document_cancellation_closes_a_response_retained_outside_the_dom() {
     let mut registry = registry();
-    registry.register(discovery(true, false, true));
+    let mut device = discovery(true, false, true);
+    device.initial_frames = 4;
+    registry.register(device);
     registry.supports_session(SessionMode::ImmersiveVR).unwrap();
     let mut client = registry.registry();
     let (send, receive) = mpsc::channel();
@@ -455,14 +457,351 @@ fn pending_document_cancellation_closes_a_response_retained_outside_the_dom() {
         })
         .unwrap(),
     );
-    client.cancel_document_sessions(pipeline(1), 1);
     registry.run_one_frame();
     let _response = receive
         .recv_timeout(Duration::from_secs(2))
         .unwrap()
         .unwrap()
         .unwrap();
+    assert_eq!(registry.active_sessions.len(), 1);
+    client.cancel_document_sessions(pipeline(1), 1);
+    registry.run_one_frame();
     assert!(registry.active_sessions.is_empty());
     registry.register_discovery(Box::new(discovery(false, true, true)), true);
     assert!(registry.supports_session(SessionMode::ImmersiveAR).is_ok());
+}
+
+struct ConsentDiscovery {
+    inner: Discovery,
+    gate: Arc<std::sync::atomic::AtomicU8>,
+    starts: Arc<std::sync::atomic::AtomicUsize>,
+    cancelled: Arc<Mutex<Vec<SessionId>>>,
+    preparations: Arc<Mutex<Vec<SessionId>>>,
+}
+impl DiscoveryAPI<()> for ConsentDiscovery {
+    fn supports_session(&self, mode: SessionMode) -> bool {
+        self.inner.supports_session(mode)
+    }
+    fn immersive_device_state(&self) -> Option<ImmersiveDeviceState> {
+        self.inner.immersive_device_state()
+    }
+    fn prepare_session(
+        &mut self,
+        id: SessionId,
+        mode: SessionMode,
+        _: &SessionInit,
+    ) -> Result<bool, Error> {
+        if mode == SessionMode::Inline {
+            return Ok(true);
+        }
+        self.preparations.lock().unwrap().push(id);
+        match self.gate.load(Ordering::Acquire) {
+            0 => Ok(false),
+            1 => Ok(true),
+            3 => {
+                self.inner.state.lock().unwrap().as_mut().unwrap().identity += 1;
+                Ok(true)
+            },
+            _ => Err(Error::NoMatchingDevice),
+        }
+    }
+    fn cancel_session_preparation(&mut self, id: SessionId) {
+        self.cancelled.lock().unwrap().push(id);
+    }
+    fn request_session(
+        &mut self,
+        mode: SessionMode,
+        init: &SessionInit,
+        builder: SessionBuilder<()>,
+    ) -> Result<Session, Error> {
+        self.starts.fetch_add(1, Ordering::Relaxed);
+        self.inner.request_session(mode, init, builder)
+    }
+}
+fn consent_discovery() -> ConsentDiscovery {
+    let mut inner = discovery(true, false, true);
+    inner.initial_frames = 10;
+    ConsentDiscovery {
+        inner,
+        gate: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+        starts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        cancelled: Arc::new(Mutex::new(vec![])),
+        preparations: Arc::new(Mutex::new(vec![])),
+    }
+}
+fn queued_request(
+    registry: &mut MainThreadRegistry<()>,
+    pipe: u32,
+    generation: u64,
+    mode: SessionMode,
+) -> mpsc::Receiver<Result<Session, Error>> {
+    let (send, receive) = mpsc::channel();
+    registry.registry().request_session_for_document(
+        pipeline(pipe),
+        generation,
+        mode,
+        init(),
+        ProfileGenericCallback::new(move |response| {
+            send.send(response.unwrap()).unwrap();
+        })
+        .unwrap(),
+    );
+    receive
+}
+#[test]
+fn consent_preparation_cancelled_before_start_never_creates_a_backend() {
+    let mut r = registry();
+    let device = consent_discovery();
+    let starts = device.starts.clone();
+    let cancelled = device.cancelled.clone();
+    r.register(device);
+    let response = queued_request(&mut r, 1, 1, SessionMode::ImmersiveVR);
+    r.registry().cancel_document_sessions(pipeline(1), 1);
+    r.run_one_frame();
+    assert!(
+        response
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+    assert!(cancelled.lock().unwrap().is_empty());
+    assert!(r.pending_requests.is_empty());
+}
+#[test]
+fn consent_preparation_keeps_queries_and_inline_sessions_responsive() {
+    let mut r = registry();
+    let device = consent_discovery();
+    let starts = device.starts.clone();
+    r.register(device);
+    let pending = queued_request(&mut r, 1, 1, SessionMode::ImmersiveVR);
+    r.run_one_frame();
+    assert!(pending.try_recv().is_err());
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+    let inline = queued_request(&mut r, 2, 1, SessionMode::Inline);
+    let (send, receive) = mpsc::channel();
+    r.registry().supports_session(
+        SessionMode::ImmersiveVR,
+        ProfileGenericCallback::new(move |value| send.send(value.unwrap()).unwrap()).unwrap(),
+    );
+    r.run_one_frame();
+    assert!(
+        receive
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_ok()
+    );
+    assert!(inline.recv_timeout(Duration::from_secs(1)).unwrap().is_ok());
+    assert!(pending.try_recv().is_err());
+    assert_eq!(starts.load(Ordering::Relaxed), 1);
+}
+#[test]
+fn consent_preparation_cancellation_releases_ui_and_preserves_newer_generations() {
+    let mut r = registry();
+    let device = consent_discovery();
+    let starts = device.starts.clone();
+    let gate = device.gate.clone();
+    let cancelled = device.cancelled.clone();
+    r.register(device);
+    let old = queued_request(&mut r, 1, 1, SessionMode::ImmersiveVR);
+    r.run_one_frame();
+    let fresh = queued_request(&mut r, 1, 2, SessionMode::ImmersiveVR);
+    let other = queued_request(&mut r, 2, 1, SessionMode::ImmersiveVR);
+    r.registry().cancel_document_sessions(pipeline(1), 1);
+    r.run_one_frame();
+    assert!(old.recv_timeout(Duration::from_secs(1)).unwrap().is_err());
+    assert_eq!(cancelled.lock().unwrap().len(), 1);
+    assert!(fresh.try_recv().is_err());
+    assert!(other.try_recv().is_err());
+    gate.store(1, Ordering::Release);
+    r.run_one_frame();
+    assert!(fresh.recv_timeout(Duration::from_secs(1)).unwrap().is_ok());
+    r.run_one_frame();
+    assert!(other.recv_timeout(Duration::from_secs(1)).unwrap().is_ok());
+    assert_eq!(starts.load(Ordering::Relaxed), 2);
+    assert!(r.pending_requests.is_empty());
+}
+#[test]
+fn consent_preparation_denial_allows_the_next_live_request() {
+    let mut r = registry();
+    let device = consent_discovery();
+    let gate = device.gate.clone();
+    let starts = device.starts.clone();
+    let cancelled = device.cancelled.clone();
+    r.register(device);
+    let denied = queued_request(&mut r, 1, 1, SessionMode::ImmersiveVR);
+    r.run_one_frame();
+    gate.store(2, Ordering::Release);
+    r.run_one_frame();
+    assert!(
+        denied
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(cancelled.lock().unwrap().len(), 1);
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+    gate.store(1, Ordering::Release);
+    let fresh = queued_request(&mut r, 1, 1, SessionMode::ImmersiveVR);
+    r.run_one_frame();
+    assert!(fresh.recv_timeout(Duration::from_secs(1)).unwrap().is_ok());
+    assert_eq!(starts.load(Ordering::Relaxed), 1);
+}
+#[test]
+fn consent_preparation_device_replacement_cancels_without_switching_requests() {
+    let mut r = registry();
+    let device = consent_discovery();
+    let starts = device.starts.clone();
+    let cancelled = device.cancelled.clone();
+    r.register(device);
+    let response = queued_request(&mut r, 1, 1, SessionMode::ImmersiveVR);
+    r.run_one_frame();
+    r.register_discovery(Box::new(discovery(false, true, true)), true);
+    r.run_one_frame();
+    assert!(
+        response
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+    assert_eq!(cancelled.lock().unwrap().len(), 1);
+    assert!(r.pending_requests.is_empty());
+}
+#[test]
+fn consent_preparation_keeps_inline_backend_fallback() {
+    let mut r = registry();
+    r.register(discovery(true, false, false));
+    let mut working = discovery(false, true, true);
+    working.initial_frames = 4;
+    r.register(working);
+    let response = queued_request(&mut r, 1, 1, SessionMode::Inline);
+    r.run_one_frame();
+    r.run_one_frame();
+    assert!(
+        response
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_ok()
+    );
+    assert!(r.pending_requests.is_empty());
+}
+
+#[test]
+fn consent_preparation_same_discovery_identity_change_retires_the_request() {
+    let mut r = registry();
+    let device = consent_discovery();
+    let identity = device.inner.state.clone();
+    let starts = device.starts.clone();
+    let cancelled = device.cancelled.clone();
+    r.register(device);
+    let response = queued_request(&mut r, 1, 1, SessionMode::ImmersiveVR);
+    r.run_one_frame();
+    identity.lock().unwrap().as_mut().unwrap().identity += 1;
+    r.run_one_frame();
+    assert!(
+        response
+            .recv_timeout(Duration::from_millis(100))
+            .expect("Runtime identity replacement must retire pending consent")
+            .is_err()
+    );
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+    assert_eq!(cancelled.lock().unwrap().len(), 1);
+    assert!(r.pending_requests.is_empty());
+}
+#[test]
+fn consent_preparation_cancellation_waits_for_the_next_ui_iteration() {
+    let mut r = registry();
+    let device = consent_discovery();
+    let preparations = device.preparations.clone();
+    r.register(device);
+    let old = queued_request(&mut r, 1, 1, SessionMode::ImmersiveVR);
+    r.run_one_frame();
+    assert_eq!(preparations.lock().unwrap().len(), 1);
+    let fresh = queued_request(&mut r, 2, 1, SessionMode::ImmersiveVR);
+    r.registry().cancel_document_sessions(pipeline(1), 1);
+    r.run_one_frame();
+    assert!(old.recv_timeout(Duration::from_secs(1)).unwrap().is_err());
+    assert_eq!(
+        preparations.lock().unwrap().len(),
+        1,
+        "Focus restoration must reach the browser loop before another consent starts"
+    );
+    r.run_one_frame();
+    assert_eq!(preparations.lock().unwrap().len(), 2);
+    assert!(fresh.try_recv().is_err());
+}
+#[test]
+fn consent_preparation_acceptance_waits_for_the_next_ui_iteration() {
+    let mut r = registry();
+    let device = consent_discovery();
+    let preparations = device.preparations.clone();
+    device.gate.store(1, Ordering::Release);
+    r.register(device);
+    let first = queued_request(&mut r, 1, 1, SessionMode::ImmersiveVR);
+    let second = queued_request(&mut r, 2, 1, SessionMode::ImmersiveVR);
+    r.run_one_frame();
+    assert!(first.recv_timeout(Duration::from_secs(1)).unwrap().is_ok());
+    assert_eq!(
+        preparations.lock().unwrap().len(),
+        1,
+        "Only one immersive consent can complete per browser UI iteration"
+    );
+    assert!(second.try_recv().is_err());
+    r.run_one_frame();
+    assert!(second.recv_timeout(Duration::from_secs(1)).unwrap().is_ok());
+    assert_eq!(preparations.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn consent_preparation_rechecks_runtime_identity_after_consent() {
+    let mut r = registry();
+    let device = consent_discovery();
+    device.gate.store(3, Ordering::Release);
+    let starts = device.starts.clone();
+    let cancelled = device.cancelled.clone();
+    r.register(device);
+    let response = queued_request(&mut r, 1, 1, SessionMode::ImmersiveVR);
+    r.run_one_frame();
+    assert!(
+        response
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+    assert_eq!(cancelled.lock().unwrap().len(), 1);
+}
+#[test]
+fn consent_preparation_wakes_the_next_iteration_for_a_deferred_live_request() {
+    struct CountingWaker(Arc<std::sync::atomic::AtomicUsize>);
+    impl EventLoopWaker for CountingWaker {
+        fn clone_box(&self) -> Box<dyn EventLoopWaker> {
+            Box::new(Self(self.0.clone()))
+        }
+        fn wake(&self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut r = MainThreadRegistry::new(
+        Box::new(CountingWaker(wakes.clone())),
+        LayerGrandManager::new(Manager),
+    )
+    .unwrap();
+    let device = consent_discovery();
+    device.gate.store(1, Ordering::Release);
+    r.register(device);
+    let first = queued_request(&mut r, 1, 1, SessionMode::ImmersiveVR);
+    let second = queued_request(&mut r, 2, 1, SessionMode::ImmersiveVR);
+    let before = wakes.load(Ordering::Relaxed);
+    r.run_one_frame();
+    assert!(first.recv_timeout(Duration::from_secs(1)).unwrap().is_ok());
+    assert!(second.try_recv().is_err());
+    assert!(
+        wakes.load(Ordering::Relaxed) > before,
+        "A live request deferred for native focus restoration must schedule another browser iteration"
+    );
+    r.run_one_frame();
+    assert!(second.recv_timeout(Duration::from_secs(1)).unwrap().is_ok());
 }

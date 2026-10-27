@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use std::ffi::{CStr, CString, c_char};
+use std::ffi::{CStr, CString, c_char, c_void};
 
 #[repr(C)]
 pub struct Event {
@@ -51,6 +51,9 @@ unsafe extern "C" {
     pub fn browser_ui_cursor(cursor: i32);
     pub fn browser_ui_fullscreen(enabled: i32);
     pub fn browser_ui_ask(title: *const c_char, message: *const c_char) -> i32;
+    fn browser_ui_consent_open(title: *const c_char, message: *const c_char) -> *mut c_void;
+    fn browser_ui_consent_poll(dialog: *mut c_void) -> i32;
+    fn browser_ui_consent_close(dialog: *mut c_void);
     pub fn browser_ui_prompt(message: *const c_char, value: *const c_char) -> *const c_char;
     pub fn browser_ui_smallnet_form_open(json: *const c_char) -> i32;
     pub fn browser_ui_smallnet_form_poll(output: *mut c_char, capacity: usize) -> i32;
@@ -76,6 +79,27 @@ pub fn c(text: &str) -> CString {
 }
 pub fn ask(title: &str, message: &str) -> bool {
     unsafe { browser_ui_ask(c(title).as_ptr(), c(message).as_ptr()) != 0 }
+}
+pub enum ConsentAnswer { Pending, Allow, Deny }
+
+/// Main-thread native prompt. Its strings are copied by FLTK; dropping this
+/// handle closes the window and releases its widgets without a nested event loop.
+pub struct ConsentDialog(*mut c_void);
+impl ConsentDialog {
+    pub fn new(title: &str, message: &str) -> Option<Self> {
+        let dialog = unsafe { browser_ui_consent_open(c(title).as_ptr(), c(message).as_ptr()) };
+        (!dialog.is_null()).then_some(Self(dialog))
+    }
+    pub fn poll(&self) -> ConsentAnswer {
+        match unsafe { browser_ui_consent_poll(self.0) } {
+            0 => ConsentAnswer::Pending,
+            1 => ConsentAnswer::Allow,
+            _ => ConsentAnswer::Deny,
+        }
+    }
+}
+impl Drop for ConsentDialog {
+    fn drop(&mut self) { unsafe { browser_ui_consent_close(self.0) }; }
 }
 pub fn status(text: &str) {
     unsafe { browser_ui_status(c(text).as_ptr()) }
