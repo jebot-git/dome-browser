@@ -15,6 +15,7 @@
 #include <FL/Fl_Color_Chooser.H>
 #include <FL/Fl_Copy_Surface.H>
 #include <FL/fl_draw.H>
+#include <FL/fl_utf8.h>
 #include <algorithm>
 #include <cstring>
 #include <deque>
@@ -39,15 +40,41 @@ static int (*setNativePenHandler)(NativePenHandler,void*)=nullptr;
 
 namespace {
 std::deque<BrowserEvent> events;
-std::string menuLabel(const std::string &text) {
-  std::string label;
-  for(char c:text) {
-    if(c=='/' || c=='\\')label+='\\';
-    if(c=='&')label+='&';
-    label+=c;
+// Captions are presentation only; navigation keeps the original URL/string.
+std::string flatCaption(const std::string &text,bool shortcuts=true,unsigned limit=80) {
+  std::string caption;size_t at=0;unsigned count=0;
+  while(at<text.size() && count++<limit) {
+    int bytes=std::max(1,fl_utf8len1(text[at]));
+    bytes=std::min<size_t>(bytes,text.size()-at);
+    char c=text[at];
+    if(shortcuts && bytes==1 && (c=='&' || c=='@'))caption+=c;
+    if(bytes==1 && static_cast<unsigned char>(c)<32)caption+=' ';
+    else caption.append(text,at,bytes);
+    at+=bytes;
   }
-  return label;
+  if(at<text.size())caption+="…";
+  return caption;
 }
+struct FlatMenu {
+  std::vector<std::string> captions;
+  std::vector<Fl_Menu_Item> entries;
+  void assign(const std::vector<std::string> &text) {
+    captions.clear();captions.reserve(text.size());
+    for(const auto &value:text)captions.push_back(flatCaption(value));
+    entries.assign(captions.size()+1,Fl_Menu_Item{});
+    for(size_t index=0;index<captions.size();++index)entries[index].label(captions[index].c_str());
+  }
+};
+class FlatChoice : public Fl_Choice {
+  FlatMenu contents;
+public:
+  using Fl_Choice::Fl_Choice;
+  ~FlatChoice() override {menu(nullptr);}
+  void assign(const std::vector<std::string> &text,int selected) {
+    menu(nullptr);contents.assign(text);menu(contents.entries.data());value(selected);
+  }
+};
+
 void emit(int kind, int a=0, int b=0, int c=0, int d=0, const char *text="") {
   if((kind==1 || kind==5) && text && strlen(text)>=sizeof(BrowserEvent::text)) {
     browser_ui_status("Address exceeds the native input limit");return;
@@ -151,7 +178,7 @@ class Browser : public Fl_Double_Window {
 public:
   DesktopMenuBar *menu;
   LocationInput *address;
-  Fl_Choice *tabs;
+  FlatChoice *tabs;
   Fl_Button *back,*forward,*reload,*newTab,*closeTab;
   Fl_Box *status;
   Page *page;
@@ -200,7 +227,7 @@ public:
     back=new Fl_Button(8,38,82,34,"Back");forward=new Fl_Button(96,38,98,34,"Forward");reload=new Fl_Button(200,38,90,34,"Reload");
     back->callback([](Fl_Widget *,void *){emit(2);});forward->callback([](Fl_Widget *,void *){emit(3);});reload->callback([](Fl_Widget *,void *){emit(4);});
     address=new LocationInput(298,38,w()-306,34);address->tooltip("Address or search (Ctrl+L)");address->when(FL_WHEN_ENTER_KEY_ALWAYS);address->callback([](Fl_Widget *w,void *p){emit(1,0,0,0,0,static_cast<LocationInput *>(w)->target());static_cast<Browser *>(p)->page->take_focus();},this);
-    tabs=new Fl_Choice(8,80,w()-212,32);tabs->tooltip("Open tabs");tabs->callback([](Fl_Widget *w,void *){emit(7,static_cast<Fl_Choice *>(w)->value());});
+    tabs=new FlatChoice(8,80,w()-212,32);tabs->tooltip("Open tabs");tabs->callback([](Fl_Widget *w,void *){emit(7,static_cast<Fl_Choice *>(w)->value());});
     newTab=new Fl_Button(w()-196,80,88,32,"New Tab");newTab->callback([](Fl_Widget *,void *){emit(5);});closeTab=new Fl_Button(w()-100,80,92,32,"Close");closeTab->callback([](Fl_Widget *,void *){emit(6);});
     page=new Page(0,120,w(),h()-148);status=new Fl_Box(8,h()-25,w()-16,22,"Starting Servo…");status->align(FL_ALIGN_LEFT|FL_ALIGN_INSIDE|FL_ALIGN_CLIP);
     end();resizable(page);
@@ -298,8 +325,8 @@ extern "C" int browser_ui_visible(){
 extern "C" void browser_ui_wake(){Fl::awake();}
 extern "C" void browser_ui_close(){if(setNativePenHandler)setNativePenHandler(nullptr,nullptr);setNativePenHandler=nullptr;if(fl_wl_set_touch_handler)fl_wl_set_touch_handler(nullptr,nullptr);browser_ui_smallnet_form_close();browser.reset();if(applicationBus){if(applicationObject)g_dbus_connection_unregister_object(applicationBus,applicationObject);g_object_unref(applicationBus);applicationBus=nullptr;}if(applicationInfo){g_dbus_node_info_unref(applicationInfo);applicationInfo=nullptr;}}
 extern "C" void browser_ui_frame(const uint8_t *p,unsigned w,unsigned h){browser->page->frame(p,w,h);}
-extern "C" void browser_ui_title(const char *title,const char *url,int back,int forward){browser->copy_label((std::string(title)+" — Dome Browser").c_str());if(Fl::focus()!=browser->address)browser->address->setUrl(url);if(back)browser->back->activate();else browser->back->deactivate();if(forward)browser->forward->activate();else browser->forward->deactivate();}
-extern "C" void browser_ui_tabs(const char *text,int active){try{auto data=Json::parse(text);browser->tabs->clear();int index=0;for(const auto &t:data){auto label=menuLabel(std::to_string(++index)+". "+t.get<std::string>());browser->tabs->add(label.c_str(),0,nullptr);}browser->tabs->value(active);}catch(...){} }
+extern "C" void browser_ui_title(const char *title,const char *url,int back,int forward){browser->copy_label((flatCaption(title,false,160)+" — Dome Browser").c_str());if(Fl::focus()!=browser->address)browser->address->setUrl(url);if(back)browser->back->activate();else browser->back->deactivate();if(forward)browser->forward->activate();else browser->forward->deactivate();}
+extern "C" void browser_ui_tabs(const char *text,int active){try{auto data=Json::parse(text);std::vector<std::string> labels;int index=0;for(const auto &item:data)labels.push_back(std::to_string(++index)+". "+item.get<std::string>());browser->tabs->assign(labels,active);}catch(...){} }
 extern "C" void browser_ui_status(const char *text){browser->status->copy_label(text);}
 extern "C" void browser_ui_cursor(int cursor){static const Fl_Cursor cursors[]={FL_CURSOR_DEFAULT,FL_CURSOR_HAND,FL_CURSOR_INSERT,FL_CURSOR_NWSE,FL_CURSOR_NS,FL_CURSOR_WE,FL_CURSOR_NESW,FL_CURSOR_MOVE};browser->cursor(cursors[std::clamp(cursor,0,7)]);}
 extern "C" void browser_ui_fullscreen(int enabled){if(browser->fullscreenMode==bool(enabled))return;std::string title=browser->label()?browser->label():"Dome Browser";browser->fullscreenMode=enabled;if(enabled)browser->fullscreen();else browser->fullscreen_off();browser->copy_label(title.c_str());browser->layout();}
@@ -327,7 +354,27 @@ static const char *selection_text(int source){
 extern "C" const char *browser_ui_paste(){return selection_text(1);}
 extern "C" const char *browser_ui_primary_selection(){return selection_text(0);}
 extern "C" const char *browser_ui_file(int multiple){Fl_Native_File_Chooser picker;picker.title("Choose a file");picker.type(multiple?Fl_Native_File_Chooser::BROWSE_MULTI_FILE:Fl_Native_File_Chooser::BROWSE_FILE);if(picker.show()!=0)return nullptr;Json paths=Json::array();for(int i=0;i<picker.count();++i)paths.push_back(picker.filename(i));returned=paths.dump();return returned.c_str();}
-extern "C" int browser_ui_select(const char *text,int x,int y){try{auto items=Json::parse(text);Fl_Menu_Button popup(x+browser->x(),y+browser->y(),1,1);for(auto &item:items){auto label=menuLabel(item.get<std::string>());popup.add(label.c_str(),0,nullptr);}const Fl_Menu_Item *chosen=popup.popup();return chosen?int(chosen-popup.menu()):-1;}catch(...){return -1;}}
+extern "C" int browser_ui_select(const char *text,int x,int y){try{
+  const auto values=Json::parse(text).get<std::vector<std::string>>();
+  if(values.empty())return -1;
+  // A bounded page also keeps large histories inside native surface limits.
+  constexpr size_t pageSize=20;size_t offset=0;
+  for(;;) {
+    const size_t count=std::min(pageSize,values.size()-offset);
+    std::vector<std::string> labels;
+    if(offset)labels.push_back("< Previous entries");
+    labels.insert(labels.end(),values.begin()+offset,values.begin()+offset+count);
+    if(offset+count<values.size())labels.push_back("More entries >");
+    FlatMenu contents;contents.assign(labels);
+    Fl_Menu_Button popup(x+browser->x(),y+browser->y(),1,1);popup.menu(contents.entries.data());
+    const Fl_Menu_Item *chosen=popup.popup();if(!chosen)return -1;
+    size_t selected=chosen-contents.entries.data();
+    if(offset && selected==0){offset-=pageSize;continue;}
+    if(offset)--selected;
+    if(selected==count){offset+=count;continue;}
+    return int(offset+selected);
+  }
+}catch(...){return -1;}}
 extern "C" void browser_ui_notification(const char *text){try{browser->notifications->post(Json::parse(text));}catch(...){} }
 // All values use the same FLTK logical-pixel coordinates as the page surface.
 extern "C" void browser_ui_screen_geometry(int *values){

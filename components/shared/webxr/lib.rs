@@ -52,5 +52,5 @@ pub use space::{ApiSpace, BaseSpace, Space};
 pub use view::{
     CUBE_BACK, CUBE_BOTTOM, CUBE_LEFT, CUBE_RIGHT, CUBE_TOP, Capture, CubeBack, CubeBottom,
     CubeLeft, CubeRight, CubeTop, Display, Floor, Input, LEFT_EYE, LeftEye, Native, RIGHT_EYE,
-    RightEye, SomeEye, VIEWER, View, Viewer, Viewport, Viewports, Views,
+    RightEye, SomeEye, VIEWER, View, ViewDescription, ViewEye, Viewer, Viewport, Viewports, Views,
 };

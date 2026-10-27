@@ -1,0 +1,279 @@
+{
+  "completed_utc": "2026-10-27T16:57:54.069985+00:00",
+  "source_base_commit": "418258418435de5c06e47b4a340f5ae7908ef2a9",
+  "candidate_sha256": "dc91ae39c12441ddb75adb15355343bd1e9d6e4f2d59f6d038cbad822ccc509b",
+  "test_embedder_sha256": "6f02c88a09fd02315521e6f3f855b86efe7aac80a992adc24f22ffb4872463f5",
+  "compiled_inputs_unchanged": true,
+  "source_file_sha256": {
+    "components/config/prefs.rs": "9683343446fd50c6f4005583d818f4e9ec3685a03505671e1cf4e1567154e410",
+    "components/net/http_loader.rs": "93defdc361ee9e9604392c76a1b4115837949daaf51b8c162ff24db7e1fa2104",
+    "components/script/dom/servoparser/mod.rs": "e000981b95f58c71e3f811752f9e31d061875fba9f358cabdfac360466639e43",
+    "components/script/dom/webxr/fakexrdevice.rs": "e20f66ba70633092044996be6cc422c3b8fc4ebf32f1f24dab401dae849a24cd",
+    "components/script/dom/webxr/xrframe.rs": "c39edc83e194bb29e680b4116bd282ea12dd668a401654cb7cf3c06dc99d9320",
+    "components/script/dom/webxr/xrsession.rs": "f1b745124d9a161c5ab08f9db266bd242e1f7deb4cca7b73f782163f98637dba",
+    "components/script/dom/webxr/xrtest.rs": "1aa09dc34ed021cdfeb801c54edb5043b71ecf6aa27c17c94ccebfa4be2732e4",
+    "components/script/dom/webxr/xrview.rs": "5de718ead3451d9a064d571b2c5d98dfa2fd94bfbe26c04f2eb7035637e47cbe",
+    "components/script/dom/webxr/xrviewerpose.rs": "c0b454bcd2518921134442c2408d74e59e5e750515ca2ec41fdef1320fc12194",
+    "components/script/dom/webxr/xrwebgllayer.rs": "9397e0edaac6af4cc6386e1fecfd741da742082646a0d1bea09f50bb0beafbdf",
+    "components/script/fetch/fetch.rs": "5215f2729c6286dbbcaa7dc07100f87f9591bc69d9917ec647a2426d93983846",
+    "components/script_bindings/webidls/FakeXRDevice.webidl": "4cb11c204841fa14c41e32393647c21f773a6c1d0eb9f724bd2f994a3871f840",
+    "components/script_bindings/webidls/XRTest.webidl": "75d279229a41149b7cdd6abc08116ce12a368915d04411d570f67f82c6cb41cd",
+    "components/servo/servo.rs": "ee748840522405e716adf997ab66f136354cfd1beb272bc56f2eefd6f481e58c",
+    "components/servo/webview_delegate.rs": "3eec9ca6262f5a4d8461f6af4d24255f7a525d1b58e3775703e2e3bf45d22b1c",
+    "components/shared/embedder/lib.rs": "7730136e5bd11cca4591416f6018dd00d38d62bcc24c13517878acc2db8c6709",
+    "components/shared/webxr/lib.rs": "ebe68e79d421d7fa57a2c64d2c9b5d4d30d3652c2c9d0d7d0df9ed0566226667",
+    "components/shared/webxr/mock.rs": "0627d09819f7af81c61bf648b95344eba215ef8ed25cff9b89630e6d689adff9",
+    "components/shared/webxr/view.rs": "125227720be17af31094687da60f97d17aaa9a293ab2d6365ad3b269b0d57fb7",
+    "components/webxr/headless/mod.rs": "6ff5857b64fe8ee84fe48d15341882bed4de325e4895d12e94ab90fd8f3d1700",
+    "ports/dome-fltk/native/browser.cpp": "19d034ec55d845f8028197af6805276db25e0a4a8c95e7aa473a86ebc2cae34b",
+    "ports/dome-fltk/native/external-links.h": "7c43b4198f15adeece8de5f48109b096bb3b6950e93272400f8ab0312df79752",
+    "ports/dome-fltk/src/downloads.rs": "6f5ada9675d40e0dfcd79548d8efd0724f3d9e8e7880115110e3c287197d1ca7",
+    "ports/dome-fltk/src/main.rs": "6b65d22380d0781c93f2195cab4378157d97adccc824cd69d6aa13221a822641",
+    "ports/dome-fltk/tests/webxr-layer-wpt.py": "8ceebd5402f523a7014e67b68a1d1dbf7f5b99287372afb431c2a128074d6e2d",
+    "ports/dome-fltk/src/external_documents.rs": "0a9c2fa6ebeb74a6042314c8416cd407bc2dd76cb88488a97caeb2d7c346b966",
+    "ports/dome-fltk/tests/history-popup.py": "deab0e1c55e527ebe6fa8ef6da769d8baae303d85378884440643db27c39d328",
+    "ports/dome-fltk/tests/pdf-handoff.py": "e662af9c1fdee89079220119028f831a37c785a416cb41e9a071df91ab7f9fb3",
+    "ports/dome-fltk/tests/webxr-secondary-views.html": "108d0cfb64dd3a51ea42b2e4a2326a5fb6bca822403ff289dd54e0c831ccdd28",
+    "ports/dome-fltk/tests/webxr-secondary-views.py": "fe53a4d6eb921468d6c341683ceb9e78e15ffdd1c971c3562329fa872ef6fced"
+  },
+  "selected_units": 209,
+  "runtime_checks": 4545,
+  "worker_shutdown_cases": 3,
+  "upstream_passed_cases": 69,
+  "upstream_optional_unsupported": 4,
+  "regression_jobs": 34,
+  "all_required_passed": true,
+  "units": [
+    {
+      "name": "frontend",
+      "passed": 184,
+      "log_sha256": "b841d2df7c870f17c3e16ec679d5b137921ab04b9fc7722799c71e0ce32070b5"
+    },
+    {
+      "name": "geometry",
+      "passed": 10,
+      "log_sha256": "2759c4c4eef38c837214f60d131c55dfe5f7684196bd804299a86ec226d036df"
+    },
+    {
+      "name": "pointer-ids",
+      "passed": 2,
+      "log_sha256": "c466f143477d20df9d8b579eeab7e908e817f7b50e38b53d9c76ebdfdb2a52b7"
+    },
+    {
+      "name": "pen-payload",
+      "passed": 3,
+      "log_sha256": "14d6b1fc9d834eb304ba9d8d2b8cddea6ed03f27408df452890525a58b81f033"
+    },
+    {
+      "name": "factory",
+      "passed": 1,
+      "log_sha256": "8a8c21c8ea85006f04e6e5aef473a3e1aec721b1d46670043c1d8075a6cdfccf"
+    },
+    {
+      "name": "secondary",
+      "passed": 4,
+      "log_sha256": "e5442193655601fef4992b6e91b118527f326721296707293497074a73110706"
+    },
+    {
+      "name": "renderer",
+      "passed": 5,
+      "log_sha256": "396612af5c45a1577289bac289cd8791e746af2a827acb781bce5ec0241108b5"
+    }
+  ],
+  "suites": [
+    {
+      "name": "pdf-old",
+      "runtime_checks": 25,
+      "report_sha256": "da6b46b5e4f3df524b84dc8fbabc56fff7938a7e95e8699ce59e248fbcc7a82f"
+    },
+    {
+      "name": "pdf-new",
+      "runtime_checks": 25,
+      "report_sha256": "da6b46b5e4f3df524b84dc8fbabc56fff7938a7e95e8699ce59e248fbcc7a82f"
+    },
+    {
+      "name": "history-new",
+      "runtime_checks": 13,
+      "report_sha256": "fb69d7c08ccda81b7b50ebb29e6a0f951084bbb2494dbc8ab96eab10045bb541"
+    },
+    {
+      "name": "history-old",
+      "runtime_checks": 13,
+      "report_sha256": "fb69d7c08ccda81b7b50ebb29e6a0f951084bbb2494dbc8ab96eab10045bb541"
+    },
+    {
+      "name": "general-new",
+      "runtime_checks": 46,
+      "report_sha256": "90ae9fa47a09d413d31d88329faa5e9b44df0d28fe73493d31a325e823e1066a"
+    },
+    {
+      "name": "general-old",
+      "runtime_checks": 46,
+      "report_sha256": "90ae9fa47a09d413d31d88329faa5e9b44df0d28fe73493d31a325e823e1066a"
+    },
+    {
+      "name": "native-touch",
+      "runtime_checks": 22,
+      "report_sha256": "c57fa2adefec30239e4c5bb6ec1dc661b34e36aae8bee7f6f00a47e6a6901668"
+    },
+    {
+      "name": "mouse-inline",
+      "runtime_checks": 34,
+      "report_sha256": "80da0b7235b66cf15994127153bd22849130fde05d17e54d2617e6804b053c98"
+    },
+    {
+      "name": "controller",
+      "runtime_checks": 60,
+      "report_sha256": "38a6db427b269af5e2ce7594b43b4bf99307438d3de130efe4c41247d8e8faa3"
+    },
+    {
+      "name": "mouse-immersive",
+      "runtime_checks": 38,
+      "report_sha256": "b838ded8b7f3ce2053a9415192d8a8a133988f6bf458f89892216abd831a9387"
+    },
+    {
+      "name": "reset",
+      "runtime_checks": 101,
+      "report_sha256": "23b7cb4e7d4fa33ba7cfe3310f67d3058934039a23c049e7fbf7b12ab312727e"
+    },
+    {
+      "name": "engine-touch",
+      "runtime_checks": 43,
+      "report_sha256": "a1c95ce2710358e7e9f7c52a30549742e45505981c252a57bb98f316c418b49c"
+    },
+    {
+      "name": "visibility",
+      "runtime_checks": 77,
+      "report_sha256": "3cfc96f1e4c6b9bce9aa0103184e0a7946b69f3d88de0ecf0fb81159c0aad3e1"
+    },
+    {
+      "name": "frame-same",
+      "runtime_checks": 17,
+      "report_sha256": "c8206cb861c5b8ed07ed637bf0ea5aac70025aeba7b31449e1e3ecab8589d6d9"
+    },
+    {
+      "name": "frame-cross",
+      "runtime_checks": 17,
+      "report_sha256": "9dc1e73698fe52e7a1ed08e042d4ab40099f69b7f71ccf22b497c848dfa70372"
+    },
+    {
+      "name": "outcomes",
+      "runtime_checks": 9,
+      "report_sha256": "3ea178e01294ab974c3ac19b029a8e42305727f31f66155b7cfc2bf1055ec4d2"
+    },
+    {
+      "name": "native-pen",
+      "runtime_checks": 87,
+      "report_sha256": "048fff2726b5dd8404a743e177d9064e0d2e55665da7fb32fdac64be1f709f5e"
+    },
+    {
+      "name": "upstream",
+      "upstream_passed_cases": 7,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "980c54d7917777660e3d920067b4b4e512ad530cfa89e67d2ff12c9195dd4f3a"
+    },
+    {
+      "name": "layer-scaling",
+      "runtime_checks": 369,
+      "report_sha256": "11e62e57454cec2517bcd61f9d5bddf31ef0fce647ede9770c9b4cf1bba25f69"
+    },
+    {
+      "name": "layers-upstream",
+      "upstream_passed_cases": 22,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "94fb8167ca0912d86360016dd15c304f492fde130868c7ffccc4aaf1cd645470"
+    },
+    {
+      "name": "bounded",
+      "runtime_checks": 21,
+      "report_sha256": "38aa9753d23b80510f63b0e63175ea90ad82631cb8cd2aa2b17c68021cd0f775"
+    },
+    {
+      "name": "reset-upstream",
+      "upstream_passed_cases": 4,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "ee1550fcef8314a157b04029a4da917652732fe2bb153fa0e10f7771da456b94"
+    },
+    {
+      "name": "layer-attributes",
+      "runtime_checks": 1037,
+      "report_sha256": "6bbacb9492792df1ee30c065bfffbae13483bc88b14dbc51e03a6df57698c41c"
+    },
+    {
+      "name": "layer-attributes-opaque-context",
+      "runtime_checks": 1037,
+      "report_sha256": "6aca559320e192bb14b4017877fbba28d1153ae5484bc434588ac1d4c7b95e56"
+    },
+    {
+      "name": "compatibility-nohost",
+      "runtime_checks": 31,
+      "report_sha256": "e0c860020038356f1cf731102f751b4ba454b169340c5f542fecd82382f683e2"
+    },
+    {
+      "name": "compatibility-native",
+      "runtime_checks": 45,
+      "report_sha256": "a99daff4fe16415ce754e2973f31dc8b65408d4bf9df603587dc9e4a42cfeb70"
+    },
+    {
+      "name": "dynamic-upstream",
+      "upstream_passed_cases": 24,
+      "upstream_optional_unsupported": 4,
+      "report_sha256": "5e283a587d138ba292e7417bc43f2cc8f42597649a0edf687af56c47fb81227c"
+    },
+    {
+      "name": "dynamic",
+      "runtime_checks": 610,
+      "report_sha256": "fb7333cfb1b92b0f87ee6e5465c1236bf8f4005b5ce687e883a3164e3d77f604"
+    },
+    {
+      "name": "secondary",
+      "runtime_checks": 624,
+      "report_sha256": "c7435fd6f7cb3397a8a82ea88a582ecac089697de6ca291dc07a8db54dc79618"
+    },
+    {
+      "name": "secondary-upstream",
+      "upstream_passed_cases": 12,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "b4fdcaeb7399adf119f1e83c4e7e33bc3bab7e08f6f0e1bfa4dfe0da01a0778e"
+    },
+    {
+      "name": "external-links",
+      "runtime_checks": 63,
+      "report_sha256": "07e985f9334c5a70ef7e984ad568a375d1ea09ff28c11e6e1c7c8f3b30ca3730"
+    },
+    {
+      "name": "wasm-streams",
+      "runtime_checks": 17,
+      "report_sha256": "c1dd8bd44e1a089071c1e29dff5ea3ffbbb25c38d5e6d7051d3d6b68365a8177"
+    },
+    {
+      "name": "downloads",
+      "runtime_checks": 18,
+      "report_sha256": "ee4e74c8fe4dbe1dbe420926fa17af385bd7aae2ccf240341d36b28ceed0a9e6"
+    },
+    {
+      "name": "worker-shutdown",
+      "worker_shutdown_cases": 3,
+      "report_sha256": "0ecdd3fbe1610b6961d0670dce20fe6db2b183f226689bde4df0a94520af451b"
+    }
+  ],
+  "initial_reports": [
+    "../history-popup-ctd-v1/before/report.json",
+    "before-upstream/report.json",
+    "../pdf-handoff-v1/r5-before-fetch-fix/report.json"
+  ],
+  "remaining": [
+    "Full WebGL context loss/restoration and adapter migration",
+    "Permissions Policy integration and broader WebXR coverage",
+    "DomeD shell touch/stylus interactions beyond native client surfaces",
+    "Dynamic scaling on optional native backends",
+    "Physical device validation",
+    "Continuous stability, web adblocking/privacy and local workstation protection maintenance",
+    "Final standards-focused Discord/x.com rendering"
+  ],
+  "physical_device_validation": false,
+  "optional_windows_openxr_compiled": false,
+  "installed": false,
+  "sessions_restarted": false,
+  "artifacts_directory": "artifacts/servo-rendering-goal/webxr-secondary-views-v1"
+}

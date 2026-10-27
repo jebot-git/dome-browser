@@ -445,6 +445,16 @@ impl Image {
     }
 }
 
+/// A single navigation response streamed to a native document handler.
+pub type ExternalDocumentId = PipelineId;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum ExternalDocumentEvent {
+    Start { id: ExternalDocumentId, url: Url, content_type: String, content_disposition: String },
+    Data { id: ExternalDocumentId, bytes: Vec<u8> },
+    Finished { id: ExternalDocumentId, result: Result<(), String> },
+}
+
 /// The severity level of a message logged by page content.
 #[derive(Clone, Debug, Deserialize, Serialize, MallocSizeOf)]
 #[serde(rename_all = "lowercase")]
@@ -527,6 +537,7 @@ pub enum EmbedderMsg {
     NotifyFullscreenStateChanged(WebViewId, bool),
     /// The [`LoadStatus`] of the Given `WebView` has changed.
     NotifyLoadStatusChanged(WebViewId, LoadStatus),
+    ExternalDocument(WebViewId, ExternalDocumentEvent),
     /// Open dialog to select bluetooth device.
     GetSelectedBluetoothDevice(
         WebViewId,

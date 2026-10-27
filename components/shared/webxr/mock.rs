@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::GenericReceiver;
 
 use crate::{
-    DiscoveryAPI, Display, EntityType, Error, Floor, Handedness, Input, InputId, InputSource,
-    LeftEye, Native, RightEye, SelectEvent, SelectKind, TargetRayMode, Triangle, Viewer, Viewport,
-    Visibility,
+    ApiSpace, DiscoveryAPI, Display, EntityType, Error, Floor, Handedness, Input, InputId,
+    InputSource, Native, SelectEvent, SelectKind, TargetRayMode, Triangle, ViewEye, Viewer,
+    Viewport, Visibility,
 };
 
 /// A trait for discovering mock XR devices
@@ -30,6 +30,7 @@ pub struct MockDeviceInit {
     pub supports_ar: bool,
     pub viewer_origin: Option<RigidTransform3D<f32, Viewer, Native>>,
     pub views: MockViewsInit,
+    pub secondary_views: MockViewsInit,
     pub supported_features: Vec<String>,
     pub world: Option<MockWorld>,
 }
@@ -41,19 +42,19 @@ pub struct MockViewInit<Eye> {
     pub viewport: Rect<i32, Viewport>,
     /// field of view values, in radians
     pub fov: Option<(f32, f32, f32, f32)>,
+    pub eye: ViewEye,
+    pub is_first_person_observer: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum MockViewsInit {
-    Mono(MockViewInit<Viewer>),
-    Stereo(MockViewInit<LeftEye>, MockViewInit<RightEye>),
-}
+/// Mock devices accept ordered lists, including more than two primary views
+/// and repeated eye labels, just as the WebXR test API does.
+pub type MockViewsInit = Vec<MockViewInit<ApiSpace>>;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum MockDeviceMsg {
     SetViewerOrigin(Option<RigidTransform3D<f32, Viewer, Native>>),
     SetFloorOrigin(Option<RigidTransform3D<f32, Floor, Native>>),
-    SetViews(MockViewsInit),
+    SetViews(MockViewsInit, Option<MockViewsInit>),
     AddInputSource(MockInputInit),
     MessageInputSource(InputId, MockInputMsg),
     VisibilityChange(Visibility),

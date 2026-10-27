@@ -4,6 +4,7 @@ mod compatibility;
 mod downloads;
 mod external_media;
 mod external_links;
+mod external_documents;
 mod wallet;
 mod storage;
 mod cookie_settings;
@@ -85,6 +86,7 @@ struct Services {
     downloads: downloads::Downloads,
     external_player: external_media::Handoff,
     external_links: external_links::Handoff,
+    external_pdf: external_documents::Handoff,
     xr_focus: xr::Focus,
 }
 impl servo::ServoDelegate for Services {
@@ -102,6 +104,7 @@ struct PageState {
     closed: Cell<bool>,
     pending: RefCell<Vec<servo::CreateNewWebViewRequest>>,
     pending_external: RefCell<Option<(Url, Option<Url>)>>,
+    pdf: RefCell<external_documents::Incoming>,
     tab: usize,
     services: Rc<Services>,
     permissions: Rc<RefCell<std::collections::HashSet<String>>>,
@@ -133,13 +136,21 @@ impl WebViewDelegate for PageState {
         self.history.set((current, entries.len()));
         self.changed.set(true)
     }
+    fn notify_external_document(&self, _: WebView, event: servo::ExternalDocumentEvent) {
+        match self.pdf.borrow_mut().event(event) {
+            Ok(Some(path)) => self.services.external_pdf.launch(path),
+            Ok(None) => (),
+            Err(error) => ui::status(&format!("Cannot open PDF: {error}")),
+        }
+    }
     fn notify_load_status_changed(&self, _: WebView, status: LoadStatus) {
-        if status==LoadStatus::Started {self.protocol_notice.borrow_mut().take();}
+        if status==LoadStatus::Started {self.protocol_notice.borrow_mut().take();self.pdf.borrow_mut().cancel();}
         self.loaded.set(status == LoadStatus::Complete);
         if self.loaded.get() {ui::status(self.protocol_notice.borrow().as_deref().unwrap_or("Ready"));}
         else {ui::status("Loading…");}
     }
     fn notify_closed(&self, _: WebView) {
+        self.pdf.borrow_mut().cancel();
         self.closed.set(true)
     }
     fn screen_geometry(&self, _: WebView) -> Option<servo::ScreenGeometry> {
@@ -439,6 +450,7 @@ fn state(id: usize, permissions: Rc<RefCell<std::collections::HashSet<String>>>,
         closed: Cell::new(false),
         pending: RefCell::new(Vec::new()),
         pending_external: RefCell::new(None),
+        pdf: RefCell::new(external_documents::Incoming::default()),
         tab: id,
         services,
         permissions,
@@ -730,7 +742,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else { None };
     let services=Rc::new(Services { blocker:RefCell::new(adblocking::Blocker::load(&profile)?),
         wallet:RefCell::new(wallet::Wallet::new(&profile)?),active:Cell::new(0),downloads:downloads::Downloads::new(),
-        external_player:external_media::Handoff::new(&profile),external_links:external_links::Handoff::new(), xr_focus: xr::Focus::default() });
+        external_player:external_media::Handoff::new(&profile),external_links:external_links::Handoff::new(), external_pdf:external_documents::Handoff::new(), xr_focus: xr::Focus::default() });
     let mut history_writable = screenshot.is_none();
     let mut history = match storage::History::load(&profile.join("hs.txt")) {
         Ok(history) => history,
@@ -752,6 +764,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     prefs.network_cosmetic_filtering_enabled = true;
     unsafe { ui::browser_ui_cookie_policy(i32::from(third_party_cookies_blocked)); }
     prefs.dom_notification_enabled = true;
+    prefs.dom_external_pdf_enabled = true;
     // GitHub's component runtime requires these implemented Servo APIs.
     prefs.dom_intersection_observer_enabled = true;
     prefs.dom_adoptedstylesheet_enabled = true;
@@ -872,6 +885,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         while let Ok(result)=services.external_links.receiver.try_recv() {
             match result { Ok(())=>ui::status("Link opened in the default application"),Err(message)=>ui::status(message) }
+        }
+        while let Ok(result) = services.external_pdf.receiver.try_recv() {
+            match result { Ok(path)=>ui::status(&format!("PDF opened in system viewer; saved to {}",path.display())),Err(error)=>ui::status(&error) }
         }
         while let Ok(success) = services.external_player.receiver.try_recv() {
             if !success { ui::status("External player could not play this media or page"); }

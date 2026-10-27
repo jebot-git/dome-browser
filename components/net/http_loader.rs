@@ -2249,7 +2249,6 @@ async fn http_network_fetch(
     let timing_ptr2 = fetch_params.timing_info.clone();
     let timing_ptr3 = fetch_params.timing_info.clone();
     let url1 = request.url();
-    let url2 = url1.clone();
 
     let prealloc_size: usize = if let Some(possible_length) = response_stream
         .headers()
@@ -2322,22 +2321,16 @@ async fn http_network_fetch(
                 future::ready(Ok(()))
             })
             .map_err(move |error| {
-                if let std::io::ErrorKind::InvalidData = error.kind() {
-                    debug!("Content decompression error for {:?}", url2);
-                    let _ = done_sender3.send(Data::Error(NetworkError::DecompressionError));
-                    let mut body = response_body2.lock();
-
-                    *body = ResponseBody::Done(vec![]);
-                }
-                debug!("finished response for {:?}", url2);
-                let mut body = response_body2.lock();
-                let completed_body = match *body {
-                    ResponseBody::Receiving(ref mut body) => std::mem::take(body),
-                    _ => vec![],
+                let failure = if error.kind() == std::io::ErrorKind::InvalidData {
+                    NetworkError::DecompressionError
+                } else {
+                    NetworkError::ResourceLoadError("Network response body transfer failed".into())
                 };
-                *body = ResponseBody::Done(completed_body);
+                // An interrupted body is not a successful EOF. Consumers must
+                // reject it and cannot commit the partial response as a file.
+                *response_body2.lock() = ResponseBody::Done(vec![]);
                 timing_ptr3.set_attribute(ResourceAttribute::ResponseEnd);
-                let _ = done_sender3.send(Data::Done);
+                let _ = done_sender3.send(Data::Error(failure));
             }),
     );
 

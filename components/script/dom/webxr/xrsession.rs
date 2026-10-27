@@ -158,27 +158,22 @@ pub(crate) struct XRSession {
     #[no_trace]
     last_inline_pose: DomRefCell<Option<webxr_api::ViewerPose>>,
     #[no_trace]
-    viewport_scales: DomRefCell<Vec<webxr_api::ViewportScale>>,
+    viewport_scales: DomRefCell<HashMap<u64, webxr_api::ViewportScale>>,
+    active_view_ids: DomRefCell<Vec<u64>>,
 }
 
 impl XRSession {
-    pub(crate) fn request_viewport_scale(&self, index: usize, scale: Option<f64>) {
+    pub(crate) fn request_viewport_scale(&self, id: u64, scale: Option<f64>) {
         if self.is_immersive() && !self.session.borrow().supports_dynamic_viewport_scaling() { return; }
-        let mut scales = self.viewport_scales.borrow_mut();
-        let length = scales.len().max(index + 1);
-        scales.resize_with(length, Default::default);
-        scales[index].request(scale);
+        if let Some(state) = self.viewport_scales.borrow_mut().get_mut(&id) { state.request(scale); }
     }
 
-    pub(crate) fn commit_viewport_scale(&self, index: usize) -> f64 {
-        let mut scales = self.viewport_scales.borrow_mut();
-        let length = scales.len().max(index + 1);
-        scales.resize_with(length, Default::default);
-        scales[index].commit()
+    pub(crate) fn commit_viewport_scale(&self, id: u64) -> f64 {
+        self.viewport_scales.borrow_mut().get_mut(&id).map_or(1.0, |state| state.commit())
     }
 
     pub(crate) fn current_viewport_scale(&self, index: usize) -> f64 {
-        self.viewport_scales.borrow().get(index).map_or(1.0, |scale| scale.current())
+        self.active_view_ids.borrow().get(index).and_then(|id| self.viewport_scales.borrow().get(id).map(|state| state.current())).unwrap_or(1.0)
     }
 
     /// A document leaving the active browsing context must release its device,
@@ -226,7 +221,8 @@ impl XRSession {
             inline_pointer_canvas: Default::default(),
             next_inline_pointer_id: Cell::new(u32::MAX),
             last_inline_pose: DomRefCell::new(None),
-            viewport_scales: DomRefCell::new(Vec::new()),
+            viewport_scales: DomRefCell::new(HashMap::new()),
+            active_view_ids: DomRefCell::new(Vec::new()),
         }
     }
 
@@ -572,7 +568,12 @@ impl XRSession {
             .to_dom_high_res_time_stamp(time);
         let frame = XRFrame::new(cx, self.global().as_window(), self, frame);
 
-        for scale in self.viewport_scales.borrow_mut().iter_mut() { scale.begin_frame(); }
+        if let Some(ids) = frame.view_ids() {
+            let mut scales = self.viewport_scales.borrow_mut();
+            scales.retain(|id, _| ids.contains(id));
+            for id in &ids { scales.entry(*id).or_default().begin_frame(); }
+            *self.active_view_ids.borrow_mut() = ids;
+        }
 
         // Step 8-9
         frame.set_active(true);

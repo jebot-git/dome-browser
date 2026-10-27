@@ -75,8 +75,7 @@ sessions. Native captures compare submitted rectangles and pixels, including
 orientation and the unused area beside reduced viewports. The dedicated
 upstream scaling page runs with `tests/webxr-layer-wpt.py --dynamic-only`.
 Its four optional recommendation cases are reported separately; all scaling
-assertions must pass. The broader secondary-view mock-device gap remains
-outside this dedicated scaling suite.
+assertions must pass. Secondary-view behavior has its own fixture below.
 
 The [27 October validation record](validation-dynamic-viewports-2026-10-27.json)
 contains the tested source and binary hashes: 203 selected unit tests, 3,747
@@ -87,6 +86,37 @@ The mouse fixture waits for the complete event-report sequence before checking
 selection counts; HTTP delivery order does not determine browser event order.
 This remains scoped software/native-fixture validation, with physical-device
 and optional-backend validation still outstanding.
+
+## Secondary views and changing view sets
+
+The mock backend preserves each view's eye, projection, transform and
+`isFirstPersonObserver` metadata. It accepts arbitrary primary and secondary
+view counts, including repeated eye labels. Secondary views appear only in an
+immersive session that was granted `secondary-views`; inline sessions retain
+their single primary view. Updating primary views while omitting secondary
+views retains the latter, while an explicit empty secondary list clears them.
+Invalid combined updates leave both sets unchanged.
+
+View IDs remain stable while a view is retained. Scale requests follow those
+IDs even when their array index changes; removed views cannot affect replacement
+views. New layouts pack asymmetric view widths and fit their rectangles within
+the layer's existing framebuffer allocation. Viewport caches include view
+identity, avoiding reuse for a replacement view with identical geometry.
+
+`tests/webxr-secondary-views.py` checks feature gating, metadata, changes of
+view count, retained and replaced identities, independent scaling and GPU pixel
+readback in both WebGL versions. `tests/webxr-layer-wpt.py --secondary-only`
+runs the upstream secondary-view and viewport pages without replacing their
+assertions. These follow the [WebXR Test API view-update rules](https://immersive-web.github.io/webxr-test-api/).
+The [combined validation record](validation-secondary-views-history-pdf-2026-10-27.json)
+records 209 selected units, 4,545 runtime checks, 69 upstream passes and three
+worker-shutdown cases across 34 regression suites. Four optional viewport-scale
+recommendation cases remain unsupported. History and PDF handoff were each
+validated with both available FLTK runtime versions.
+
+This mock-device coverage does not establish additional physical-camera or
+headset interoperability. Context loss, Permissions Policy and broader
+physical-device validation remain continuing work.
 
 ## Context eligibility
 

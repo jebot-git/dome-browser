@@ -26,6 +26,7 @@ dictionary FakeXRDeviceInit {
     sequence<XRSessionMode> supportedModes;
 
     required sequence<FakeXRViewInit> views;
+    sequence<FakeXRViewInit> secondaryViews;
 
     // this is actually sequence<any>, but we don't support
     // non-string features anyway

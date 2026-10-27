@@ -59,6 +59,27 @@ impl XRViewerPose {
                 0,
                 &to_base,
             )),
+            Views::List(descriptions) => {
+                for (index, description) in descriptions.iter().enumerate() {
+                    let eye = match description.eye {
+                        webxr_api::ViewEye::None => XREye::None,
+                        webxr_api::ViewEye::Left => XREye::Left,
+                        webxr_api::ViewEye::Right => XREye::Right,
+                    };
+                    let view = XRView::new(
+                        cx,
+                        window,
+                        session,
+                        frame,
+                        &description.view,
+                        eye,
+                        index,
+                        &to_base,
+                    );
+                    view.describe(description.id, description.is_first_person_observer);
+                    views.push(view);
+                }
+            },
             Views::Mono(view) => views.push(XRView::new(
                 cx,
                 window,
@@ -112,7 +133,7 @@ impl XRViewerPose {
                     1,
                     &to_base,
                 ));
-                views.push(XRView::new(
+                let observer = XRView::new(
                     cx,
                     window,
                     session,
@@ -121,7 +142,9 @@ impl XRViewerPose {
                     XREye::None,
                     2,
                     &to_base,
-                ));
+                );
+                observer.describe(2, true);
+                views.push(observer);
             },
             Views::Cubemap(front, left, right, top, bottom, back) => {
                 views.push(XRView::new(

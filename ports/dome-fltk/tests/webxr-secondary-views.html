@@ -1,0 +1,79 @@
+<!doctype html><meta charset="utf-8"><title>Secondary view lifecycle</title>
+<script>
+const state=window.test={ready:true,finished:false,error:null,checks:[],frames:0};
+state.snapshot=()=>({...state,snapshot:undefined});
+const check=(value,label)=>{if(!value)throw Error(label);state.checks.push(label)};
+const identity=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
+function init(eye,w,h,y=0,observer=false){return {eye,resolution:{width:w,height:h},projectionMatrix:identity,viewOffset:{position:[0,y,0],orientation:[0,0,0,1]},isFirstPersonObserver:observer}}
+const primary=[init('left',63,95),init('right',64,80)];
+const secondary=[init('none',31,41,.1,true),init('left',17,59,.2,false)];
+const three=[init('left',19,51),init('left',23,49),init('right',29,47)];
+const rect=v=>({x:v.x,y:v.y,width:v.width,height:v.height});
+const raf=(session,fn)=>new Promise((resolve,reject)=>session.requestAnimationFrame((time,frame)=>{state.frames++;try{const value=fn(frame);setTimeout(()=>resolve(value),0)}catch(error){reject(error)}}));
+function fullRectangles(views,w,h){
+ const width=views.reduce((s,v)=>s+v.resolution.width,0),height=Math.max(...views.map(v=>v.resolution.height));
+ const scale=Math.min(w/width,h/height),tw=Math.min(w,Math.ceil(width*scale)),th=Math.min(h,Math.ceil(height*scale));let edge=0;
+ return views.map(v=>{const left=Math.floor(edge*tw/width);edge+=v.resolution.width;return {x:left,y:0,width:Math.floor(edge*tw/width)-left,height:Math.floor(v.resolution.height*th/height)}});
+}
+async function main(){
+ for(const version of ['webgl','webgl2']){
+  const device=await navigator.xr.test.simulateDeviceConnection({supportedModes:['inline','immersive-vr'],views:primary,secondaryViews:secondary,supportedFeatures:['viewer','local','secondary-views'],viewerOrigin:{position:[0,0,0],orientation:[0,0,0,1]}});
+  const canvas=document.createElement('canvas');canvas.width=240;canvas.height=120;document.body.append(canvas);
+  const gl=canvas.getContext(version,{xrCompatible:true});await gl.makeXRCompatible();
+  let session=await navigator.xr.requestSession('immersive-vr');let space=await session.requestReferenceSpace('viewer');let layer=new XRWebGLLayer(session,gl);session.updateRenderState({baseLayer:layer});
+  await raf(session,frame=>check(frame.getViewerPose(space).views.length===2,version+': unrequested secondary views stay inactive'));await session.end();
+  session=await navigator.xr.requestSession('inline',{optionalFeatures:['secondary-views']});space=await session.requestReferenceSpace('viewer');layer=new XRWebGLLayer(session,gl);session.updateRenderState({baseLayer:layer});
+  await raf(session,frame=>{const views=frame.getViewerPose(space).views;check(views.length===1&&views[0].eye==='none'&&!views[0].isFirstPersonObserver,version+': inline sessions expose only their primary view')});await session.end();
+  session=await navigator.xr.requestSession('immersive-vr',{requiredFeatures:['secondary-views']});space=await session.requestReferenceSpace('viewer');layer=new XRWebGLLayer(session,gl);session.updateRenderState({baseLayer:layer});
+  const allocation=[layer.framebufferWidth,layer.framebufferHeight];let saved=null,oldPorts=null;
+  async function draw(expected,scales,label,before){
+   return raf(session,frame=>{
+    const views=frame.getViewerPose(space).views;check(views.length===expected.length,label+': every active view is exposed');
+    if(before)before(views);
+    const full=fullRectangles(expected,...allocation);gl.bindFramebuffer(gl.FRAMEBUFFER,layer.framebuffer);gl.disable(gl.SCISSOR_TEST);gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
+    check(gl.checkFramebufferStatus(gl.FRAMEBUFFER)===gl.FRAMEBUFFER_COMPLETE,label+': GPU framebuffer stays complete');
+    const ports=[];gl.enable(gl.SCISSOR_TEST);
+    views.forEach((view,i)=>{
+     const wanted=expected[i],v=layer.getViewport(view);ports.push(v);
+     check(view.index===i&&view.eye===wanted.eye&&view.isFirstPersonObserver===wanted.isFirstPersonObserver,label+': metadata and index '+i);
+     check(Math.abs(view.transform.position.y-wanted.viewOffset.position[1])<1e-5,label+': native view offset '+i);
+     check([...view.projectionMatrix].every((value,j)=>Math.abs(value-wanted.projectionMatrix[j])<1e-5),label+': projection '+i);
+     check(v&&v.x===full[i].x&&v.y===0&&v.width===Math.max(1,Math.floor(full[i].width*scales[i]))&&v.height===Math.max(1,Math.floor(full[i].height*scales[i])),label+': viewport uses its own identity and allocation '+i);
+     check(v.x>=0&&v.y>=0&&v.x+v.width<=allocation[0]&&v.y+v.height<=allocation[1],label+': viewport stays inside the allocation '+i);
+     check(v===layer.getViewport(view),label+': repeated query is stable '+i);
+     for(let j=0;j<i;j++)check(ports[j].x+ports[j].width<=v.x,label+': view regions do not overlap '+j+'/'+i);
+     gl.scissor(v.x,v.y,v.width,v.height);gl.clearColor((31+i*37)/255,61/255,127/255,1);gl.clear(gl.COLOR_BUFFER_BIT);
+    });
+    views.forEach((view,i)=>{const v=ports[i],pixel=new Uint8Array(4);gl.readPixels(v.x,v.y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);check([...pixel].join(',')===[31+i*37,61,127,255].join(','),label+': independent pixels '+i)});
+    gl.disable(gl.SCISSOR_TEST);check(gl.getError()===0,label+': no GL errors');check(layer.framebufferWidth===allocation[0]&&layer.framebufferHeight===allocation[1],label+': allocation remains stable');
+    return {views,ports};
+   });
+  }
+  saved=await draw([...primary,...secondary],[1,1,1,1],version+' initial');
+  await draw([...primary,...secondary],[.5,1,.5,1],version+' scale requests',views=>{views[0].requestViewportScale(.5);views[2].requestViewportScale(.5)});
+  // A replacement with identical geometry must have fresh view identities.
+  device.setViews(primary);
+  await raf(session,()=>{});await raf(session,()=>{});
+  const replaced=await draw([...primary,...secondary],[1,1,.5,1],version+' replace primary',views=>saved.views[0].requestViewportScale(.2));
+  check(replaced.ports[0]!==saved.ports[0],version+': replacement primary receives a new viewport object');
+  // Move retained secondary views to new array positions without losing scales.
+  device.setViews(three);await raf(session,()=>{});await raf(session,()=>{});
+  await draw([...three,...secondary],[1,1,1,.5,1],version+' arbitrary primary count');
+  device.setViews(three,[]);await raf(session,()=>{});await raf(session,()=>{});
+  await draw(three,[1,1,1],version+' clear secondary');
+  device.setViews(primary,secondary);await raf(session,()=>{});await raf(session,()=>{});
+  await draw([...primary,...secondary],[1,1,1,1],version+' replace secondary');
+  // Invalid replacement is atomic: neither list is changed.
+  let error=null;try{device.setViews(three,[init('none',0,41)])}catch(e){error=e.name}
+  check(error==='TypeError',version+': invalid secondary geometry is rejected');
+  const beforeIdentity=await draw([...primary,...secondary],[1,1,1,1],version+' rejected update retains views');
+  device.setViews(primary);await raf(session,()=>{});await raf(session,()=>{});
+  const afterIdentity=await draw([...primary,...secondary],[1,1,1,1],version+' identical geometry replacement');
+  check(beforeIdentity.ports[0]!==afterIdentity.ports[0],version+': changed identity replaces a geometrically identical primary viewport');
+  check(beforeIdentity.ports[2]===afterIdentity.ports[2],version+': omitted secondary keeps its identity and viewport object');
+  await session.end();await device.disconnect();
+ }
+ state.finished=true;
+}
+addEventListener('DOMContentLoaded',()=>main().catch(error=>{state.error=error.stack||error.message}));
+</script><body></body>

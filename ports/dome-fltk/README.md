@@ -101,7 +101,7 @@ The profile's `hs.txt` stores recently completed page URLs, one URL per line,
 most recent first. It keeps up to 2,000 unique URLs within the profile-file size
 limit and excludes `about:blank` and URLs with embedded credentials. There are
 no timestamps or form contents in this file. **History → Open History** (Ctrl+H)
-uses the native picker, and **Clear History** removes the list and completions
+uses a native picker with 20 entries per page, and **Clear History** removes the list and completions
 after confirmation. The address bar offers inline completion from this history
 while typing, selecting the suggested suffix so continued typing replaces it.
 It supports both full URLs and host/path prefixes without a scheme, preserving
@@ -110,6 +110,30 @@ wins over a longer prefix match. Backspace/Delete remain normal editing keys.
 `hs.txt` uses the same private atomic writes as session/bookmark files. Invalid
 history files are preserved, and automatic history writes are disabled for that
 run until the user explicitly clears history.
+
+History and tab captions are shortened for display at Unicode boundaries. Each
+entry retains its own selection index even when shortened captions look alike;
+navigation and saved history keep the complete URL. Native window titles are
+also bounded so long page titles remain usable. `tests/history-popup.py` checks
+repeated opening, paging, selection and clean shutdown with a private 2,000-entry
+history containing long URLs and a long Unicode page title.
+
+## PDF files
+
+Top-level PDF navigations save the completed response into the user's Downloads
+folder and open the system's PDF viewer. DomeD's `application/pdf` default takes
+precedence over the standard desktop MIME default. Both file and URI desktop
+handlers are supported. The browser passes the original response bytes, including
+authenticated requests, POST results and redirects, without downloading again.
+Incomplete or cancelled transfers remove their partial files and never launch
+a viewer. Saved files have private permissions and a `.pdf` filename. If a viewer
+is unavailable, the complete file remains saved and the status bar reports it.
+Embedded PDFs do not launch external applications automatically; an HTML page
+whose URL ends in `.pdf` remains a normal page.
+
+`tests/pdf-handoff.py` uses private desktop handlers to check these behaviors,
+including UTF-8 filenames, local files, compressed responses and interrupted
+transfers. It does not change the user's application defaults.
 
 ## Mail and torrent links
 

@@ -697,7 +697,7 @@ impl FetchCallState {
     ) {
         let mut realm = enter_auto_realm(cx, &*self.response);
         let cx = &mut realm.current_realm();
-        if let Err(NetworkError::DecompressionError) = response {
+        if response.is_err() {
             self.response
                 .error_stream(cx, Error::Type(c"Network error occurred".to_owned()));
         }

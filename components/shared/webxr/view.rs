@@ -6,6 +6,8 @@
 
 use std::marker::PhantomData;
 
+use crate::ApiSpace;
+
 use euclid::{Rect, RigidTransform3D, Transform3D};
 use malloc_size_of_derive::MallocSizeOf;
 use serde::{Deserialize, Serialize};
@@ -122,6 +124,24 @@ impl<Eye> View<Eye> {
     }
 }
 
+/// The eye label is independent of the number or position of active views.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, MallocSizeOf)]
+pub enum ViewEye {
+    None,
+    Left,
+    Right,
+}
+
+/// Description of an active view with a stable identity within its session.
+/// Replacing a view must give it a new ID, even if its geometry is identical.
+#[derive(Clone, Debug, Serialize, Deserialize, MallocSizeOf)]
+pub struct ViewDescription {
+    pub id: u64,
+    pub eye: ViewEye,
+    pub view: View<ApiSpace>,
+    pub is_first_person_observer: bool,
+}
+
 /// Whether a device is mono or stereo, and the views it supports.
 #[derive(Clone, Debug, Serialize, Deserialize, MallocSizeOf)]
 #[expect(clippy::large_enum_variant)]
@@ -129,6 +149,7 @@ pub enum Views {
     /// Mono view for inline VR, viewport and projection matrices are calculated by client
     Inline,
     Mono(View<Viewer>),
+    List(Vec<ViewDescription>),
     Stereo(View<LeftEye>, View<RightEye>),
     StereoCapture(View<LeftEye>, View<RightEye>, View<Capture>),
     Cubemap(
@@ -139,6 +160,19 @@ pub enum Views {
         View<CubeBottom>,
         View<CubeBack>,
     ),
+}
+
+impl Views {
+    pub fn identities(&self) -> Vec<u64> {
+        let count = match self {
+            Self::List(views) => return views.iter().map(|view| view.id).collect(),
+            Self::Inline | Self::Mono(_) => 1,
+            Self::Stereo(..) => 2,
+            Self::StereoCapture(..) => 3,
+            Self::Cubemap(..) => 6,
+        };
+        (0..count).collect()
+    }
 }
 
 /// A list of viewports per-eye in the order of fields in Views.

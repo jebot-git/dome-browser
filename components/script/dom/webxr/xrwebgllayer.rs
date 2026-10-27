@@ -12,8 +12,8 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object_with_proto;
 use servo_canvas_traits::webgl::{WebGLCommand, WebGLContextId, WebGLTextureId};
 use webxr_api::{
-    ContextId as WebXRContextId, LayerAttributes, LayerId, LayerInit, Viewport, Viewports,
-    scaled_viewport,
+    ContextId as WebXRContextId, LayerAttributes, LayerGeometry, LayerId, LayerInit, Viewport,
+    Viewports, scaled_viewport,
 };
 
 use crate::canvas_context::CanvasContext;
@@ -60,8 +60,10 @@ pub(crate) struct XRWebGLLayer {
     /// If none, this is an inline session (the composition disabled flag is true)
     framebuffer: Option<Dom<WebGLFramebuffer>>,
     #[no_trace]
-    viewports: Vec<Rect<i32, Viewport>>,
-    viewport_objects: DomRefCell<Vec<Option<(Dom<XRViewport>, f64, Dom<XRFrame>)>>>,
+    viewports: DomRefCell<Vec<Rect<i32, Viewport>>>,
+    #[no_trace]
+    source_viewports: DomRefCell<Vec<Rect<i32, Viewport>>>,
+    viewport_objects: DomRefCell<Vec<Option<(Dom<XRViewport>, f64, Dom<XRFrame>, u64)>>>,
 }
 
 impl XRWebGLLayer {
@@ -78,7 +80,10 @@ impl XRWebGLLayer {
             antialias: attributes.antialias,
             ignore_depth_values: attributes.ignore_depth_values,
             framebuffer: framebuffer.map(Dom::from_ref),
-            viewports,
+            viewports: DomRefCell::new(viewports),
+            source_viewports: DomRefCell::new(
+                session.with_session(|session| session.viewports().to_vec()),
+            ),
             viewport_objects: DomRefCell::new(Vec::new()),
         }
     }
@@ -145,6 +150,28 @@ impl XRWebGLLayer {
     pub(crate) fn begin_frame(&self, cx: &mut JSContext, frame: &XRFrame) -> Option<()> {
         debug!("XRWebGLLayer begin frame");
         let framebuffer = self.framebuffer.as_ref()?;
+        let source = self
+            .session()
+            .with_session(|session| session.viewports().to_vec());
+        if *self.source_viewports.borrow() != source {
+            let full = if source.is_empty() {
+                Vec::new()
+            } else {
+                LayerGeometry::new(
+                    &Viewports {
+                        viewports: source.clone(),
+                    },
+                    f32::INFINITY,
+                    self.size().to_i32(),
+                )
+                .ok()?
+                .viewports
+                .viewports
+            };
+            self.viewport_objects.borrow_mut().truncate(full.len());
+            *self.viewports.borrow_mut() = full;
+            *self.source_viewports.borrow_mut() = source;
+        }
         let sub_images = frame.get_sub_images(self.layer_id()?)?;
         let session = self.session();
         let context = framebuffer.upcast().context()?;
@@ -226,6 +253,7 @@ impl XRWebGLLayer {
             let viewports = Viewports {
                 viewports: self
                     .viewports
+                    .borrow()
                     .iter()
                     .enumerate()
                     .map(|(index, &full)| {
@@ -405,31 +433,34 @@ impl XRWebGLLayerMethods<crate::DomTypeHolder> for XRWebGLLayer {
             .borrow()
             .get(index)
             .and_then(|cached| {
-                cached.as_ref().map(|(viewport, scale, frame)| {
+                cached.as_ref().map(|(viewport, scale, frame, id)| {
                     (
                         DomRoot::from_ref(&**viewport),
                         *scale,
                         DomRoot::from_ref(&**frame),
+                        *id,
                     )
                 })
             });
         if cached
             .as_ref()
-            .is_some_and(|(_, _, frame)| &**frame == view.frame())
+            .is_some_and(|(_, _, frame, id)| &**frame == view.frame() && *id == view.view_id())
         {
-            return Ok(cached.map(|(viewport, _, _)| viewport));
+            return Ok(cached.map(|(viewport, _, _, _)| viewport));
         }
         let full = if self.framebuffer.is_none() {
             Rect::from_size(self.size().to_i32())
         } else {
-            let Some(full) = self.viewports.get(index) else {
+            let viewports = self.viewports.borrow();
+            let Some(full) = viewports.get(index) else {
                 return Ok(None);
             };
             *full
         };
-        let scale = self.session().commit_viewport_scale(index);
+        let scale = self.session().commit_viewport_scale(view.view_id());
         let viewport = scaled_viewport(full, scale);
-        let result = if let Some((cached, cached_scale, _)) = cached
+        let result = if let Some((cached, cached_scale, _, cached_id)) = cached
+            && cached_id == view.view_id()
             && cached_scale == scale
             && cached.rect() == viewport
         {
@@ -440,7 +471,12 @@ impl XRWebGLLayerMethods<crate::DomTypeHolder> for XRWebGLLayer {
         let mut cache = self.viewport_objects.borrow_mut();
         let length = cache.len().max(index + 1);
         cache.resize_with(length, || None);
-        cache[index] = Some((Dom::from_ref(&*result), scale, Dom::from_ref(view.frame())));
+        cache[index] = Some((
+            Dom::from_ref(&*result),
+            scale,
+            Dom::from_ref(view.frame()),
+            view.view_id(),
+        ));
         Ok(Some(result))
     }
 }

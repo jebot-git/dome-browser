@@ -671,6 +671,11 @@ impl ServoInner {
                     webview.set_favicon(image);
                 }
             },
+            EmbedderMsg::ExternalDocument(webview_id, event) => {
+                if let Some(webview) = self.get_webview_handle(webview_id) {
+                    webview.delegate().notify_external_document(webview, event);
+                }
+            },
             EmbedderMsg::NotifyLoadStatusChanged(webview_id, load_status) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
                     webview.set_load_status(load_status);

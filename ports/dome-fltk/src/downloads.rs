@@ -93,7 +93,7 @@ fn configured_directory(text: &str, home: &Path) -> Option<PathBuf> {
         path.is_absolute().then_some(path)
     })
 }
-fn downloads_directory() -> io::Result<PathBuf> {
+pub(crate) fn downloads_directory() -> io::Result<PathBuf> {
     let home = PathBuf::from(std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is not set"))?);
     let config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)
         .filter(|p| p.is_absolute()).unwrap_or_else(|| home.join(".config"));
@@ -119,7 +119,7 @@ fn decode_percent(text: &str) -> String {
     }
     String::from_utf8_lossy(&decoded).into_owned()
 }
-fn filename(url: &Url, disposition: &str, mime: &str) -> String {
+pub(crate) fn filename(url: &Url, disposition: &str, mime: &str) -> String {
     let mut plain = None;
     let mut extended = None;
     for part in disposition.split(';').skip(1) {
@@ -149,9 +149,9 @@ fn filename(url: &Url, disposition: &str, mime: &str) -> String {
     }
     name
 }
-struct PendingFile { file: File, path: PathBuf, committed: bool }
+pub(crate) struct PendingFile { pub(crate) file: File, path: PathBuf, committed: bool }
 impl PendingFile {
-    fn new(dir: &Path, name: &str) -> io::Result<Self> {
+    pub(crate) fn new(dir: &Path, name: &str) -> io::Result<Self> {
         for index in 0..10000 {
             let path = dir.join(if index == 0 { name.to_owned() } else {
                 let p = Path::new(name);
@@ -166,7 +166,7 @@ impl PendingFile {
         }
         Err(io::Error::other("Too many files with the same name"))
     }
-    fn finish(mut self) -> io::Result<PathBuf> {
+    pub(crate) fn finish(mut self) -> io::Result<PathBuf> {
         self.file.sync_all()?;
         self.committed = true;
         Ok(self.path.clone())

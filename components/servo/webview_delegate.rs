@@ -959,6 +959,9 @@ pub trait WebViewDelegate {
     /// The `LoadStatus` of the currently loading or loaded page in this [`WebView`] has changed. The new
     /// status can accessed via [`WebView::load_status`].
     fn notify_load_status_changed(&self, _webview: WebView, _status: LoadStatus) {}
+    /// An opted-in top-level document response is supplied to the native handler.
+    /// Events retain response bytes, so handlers need not repeat the request.
+    fn notify_external_document(&self, _webview: WebView, _event: embedder_traits::ExternalDocumentEvent) {}
     /// The [`Cursor`] of the currently loaded page in this [`WebView`] has changed. The new
     /// cursor can accessed via [`WebView::cursor`].
     fn notify_cursor_changed(&self, _webview: WebView, _cursor: Cursor) {}

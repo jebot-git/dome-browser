@@ -66,6 +66,10 @@ impl XRFrame {
         self.active.set(active);
     }
 
+    pub(crate) fn view_ids(&self) -> Option<Vec<u64>> {
+        self.data.pose.as_ref().map(|pose| pose.views.identities())
+    }
+
     pub(crate) fn is_active(&self) -> bool {
         self.active.get()
     }

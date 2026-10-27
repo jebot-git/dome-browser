@@ -108,6 +108,11 @@ impl XRTestMethods<crate::DomTypeHolder> for XRTest {
             },
         };
 
+        let secondary_views = match init.secondaryViews.as_deref().map(get_views).transpose() {
+            Ok(views) => views.unwrap_or_default(),
+            Err(error) => { p.reject_error(cx, error); return p; },
+        };
+
         let supported_features = if let Some(ref s) = init.supportedFeatures {
             s.iter().cloned().map(String::from).collect()
         } else {
@@ -142,6 +147,7 @@ impl XRTestMethods<crate::DomTypeHolder> for XRTest {
         let init = MockDeviceInit {
             viewer_origin: origin,
             views,
+            secondary_views,
             supports_inline,
             supports_vr,
             supports_ar,

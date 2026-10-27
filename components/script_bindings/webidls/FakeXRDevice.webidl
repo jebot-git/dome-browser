@@ -46,6 +46,7 @@ dictionary FakeXRViewInit {
   required FakeXRDeviceResolution resolution;
 
   FakeXRFieldOfViewInit fieldOfView;
+  boolean isFirstPersonObserver = false;
 };
 
 // https://immersive-web.github.io/webxr/#xrviewport

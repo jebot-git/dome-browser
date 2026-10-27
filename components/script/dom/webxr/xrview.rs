@@ -8,6 +8,7 @@ use js::context::JSContext;
 use js::typedarray::{Float32, HeapFloat32Array};
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 use script_bindings::trace::RootedTraceableBox;
+use std::cell::Cell;
 use webxr_api::{ApiSpace, View};
 
 use crate::dom::bindings::buffer_source::HeapBufferSource;
@@ -25,6 +26,8 @@ pub(crate) struct XRView {
     session: Dom<XRSession>,
     eye: XREye,
     viewport_index: usize,
+    view_id: Cell<u64>,
+    is_first_person_observer: Cell<bool>,
     #[ignore_malloc_size_of = "mozjs"]
     proj: HeapBufferSource<Float32>,
     #[no_trace]
@@ -47,6 +50,8 @@ impl XRView {
             session: Dom::from_ref(session),
             eye,
             viewport_index,
+            view_id: Cell::new(viewport_index as u64),
+            is_first_person_observer: Cell::new(false),
             proj: HeapBufferSource::default(),
             view,
             transform: Dom::from_ref(transform),
@@ -87,6 +92,15 @@ impl XRView {
 
     pub(crate) fn frame(&self) -> &XRFrame {
         &self.frame
+    }
+
+    pub(crate) fn describe(&self, id: u64, observer: bool) {
+        self.view_id.set(id);
+        self.is_first_person_observer.set(observer);
+    }
+
+    pub(crate) fn view_id(&self) -> u64 {
+        self.view_id.get()
     }
 
     pub(crate) fn viewport_index(&self) -> usize {
@@ -132,12 +146,11 @@ impl XRViewMethods<crate::DomTypeHolder> for XRView {
     /// <https://www.w3.org/TR/webxr/#dom-xrview-requestviewportscale>
     fn RequestViewportScale(&self, scale: Option<Finite<f64>>) {
         self.session
-            .request_viewport_scale(self.viewport_index, scale.map(|scale| *scale));
+            .request_viewport_scale(self.view_id(), scale.map(|scale| *scale));
     }
 
     /// <https://www.w3.org/TR/webxr-ar-module-1/#dom-xrview-isfirstpersonobserver>
     fn IsFirstPersonObserver(&self) -> bool {
-        // Servo is not currently supported anywhere that supports this, so return false
-        false
+        self.is_first_person_observer.get()
     }
 }

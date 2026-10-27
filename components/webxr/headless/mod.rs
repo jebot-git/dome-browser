@@ -14,11 +14,11 @@ use webxr_api::util::{self, ClipPlanes, HitTestList};
 use webxr_api::{
     ApiSpace, BaseSpace, ContextId, DeviceAPI, DiscoveryAPI, EnvironmentBlendMode, Error, Event,
     EventBuffer, Floor, Frame, FrameUpdateEvent, HitTestId, HitTestResult, HitTestSource, Input,
-    InputFrame, InputId, InputSource, LayerGrandManager, LayerId, LayerInfo, LayerInit, LayerManager,
-    MockButton, MockDeviceInit, MockDeviceMsg, MockDiscoveryAPI, MockInputMsg, MockViewInit,
-    MockViewsInit, MockWorld, Native, Quitter, Ray, SelectEvent, SelectKind, Session,
-    SessionBuilder, SessionInit, SessionMode, Space, SubImages, View, Viewer, ViewerPose,
-    Viewports, Views,
+    InputFrame, InputId, InputSource, LayerGrandManager, LayerId, LayerInfo, LayerInit,
+    LayerManager, MockButton, MockDeviceInit, MockDeviceMsg, MockDiscoveryAPI, MockInputMsg,
+    MockViewInit, MockViewsInit, MockWorld, Native, Quitter, Ray, SelectEvent, SelectKind, Session,
+    SessionBuilder, SessionInit, SessionMode, Space, SubImages, View, ViewDescription, Viewer,
+    ViewerPose, Viewports, Views,
 };
 
 use crate::{SurfmanGL, SurfmanLayerManager};
@@ -66,13 +66,22 @@ struct PerSessionData {
     events: EventBuffer,
     needs_vp_update: bool,
     frame_events: Vec<FrameUpdateEvent>,
+    secondary_views_enabled: bool,
+}
+
+#[derive(Clone)]
+struct HeadlessView {
+    id: u64,
+    init: MockViewInit<ApiSpace>,
 }
 
 struct HeadlessDeviceData {
     floor_transform: Option<RigidTransform3D<f32, Native, Floor>>,
     viewer_origin: Option<RigidTransform3D<f32, Viewer, Native>>,
     supported_features: Vec<String>,
-    views: MockViewsInit,
+    views: Vec<HeadlessView>,
+    secondary_views: Vec<HeadlessView>,
+    next_view_id: u64,
     inputs: Vec<InputInfo>,
     sessions: Vec<PerSessionData>,
     disconnected: bool,
@@ -93,12 +102,25 @@ impl MockDiscoveryAPI<SurfmanGL> for HeadlessMockDiscovery {
 
         let viewer_origin = init.viewer_origin;
         let floor_transform = init.floor_origin.map(|f| f.inverse());
-        let views = init.views.clone();
+        let mut next_view_id = 0;
+        let mut identify = |init| {
+            let id = next_view_id;
+            next_view_id += 1;
+            HeadlessView { id, init }
+        };
+        let views = init.views.into_iter().map(&mut identify).collect();
+        let secondary_views = init
+            .secondary_views
+            .into_iter()
+            .map(&mut identify)
+            .collect();
         let data = HeadlessDeviceData {
             floor_transform,
             viewer_origin,
             supported_features: init.supported_features,
             views,
+            secondary_views,
+            next_view_id,
             inputs: vec![],
             sessions: vec![],
             disconnected: false,
@@ -138,7 +160,6 @@ impl DiscoveryAPI<SurfmanGL> for HeadlessDiscovery {
         crate::compatibility::check_mock(manager, context)
     }
 
-
     fn request_session(
         &mut self,
         mode: SessionMode,
@@ -150,6 +171,7 @@ impl DiscoveryAPI<SurfmanGL> for HeadlessDiscovery {
         }
         let data = self.data.clone();
         let mut d = data.lock().unwrap();
+        let granted_features = init.validate(mode, &d.supported_features)?;
         let id = d.next_id;
         d.next_id += 1;
         let per_session = PerSessionData {
@@ -160,10 +182,13 @@ impl DiscoveryAPI<SurfmanGL> for HeadlessDiscovery {
             events: Default::default(),
             needs_vp_update: false,
             frame_events: vec![],
+            secondary_views_enabled: mode != SessionMode::Inline
+                && granted_features
+                    .iter()
+                    .any(|feature| feature == "secondary-views"),
         };
         d.sessions.push(per_session);
 
-        let granted_features = init.validate(mode, &d.supported_features)?;
         let layer_manager = None;
         drop(d);
         xr.spawn(move |grand_manager| {
@@ -233,7 +258,9 @@ impl HeadlessDevice {
 }
 
 impl DeviceAPI for HeadlessDevice {
-    fn supports_dynamic_viewport_scaling(&self) -> bool { true }
+    fn supports_dynamic_viewport_scaling(&self) -> bool {
+        true
+    }
 
     fn floor_transform(&self) -> Option<RigidTransform3D<f32, Native, Floor>> {
         self.data.lock().unwrap().floor_transform
@@ -242,12 +269,13 @@ impl DeviceAPI for HeadlessDevice {
     fn viewports(&self) -> Viewports {
         let d = self.data.lock().unwrap();
         let per_session = d.sessions.iter().find(|s| s.id == self.id).unwrap();
-        d.viewports(per_session.mode)
+        d.viewports(per_session)
     }
 
     fn create_layer(&mut self, context_id: ContextId, init: LayerInit) -> Result<LayerInfo, Error> {
         let viewports = self.viewports();
-        self.layer_manager()?.create_layer(context_id, init, viewports)
+        self.layer_manager()?
+            .create_layer(context_id, init, viewports)
     }
 
     fn destroy_layer(&mut self, context_id: ContextId, layer_id: LayerId) {
@@ -266,8 +294,8 @@ impl DeviceAPI for HeadlessDevice {
         let per_session = data.sessions.iter_mut().find(|s| s.id == self.id).unwrap();
         if per_session.needs_vp_update {
             per_session.needs_vp_update = false;
-            let mode = per_session.mode;
-            let vp = data.viewports(mode);
+            let per_session = data.sessions.iter().find(|s| s.id == self.id).unwrap();
+            let vp = data.viewports(per_session);
             frame.events.push(FrameUpdateEvent::UpdateViewports(vp));
         }
         let per_session = data.sessions.iter_mut().find(|s| s.id == self.id).unwrap();
@@ -363,21 +391,21 @@ macro_rules! with_all_sessions {
 
 impl HeadlessDeviceData {
     fn get_frame(&self, s: &PerSessionData, sub_images: Vec<SubImages>) -> Frame {
-        let views = self.views.clone();
-
         let pose = self.viewer_origin.map(|transform| {
             let views = if s.mode == SessionMode::Inline {
                 Views::Inline
             } else {
-                match views {
-                    MockViewsInit::Mono(one) => Views::Mono(view(one, transform, s.clip_planes)),
-                    MockViewsInit::Stereo(one, two) => Views::Stereo(
-                        view(one, transform, s.clip_planes),
-                        view(two, transform, s.clip_planes),
-                    ),
-                }
+                Views::List(
+                    self.active_views(s)
+                        .map(|entry| ViewDescription {
+                            id: entry.id,
+                            eye: entry.init.eye,
+                            is_first_person_observer: entry.init.is_first_person_observer,
+                            view: view(entry.init.clone(), transform, s.clip_planes),
+                        })
+                        .collect(),
+                )
             };
-
             ViewerPose { transform, views }
         });
         let inputs = self
@@ -388,18 +416,19 @@ impl HeadlessDeviceData {
                 let (button_values, button_pressed, button_touched, axis_values) =
                     webxr_api::mock_gamepad_state(&i.buttons, i.clicking);
                 InputFrame {
-                id: i.source.id,
-                target_ray_origin: i.pointer,
-                grip_origin: i.grip,
-                pressed: i.clicking,
-                squeezed: button_pressed.get(1).copied().unwrap_or(false),
-                hand: None,
-                button_values,
-                button_pressed,
-                button_touched,
-                axis_values,
-                input_changed: true,
-            }})
+                    id: i.source.id,
+                    target_ray_origin: i.pointer,
+                    grip_origin: i.grip,
+                    pressed: i.clicking,
+                    squeezed: button_pressed.get(1).copied().unwrap_or(false),
+                    hand: None,
+                    button_values,
+                    button_pressed,
+                    button_touched,
+                    axis_values,
+                    input_changed: true,
+                }
+            })
             .collect();
         Frame {
             pose,
@@ -412,16 +441,45 @@ impl HeadlessDeviceData {
         }
     }
 
-    fn viewports(&self, mode: SessionMode) -> Viewports {
-        let vec = if mode == SessionMode::Inline {
-            vec![]
-        } else {
-            match &self.views {
-                MockViewsInit::Mono(one) => vec![one.viewport],
-                MockViewsInit::Stereo(one, two) => vec![one.viewport, two.viewport],
-            }
+    fn active_views(&self, session: &PerSessionData) -> impl Iterator<Item = &HeadlessView> {
+        let enabled = session.secondary_views_enabled;
+        self.views
+            .iter()
+            .chain(self.secondary_views.iter().filter(move |_| enabled))
+    }
+
+    fn viewports(&self, session: &PerSessionData) -> Viewports {
+        let mut viewports = Vec::new();
+        if session.mode == SessionMode::Inline {
+            return Viewports { viewports };
+        }
+        let mut x = 0_i32;
+        for view in self.active_views(session) {
+            let size = view.init.viewport.size;
+            let Some(next) = x.checked_add(size.width) else {
+                return Viewports {
+                    viewports: Vec::new(),
+                };
+            };
+            viewports.push(euclid::Rect::new(Point2D::new(x, 0), size));
+            x = next;
+        }
+        Viewports { viewports }
+    }
+
+    fn replace_views(&mut self, primary: MockViewsInit, secondary: Option<MockViewsInit>) {
+        let mut identify = |init| {
+            let id = self.next_view_id;
+            self.next_view_id += 1;
+            HeadlessView { id, init }
         };
-        Viewports { viewports: vec }
+        self.views = primary.into_iter().map(&mut identify).collect();
+        if let Some(secondary) = secondary {
+            self.secondary_views = secondary.into_iter().map(identify).collect();
+        }
+        for session in &mut self.sessions {
+            session.needs_vp_update = true;
+        }
     }
 
     fn trigger_select(&mut self, id: InputId, kind: SelectKind, event: SelectEvent) {
@@ -441,20 +499,27 @@ impl HeadlessDeviceData {
                 self.viewer_origin = viewer_origin;
             },
             MockDeviceMsg::SetFloorOrigin(floor_origin) => {
-                let delta = self.floor_transform.zip(floor_origin).map(|(old, new)| new.then(&old).cast_unit());
+                let delta = self
+                    .floor_transform
+                    .zip(floor_origin)
+                    .map(|(old, new)| new.then(&old).cast_unit());
                 self.floor_transform = floor_origin.map(|f| f.inverse());
                 let floor = self.floor_transform;
                 with_all_sessions!(self, |s| {
-                    s.frame_events.push(FrameUpdateEvent::UpdateFloorTransform(floor));
-                    s.frame_events.push(FrameUpdateEvent::ReferenceSpaceChanged(BaseSpace::Floor, delta));
-                    s.frame_events.push(FrameUpdateEvent::ReferenceSpaceChanged(BaseSpace::BoundedFloor, delta));
+                    s.frame_events
+                        .push(FrameUpdateEvent::UpdateFloorTransform(floor));
+                    s.frame_events.push(FrameUpdateEvent::ReferenceSpaceChanged(
+                        BaseSpace::Floor,
+                        delta,
+                    ));
+                    s.frame_events.push(FrameUpdateEvent::ReferenceSpaceChanged(
+                        BaseSpace::BoundedFloor,
+                        delta,
+                    ));
                 });
             },
-            MockDeviceMsg::SetViews(views) => {
-                self.views = views;
-                with_all_sessions!(self, |s| {
-                    s.needs_vp_update = true;
-                })
+            MockDeviceMsg::SetViews(primary, secondary) => {
+                self.replace_views(primary, secondary);
             },
             MockDeviceMsg::VisibilityChange(v) => {
                 with_all_sessions!(self, |s| s.events.callback(Event::VisibilityChange(v)))
@@ -540,7 +605,8 @@ impl HeadlessDeviceData {
                         },
                         MockInputMsg::SetSupportedButtons(buttons) => {
                             input.buttons = buttons;
-                            input.source.gamepad = Some(webxr_api::mock_gamepad_layout(&input.buttons));
+                            input.source.gamepad =
+                                Some(webxr_api::mock_gamepad_layout(&input.buttons));
                             with_all_sessions!(self, |s| s.events.callback(Event::UpdateInput(
                                 input.source.id,
                                 input.source.clone()
@@ -568,15 +634,21 @@ impl HeadlessDeviceData {
             MockDeviceMsg::SetBoundsGeometry(g) => {
                 if self.bounds_geometry != g {
                     self.bounds_geometry = g;
-                    with_all_sessions!(self, |s| s.frame_events.push(FrameUpdateEvent::ReferenceSpaceChanged(
-                        BaseSpace::BoundedFloor, Some(RigidTransform3D::identity())
-                    )));
+                    with_all_sessions!(self, |s| s.frame_events.push(
+                        FrameUpdateEvent::ReferenceSpaceChanged(
+                            BaseSpace::BoundedFloor,
+                            Some(RigidTransform3D::identity())
+                        )
+                    ));
                 }
             },
             MockDeviceMsg::SimulateResetPose => {
-                with_all_sessions!(self, |s| s.frame_events.push(FrameUpdateEvent::ReferenceSpaceChanged(
-                    BaseSpace::Local, Some(RigidTransform3D::identity())
-                )));
+                with_all_sessions!(self, |s| s.frame_events.push(
+                    FrameUpdateEvent::ReferenceSpaceChanged(
+                        BaseSpace::Local,
+                        Some(RigidTransform3D::identity())
+                    )
+                ));
             },
         }
         true
@@ -609,5 +681,163 @@ impl HeadlessDeviceData {
             origin: origin_rigid.then(&space_origin).translation,
             direction: space_origin.rotation.transform_vector3d(ray.direction),
         })
+    }
+}
+
+#[cfg(test)]
+mod secondary_views_tests {
+    use super::*;
+    use euclid::{Rect, Size2D, Transform3D};
+    use webxr_api::{LayerGeometry, ViewEye};
+
+    fn init(eye: ViewEye, width: i32, height: i32, observer: bool) -> MockViewInit<ApiSpace> {
+        MockViewInit {
+            transform: RigidTransform3D::identity(),
+            projection: Transform3D::identity(),
+            viewport: Rect::from_size(Size2D::new(width, height)),
+            fov: None,
+            eye,
+            is_first_person_observer: observer,
+        }
+    }
+    fn primary() -> MockViewsInit {
+        vec![
+            init(ViewEye::Left, 63, 95, false),
+            init(ViewEye::Right, 64, 80, false),
+        ]
+    }
+    fn data() -> HeadlessDeviceData {
+        HeadlessDeviceData {
+            floor_transform: None,
+            viewer_origin: Some(RigidTransform3D::identity()),
+            supported_features: vec!["secondary-views".into()],
+            views: primary()
+                .into_iter()
+                .enumerate()
+                .map(|(id, init)| HeadlessView {
+                    id: id as u64,
+                    init,
+                })
+                .collect(),
+            secondary_views: vec![
+                HeadlessView {
+                    id: 2,
+                    init: init(ViewEye::None, 31, 41, true),
+                },
+                HeadlessView {
+                    id: 3,
+                    init: init(ViewEye::Left, 17, 59, false),
+                },
+            ],
+            next_view_id: 4,
+            inputs: vec![],
+            sessions: vec![],
+            disconnected: false,
+            world: None,
+            next_id: 0,
+            bounds_geometry: vec![],
+        }
+    }
+    fn session(mode: SessionMode, secondary: bool) -> PerSessionData {
+        PerSessionData {
+            id: 0,
+            mode,
+            clip_planes: Default::default(),
+            quitter: None,
+            events: Default::default(),
+            needs_vp_update: false,
+            frame_events: vec![],
+            secondary_views_enabled: secondary && mode != SessionMode::Inline,
+        }
+    }
+    #[test]
+    fn secondary_views_are_gated_per_session_and_preserve_metadata() {
+        let d = data();
+        for (mode, enabled, count) in [
+            (SessionMode::Inline, true, 1),
+            (SessionMode::ImmersiveVR, false, 2),
+            (SessionMode::ImmersiveVR, true, 4),
+        ] {
+            let s = session(mode, enabled);
+            let frame = d.get_frame(&s, vec![]);
+            let views = frame.pose.unwrap().views;
+            assert_eq!(views.identities().len(), count);
+            if mode == SessionMode::Inline {
+                assert!(matches!(views, Views::Inline));
+                continue;
+            }
+            let Views::List(views) = views else {
+                panic!("Expected described views")
+            };
+            assert_eq!(views[0].eye, ViewEye::Left);
+            assert!(!views[0].is_first_person_observer);
+            if enabled {
+                assert_eq!(views[2].eye, ViewEye::None);
+                assert!(views[2].is_first_person_observer);
+                assert_eq!(views[3].eye, ViewEye::Left);
+                assert!(!views[3].is_first_person_observer);
+            }
+        }
+    }
+    #[test]
+    fn secondary_views_omission_retains_identities_and_empty_list_clears_them() {
+        let mut d = data();
+        d.sessions.push(session(SessionMode::ImmersiveVR, true));
+        d.replace_views(primary(), None);
+        assert_eq!(d.views.iter().map(|v| v.id).collect::<Vec<_>>(), vec![4, 5]);
+        assert_eq!(
+            d.secondary_views.iter().map(|v| v.id).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert!(d.sessions[0].needs_vp_update);
+        d.replace_views(primary(), Some(vec![]));
+        assert!(d.secondary_views.is_empty());
+        assert_eq!(d.views[0].id, 6);
+    }
+    #[test]
+    fn secondary_views_pack_asymmetric_regions_and_fit_existing_allocations() {
+        let d = data();
+        let s = session(SessionMode::ImmersiveVR, true);
+        let viewports = d.viewports(&s);
+        assert_eq!(
+            viewports
+                .viewports
+                .iter()
+                .map(|v| v.origin.x)
+                .collect::<Vec<_>>(),
+            vec![0, 63, 127, 158]
+        );
+        let geometry = LayerGeometry::new(&viewports, f32::INFINITY, Size2D::new(127, 95)).unwrap();
+        assert!(geometry.framebuffer_size.width <= 127 && geometry.framebuffer_size.height <= 95);
+        for (index, rect) in geometry.viewports.viewports.iter().enumerate() {
+            assert!(rect.size.width > 0 && rect.size.height > 0);
+            assert!(
+                geometry.viewports.viewports[..index]
+                    .iter()
+                    .all(|other| !other.intersects(rect))
+            );
+        }
+    }
+    #[test]
+    fn secondary_views_allow_arbitrary_primary_counts_and_repeated_eye_labels() {
+        let mut d = data();
+        let s = session(SessionMode::ImmersiveVR, true);
+        d.replace_views(
+            vec![
+                init(ViewEye::Left, 9, 10, false),
+                init(ViewEye::Left, 11, 12, false),
+                init(ViewEye::Right, 13, 14, false),
+            ],
+            None,
+        );
+        let Views::List(views) = d.get_frame(&s, vec![]).pose.unwrap().views else {
+            panic!("Expected list")
+        };
+        assert_eq!(views.len(), 5);
+        assert_eq!(views[1].eye, ViewEye::Left);
+        assert_eq!(
+            views.iter().map(|v| v.id).collect::<Vec<_>>(),
+            vec![4, 5, 6, 2, 3]
+        );
     }
 }

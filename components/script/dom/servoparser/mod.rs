@@ -31,6 +31,7 @@ use content_security_policy::sandboxing_directive::SandboxingFlagSet;
 use devtools_traits::ScriptToDevtoolsControlMsg;
 use dom_struct::dom_struct;
 use embedder_traits::resources::{self, Resource};
+use embedder_traits::{EmbedderMsg, ExternalDocumentEvent};
 use encoding_rs::{Encoding, UTF_8};
 use html5ever::buffer_queue::BufferQueue;
 use html5ever::tendril::StrTendril;
@@ -973,6 +974,7 @@ struct NavigationParams {
     policy_container: Arc<PolicyContainer>,
     /// content-type of this document, if known. Otherwise need to sniff it
     content_type: Option<Mime>,
+    content_disposition: String,
     /// link headers from the response
     link_headers: Vec<LinkHeader>,
     /// <https://html.spec.whatwg.org/multipage/#navigation-params-sandboxing>
@@ -1014,6 +1016,7 @@ pub(crate) struct ParserContext {
     /// will be a non-aliased copy of the origin.
     source_origin: Option<MutableOrigin>,
     document: Option<Trusted<Document>>,
+    external_document: bool,
 }
 
 impl ParserContext {
@@ -1038,6 +1041,7 @@ impl ParserContext {
             navigation_params: NavigationParams {
                 policy_container: Default::default(),
                 content_type: None,
+                content_disposition: String::new(),
                 link_headers: vec![],
                 final_sandboxing_flag_set: creation_sandboxing_flag_set,
                 resource_header: vec![],
@@ -1047,6 +1051,7 @@ impl ParserContext {
             target_snapshot_params,
             source_origin,
             document: None,
+            external_document: false,
         }
     }
 
@@ -1161,6 +1166,18 @@ impl ParserContext {
             content_type,
             &self.navigation_params.resource_header,
         );
+        if pref!(dom_external_pdf_enabled) && mime_type.essence_str() == "application/pdf" && document.window().is_top_level() {
+            self.external_document = true;
+            document.window().send_to_embedder(EmbedderMsg::ExternalDocument(self.webview_id, ExternalDocumentEvent::Start {
+                id: self.pipeline_id, url: document.url().into_url(), content_type: "application/pdf".into(),
+                content_disposition: self.navigation_params.content_disposition.clone(),
+            }));
+            let header = std::mem::take(&mut self.navigation_params.resource_header);
+            self.send_external_data(document, header);
+            self.load_inline_unknown_content(cx, parser.expect("PDF navigation needs a parser"),
+                "<!doctype html><title>PDF document</title><p>This PDF is being opened in your system PDF viewer.</p>".into());
+            return;
+        }
         // Step 2. If the user agent has been configured to process resources of the given type using
         // some mechanism other than rendering the content in a navigable, then skip this step.
         // Otherwise, if the type is one of the following types:
@@ -1604,6 +1621,8 @@ impl ParserContext {
         self.navigation_params = NavigationParams {
             policy_container: Arc::new(policy_container),
             content_type,
+            content_disposition: metadata.as_ref().and_then(|metadata| metadata.headers.as_ref())
+                .and_then(|headers| headers.get("Content-Disposition")).and_then(|header| header.to_str().ok()).unwrap_or_default().to_owned(),
             final_sandboxing_flag_set,
             link_headers,
             about_base_url: document.about_base_url(),
@@ -1681,7 +1700,20 @@ impl ParserContext {
         }
     }
 
+    fn send_external_data(&self, document: &Document, bytes: Vec<u8>) {
+        if !bytes.is_empty() {
+            document.window().send_to_embedder(EmbedderMsg::ExternalDocument(self.webview_id,
+                ExternalDocumentEvent::Data { id: self.pipeline_id, bytes }));
+        }
+    }
+
     pub(crate) fn process_response_chunk(&mut self, cx: &mut JSContext, payload: Bytes) {
+        if self.external_document {
+            if let Some(document) = self.document.as_ref().map(|document| document.root()) {
+                self.send_external_data(&document, payload.to_vec());
+            }
+            return;
+        }
         if self.is_synthesized_document {
             return;
         }
@@ -1718,8 +1750,8 @@ impl ParserContext {
         timing: ResourceFetchTiming,
     ) {
         let parser = self.parser.as_ref().map(|parser| parser.root());
-        if parser.as_ref().is_some_and(|parser| parser.aborted.get())
-            || self.is_synthesized_document
+        if !self.external_document && (parser.as_ref().is_some_and(|parser| parser.aborted.get())
+            || self.is_synthesized_document)
         {
             return;
         }
@@ -1740,6 +1772,15 @@ impl ParserContext {
             self.load_document(cx, parser.as_deref(), &document);
         }
 
+        if self.external_document {
+            let result = if parser.as_ref().is_some_and(|parser| parser.aborted.get()) {
+                Err("PDF load cancelled".into())
+            } else { status.as_ref().map(|_| ()).map_err(|_| "PDF download failed".into()) };
+            if status.is_ok() { document.set_resource_fetch_timing(timing); }
+            document.window().send_to_embedder(EmbedderMsg::ExternalDocument(self.webview_id,
+                ExternalDocumentEvent::Finished { id: self.pipeline_id, result }));
+            return;
+        }
         let mut realm = enter_auto_realm(cx, &*document);
         let cx = &mut realm;
 

@@ -7,7 +7,8 @@ are preserved and hashed. Production browser APIs are not replaced.
 """
 import argparse,hashlib,json,os,re,subprocess,sys
 from pathlib import Path
-p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--dynamic-only',action='store_true',help='Run the dynamic scaling suite, reporting absent optional recommendations separately');a=p.parse_args()
+p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--dynamic-only',action='store_true',help='Run the dynamic scaling suite, reporting absent optional recommendations separately');p.add_argument('--secondary-only',action='store_true',help='Run secondary-view and viewport validity suites');a=p.parse_args()
+if a.dynamic_only and a.secondary_only:p.error('Choose one dedicated suite')
 here=Path(__file__).resolve().parent;source=here.parents[2];wpt=source/'tests/wpt/tests'
 out=a.output.resolve();out.mkdir(parents=True,exist_ok=False);driver=out/'driver';driver.mkdir()
 hashes={};pages=[]
@@ -24,7 +25,7 @@ navigator.xr.test.simulateDeviceConnection=async init=>{
 };
 </script>"""
 
-names=['xr_viewport_scale'] if a.dynamic_only else ['xrWebGLLayer_framebuffer_scale','xrWebGLLayer_viewports','xrWebGLLayer_framebuffer_draw','xrWebGLLayer_opaque_framebuffer','xrWebGLLayer_opaque_framebuffer_stencil','xrWebGLLayer_framebuffer_sameObject']
+names=['xrViewerPose_secondaryViews','xrViewport_valid'] if a.secondary_only else ['xr_viewport_scale'] if a.dynamic_only else ['xrWebGLLayer_framebuffer_scale','xrWebGLLayer_viewports','xrWebGLLayer_framebuffer_draw','xrWebGLLayer_opaque_framebuffer','xrWebGLLayer_opaque_framebuffer_stencil','xrWebGLLayer_framebuffer_sameObject']
 for name in names:
  path=wpt/'webxr'/(name+'.https.html');hashes[str(path.relative_to(source))]=hashlib.sha256(path.read_bytes()).hexdigest()
  def script(match):

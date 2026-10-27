@@ -69,7 +69,8 @@ impl FakeXRDevice {
 }
 
 pub(crate) fn view<Eye>(view: &FakeXRViewInit) -> Fallible<MockViewInit<Eye>> {
-    if view.projectionMatrix.len() != 16 || view.viewOffset.position.len() != 3 {
+    if view.projectionMatrix.len() != 16 || view.viewOffset.position.len() != 3 ||
+        view.resolution.width <= 0 || view.resolution.height <= 0 {
         return Err(Error::Type(c"Incorrectly sized array".into()));
     }
 
@@ -82,10 +83,7 @@ pub(crate) fn view<Eye>(view: &FakeXRViewInit) -> Fallible<MockViewInit<Eye>> {
     let transform = get_origin(&view.viewOffset)?.inverse();
 
     let size = Size2D::new(view.resolution.width, view.resolution.height);
-    let origin = match view.eye {
-        XREye::Right => Point2D::new(size.width, 0),
-        _ => Point2D::zero(),
-    };
+    let origin = Point2D::zero();
     let viewport = Rect::new(origin, size);
 
     let fov = view.fieldOfView.as_ref().map(|fov| {
@@ -102,22 +100,13 @@ pub(crate) fn view<Eye>(view: &FakeXRViewInit) -> Fallible<MockViewInit<Eye>> {
         transform,
         viewport,
         fov,
+        eye: match view.eye { XREye::None => webxr_api::ViewEye::None, XREye::Left => webxr_api::ViewEye::Left, XREye::Right => webxr_api::ViewEye::Right },
+        is_first_person_observer: view.isFirstPersonObserver,
     })
 }
 
 pub(crate) fn get_views(views: &[FakeXRViewInit]) -> Fallible<MockViewsInit> {
-    match views.len() {
-        1 => Ok(MockViewsInit::Mono(view(&views[0])?)),
-        2 => {
-            let (left, right) = match (views[0].eye, views[1].eye) {
-                (XREye::Left, XREye::Right) => (&views[0], &views[1]),
-                (XREye::Right, XREye::Left) => (&views[1], &views[0]),
-                _ => return Err(Error::NotSupported(None)),
-            };
-            Ok(MockViewsInit::Stereo(view(left)?, view(right)?))
-        },
-        _ => Err(Error::NotSupported(None)),
-    }
+    views.iter().map(view).collect()
 }
 
 pub(crate) fn get_origin<T, U>(
@@ -190,12 +179,13 @@ impl FakeXRDeviceMethods<crate::DomTypeHolder> for FakeXRDevice {
     fn SetViews(
         &self,
         views: Vec<FakeXRViewInit>,
-        _secondary_views: Option<Vec<FakeXRViewInit>>,
+        secondary_views: Option<Vec<FakeXRViewInit>>,
     ) -> Fallible<()> {
-        let _ = self
-            .sender
-            .send(MockDeviceMsg::SetViews(get_views(&views)?));
-        // TODO: Support setting secondary views for mock backend
+        // Parse both lists before sending one atomic update. Omitting the
+        // secondary list preserves it; an explicit empty list clears it.
+        let primary = get_views(&views)?;
+        let secondary = secondary_views.as_deref().map(get_views).transpose()?;
+        let _ = self.sender.send(MockDeviceMsg::SetViews(primary, secondary));
         Ok(())
     }
 
