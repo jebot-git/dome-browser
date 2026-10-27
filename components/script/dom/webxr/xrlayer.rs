@@ -21,6 +21,8 @@ pub(crate) struct XRLayer {
     event_target: EventTarget,
     session: Dom<XRSession>,
     context: Dom<WebGLRenderingContext>,
+    #[no_trace]
+    context_id: WebGLContextId,
     /// If none, the session is inline (the composition disabled flag is true)
     /// and this is a XRWebGLLayer.
     #[no_trace]
@@ -37,6 +39,7 @@ impl XRLayer {
             event_target: EventTarget::new_inherited(),
             session: Dom::from_ref(session),
             context: Dom::from_ref(context),
+            context_id: context.context_id(),
             layer_id,
         }
     }
@@ -46,7 +49,7 @@ impl XRLayer {
     }
 
     pub(crate) fn context_id(&self) -> WebGLContextId {
-        self.context.context_id()
+        self.context_id
     }
 
     pub(crate) fn context(&self) -> &WebGLRenderingContext {
@@ -58,6 +61,7 @@ impl XRLayer {
     }
 
     pub(crate) fn begin_frame(&self, cx: &mut JSContext, frame: &XRFrame) -> Option<()> {
+        if self.context.is_context_lost() || self.context.context_id() != self.context_id { return None; }
         // TODO: Implement this for other layer types
         if let Some(this) = self.downcast::<XRWebGLLayer>() {
             this.begin_frame(cx, frame)
@@ -67,6 +71,7 @@ impl XRLayer {
     }
 
     pub(crate) fn end_frame(&self, frame: &XRFrame) -> Option<()> {
+        if self.context.is_context_lost() || self.context.context_id() != self.context_id { return None; }
         // TODO: Implement this for other layer types
         if let Some(this) = self.downcast::<XRWebGLLayer>() {
             this.end_frame(frame)

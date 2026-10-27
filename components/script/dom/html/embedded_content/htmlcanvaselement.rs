@@ -427,6 +427,22 @@ impl HTMLCanvasElement {
         }
     }
 
+    #[cfg(feature = "webgl")]
+    pub(crate) fn webgl_context_lost(&self, no_gc: &NoGC) {
+        self.image_key.set(None);
+        self.owner_document().mark_canvas_as_dirty(&Dom::from_ref(self));
+        self.upcast::<Node>().dirty(no_gc, NodeDamage::ContentOrHeritage);
+    }
+
+    #[cfg(feature = "webgl")]
+    pub(crate) fn webgl_context_restored(&self, no_gc: &NoGC) -> Option<ImageKey> {
+        let key = self.owner_window().image_cache().get_image_key();
+        self.image_key.set(key);
+        self.owner_document().mark_canvas_as_dirty(&Dom::from_ref(self));
+        self.upcast::<Node>().dirty(no_gc, NodeDamage::ContentOrHeritage);
+        key
+    }
+
     pub(crate) fn update_rendering(&self, epoch: Epoch) -> Option<ImageKey> {
         let context = self.context()?;
         let image_key = self.image_key.get()?;

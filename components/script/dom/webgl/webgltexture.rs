@@ -8,6 +8,8 @@ use std::cell::Cell;
 use std::cmp;
 
 use dom_struct::dom_struct;
+use servo_canvas_traits::webgl::WebGLMsgSender;
+use crate::dom::webgl::webglrenderingcontext::send_webgl_cleanup_command;
 use js::context::JSContext;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{DomObject as _, reflect_dom_object};
@@ -26,7 +28,6 @@ use crate::dom::webgl::validations::types::TexImageTarget;
 use crate::dom::webgl::webglframebuffer::WebGLFramebuffer;
 use crate::dom::webgl::webglobject::WebGLObject;
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
-use crate::dom::webglrenderingcontext::capture_webgl_backtrace;
 #[cfg(feature = "webxr")]
 use crate::dom::xrsession::XRSession;
 
@@ -54,6 +55,9 @@ const MAX_FACE_COUNT: usize = 6;
 struct DroppableWebGLTexture {
     context: WeakRef<WebGLRenderingContext>,
     #[no_trace]
+    #[ignore_malloc_size_of = "Non-owning channel for the creating native generation"]
+    cleanup_sender: std::rc::Weak<WebGLMsgSender>,
+    #[no_trace]
     id: WebGLTextureId,
     is_deleted: Cell<bool>,
     owner: WebGLTextureOwner,
@@ -61,12 +65,7 @@ struct DroppableWebGLTexture {
 
 impl DroppableWebGLTexture {
     fn send_with_fallibility(&self, command: WebGLCommand, fallibility: Operation) {
-        if let Some(root) = self.context.root() {
-            let result = root.sender().send(command, capture_webgl_backtrace());
-            if matches!(fallibility, Operation::Infallible) {
-                result.expect("Operation failed");
-            }
-        }
+        send_webgl_cleanup_command(&self.cleanup_sender, command, fallibility);
     }
 
     fn delete(&self, operation_fallibility: Operation) {
@@ -81,7 +80,8 @@ impl DroppableWebGLTexture {
             all attachment points in a currently bound framebuffer.
             - GLES 3.0, 4.4.2.3, "Attaching Texture Images to a Framebuffer"
             */
-            if let Some(context) = self.context.root() {
+            if matches!(operation_fallibility, Operation::Infallible) && self.cleanup_sender.upgrade().is_some() {
+              if let Some(context) = self.context.root().filter(|context| !context.is_context_lost()) {
                 if let Some(fb) = context.get_draw_framebuffer_slot().get() {
                     let _ = fb.detach_texture(self.id);
                 }
@@ -90,6 +90,7 @@ impl DroppableWebGLTexture {
                 }
             }
 
+            }
             // We don't delete textures owned by WebXR
             #[cfg(feature = "webxr")]
             if let WebGLTextureOwner::WebXR(_) = self.owner {
@@ -146,6 +147,7 @@ impl WebGLTexture {
             attached_framebuffer: Default::default(),
             droppable: DroppableWebGLTexture {
                 context: WeakRef::new(context),
+                cleanup_sender: context.cleanup_sender(),
                 id,
                 is_deleted: Cell::new(false),
                 #[cfg(feature = "webxr")]

@@ -5,9 +5,10 @@
 use std::cell::Cell;
 
 use dom_struct::dom_struct;
+use servo_canvas_traits::webgl::WebGLMsgSender;
+use crate::dom::webgl::webglrenderingcontext::send_webgl_cleanup_command;
 use js::context::JSContext;
 use script_bindings::reflector::reflect_dom_object;
-use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::WebGLError::*;
 use servo_canvas_traits::webgl::{WebGLCommand, WebGLSamplerId, webgl_channel};
 
@@ -16,11 +17,12 @@ use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::webgl::webglobject::WebGLObject;
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
-use crate::dom::webglrenderingcontext::capture_webgl_backtrace;
 
 #[derive(JSTraceable, MallocSizeOf)]
 struct DroppableWebGLSampler {
-    context: WeakRef<WebGLRenderingContext>,
+    #[no_trace]
+    #[ignore_malloc_size_of = "Non-owning channel for the creating native generation"]
+    cleanup_sender: std::rc::Weak<WebGLMsgSender>,
     #[no_trace]
     gl_id: WebGLSamplerId,
     marked_for_deletion: Cell<bool>,
@@ -28,12 +30,7 @@ struct DroppableWebGLSampler {
 
 impl DroppableWebGLSampler {
     fn send_with_fallibility(&self, command: WebGLCommand, fallibility: Operation) {
-        if let Some(root) = self.context.root() {
-            let result = root.sender().send(command, capture_webgl_backtrace());
-            if matches!(fallibility, Operation::Infallible) {
-                result.expect("Operation failed");
-            }
-        }
+        send_webgl_cleanup_command(&self.cleanup_sender, command, fallibility);
     }
 
     fn delete(&self, operation_fallibility: Operation) {
@@ -114,7 +111,7 @@ impl WebGLSampler {
         Self {
             webgl_object: WebGLObject::new_inherited(context),
             droppable: DroppableWebGLSampler {
-                context: WeakRef::new(context),
+                cleanup_sender: context.cleanup_sender(),
                 gl_id: id,
                 marked_for_deletion: Cell::new(false),
             },
@@ -122,6 +119,9 @@ impl WebGLSampler {
     }
 
     pub(crate) fn new(cx: &mut JSContext, context: &WebGLRenderingContext) -> DomRoot<Self> {
+        if context.is_context_lost() {
+            return reflect_dom_object(cx, Box::new(Self::new_inherited(context, servo_canvas_traits::webgl::WebGLSamplerId::maybe_new(1).unwrap())), &*context.global());
+        }
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::GenerateSampler(sender));
         let id = receiver.recv().unwrap();

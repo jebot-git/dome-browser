@@ -6,12 +6,13 @@
 use std::cell::Cell;
 
 use dom_struct::dom_struct;
+use servo_canvas_traits::webgl::WebGLMsgSender;
+use crate::dom::webgl::webglrenderingcontext::send_webgl_cleanup_command;
 #[cfg(feature = "webxr")]
 use euclid::Size2D;
 use js::context::JSContext;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object;
-use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{
     WebGLCommand, WebGLError, WebGLFramebufferBindingRequest, WebGLFramebufferId,
     WebGLRenderbufferId, WebGLResult, WebGLTextureId, WebGLVersion, webgl_channel,
@@ -94,19 +95,21 @@ struct DroppableWebGLFramebuffer {
     #[no_trace]
     id: WebGLFramebufferId,
     is_deleted: Cell<bool>,
-    context: WeakRef<WebGLRenderingContext>,
+    #[no_trace]
+    #[ignore_malloc_size_of = "Non-owning native generation channel"]
+    cleanup_sender: std::rc::Weak<WebGLMsgSender>,
 }
 
 impl DroppableWebGLFramebuffer {
     fn new(
         id: WebGLFramebufferId,
         is_deleted: Cell<bool>,
-        context: WeakRef<WebGLRenderingContext>,
+        cleanup_sender: std::rc::Weak<WebGLMsgSender>,
     ) -> Self {
         Self {
             id,
             is_deleted,
-            context,
+            cleanup_sender,
         }
     }
 }
@@ -126,13 +129,7 @@ impl DroppableWebGLFramebuffer {
     pub(crate) fn delete(&self, operation_fallibility: Operation) {
         if !self.is_deleted() {
             self.set_deleted(true);
-            if let Some(context) = self.context.root() {
-                let cmd = WebGLCommand::DeleteFramebuffer(self.id());
-                match operation_fallibility {
-                    Operation::Fallible => context.send_command_ignored(cmd),
-                    Operation::Infallible => context.send_command(cmd),
-                }
-            }
+            send_webgl_cleanup_command(&self.cleanup_sender, WebGLCommand::DeleteFramebuffer(self.id()), operation_fallibility);
         }
     }
 }
@@ -184,7 +181,7 @@ impl WebGLFramebuffer {
             is_initialized: Cell::new(false),
             #[cfg(feature = "webxr")]
             xr_session: Default::default(),
-            droppable: DroppableWebGLFramebuffer::new(id, Cell::new(false), WeakRef::new(context)),
+            droppable: DroppableWebGLFramebuffer::new(id, Cell::new(false), context.cleanup_sender()),
         }
     }
 

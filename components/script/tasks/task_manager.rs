@@ -164,6 +164,7 @@ impl TaskManager {
         IntersectionObserver
     );
     task_source_functions!(self, storage_task_source, Storage);
+    task_source_functions!(self, webgl_task_source, WebGL);
     #[cfg(feature = "webgpu")]
     task_source_functions!(self, webgpu_task_source, WebGPU);
 }

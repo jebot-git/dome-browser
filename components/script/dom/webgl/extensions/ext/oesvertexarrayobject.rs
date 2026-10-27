@@ -37,21 +37,26 @@ impl OESVertexArrayObjectMethods<crate::DomTypeHolder> for OESVertexArrayObject 
         &self,
         cx: &mut JSContext,
     ) -> Option<DomRoot<WebGLVertexArrayObjectOES>> {
+        if self.ctx.is_context_lost() { return Some(WebGLVertexArrayObjectOES::new(cx, &self.ctx,
+            Some(servo_canvas_traits::webgl::WebGLVertexArrayId::maybe_new(1).unwrap()))); }
         self.ctx.create_vertex_array(cx)
     }
 
     /// <https://www.khronos.org/registry/webgl/extensions/OES_vertex_array_object/>
     fn DeleteVertexArrayOES(&self, cx: &mut JSContext, vao: Option<&WebGLVertexArrayObjectOES>) {
+        if self.ctx.is_context_lost() { return; }
         self.ctx.delete_vertex_array(cx, vao);
     }
 
     /// <https://www.khronos.org/registry/webgl/extensions/OES_vertex_array_object/>
     fn IsVertexArrayOES(&self, vao: Option<&WebGLVertexArrayObjectOES>) -> bool {
+        if self.ctx.is_context_lost() { return false; }
         self.ctx.is_vertex_array(vao)
     }
 
     /// <https://www.khronos.org/registry/webgl/extensions/OES_vertex_array_object/>
     fn BindVertexArrayOES(&self, vao: Option<&WebGLVertexArrayObjectOES>) {
+        if self.ctx.is_context_lost() { return; }
         self.ctx.bind_vertex_array(vao);
     }
 }

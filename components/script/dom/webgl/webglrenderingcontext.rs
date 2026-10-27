@@ -59,7 +59,9 @@ use crate::dom::bindings::conversions::DerivedFrom;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::DomGlobal;
-use crate::dom::bindings::root::{DomOnceCell, DomRoot, MutNullableDom};
+use crate::dom::bindings::root::{DomRoot, MutNullableDom};
+use crate::dom::bindings::weakref::WeakRef;
+use crate::dom::webgl::webgl2renderingcontext::WebGL2RenderingContext;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
 #[cfg(feature = "webgl_backtrace")]
@@ -164,12 +166,12 @@ pub(crate) enum Operation {
 struct DroppableWebGLRenderingContext {
     #[no_trace]
     #[conditional_malloc_size_of]
-    webgl_sender: Rc<WebGLMsgSender>,
+    webgl_sender: DomRefCell<Rc<WebGLMsgSender>>,
 }
 
 impl Drop for DroppableWebGLRenderingContext {
     fn drop(&mut self) {
-        let _ = self.webgl_sender.send_remove();
+        let _ = self.webgl_sender.borrow().send_remove();
     }
 }
 
@@ -188,6 +190,14 @@ pub(crate) struct WebGLRenderingContext {
     #[no_trace]
     last_error: Cell<Option<WebGLError>>,
     xr_compatible: Cell<bool>,
+    context_lost: Cell<bool>,
+    context_loss_error_pending: Cell<bool>,
+    context_restorable: Cell<bool>,
+    restoration_pending: Cell<bool>,
+    #[no_trace]
+    #[ignore_malloc_size_of = "Fixed native context creation options"]
+    creation_attributes: GLContextAttributes,
+    webgl2_context: DomRefCell<Option<WeakRef<WebGL2RenderingContext>>>,
     texture_packing_alignment: Cell<u8>,
     texture_unpacking_settings: Cell<TextureUnpacking>,
     // TODO(nox): Should be Cell<u8>.
@@ -207,9 +217,9 @@ pub(crate) struct WebGLRenderingContext {
     size: Cell<Size2D<u32>>,
     extension_manager: WebGLExtensions,
     capabilities: Capabilities,
-    default_vao: DomOnceCell<WebGLVertexArrayObjectOES>,
+    default_vao: MutNullableDom<WebGLVertexArrayObjectOES>,
     current_vao: MutNullableDom<WebGLVertexArrayObjectOES>,
-    default_vao_webgl2: DomOnceCell<WebGLVertexArrayObject>,
+    default_vao_webgl2: MutNullableDom<WebGLVertexArrayObject>,
     current_vao_webgl2: MutNullableDom<WebGLVertexArrayObject>,
     textures: Textures,
     #[no_trace]
@@ -258,6 +268,12 @@ impl WebGLRenderingContext {
                 canvas,
                 last_error: Cell::new(None),
                 xr_compatible: Cell::new(false),
+                context_lost: Cell::new(false),
+                context_loss_error_pending: Cell::new(false),
+                context_restorable: Cell::new(false),
+                restoration_pending: Cell::new(false),
+                creation_attributes: attrs,
+                webgl2_context: DomRefCell::new(None),
                 texture_packing_alignment: Cell::new(4),
                 texture_unpacking_settings: Cell::new(TextureUnpacking::CONVERT_COLORSPACE),
                 texture_unpacking_alignment: Cell::new(4),
@@ -288,7 +304,7 @@ impl WebGLRenderingContext {
                 textures: Textures::new(max_combined_texture_image_units),
                 api_type: ctx_data.api_type,
                 droppable: DroppableWebGLRenderingContext {
-                    webgl_sender: Rc::new(ctx_data.sender),
+                    webgl_sender: DomRefCell::new(Rc::new(ctx_data.sender)),
                 },
             };
             #[cfg(feature = "webxr")]
@@ -343,6 +359,135 @@ impl WebGLRenderingContext {
         }
     }
 
+    pub(crate) fn is_context_lost(&self) -> bool {
+        self.context_lost.get()
+    }
+
+    pub(crate) fn register_webgl2_context(&self, context: &WebGL2RenderingContext) {
+        *self.webgl2_context.borrow_mut() = Some(WeakRef::new(context));
+    }
+
+    // WEBGL_lose_context retains its extension object across generations.
+    // Its two methods are the only operations that can report errors while lost.
+    pub(crate) fn lose_context(&self, cx: &mut JSContext) {
+        use crate::dom::bindings::refcounted::Trusted;
+        if self.context_lost.replace(true) {
+            self.last_error.set(Some(InvalidOperation));
+            return;
+        }
+        self.context_loss_error_pending.set(true);
+        self.context_restorable.set(false);
+        self.restoration_pending.set(false);
+        self.last_error.set(None);
+        self.xr_compatible.set(false);
+        self.extension_manager.reset_after_loss();
+        // Native removal also tears down the context's XR layers and swap chain.
+        // Removal waits for any in-flight compositor use to complete.
+        let _ = self.sender().send_remove();
+        // Expire cleanup handles immediately, including while native removal is
+        // waiting for WebRender. No old finalizer can submit more GL work.
+        let retired = (*self.sender()).clone();
+        *self.droppable.webgl_sender.borrow_mut() = Rc::new(retired);
+        self.reset_cached_state();
+        if let HTMLCanvasElementOrOffscreenCanvas::HTMLCanvasElement(canvas) = &self.canvas {
+            canvas.webgl_context_lost(cx.no_gc());
+        }
+        let context = Trusted::new(self);
+        self.global().task_manager().webgl_task_source().queue(task!(webgl_context_lost: move |cx| {
+            let context = context.root();
+            if !context.is_context_lost() { return; }
+            let cancelled = context.fire_context_event(cx, stylo_atoms::Atom::from("webglcontextlost"));
+            context.context_restorable.set(cancelled);
+        }));
+    }
+
+    pub(crate) fn restore_context(&self) {
+        use crate::dom::bindings::refcounted::Trusted;
+        if !self.is_context_lost() || !self.context_restorable.get() {
+            self.last_error.set(Some(InvalidOperation));
+            return;
+        }
+        if self.restoration_pending.replace(true) { return; }
+        let context = Trusted::new(self);
+        self.global().task_manager().webgl_task_source().queue(task!(restore_webgl_context: move |cx| {
+            let context = context.root();
+            context.restoration_pending.set(false);
+            if !context.is_context_lost() || !context.context_restorable.get() { return; }
+            if context.recreate_drawing_buffer().is_err() { return; }
+            context.reset_cached_state();
+            context.last_error.set(None);
+            context.context_loss_error_pending.set(false);
+            context.context_restorable.set(false);
+            context.context_lost.set(false);
+            if let HTMLCanvasElementOrOffscreenCanvas::HTMLCanvasElement(canvas) = &context.canvas {
+                if let Some(key) = canvas.webgl_context_restored(cx.no_gc()) { context.set_image_key(key); }
+            }
+            context.fire_context_event(cx, stylo_atoms::Atom::from("webglcontextrestored"));
+        }));
+    }
+
+    fn fire_context_event(&self, cx: &mut JSContext, name: stylo_atoms::Atom) -> bool {
+        let event = WebGLContextEvent::new(cx, self.global().as_window(), name,
+            EventBubbles::DoesNotBubble, EventCancelable::Cancelable, DOMString::new());
+        let not_cancelled = match &self.canvas {
+            HTMLCanvasElementOrOffscreenCanvas::HTMLCanvasElement(canvas) => event.upcast::<Event>().fire(cx, canvas.upcast()),
+            HTMLCanvasElementOrOffscreenCanvas::OffscreenCanvas(canvas) => event.upcast::<Event>().fire(cx, canvas.upcast()),
+        };
+        !not_cancelled
+    }
+
+    fn recreate_drawing_buffer(&self) -> Result<(), String> {
+        let global = self.global();
+        let window = global.downcast::<Window>().ok_or("WebGL window unavailable")?;
+        let channel = window.webgl_chan().ok_or("WebGL backend unavailable")?;
+        let size = self.size();
+        let (sender, receiver) = webgl_channel().ok_or("WebGL channel unavailable")?;
+        // Restoration starts with xrCompatible false; an application can negotiate again.
+        let mut attrs = self.creation_attributes;
+        attrs.xr_compatible = false;
+        channel.send(WebGLMsg::CreateContext(window.webview_id().into(), self.webgl_version, size, attrs, sender))
+            .map_err(|_| "WebGL backend unavailable")?;
+        let data = receiver.recv().map_err(|_| "WebGL restoration failed")??;
+        if data.limits != self.limits || data.api_type != self.api_type || data.glsl_version != self.glsl_version {
+            let _ = data.sender.send_remove();
+            return Err("WebGL graphics capabilities changed during restoration".into());
+        }
+        // A new context ID invalidates every old WebGLObject and uniform location,
+        // even if the native driver recycles a numeric GL object name.
+        *self.droppable.webgl_sender.borrow_mut() = Rc::new(data.sender);
+        self.size.set(size);
+        Ok(())
+    }
+
+    fn reset_cached_state(&self) {
+        self.texture_packing_alignment.set(4);
+        self.texture_unpacking_alignment.set(4);
+        self.texture_unpacking_settings.set(TextureUnpacking::CONVERT_COLORSPACE);
+        self.texture_unpack_layout.set(UnpackLayout::default());
+        self.bound_draw_framebuffer.set(None);
+        self.bound_read_framebuffer.set(None);
+        self.bound_renderbuffer.set(None);
+        self.bound_buffer_array.set(None);
+        self.current_program.set(None);
+        self.current_vao.set(None);
+        self.default_vao.set(None);
+        self.current_vao_webgl2.set(None);
+        self.default_vao_webgl2.set(None);
+        self.current_vertex_attribs.borrow_mut().fill(VertexAttrib::Float(0., 0., 0., 1.));
+        let size = self.size();
+        self.current_scissor.set((0, 0, size.width, size.height));
+        self.current_clear_color.set((0., 0., 0., 0.));
+        self.capabilities.value.set(CapFlags::default());
+        self.textures.active_unit.set(0);
+        for unit in &self.textures.units {
+            unit.tex_2d.set(None); unit.tex_cube_map.set(None);
+            unit.tex_3d.set(None); unit.tex_2d_array.set(None);
+        }
+        if let Some(context) = self.webgl2_context.borrow().as_ref().and_then(WeakRef::root) {
+            context.reset_cached_state();
+        }
+    }
+
     pub(crate) fn is_xr_compatible(&self) -> bool {
         self.xr_compatible.get()
     }
@@ -381,11 +526,11 @@ impl WebGLRenderingContext {
     }
 
     pub(crate) fn set_image_key(&self, image_key: ImageKey) {
-        self.droppable.webgl_sender.set_image_key(image_key);
+        self.sender().set_image_key(image_key);
     }
 
     pub(crate) fn update_rendering(&self, canvas_epoch: Epoch) -> bool {
-        if !self.onscreen() {
+        if self.is_context_lost() || !self.onscreen() {
             return false;
         }
 
@@ -525,19 +670,13 @@ impl WebGLRenderingContext {
 
     pub(crate) fn current_vao(&self, cx: &mut JSContext) -> DomRoot<WebGLVertexArrayObjectOES> {
         self.current_vao.or_init(|| {
-            DomRoot::from_ref(
-                self.default_vao
-                    .init_once(|| WebGLVertexArrayObjectOES::new(cx, self, None)),
-            )
+            self.default_vao.or_init(|| WebGLVertexArrayObjectOES::new(cx, self, None))
         })
     }
 
     pub(crate) fn current_vao_webgl2(&self, cx: &mut JSContext) -> DomRoot<WebGLVertexArrayObject> {
         self.current_vao_webgl2.or_init(|| {
-            DomRoot::from_ref(
-                self.default_vao_webgl2
-                    .init_once(|| WebGLVertexArrayObject::new(cx, self, None)),
-            )
+            self.default_vao_webgl2.or_init(|| WebGLVertexArrayObject::new(cx, self, None))
         })
     }
 
@@ -546,19 +685,19 @@ impl WebGLRenderingContext {
     }
 
     #[inline]
-    pub(crate) fn sender(&self) -> &WebGLMsgSender {
-        &self.droppable.webgl_sender
+    pub(crate) fn sender(&self) -> Rc<WebGLMsgSender> {
+        self.droppable.webgl_sender.borrow().clone()
     }
 
     pub(crate) fn cleanup_sender(&self) -> std::rc::Weak<WebGLMsgSender> {
-        Rc::downgrade(&self.droppable.webgl_sender)
+        if self.is_context_lost() { return std::rc::Weak::new(); }
+        Rc::downgrade(&self.sender())
     }
 
     #[inline]
     pub(crate) fn send_with_fallibility(&self, command: WebGLCommand, fallibility: Operation) {
         let result = self
-            .droppable
-            .webgl_sender
+            .sender()
             .send(command, capture_webgl_backtrace());
         if matches!(fallibility, Operation::Infallible) {
             result.expect("Operation failed");
@@ -576,6 +715,7 @@ impl WebGLRenderingContext {
 
     #[track_caller]
     pub(crate) fn webgl_error(&self, err: WebGLError) {
+        if self.is_context_lost() { return; }
         // TODO(emilio): Add useful debug messages to this
         warn!(
             "WebGL error: {:?}, previous error was {:?}, caller: {}",
@@ -638,7 +778,7 @@ impl WebGLRenderingContext {
         let Some(context) = object.upcast().context() else {
             return Err(WebGLError::InvalidOperation);
         };
-        if self != &*context {
+        if self != &*context || self.context_id() != object.upcast().context_id() {
             return Err(WebGLError::InvalidOperation);
         }
         Ok(())
@@ -2154,7 +2294,7 @@ impl CanvasContext for WebGLRenderingContext {
     type ID = WebGLContextId;
 
     fn context_id(&self) -> Self::ID {
-        self.droppable.webgl_sender.context_id()
+        self.sender().context_id()
     }
 
     fn canvas(&self) -> Option<RootedHTMLCanvasElementOrOffscreenCanvas> {
@@ -2162,10 +2302,10 @@ impl CanvasContext for WebGLRenderingContext {
     }
 
     fn resize(&self) {
+        if self.is_context_lost() { return; }
         let size = self.size().cast();
         let (sender, receiver) = webgl_channel().unwrap();
-        self.droppable
-            .webgl_sender
+        self.sender()
             .send_resize(size, sender)
             .unwrap();
         // FIXME(#21718) The backend is allowed to choose a size smaller than
@@ -2227,6 +2367,7 @@ impl CanvasContext for WebGLRenderingContext {
     //
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#2.2>
     fn get_image_data(&self) -> Option<Snapshot> {
+        if self.is_context_lost() { return None; }
         handle_potential_webgl_error!(self, self.validate_read_framebuffer(), return None);
         let mut size = self.size().cast();
 
@@ -2318,11 +2459,13 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.11>
     fn Flush(&self) {
+        if self.is_context_lost() { return; }
         self.send_command(WebGLCommand::Flush);
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.11>
     fn Finish(&self) {
+        if self.is_context_lost() { return; }
         let (sender, receiver) = webgl_channel().unwrap();
         self.send_command(WebGLCommand::Finish(sender));
         receiver.recv().unwrap()
@@ -2330,6 +2473,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.1>
     fn DrawingBufferWidth(&self) -> i32 {
+        if self.is_context_lost() { return 0; }
         let (sender, receiver) = webgl_channel().unwrap();
         self.send_command(WebGLCommand::DrawingBufferWidth(sender));
         receiver.recv().unwrap()
@@ -2337,6 +2481,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.1>
     fn DrawingBufferHeight(&self) -> i32 {
+        if self.is_context_lost() { return 0; }
         let (sender, receiver) = webgl_channel().unwrap();
         self.send_command(WebGLCommand::DrawingBufferHeight(sender));
         receiver.recv().unwrap()
@@ -2350,6 +2495,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         parameter: u32,
         mut retval: MutableHandleValue,
     ) {
+        if self.is_context_lost() { return retval.set(NullValue()); }
         let buffer = handle_potential_webgl_error!(
             self,
             self.bound_buffer(cx, target),
@@ -2360,6 +2506,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn GetParameter(&self, cx: &mut JSContext, parameter: u32, mut retval: MutableHandleValue) {
+        if self.is_context_lost() { return retval.set(NullValue()); }
         if !self
             .extension_manager
             .is_get_parameter_name_enabled(parameter)
@@ -2613,6 +2760,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         pname: u32,
         mut retval: MutableHandleValue,
     ) {
+        if self.is_context_lost() { return retval.set(NullValue()); }
         let texture_slot = handle_potential_webgl_error!(
             self,
             self.textures
@@ -2679,6 +2827,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn GetError(&self) -> u32 {
+        if self.context_loss_error_pending.replace(false) { return constants::CONTEXT_LOST_WEBGL; }
         let error_code = if let Some(error) = self.last_error.get() {
             match error {
                 WebGLError::InvalidEnum => constants::INVALID_ENUM,
@@ -2697,13 +2846,13 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.2>
     fn GetContextAttributes(&self) -> Option<WebGLContextAttributes> {
+        if self.is_context_lost() { return None; }
         let (sender, receiver) = webgl_channel().unwrap();
 
         // If the send does not succeed, assume context lost
         let backtrace = capture_webgl_backtrace();
         if self
-            .droppable
-            .webgl_sender
+            .sender()
             .send(WebGLCommand::GetContextAttributes(sender), backtrace)
             .is_err()
         {
@@ -2728,11 +2877,12 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.13>
     fn IsContextLost(&self) -> bool {
-        false
+        self.is_context_lost()
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.14>
     fn GetSupportedExtensions(&self) -> Option<Vec<DOMString>> {
+        if self.is_context_lost() { return None; }
         self.extension_manager
             .init_once(|| self.get_gl_extensions());
         let extensions = self.extension_manager.get_supported_extensions();
@@ -2751,6 +2901,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         name: DOMString,
         rval: MutableHandleObject,
     ) {
+        if self.is_context_lost() { return; }
         self.extension_manager
             .init_once(|| self.get_gl_extensions());
         self.extension_manager
@@ -2759,23 +2910,27 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn ActiveTexture(&self, texture: u32) {
+        if self.is_context_lost() { return; }
         handle_potential_webgl_error!(self, self.textures.set_active_unit_enum(texture), return);
         self.send_command(WebGLCommand::ActiveTexture(texture));
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn BlendColor(&self, r: f32, g: f32, b: f32, a: f32) {
+        if self.is_context_lost() { return; }
         self.send_command(WebGLCommand::BlendColor(r, g, b, a));
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn BlendEquation(&self, mode: u32) {
+        if self.is_context_lost() { return; }
         handle_potential_webgl_error!(self, self.validate_blend_mode(mode), return);
         self.send_command(WebGLCommand::BlendEquation(mode))
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn BlendEquationSeparate(&self, mode_rgb: u32, mode_alpha: u32) {
+        if self.is_context_lost() { return; }
         handle_potential_webgl_error!(self, self.validate_blend_mode(mode_rgb), return);
         handle_potential_webgl_error!(self, self.validate_blend_mode(mode_alpha), return);
         self.send_command(WebGLCommand::BlendEquationSeparate(mode_rgb, mode_alpha));
@@ -2783,6 +2938,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn BlendFunc(&self, src_factor: u32, dest_factor: u32) {
+        if self.is_context_lost() { return; }
         // From the WebGL 1.0 spec, 6.13: Viewport Depth Range:
         //
         //     A call to blendFunc will generate an INVALID_OPERATION error if one of the two
@@ -2800,6 +2956,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn BlendFuncSeparate(&self, src_rgb: u32, dest_rgb: u32, src_alpha: u32, dest_alpha: u32) {
+        if self.is_context_lost() { return; }
         // From the WebGL 1.0 spec, 6.13: Viewport Depth Range:
         //
         //     A call to blendFuncSeparate will generate an INVALID_OPERATION error if srcRGB is
@@ -2819,6 +2976,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn AttachShader(&self, program: &WebGLProgram, shader: &WebGLShader) {
+        if self.is_context_lost() { return; }
         handle_potential_webgl_error!(self, self.validate_ownership(program), return);
         handle_potential_webgl_error!(self, self.validate_ownership(shader), return);
         handle_potential_webgl_error!(self, program.attach_shader(shader));
@@ -2826,6 +2984,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn DetachShader(&self, program: &WebGLProgram, shader: &WebGLShader) {
+        if self.is_context_lost() { return; }
         handle_potential_webgl_error!(self, self.validate_ownership(program), return);
         handle_potential_webgl_error!(self, self.validate_ownership(shader), return);
         handle_potential_webgl_error!(self, program.detach_shader(shader));
@@ -2833,12 +2992,14 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn BindAttribLocation(&self, program: &WebGLProgram, index: u32, name: DOMString) {
+        if self.is_context_lost() { return; }
         handle_potential_webgl_error!(self, self.validate_ownership(program), return);
         handle_potential_webgl_error!(self, program.bind_attrib_location(index, name));
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.5>
     fn BindBuffer(&self, cx: &mut JSContext, target: u32, buffer: Option<&WebGLBuffer>) {
+        if self.is_context_lost() { return; }
         let current_vao;
         let slot = match target {
             constants::ARRAY_BUFFER => &self.bound_buffer_array,
@@ -2856,6 +3017,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.6>
     fn BindFramebuffer(&self, target: u32, framebuffer: Option<&WebGLFramebuffer>) {
+        if self.is_context_lost() { return; }
         handle_potential_webgl_error!(
             self,
             self.validate_new_framebuffer_binding(framebuffer),
@@ -2871,6 +3033,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.7>
     fn BindRenderbuffer(&self, target: u32, renderbuffer: Option<&WebGLRenderbuffer>) {
+        if self.is_context_lost() { return; }
         if let Some(rb) = renderbuffer {
             handle_potential_webgl_error!(self, self.validate_ownership(rb), return);
         }
@@ -2901,6 +3064,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.8>
     fn BindTexture(&self, target: u32, texture: Option<&WebGLTexture>) {
+        if self.is_context_lost() { return; }
         if let Some(texture) = texture {
             handle_potential_webgl_error!(self, self.validate_ownership(texture), return);
         }
@@ -2922,6 +3086,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.8>
     fn GenerateMipmap(&self, target: u32) {
+        if self.is_context_lost() { return; }
         let texture_slot = handle_potential_webgl_error!(
             self,
             self.textures
@@ -2941,6 +3106,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         data: Option<ArrayBufferViewOrArrayBuffer>,
         usage: u32,
     ) {
+        if self.is_context_lost() { return; }
         let usage = handle_potential_webgl_error!(self, self.buffer_usage(usage), return);
         let bound_buffer =
             handle_potential_webgl_error!(self, self.bound_buffer(cx, target), return);
@@ -2949,6 +3115,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.5>
     fn BufferData(&self, cx: &mut JSContext, target: u32, size: i64, usage: u32) {
+        if self.is_context_lost() { return; }
         let usage = handle_potential_webgl_error!(self, self.buffer_usage(usage), return);
         let bound_buffer =
             handle_potential_webgl_error!(self, self.bound_buffer(cx, target), return);
@@ -2963,6 +3130,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         offset: i64,
         data: ArrayBufferViewOrArrayBuffer,
     ) {
+        if self.is_context_lost() { return; }
         let bound_buffer =
             handle_potential_webgl_error!(self, self.bound_buffer(cx, target), return);
         self.buffer_sub_data(cx.no_gc(), target, offset, data, bound_buffer)
@@ -2980,6 +3148,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         border: i32,
         data: CustomAutoRooterGuard<ArrayBufferView>,
     ) {
+        if self.is_context_lost() { return; }
         let data = data.as_slice_safe(no_gc).unwrap_or(&[]);
         self.compressed_tex_image_2d(target, level, internal_format, width, height, border, data)
     }
@@ -2997,6 +3166,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         format: u32,
         data: CustomAutoRooterGuard<ArrayBufferView>,
     ) {
+        if self.is_context_lost() { return; }
         let data = data.as_slice_safe(no_gc).unwrap_or(&[]);
         self.compressed_tex_sub_image_2d(
             target, level, xoffset, yoffset, width, height, format, data,
@@ -3015,6 +3185,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         height: i32,
         border: i32,
     ) {
+        if self.is_context_lost() { return; }
         handle_potential_webgl_error!(self, self.validate_read_framebuffer(), return);
 
         let validator = CommonTexImage2DValidator::new(
@@ -3120,6 +3291,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         width: i32,
         height: i32,
     ) {
+        if self.is_context_lost() { return; }
         handle_potential_webgl_error!(self, self.validate_read_framebuffer(), return);
 
         // NB: We use a dummy (valid) format and border in order to reuse the
@@ -3179,6 +3351,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.11>
     fn Clear(&self, mask: u32) {
+        if self.is_context_lost() { return; }
         handle_potential_webgl_error!(self, self.validate_framebuffer(), return);
         if mask &
             !(constants::DEPTH_BUFFER_BIT |
@@ -3195,27 +3368,32 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn ClearColor(&self, red: f32, green: f32, blue: f32, alpha: f32) {
+        if self.is_context_lost() { return; }
         self.current_clear_color.set((red, green, blue, alpha));
         self.send_command(WebGLCommand::ClearColor(red, green, blue, alpha));
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn ClearDepth(&self, depth: f32) {
+        if self.is_context_lost() { return; }
         self.send_command(WebGLCommand::ClearDepth(depth))
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn ClearStencil(&self, stencil: i32) {
+        if self.is_context_lost() { return; }
         self.send_command(WebGLCommand::ClearStencil(stencil))
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn ColorMask(&self, r: bool, g: bool, b: bool, a: bool) {
+        if self.is_context_lost() { return; }
         self.send_command(WebGLCommand::ColorMask(r, g, b, a))
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn CullFace(&self, mode: u32) {
+        if self.is_context_lost() { return; }
         match mode {
             constants::FRONT | constants::BACK | constants::FRONT_AND_BACK => {
                 self.send_command(WebGLCommand::CullFace(mode))
@@ -3226,6 +3404,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn FrontFace(&self, mode: u32) {
+        if self.is_context_lost() { return; }
         match mode {
             constants::CW | constants::CCW => self.send_command(WebGLCommand::FrontFace(mode)),
             _ => self.webgl_error(InvalidEnum),
@@ -3233,6 +3412,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
     }
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn DepthFunc(&self, func: u32) {
+        if self.is_context_lost() { return; }
         match func {
             constants::NEVER |
             constants::LESS |
@@ -3248,11 +3428,13 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn DepthMask(&self, flag: bool) {
+        if self.is_context_lost() { return; }
         self.send_command(WebGLCommand::DepthMask(flag))
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn DepthRange(&self, near: f32, far: f32) {
+        if self.is_context_lost() { return; }
         // https://www.khronos.org/registry/webgl/specs/latest/1.0/#VIEWPORT_DEPTH_RANGE
         if near > far {
             return self.webgl_error(InvalidOperation);
@@ -3262,6 +3444,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn Enable(&self, cap: u32) {
+        if self.is_context_lost() { return; }
         if handle_potential_webgl_error!(self, self.capabilities.set(cap, true), return) {
             self.send_command(WebGLCommand::Enable(cap));
         }
@@ -3269,6 +3452,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn Disable(&self, cap: u32) {
+        if self.is_context_lost() { return; }
         if handle_potential_webgl_error!(self, self.capabilities.set(cap, false), return) {
             self.send_command(WebGLCommand::Disable(cap));
         }
@@ -3276,6 +3460,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn CompileShader(&self, shader: &WebGLShader) {
+        if self.is_context_lost() { return; }
         handle_potential_webgl_error!(self, self.validate_ownership(shader), return);
         handle_potential_webgl_error!(
             self,
@@ -3291,31 +3476,61 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.5>
     fn CreateBuffer(&self, cx: &mut JSContext) -> Option<DomRoot<WebGLBuffer>> {
+        if self.is_context_lost() {
+            // An invalidated script object carries no native resource. Its sender
+            // belongs to the lost generation and cannot address restored GL names.
+            return Some(WebGLBuffer::new(cx, self, servo_canvas_traits::webgl::WebGLBufferId::maybe_new(1).unwrap()));
+        }
         WebGLBuffer::maybe_new(cx, self)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.6>
     fn CreateFramebuffer(&self, cx: &mut JSContext) -> Option<DomRoot<WebGLFramebuffer>> {
+        if self.is_context_lost() {
+            // An invalidated script object carries no native resource. Its sender
+            // belongs to the lost generation and cannot address restored GL names.
+            return Some(WebGLFramebuffer::new(cx, self, servo_canvas_traits::webgl::WebGLFramebufferId::maybe_new(1).unwrap()));
+        }
         WebGLFramebuffer::maybe_new(cx, self)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.7>
     fn CreateRenderbuffer(&self, cx: &mut JSContext) -> Option<DomRoot<WebGLRenderbuffer>> {
+        if self.is_context_lost() {
+            // An invalidated script object carries no native resource. Its sender
+            // belongs to the lost generation and cannot address restored GL names.
+            return Some(WebGLRenderbuffer::new(cx, self, servo_canvas_traits::webgl::WebGLRenderbufferId::maybe_new(1).unwrap()));
+        }
         WebGLRenderbuffer::maybe_new(cx, self)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.8>
     fn CreateTexture(&self, cx: &mut JSContext) -> Option<DomRoot<WebGLTexture>> {
+        if self.is_context_lost() {
+            // An invalidated script object carries no native resource. Its sender
+            // belongs to the lost generation and cannot address restored GL names.
+            return Some(WebGLTexture::new(cx, self, servo_canvas_traits::webgl::WebGLTextureId::maybe_new(1).unwrap()));
+        }
         WebGLTexture::maybe_new(cx, self)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn CreateProgram(&self, cx: &mut JSContext) -> Option<DomRoot<WebGLProgram>> {
+        if self.is_context_lost() {
+            // An invalidated script object carries no native resource. Its sender
+            // belongs to the lost generation and cannot address restored GL names.
+            return Some(WebGLProgram::new(cx, self, servo_canvas_traits::webgl::WebGLProgramId::maybe_new(1).unwrap()));
+        }
         WebGLProgram::maybe_new(cx, self)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn CreateShader(&self, cx: &mut JSContext, shader_type: u32) -> Option<DomRoot<WebGLShader>> {
+        if self.is_context_lost() {
+            // An invalidated script object carries no native resource. Its sender
+            // belongs to the lost generation and cannot address restored GL names.
+            return Some(WebGLShader::new(cx, self, servo_canvas_traits::webgl::WebGLShaderId::maybe_new(1).unwrap(), shader_type));
+        }
         match shader_type {
             constants::VERTEX_SHADER | constants::FRAGMENT_SHADER => {},
             _ => {
@@ -3328,6 +3543,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.5>
     fn DeleteBuffer(&self, cx: &mut JSContext, buffer: Option<&WebGLBuffer>) {
+        if self.is_context_lost() { return; }
         let buffer = match buffer {
             Some(buffer) => buffer,
             None => return,
@@ -3346,6 +3562,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.6>
     fn DeleteFramebuffer(&self, framebuffer: Option<&WebGLFramebuffer>) {
+        if self.is_context_lost() { return; }
         if let Some(framebuffer) = framebuffer {
             // https://immersive-web.github.io/webxr/#opaque-framebuffer
             // Can opaque framebuffers be deleted?
@@ -3367,6 +3584,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.7>
     fn DeleteRenderbuffer(&self, renderbuffer: Option<&WebGLRenderbuffer>) {
+        if self.is_context_lost() { return; }
         if let Some(renderbuffer) = renderbuffer {
             handle_potential_webgl_error!(self, self.validate_ownership(renderbuffer), return);
             if let Some(bound_object) = self.bound_renderbuffer.get() &&
@@ -3384,6 +3602,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.8>
     fn DeleteTexture(&self, texture: Option<&WebGLTexture>) {
+        if self.is_context_lost() { return; }
         if let Some(texture) = texture {
             handle_potential_webgl_error!(self, self.validate_ownership(texture), return);
 
@@ -3419,6 +3638,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn DeleteProgram(&self, program: Option<&WebGLProgram>) {
+        if self.is_context_lost() { return; }
         if let Some(program) = program {
             handle_potential_webgl_error!(self, self.validate_ownership(program), return);
             program.mark_for_deletion(Operation::Infallible)
@@ -3427,6 +3647,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn DeleteShader(&self, shader: Option<&WebGLShader>) {
+        if self.is_context_lost() { return; }
         if let Some(shader) = shader {
             handle_potential_webgl_error!(self, self.validate_ownership(shader), return);
             shader.mark_for_deletion(Operation::Infallible)
@@ -3435,11 +3656,13 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.11>
     fn DrawArrays(&self, cx: &mut JSContext, mode: u32, first: i32, count: i32) {
+        if self.is_context_lost() { return; }
         handle_potential_webgl_error!(self, self.draw_arrays_instanced(cx, mode, first, count, 1));
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.11>
     fn DrawElements(&self, cx: &mut JSContext, mode: u32, count: i32, type_: u32, offset: i64) {
+        if self.is_context_lost() { return; }
         handle_potential_webgl_error!(
             self,
             self.draw_elements_instanced(cx, mode, count, type_, offset, 1)
@@ -3448,6 +3671,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn EnableVertexAttribArray(&self, cx: &mut JSContext, attrib_id: u32) {
+        if self.is_context_lost() { return; }
         if attrib_id >= self.limits.max_vertex_attribs {
             return self.webgl_error(InvalidValue);
         }
@@ -3464,6 +3688,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn DisableVertexAttribArray(&self, cx: &mut JSContext, attrib_id: u32) {
+        if self.is_context_lost() { return; }
         if attrib_id >= self.limits.max_vertex_attribs {
             return self.webgl_error(InvalidValue);
         }
@@ -3485,6 +3710,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         program: &WebGLProgram,
         index: u32,
     ) -> Option<DomRoot<WebGLActiveInfo>> {
+        if self.is_context_lost() { return None; }
         handle_potential_webgl_error!(self, self.validate_ownership(program), return None);
         match program.get_active_uniform(cx, index) {
             Ok(ret) => Some(ret),
@@ -3502,12 +3728,14 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         program: &WebGLProgram,
         index: u32,
     ) -> Option<DomRoot<WebGLActiveInfo>> {
+        if self.is_context_lost() { return None; }
         handle_potential_webgl_error!(self, self.validate_ownership(program), return None);
         handle_potential_webgl_error!(self, program.get_active_attrib(cx, index).map(Some), None)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn GetAttribLocation(&self, program: &WebGLProgram, name: DOMString) -> i32 {
+        if self.is_context_lost() { return -1; }
         handle_potential_webgl_error!(self, self.validate_ownership(program), return -1);
         handle_potential_webgl_error!(self, program.get_attrib_location(name), -1)
     }
@@ -3521,6 +3749,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         pname: u32,
         mut retval: MutableHandleValue,
     ) {
+        if self.is_context_lost() { return retval.set(NullValue()); }
         // Check if currently bound framebuffer is non-zero as per spec.
         if let Some(fb) = self.bound_draw_framebuffer.get() {
             // Opaque framebuffers cannot have their attachments inspected
@@ -3638,6 +3867,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         pname: u32,
         mut retval: MutableHandleValue,
     ) {
+        if self.is_context_lost() { return retval.set(NullValue()); }
         // We do not check to see if the renderbuffer came from an opaque framebuffer
         // https://github.com/immersive-web/webxr/issues/862
         let target_matches = target == constants::RENDERBUFFER;
@@ -3681,6 +3911,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn GetProgramInfoLog(&self, program: &WebGLProgram) -> Option<DOMString> {
+        if self.is_context_lost() { return None; }
         handle_potential_webgl_error!(self, self.validate_ownership(program), return None);
         match program.get_info_log() {
             Ok(value) => Some(DOMString::from(value)),
@@ -3699,6 +3930,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         param: u32,
         mut retval: MutableHandleValue,
     ) {
+        if self.is_context_lost() { return retval.set(NullValue()); }
         handle_potential_webgl_error!(
             self,
             self.validate_ownership(program),
@@ -3738,6 +3970,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn GetShaderInfoLog(&self, shader: &WebGLShader) -> Option<DOMString> {
+        if self.is_context_lost() { return None; }
         handle_potential_webgl_error!(self, self.validate_ownership(shader), return None);
         Some(shader.info_log())
     }
@@ -3750,6 +3983,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         param: u32,
         mut retval: MutableHandleValue,
     ) {
+        if self.is_context_lost() { return retval.set(NullValue()); }
         handle_potential_webgl_error!(
             self,
             self.validate_ownership(shader),
@@ -3777,6 +4011,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         shader_type: u32,
         precision_type: u32,
     ) -> Option<DomRoot<WebGLShaderPrecisionFormat>> {
+        if self.is_context_lost() { return None; }
         match shader_type {
             constants::FRAGMENT_SHADER | constants::VERTEX_SHADER => (),
             _ => {
@@ -3822,6 +4057,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         program: &WebGLProgram,
         name: DOMString,
     ) -> Option<DomRoot<WebGLUniformLocation>> {
+        if self.is_context_lost() { return None; }
         handle_potential_webgl_error!(self, self.validate_ownership(program), return None);
         handle_potential_webgl_error!(self, program.get_uniform_location(cx, name), None)
     }
@@ -3834,6 +4070,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         param: u32,
         mut retval: MutableHandleValue,
     ) {
+        if self.is_context_lost() { return retval.set(NullValue()); }
         let mut get_attrib = |cx: &mut JSContext, data: Ref<'_, VertexAttribData>| {
             if param == constants::CURRENT_VERTEX_ATTRIB {
                 let attrib = self.current_vertex_attribs.borrow()[index as usize];
@@ -3922,6 +4159,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn GetVertexAttribOffset(&self, cx: &mut JSContext, index: u32, pname: u32) -> i64 {
+        if self.is_context_lost() { return 0; }
         if pname != constants::VERTEX_ATTRIB_ARRAY_POINTER {
             self.webgl_error(InvalidEnum);
             return 0;
@@ -3950,6 +4188,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn Hint(&self, target: u32, mode: u32) {
+        if self.is_context_lost() { return; }
         if target != constants::GENERATE_MIPMAP_HINT &&
             !self.extension_manager.is_hint_target_enabled(target)
         {
@@ -3967,6 +4206,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.5>
     fn IsBuffer(&self, buffer: Option<&WebGLBuffer>) -> bool {
+        if self.is_context_lost() { return false; }
         buffer.is_some_and(|buf| {
             self.validate_ownership(buf).is_ok() && buf.target().is_some() && !buf.is_deleted()
         })
@@ -3974,11 +4214,13 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn IsEnabled(&self, cap: u32) -> bool {
+        if self.is_context_lost() { return false; }
         handle_potential_webgl_error!(self, self.capabilities.is_enabled(cap), false)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.6>
     fn IsFramebuffer(&self, frame_buffer: Option<&WebGLFramebuffer>) -> bool {
+        if self.is_context_lost() { return false; }
         frame_buffer.is_some_and(|buf| {
             self.validate_ownership(buf).is_ok() && buf.target().is_some() && !buf.is_deleted()
         })
@@ -3986,11 +4228,13 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn IsProgram(&self, program: Option<&WebGLProgram>) -> bool {
+        if self.is_context_lost() { return false; }
         program.is_some_and(|p| self.validate_ownership(p).is_ok() && !p.is_deleted())
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.7>
     fn IsRenderbuffer(&self, render_buffer: Option<&WebGLRenderbuffer>) -> bool {
+        if self.is_context_lost() { return false; }
         render_buffer.is_some_and(|buf| {
             self.validate_ownership(buf).is_ok() && buf.ever_bound() && !buf.is_deleted()
         })
@@ -3998,11 +4242,13 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn IsShader(&self, shader: Option<&WebGLShader>) -> bool {
+        if self.is_context_lost() { return false; }
         shader.is_some_and(|s| self.validate_ownership(s).is_ok() && !s.is_deleted())
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.8>
     fn IsTexture(&self, texture: Option<&WebGLTexture>) -> bool {
+        if self.is_context_lost() { return false; }
         texture.is_some_and(|tex| {
             self.validate_ownership(tex).is_ok() && tex.target().is_some() && !tex.is_invalid()
         })
@@ -4010,6 +4256,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn LineWidth(&self, width: f32) {
+        if self.is_context_lost() { return; }
         if width.is_nan() || width <= 0f32 {
             return self.webgl_error(InvalidValue);
         }
@@ -4022,6 +4269,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
     ///
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn PixelStorei(&self, param_name: u32, param_value: i32) {
+        if self.is_context_lost() { return; }
         let mut texture_settings = self.texture_unpacking_settings.get();
         match param_name {
             constants::UNPACK_FLIP_Y_WEBGL => {
@@ -4064,6 +4312,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn PolygonOffset(&self, factor: f32, units: f32) {
+        if self.is_context_lost() { return; }
         self.send_command(WebGLCommand::PolygonOffset(factor, units))
     }
 
@@ -4079,6 +4328,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         pixel_type: u32,
         mut pixels: CustomAutoRooterGuard<Option<ArrayBufferView>>,
     ) {
+        if self.is_context_lost() { return; }
         handle_potential_webgl_error!(self, self.validate_read_framebuffer(), return);
 
         let pixels =
@@ -4176,11 +4426,13 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn SampleCoverage(&self, value: f32, invert: bool) {
+        if self.is_context_lost() { return; }
         self.send_command(WebGLCommand::SampleCoverage(value, invert));
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.4>
     fn Scissor(&self, x: i32, y: i32, width: i32, height: i32) {
+        if self.is_context_lost() { return; }
         if width < 0 || height < 0 {
             return self.webgl_error(InvalidValue);
         }
@@ -4194,6 +4446,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn StencilFunc(&self, func: u32, ref_: i32, mask: u32) {
+        if self.is_context_lost() { return; }
         match func {
             constants::NEVER |
             constants::LESS |
@@ -4209,6 +4462,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn StencilFuncSeparate(&self, face: u32, func: u32, ref_: i32, mask: u32) {
+        if self.is_context_lost() { return; }
         match face {
             constants::FRONT | constants::BACK | constants::FRONT_AND_BACK => (),
             _ => return self.webgl_error(InvalidEnum),
@@ -4231,11 +4485,13 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn StencilMask(&self, mask: u32) {
+        if self.is_context_lost() { return; }
         self.send_command(WebGLCommand::StencilMask(mask))
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn StencilMaskSeparate(&self, face: u32, mask: u32) {
+        if self.is_context_lost() { return; }
         match face {
             constants::FRONT | constants::BACK | constants::FRONT_AND_BACK => {
                 self.send_command(WebGLCommand::StencilMaskSeparate(face, mask))
@@ -4246,6 +4502,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn StencilOp(&self, fail: u32, zfail: u32, zpass: u32) {
+        if self.is_context_lost() { return; }
         if self.validate_stencil_actions(fail) &&
             self.validate_stencil_actions(zfail) &&
             self.validate_stencil_actions(zpass)
@@ -4258,6 +4515,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn StencilOpSeparate(&self, face: u32, fail: u32, zfail: u32, zpass: u32) {
+        if self.is_context_lost() { return; }
         match face {
             constants::FRONT | constants::BACK | constants::FRONT_AND_BACK => (),
             _ => return self.webgl_error(InvalidEnum),
@@ -4275,6 +4533,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn LinkProgram(&self, program: &WebGLProgram) {
+        if self.is_context_lost() { return; }
         handle_potential_webgl_error!(self, self.validate_ownership(program), return);
         if program.is_deleted() {
             return self.webgl_error(InvalidValue);
@@ -4284,18 +4543,21 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn ShaderSource(&self, shader: &WebGLShader, source: DOMString) {
+        if self.is_context_lost() { return; }
         handle_potential_webgl_error!(self, self.validate_ownership(shader), return);
         shader.set_source(source)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn GetShaderSource(&self, shader: &WebGLShader) -> Option<DOMString> {
+        if self.is_context_lost() { return None; }
         handle_potential_webgl_error!(self, self.validate_ownership(shader), return None);
         Some(shader.source())
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform1f(&self, location: Option<&WebGLUniformLocation>, val: f32) {
+        if self.is_context_lost() { return; }
         self.with_location(location, |location| {
             match location.type_() {
                 constants::BOOL | constants::FLOAT => {},
@@ -4308,6 +4570,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform1i(&self, location: Option<&WebGLUniformLocation>, val: i32) {
+        if self.is_context_lost() { return; }
         self.with_location(location, |location| {
             match location.type_() {
                 constants::BOOL | constants::INT => {},
@@ -4328,6 +4591,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform1iv(&self, location: Option<&WebGLUniformLocation>, val: Int32ArrayOrLongSequence) {
+        if self.is_context_lost() { return; }
         self.uniform1iv(location, val, 0, 0)
     }
 
@@ -4337,11 +4601,13 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         location: Option<&WebGLUniformLocation>,
         val: Float32ArrayOrUnrestrictedFloatSequence,
     ) {
+        if self.is_context_lost() { return; }
         self.uniform1fv(location, val, 0, 0)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform2f(&self, location: Option<&WebGLUniformLocation>, x: f32, y: f32) {
+        if self.is_context_lost() { return; }
         self.with_location(location, |location| {
             match location.type_() {
                 constants::BOOL_VEC2 | constants::FLOAT_VEC2 => {},
@@ -4358,11 +4624,13 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         location: Option<&WebGLUniformLocation>,
         val: Float32ArrayOrUnrestrictedFloatSequence,
     ) {
+        if self.is_context_lost() { return; }
         self.uniform2fv(location, val, 0, 0)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform2i(&self, location: Option<&WebGLUniformLocation>, x: i32, y: i32) {
+        if self.is_context_lost() { return; }
         self.with_location(location, |location| {
             match location.type_() {
                 constants::BOOL_VEC2 | constants::INT_VEC2 => {},
@@ -4375,11 +4643,13 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform2iv(&self, location: Option<&WebGLUniformLocation>, val: Int32ArrayOrLongSequence) {
+        if self.is_context_lost() { return; }
         self.uniform2iv(location, val, 0, 0)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform3f(&self, location: Option<&WebGLUniformLocation>, x: f32, y: f32, z: f32) {
+        if self.is_context_lost() { return; }
         self.with_location(location, |location| {
             match location.type_() {
                 constants::BOOL_VEC3 | constants::FLOAT_VEC3 => {},
@@ -4396,11 +4666,13 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         location: Option<&WebGLUniformLocation>,
         val: Float32ArrayOrUnrestrictedFloatSequence,
     ) {
+        if self.is_context_lost() { return; }
         self.uniform3fv(location, val, 0, 0)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform3i(&self, location: Option<&WebGLUniformLocation>, x: i32, y: i32, z: i32) {
+        if self.is_context_lost() { return; }
         self.with_location(location, |location| {
             match location.type_() {
                 constants::BOOL_VEC3 | constants::INT_VEC3 => {},
@@ -4413,11 +4685,13 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform3iv(&self, location: Option<&WebGLUniformLocation>, val: Int32ArrayOrLongSequence) {
+        if self.is_context_lost() { return; }
         self.uniform3iv(location, val, 0, 0)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform4i(&self, location: Option<&WebGLUniformLocation>, x: i32, y: i32, z: i32, w: i32) {
+        if self.is_context_lost() { return; }
         self.with_location(location, |location| {
             match location.type_() {
                 constants::BOOL_VEC4 | constants::INT_VEC4 => {},
@@ -4430,11 +4704,13 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform4iv(&self, location: Option<&WebGLUniformLocation>, val: Int32ArrayOrLongSequence) {
+        if self.is_context_lost() { return; }
         self.uniform4iv(location, val, 0, 0)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform4f(&self, location: Option<&WebGLUniformLocation>, x: f32, y: f32, z: f32, w: f32) {
+        if self.is_context_lost() { return; }
         self.with_location(location, |location| {
             match location.type_() {
                 constants::BOOL_VEC4 | constants::FLOAT_VEC4 => {},
@@ -4451,6 +4727,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         location: Option<&WebGLUniformLocation>,
         val: Float32ArrayOrUnrestrictedFloatSequence,
     ) {
+        if self.is_context_lost() { return; }
         self.uniform4fv(location, val, 0, 0)
     }
 
@@ -4461,6 +4738,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         transpose: bool,
         val: Float32ArrayOrUnrestrictedFloatSequence,
     ) {
+        if self.is_context_lost() { return; }
         self.uniform_matrix_2fv(location, transpose, val, 0, 0)
     }
 
@@ -4471,6 +4749,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         transpose: bool,
         val: Float32ArrayOrUnrestrictedFloatSequence,
     ) {
+        if self.is_context_lost() { return; }
         self.uniform_matrix_3fv(location, transpose, val, 0, 0)
     }
 
@@ -4481,6 +4760,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         transpose: bool,
         val: Float32ArrayOrUnrestrictedFloatSequence,
     ) {
+        if self.is_context_lost() { return; }
         self.uniform_matrix_4fv(location, transpose, val, 0, 0)
     }
 
@@ -4492,6 +4772,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         location: &WebGLUniformLocation,
         mut rval: MutableHandleValue,
     ) {
+        if self.is_context_lost() { return rval.set(NullValue()); }
         handle_potential_webgl_error!(
             self,
             self.uniform_check_program(program, location),
@@ -4565,6 +4846,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn UseProgram(&self, program: Option<&WebGLProgram>) {
+        if self.is_context_lost() { return; }
         if let Some(program) = program {
             handle_potential_webgl_error!(self, self.validate_ownership(program), return);
             if program.is_deleted() || !program.is_linked() {
@@ -4585,6 +4867,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn ValidateProgram(&self, program: &WebGLProgram) {
+        if self.is_context_lost() { return; }
         handle_potential_webgl_error!(self, self.validate_ownership(program), return);
         if let Err(e) = program.validate() {
             self.webgl_error(e);
@@ -4593,6 +4876,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn VertexAttrib1f(&self, _cx: &mut JSContext, indx: u32, x: f32) {
+        if self.is_context_lost() { return; }
         self.vertex_attrib(indx, x, 0f32, 0f32, 1f32)
     }
 
@@ -4603,6 +4887,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         indx: u32,
         v: Float32ArrayOrUnrestrictedFloatSequence,
     ) {
+        if self.is_context_lost() { return; }
         let values = match v {
             Float32ArrayOrUnrestrictedFloatSequence::Float32Array(v) => {
                 v.to_vec().unwrap_or_default()
@@ -4618,6 +4903,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn VertexAttrib2f(&self, _cx: &mut JSContext, indx: u32, x: f32, y: f32) {
+        if self.is_context_lost() { return; }
         self.vertex_attrib(indx, x, y, 0f32, 1f32)
     }
 
@@ -4628,6 +4914,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         indx: u32,
         v: Float32ArrayOrUnrestrictedFloatSequence,
     ) {
+        if self.is_context_lost() { return; }
         let values = match v {
             Float32ArrayOrUnrestrictedFloatSequence::Float32Array(v) => {
                 v.to_vec().unwrap_or_default()
@@ -4643,6 +4930,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn VertexAttrib3f(&self, _cx: &mut JSContext, indx: u32, x: f32, y: f32, z: f32) {
+        if self.is_context_lost() { return; }
         self.vertex_attrib(indx, x, y, z, 1f32)
     }
 
@@ -4653,6 +4941,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         indx: u32,
         v: Float32ArrayOrUnrestrictedFloatSequence,
     ) {
+        if self.is_context_lost() { return; }
         let values = match v {
             Float32ArrayOrUnrestrictedFloatSequence::Float32Array(v) => {
                 v.to_vec().unwrap_or_default()
@@ -4668,6 +4957,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn VertexAttrib4f(&self, _cx: &mut JSContext, indx: u32, x: f32, y: f32, z: f32, w: f32) {
+        if self.is_context_lost() { return; }
         self.vertex_attrib(indx, x, y, z, w)
     }
 
@@ -4678,6 +4968,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         indx: u32,
         v: Float32ArrayOrUnrestrictedFloatSequence,
     ) {
+        if self.is_context_lost() { return; }
         let values = match v {
             Float32ArrayOrUnrestrictedFloatSequence::Float32Array(v) => {
                 v.to_vec().unwrap_or_default()
@@ -4702,6 +4993,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         stride: i32,
         offset: i64,
     ) {
+        if self.is_context_lost() { return; }
         let kind = VertexAttribPointerKind::Float { normalized };
         let res = match self.webgl_version() {
             WebGLVersion::WebGL1 => self
@@ -4716,6 +5008,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.4>
     fn Viewport(&self, x: i32, y: i32, width: i32, height: i32) {
+        if self.is_context_lost() { return; }
         if width < 0 || height < 0 {
             return self.webgl_error(InvalidValue);
         }
@@ -4737,6 +5030,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         data_type: u32,
         pixels: CustomAutoRooterGuard<Option<ArrayBufferView>>,
     ) -> ErrorResult {
+        if self.is_context_lost() { return Ok(()); }
         if !self.extension_manager.is_tex_type_enabled(data_type) {
             self.webgl_error(InvalidEnum);
             return Ok(());
@@ -4880,6 +5174,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         data_type: u32,
         source: TexImageSource,
     ) -> ErrorResult {
+        if self.is_context_lost() { return Ok(()); }
         if !self.extension_manager.is_tex_type_enabled(data_type) {
             self.webgl_error(InvalidEnum);
             return Ok(());
@@ -4971,6 +5266,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         data_type: u32,
         pixels: CustomAutoRooterGuard<Option<ArrayBufferView>>,
     ) -> ErrorResult {
+        if self.is_context_lost() { return Ok(()); }
         let validator = TexImage2DValidator::new(
             self, target, level, format, width, height, 0, format, data_type,
         );
@@ -5069,6 +5365,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         data_type: u32,
         source: TexImageSource,
     ) -> ErrorResult {
+        if self.is_context_lost() { return Ok(()); }
         let pixels = match self.get_image_pixels(no_gc, source)? {
             Some(pixels) => pixels,
             None => return Ok(()),
@@ -5105,16 +5402,19 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.8>
     fn TexParameterf(&self, target: u32, name: u32, value: f32) {
+        if self.is_context_lost() { return; }
         self.tex_parameter(target, name, TexParameterValue::Float(value))
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.8>
     fn TexParameteri(&self, target: u32, name: u32, value: i32) {
+        if self.is_context_lost() { return; }
         self.tex_parameter(target, name, TexParameterValue::Int(value))
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.6>
     fn CheckFramebufferStatus(&self, target: u32) -> u32 {
+        if self.is_context_lost() { return constants::FRAMEBUFFER_UNSUPPORTED; }
         // From the GLES 2.0.25 spec, 4.4 ("Framebuffer Objects"):
         //
         //    "If target is not FRAMEBUFFER, INVALID_ENUM is
@@ -5133,6 +5433,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.7>
     fn RenderbufferStorage(&self, target: u32, internal_format: u32, width: i32, height: i32) {
+        if self.is_context_lost() { return; }
         self.renderbuffer_storage(target, 0, internal_format, width, height)
     }
 
@@ -5144,6 +5445,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         renderbuffertarget: u32,
         rb: Option<&WebGLRenderbuffer>,
     ) {
+        if self.is_context_lost() { return; }
         if let Some(rb) = rb {
             handle_potential_webgl_error!(self, self.validate_ownership(rb), return);
         }
@@ -5167,6 +5469,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         texture: Option<&WebGLTexture>,
         level: i32,
     ) {
+        if self.is_context_lost() { return; }
         if let Some(texture) = texture {
             handle_potential_webgl_error!(self, self.validate_ownership(texture), return);
         }
@@ -5195,6 +5498,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn GetAttachedShaders(&self, program: &WebGLProgram) -> Option<Vec<DomRoot<WebGLShader>>> {
+        if self.is_context_lost() { return None; }
         handle_potential_webgl_error!(self, self.validate_ownership(program), return None);
         handle_potential_webgl_error!(self, program.attached_shaders().map(Some), None)
     }
@@ -5214,6 +5518,10 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             promise.resolve_native(cx, &());
             return promise;
         }
+        if self.is_context_lost() {
+            self.queue_xr_compatibility_error(&promise);
+            return promise;
+        }
         let Some(mut registry) = window.webxr_registry() else {
             self.queue_xr_compatibility_error(&promise);
             return promise;
@@ -5222,6 +5530,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             .task_manager()
             .dom_manipulation_task_source()
             .to_sendable();
+        let requested_context = self.context_id();
         let mut trusted = Some((Trusted::new(self), TrustedPromise::from(&promise)));
         let callback = GenericCallback::new(move |message| {
             let Some((context, promise)) = trusted.take() else {
@@ -5231,6 +5540,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             task_source.queue(task!(finish_xr_compatibility: move |cx| {
                 let context = context.root();
                 let promise = promise.root(cx);
+                let result = if context.is_context_lost() || context.context_id() != requested_context { Err(webxr_api::Error::NoMatchingDevice) } else { result };
                 context.xr_compatible.set(result.is_ok());
                 match result {
                     Ok(()) => promise.resolve_native(cx, &()),

@@ -58,6 +58,7 @@ pub(crate) enum TaskSourceName {
     Storage,
     /// <https://www.w3.org/TR/webgpu/#-webgpu-task-source>
     WebGPU,
+    WebGL,
 }
 
 impl From<TaskSourceName> for ScriptThreadEventCategory {
@@ -92,6 +93,7 @@ impl From<TaskSourceName> for ScriptThreadEventCategory {
             TaskSourceName::IntersectionObserver => ScriptThreadEventCategory::ScriptEvent,
             TaskSourceName::Storage => ScriptThreadEventCategory::ScriptEvent,
             TaskSourceName::WebGPU => ScriptThreadEventCategory::ScriptEvent,
+            TaskSourceName::WebGL => ScriptThreadEventCategory::ScriptEvent,
         }
     }
 }

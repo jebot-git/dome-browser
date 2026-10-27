@@ -1507,7 +1507,7 @@ pub struct GLContextAttributes {
     pub preserve_drawing_buffer: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct GLLimits {
     pub max_vertex_attribs: u32,
     pub max_tex_size: u32,

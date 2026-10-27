@@ -119,7 +119,11 @@ impl WebXRBridge {
             .managers
             .get_mut(&manager_id)
             .ok_or(WebXRError::NoMatchingDevice)?;
-        manager.begin_frame(contexts, layers)
+        // The script render state can still reference a layer whose context
+        // was lost. Retired layers contribute no image until replaced, rather
+        // than turning a recoverable GL loss into XR device removal.
+        let active: Vec<_> = layers.iter().filter(|ids| manager.layers().contains(ids)).copied().collect();
+        manager.begin_frame(contexts, &active)
     }
 
     pub(crate) fn end_frame(
@@ -132,7 +136,8 @@ impl WebXRBridge {
             .managers
             .get_mut(&manager_id)
             .ok_or(WebXRError::NoMatchingDevice)?;
-        manager.end_frame(contexts, layers)
+        let active: Vec<_> = layers.iter().filter(|ids| manager.layers().contains(ids)).copied().collect();
+        manager.end_frame(contexts, &active)
     }
 }
 

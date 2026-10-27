@@ -34,8 +34,8 @@ between frames, when the transient texture wrappers have been removed.
 
 The sizing and viewport requirements follow
 [WebXR Device API, XRWebGLLayer](https://www.w3.org/TR/2026/CRD-webxr-20260609/#xrwebgllayer-interface).
-This milestone does not establish full WebXR layer conformance. Broader context
-loss/compatibility behavior remains part of the continuing compatibility work.
+This milestone does not establish full WebXR layer conformance. Automatic GPU-reset detection and graphics-adapter migration remain part of
+the continuing compatibility work.
 
 ## Dynamic viewports
 
@@ -143,14 +143,74 @@ check; that source path still needs Windows compilation/runtime validation.
 
 An unavailable immersive device rejects negotiation with `InvalidStateError`
 and clears an earlier compatibility flag. A device can become available again
-without replacing existing WebGL resources. Adapter migration and complete
-WebGL loss/restoration remain unfinished: this milestone does not add the
-`WEBGL_lose_context` extension or claim resource invalidation, reset and
-restoration events. Full Permissions Policy integration also remains part of
-the broader standards work.
+without replacing existing WebGL resources. Explicit context loss and
+restoration are covered below. Graphics-adapter migration, automatic GPU-reset
+detection and full Permissions Policy integration remain part of the broader
+standards work.
 
 The eligibility and task-ordering requirements follow
 [WebXR context compatibility](https://www.w3.org/TR/2026/CRD-webxr-20260609/#webgl-context-compatibility).
+
+## Context loss and restoration
+
+`WEBGL_lose_context` is available in both WebGL versions. Loss immediately
+marks the context lost, clears XR compatibility and expires native cleanup
+handles. The backend releases the old context, swap chain and XR layers once
+in-flight compositor use finishes. Ordinary commands stop touching the backend;
+queries return the specified lost-context values. New objects created while
+lost are invalid objects without native resources.
+
+A trusted, cancellable `webglcontextlost` event is queued on the WebGL task
+source. Restoration is allowed after that event finishes only if it was
+cancelled. `restoreContext()` queues drawing-buffer recreation rather than
+restoring synchronously. Repeated requests share the queued restoration. A
+successful restore creates a new native context ID, resets native and cached
+WebGL 1/2 state, allocates a fresh canvas paint key and fires
+`webglcontextrestored`. Old objects and uniform locations stay invalid even if
+the driver reuses their former numeric names. Only the loss extension retains
+its object identity; applications must request other extensions again.
+
+Extension lookup enforces each extension's WebGL version, matching the supported
+extension list. WebGL 1 interfaces whose functionality moved into WebGL 2 core
+are not exposed as WebGL 2 extensions, following the
+[WebGL 2 specification](https://registry.khronos.org/webgl/specs/latest/2.0/). Initialization is tracked separately from
+the driver extension list so an empty list cannot reinitialize extension objects.
+
+Native cleanup belongs to the creating context generation. Deferred query and
+sync tasks also check that their objects still belong to the active generation.
+An old XR layer retains its original context ID and cannot submit through a
+restored context. Applications renegotiate XR compatibility and create a new
+layer after restoration; a queued compatibility reply cannot revive the lost
+generation.
+
+Restoration currently requires unchanged graphics limits, API type and shader
+language version. Capability changes leave the context lost. Automatic GPU-reset
+detection, graphics-adapter migration and full Permissions Policy integration
+remain continuing work. These changes do not establish physical GPU-reset or
+headset interoperability.
+
+`tests/webgl-context-loss.py` exercises WebGL 1/2 canvas
+loss, repeated restoration, pending query work, bindings and resource validity,
+new shader/buffer rendering and native Wayland canvas pixels. It also runs the
+original Khronos context-lost and context-lost-restored pages in both versions,
+adding only a completion reporter. OffscreenCanvas cases run only when that API
+is advertised; it remains disabled in the shipping frontend and is reported
+separately rather than counted as validated. `tests/webxr-context-compatibility.py
+--context-loss` loses an active immersive context, restores and renegotiates it,
+and checks replacement opaque framebuffers and native stereo pixels.
+
+The [context lifecycle validation record](validation-webgl-context-loss-2026-10-27.json)
+records 209 selected unit tests, 4,909 runtime checks, 558 passing upstream
+cases and three worker-shutdown cases across 37 suites. The new lifecycle
+fixture contributes 280 checks and 489 original Khronos assertions; immersive
+recovery and clean shutdown contribute 68 checks. Native capture verifies the
+restored 128-by-96 green canvas image and replacement stereo images. Cleared XR
+transition frames are checked as zero-filled images. Four optional viewport
+recommendation cases remain unsupported; OffscreenCanvas is unadvertised and
+is not counted as validated.
+
+The lifecycle rules follow [WebGL context loss and restoration](https://registry.khronos.org/webgl/specs/latest/1.0/#5.15.2)
+and the [WEBGL_lose_context extension](https://registry.khronos.org/webgl/extensions/WEBGL_lose_context/).
 
 ## Buffer formats and frame initialization
 

@@ -28,7 +28,7 @@ impl WebGLObject {
     pub(crate) fn new_inherited(context: &WebGLRenderingContext) -> WebGLObject {
         WebGLObject {
             reflector_: Reflector::new(),
-            webgl_sender: context.sender().clone(),
+            webgl_sender: (*context.sender()).clone(),
             context: WeakRef::new(context),
             label: DomRefCell::new(USVString::default()),
         }

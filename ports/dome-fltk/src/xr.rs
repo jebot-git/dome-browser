@@ -603,6 +603,10 @@ impl BridgeDevice {
         }
     }
     fn submit(&mut self, layers: &[(ContextId, LayerId)]) -> Result<()> {
+        // A lost context removes its shared swap chain before the page has
+        // installed a new base layer. Submit an empty frame in that interval.
+        let active: Vec<_> = layers.iter().filter(|(_, id)| self.chains.get(*id).is_some()).copied().collect();
+        let layers = active.as_slice();
         self.manager()
             .map_err(|e| format!("{e:?}"))?
             .end_frame(layers)

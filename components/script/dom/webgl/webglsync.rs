@@ -5,9 +5,10 @@
 use std::cell::Cell;
 
 use dom_struct::dom_struct;
+use servo_canvas_traits::webgl::WebGLMsgSender;
+use crate::dom::webgl::webglrenderingcontext::send_webgl_cleanup_command;
 use js::context::JSContext;
 use script_bindings::reflector::reflect_dom_object;
-use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{WebGLCommand, WebGLSyncId, webgl_channel};
 
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants;
@@ -16,11 +17,12 @@ use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::webgl::webglobject::WebGLObject;
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
-use crate::dom::webglrenderingcontext::capture_webgl_backtrace;
 
 #[derive(JSTraceable, MallocSizeOf)]
 struct DroppableWebGLSync {
-    context: WeakRef<WebGLRenderingContext>,
+    #[no_trace]
+    #[ignore_malloc_size_of = "Non-owning channel for the creating native generation"]
+    cleanup_sender: std::rc::Weak<WebGLMsgSender>,
     #[no_trace]
     sync_id: WebGLSyncId,
     marked_for_deletion: Cell<bool>,
@@ -28,12 +30,7 @@ struct DroppableWebGLSync {
 
 impl DroppableWebGLSync {
     fn send_with_fallibility(&self, command: WebGLCommand, fallibility: Operation) {
-        if let Some(root) = self.context.root() {
-            let result = root.sender().send(command, capture_webgl_backtrace());
-            if matches!(fallibility, Operation::Infallible) {
-                result.expect("Operation failed");
-            }
-        }
+        send_webgl_cleanup_command(&self.cleanup_sender, command, fallibility);
     }
 
     fn delete(&self, operation_fallibility: Operation) {
@@ -72,7 +69,7 @@ impl WebGLSync {
             client_wait_status: Cell::new(None),
             sync_status: Cell::new(None),
             droppable: DroppableWebGLSync {
-                context: WeakRef::new(context),
+                cleanup_sender: context.cleanup_sender(),
                 sync_id,
                 marked_for_deletion: Cell::new(false),
             },
@@ -106,6 +103,7 @@ impl WebGLSync {
                 let task = task!(request_client_wait_status: move || {
                     let this = this.root();
                     let context = context.root();
+                    if context.is_context_lost() || context.validate_ownership(&*this).is_err() { return; }
                     let (sender, receiver) = webgl_channel().unwrap();
                     context.send_command(WebGLCommand::ClientWaitSync(
                         this.id(),
@@ -141,6 +139,7 @@ impl WebGLSync {
                 let task = task!(request_sync_status: move || {
                     let this = this.root();
                     let context = context.root();
+                    if context.is_context_lost() || context.validate_ownership(&*this).is_err() { return; }
                     let (sender, receiver) = webgl_channel().unwrap();
                     context.send_command(WebGLCommand::GetSyncParameter(this.id(), pname, sender));
                     this.sync_status.set(Some(receiver.recv().unwrap()));

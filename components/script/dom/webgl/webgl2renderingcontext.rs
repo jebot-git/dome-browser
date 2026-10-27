@@ -16,7 +16,8 @@ use js::rust::{CustomAutoRooterGuard, HandleObject, MutableHandleObject, Mutable
 use js::typedarray::{ArrayBufferView, Float32, Int32, Uint32};
 use pixels::{Alpha, Snapshot};
 use script_bindings::interfaces::WebGL2RenderingContextHelpers;
-use script_bindings::reflector::{Reflector, reflect_dom_object};
+use script_bindings::reflector::{Reflector, reflect_weak_referenceable_dom_object};
+use std::rc::Rc;
 use servo_base::generic_channel::{self, GenericSharedMemory};
 use servo_canvas_traits::webgl::WebGLError::*;
 use servo_canvas_traits::webgl::{
@@ -180,11 +181,26 @@ impl WebGL2RenderingContext {
     ) -> Option<DomRoot<WebGL2RenderingContext>> {
         let base =
             WebGLRenderingContext::new(cx, window, canvas, WebGLVersion::WebGL2, size, attrs)?;
-        Some(reflect_dom_object(
-            cx,
-            Box::new(WebGL2RenderingContext::new_inherited(&base)),
-            window,
-        ))
+        let context = reflect_weak_referenceable_dom_object(
+            cx, Rc::new(WebGL2RenderingContext::new_inherited(&base)), window,
+        );
+        base.register_webgl2_context(&context);
+        Some(context)
+    }
+
+    pub(crate) fn reset_cached_state(&self) {
+        self.occlusion_query.set(None); self.primitives_query.set(None);
+        for slot in &self.samplers { slot.set(None); }
+        self.bound_copy_read_buffer.set(None); self.bound_copy_write_buffer.set(None);
+        self.bound_pixel_pack_buffer.set(None); self.bound_pixel_unpack_buffer.set(None);
+        self.bound_transform_feedback_buffer.set(None); self.bound_uniform_buffer.set(None);
+        self.current_transform_feedback.set(None);
+        for binding in self.indexed_uniform_buffer_bindings.iter().chain(self.indexed_transform_feedback_buffer_bindings.iter()) {
+            binding.buffer.set(None); binding.start.set(0); binding.size.set(0);
+        }
+        self.texture_pack_row_length.set(0); self.texture_pack_skip_pixels.set(0); self.texture_pack_skip_rows.set(0);
+        self.enable_rasterizer_discard.set(false);
+        self.default_fb_readbuffer.set(constants::BACK); self.default_fb_drawbuffer.set(constants::BACK);
     }
 
     pub(crate) fn set_image_key(&self, image_key: ImageKey) {
@@ -1008,21 +1024,25 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.11>
     fn Flush(&self) {
+        if self.base.is_context_lost() { return; }
         self.base.Flush()
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.11>
     fn Finish(&self) {
+        if self.base.is_context_lost() { return; }
         self.base.Finish()
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.1>
     fn DrawingBufferWidth(&self) -> i32 {
+        if self.base.is_context_lost() { return 0; }
         self.base.DrawingBufferWidth()
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.1>
     fn DrawingBufferHeight(&self) -> i32 {
+        if self.base.is_context_lost() { return 0; }
         self.base.DrawingBufferHeight()
     }
 
@@ -1034,6 +1054,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         parameter: u32,
         mut retval: MutableHandleValue,
     ) {
+        if self.base.is_context_lost() { return retval.set(NullValue()); }
         let buffer = handle_potential_webgl_error!(
             self.base,
             self.bound_buffer(cx, target),
@@ -1044,6 +1065,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn GetParameter(&self, cx: &mut JSContext, parameter: u32, mut rval: MutableHandleValue) {
+        if self.base.is_context_lost() { return rval.set(NullValue()); }
         match parameter {
             constants::VERSION => {
                 "WebGL 2.0".to_jsval(cx, rval);
@@ -1249,8 +1271,9 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         cx: &mut JSContext,
         target: u32,
         pname: u32,
-        retval: MutableHandleValue,
+        mut retval: MutableHandleValue,
     ) {
+        if self.base.is_context_lost() { return retval.set(NullValue()); }
         self.base.GetTexParameter(cx, target, pname, retval)
     }
 
@@ -1261,6 +1284,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.2>
     fn GetContextAttributes(&self) -> Option<WebGLContextAttributes> {
+        if self.base.is_context_lost() { return None; }
         self.base.GetContextAttributes()
     }
 
@@ -1271,6 +1295,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.14>
     fn GetSupportedExtensions(&self) -> Option<Vec<DOMString>> {
+        if self.base.is_context_lost() { return None; }
         self.base.GetSupportedExtensions()
     }
 
@@ -1281,6 +1306,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         name: DOMString,
         return_value: MutableHandleObject,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.GetExtension(cx, name, return_value)
     }
 
@@ -1293,6 +1319,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         pname: u32,
         mut rval: MutableHandleValue,
     ) {
+        if self.base.is_context_lost() { return rval.set(NullValue()); }
         let fb_slot = match target {
             constants::FRAMEBUFFER | constants::DRAW_FRAMEBUFFER => {
                 self.base.get_draw_framebuffer_slot()
@@ -1340,60 +1367,71 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         cx: &mut JSContext,
         target: u32,
         pname: u32,
-        retval: MutableHandleValue,
+        mut retval: MutableHandleValue,
     ) {
+        if self.base.is_context_lost() { return retval.set(NullValue()); }
         self.base
             .GetRenderbufferParameter(cx, target, pname, retval)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn ActiveTexture(&self, texture: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.ActiveTexture(texture)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn BlendColor(&self, r: f32, g: f32, b: f32, a: f32) {
+        if self.base.is_context_lost() { return; }
         self.base.BlendColor(r, g, b, a)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn BlendEquation(&self, mode: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.BlendEquation(mode)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn BlendEquationSeparate(&self, mode_rgb: u32, mode_alpha: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.BlendEquationSeparate(mode_rgb, mode_alpha)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn BlendFunc(&self, src_factor: u32, dest_factor: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.BlendFunc(src_factor, dest_factor)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn BlendFuncSeparate(&self, src_rgb: u32, dest_rgb: u32, src_alpha: u32, dest_alpha: u32) {
+        if self.base.is_context_lost() { return; }
         self.base
             .BlendFuncSeparate(src_rgb, dest_rgb, src_alpha, dest_alpha)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn AttachShader(&self, program: &WebGLProgram, shader: &WebGLShader) {
+        if self.base.is_context_lost() { return; }
         self.base.AttachShader(program, shader)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn DetachShader(&self, program: &WebGLProgram, shader: &WebGLShader) {
+        if self.base.is_context_lost() { return; }
         self.base.DetachShader(program, shader)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn BindAttribLocation(&self, program: &WebGLProgram, index: u32, name: DOMString) {
+        if self.base.is_context_lost() { return; }
         self.base.BindAttribLocation(program, index, name)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.2>
     fn BindBuffer(&self, cx: &mut JSContext, target: u32, buffer: Option<&WebGLBuffer>) {
+        if self.base.is_context_lost() { return; }
         let current_vao;
         let slot = match target {
             constants::COPY_READ_BUFFER => &self.bound_copy_read_buffer,
@@ -1416,6 +1454,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.6>
     fn BindFramebuffer(&self, target: u32, framebuffer: Option<&WebGLFramebuffer>) {
+        if self.base.is_context_lost() { return; }
         handle_potential_webgl_error!(
             self.base,
             self.base.validate_new_framebuffer_binding(framebuffer),
@@ -1446,16 +1485,19 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.7>
     fn BindRenderbuffer(&self, target: u32, renderbuffer: Option<&WebGLRenderbuffer>) {
+        if self.base.is_context_lost() { return; }
         self.base.BindRenderbuffer(target, renderbuffer)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.8>
     fn BindTexture(&self, target: u32, texture: Option<&WebGLTexture>) {
+        if self.base.is_context_lost() { return; }
         self.base.BindTexture(target, texture)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.8>
     fn GenerateMipmap(&self, target: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.GenerateMipmap(target)
     }
 
@@ -1467,6 +1509,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         data: Option<ArrayBufferViewOrArrayBuffer>,
         usage: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         let usage = handle_potential_webgl_error!(self.base, self.buffer_usage(usage), return);
         let bound_buffer =
             handle_potential_webgl_error!(self.base, self.bound_buffer(cx, target), return);
@@ -1476,6 +1519,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.5>
     fn BufferData(&self, cx: &mut JSContext, target: u32, size: i64, usage: u32) {
+        if self.base.is_context_lost() { return; }
         let usage = handle_potential_webgl_error!(self.base, self.buffer_usage(usage), return);
         let bound_buffer =
             handle_potential_webgl_error!(self.base, self.bound_buffer(cx, target), return);
@@ -1492,6 +1536,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         elem_offset: u32,
         length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         let usage = handle_potential_webgl_error!(self.base, self.buffer_usage(usage), return);
         let bound_buffer =
             handle_potential_webgl_error!(self.base, self.bound_buffer(cx, target), return);
@@ -1535,6 +1580,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         offset: i64,
         data: ArrayBufferViewOrArrayBuffer,
     ) {
+        if self.base.is_context_lost() { return; }
         let bound_buffer =
             handle_potential_webgl_error!(self.base, self.bound_buffer(cx, target), return);
         self.base
@@ -1551,6 +1597,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_elem_offset: u32,
         length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         let bound_buffer =
             handle_potential_webgl_error!(self.base, self.bound_buffer(cx, target), return);
         let bound_buffer =
@@ -1605,6 +1652,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         write_offset: i64,
         size: i64,
     ) {
+        if self.base.is_context_lost() { return; }
         if read_offset < 0 || write_offset < 0 || size < 0 {
             return self.base.webgl_error(InvalidValue);
         }
@@ -1662,6 +1710,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         dst_elem_offset: u32,
         length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         let bound_buffer =
             handle_potential_webgl_error!(self.base, self.bound_buffer(cx, target), return);
         let bound_buffer =
@@ -1722,6 +1771,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length_override: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         let mut data = pixels.as_slice_safe(no_gc).unwrap_or(&[]);
         let start = src_offset as usize;
         let end = (src_offset + src_length_override) as usize;
@@ -1758,6 +1808,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length_override: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         let mut data = pixels.as_slice_safe(no_gc).unwrap_or(&[]);
         let start = src_offset as usize;
         let end = (src_offset + src_length_override) as usize;
@@ -1785,6 +1836,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         height: i32,
         border: i32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base
             .CopyTexImage2D(target, level, internal_format, x, y, width, height, border)
     }
@@ -1801,61 +1853,73 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         width: i32,
         height: i32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base
             .CopyTexSubImage2D(target, level, xoffset, yoffset, x, y, width, height)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.11>
     fn Clear(&self, mask: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.Clear(mask)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn ClearColor(&self, red: f32, green: f32, blue: f32, alpha: f32) {
+        if self.base.is_context_lost() { return; }
         self.base.ClearColor(red, green, blue, alpha)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn ClearDepth(&self, depth: f32) {
+        if self.base.is_context_lost() { return; }
         self.base.ClearDepth(depth)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn ClearStencil(&self, stencil: i32) {
+        if self.base.is_context_lost() { return; }
         self.base.ClearStencil(stencil)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn ColorMask(&self, r: bool, g: bool, b: bool, a: bool) {
+        if self.base.is_context_lost() { return; }
         self.base.ColorMask(r, g, b, a)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn CullFace(&self, mode: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.CullFace(mode)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn FrontFace(&self, mode: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.FrontFace(mode)
     }
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn DepthFunc(&self, func: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.DepthFunc(func)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn DepthMask(&self, flag: bool) {
+        if self.base.is_context_lost() { return; }
         self.base.DepthMask(flag)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn DepthRange(&self, near: f32, far: f32) {
+        if self.base.is_context_lost() { return; }
         self.base.DepthRange(near, far)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn Enable(&self, cap: u32) {
+        if self.base.is_context_lost() { return; }
         match cap {
             constants::RASTERIZER_DISCARD => {
                 self.enable_rasterizer_discard.set(true);
@@ -1867,6 +1931,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn Disable(&self, cap: u32) {
+        if self.base.is_context_lost() { return; }
         match cap {
             constants::RASTERIZER_DISCARD => {
                 self.enable_rasterizer_discard.set(false);
@@ -1878,6 +1943,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn CompileShader(&self, shader: &WebGLShader) {
+        if self.base.is_context_lost() { return; }
         self.base.CompileShader(shader)
     }
 
@@ -1913,11 +1979,14 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.17>
     fn CreateVertexArray(&self, cx: &mut JSContext) -> Option<DomRoot<WebGLVertexArrayObject>> {
+        if self.base.is_context_lost() { return Some(WebGLVertexArrayObject::new(cx, &self.base,
+            Some(servo_canvas_traits::webgl::WebGLVertexArrayId::maybe_new(1).unwrap()))); }
         self.base.create_vertex_array_webgl2(cx)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.5>
     fn DeleteBuffer(&self, cx: &mut JSContext, buffer: Option<&WebGLBuffer>) {
+        if self.base.is_context_lost() { return; }
         let buffer = match buffer {
             Some(buffer) => buffer,
             None => return,
@@ -1947,36 +2016,43 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.6>
     fn DeleteFramebuffer(&self, framebuffer: Option<&WebGLFramebuffer>) {
+        if self.base.is_context_lost() { return; }
         self.base.DeleteFramebuffer(framebuffer)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.7>
     fn DeleteRenderbuffer(&self, renderbuffer: Option<&WebGLRenderbuffer>) {
+        if self.base.is_context_lost() { return; }
         self.base.DeleteRenderbuffer(renderbuffer)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.8>
     fn DeleteTexture(&self, texture: Option<&WebGLTexture>) {
+        if self.base.is_context_lost() { return; }
         self.base.DeleteTexture(texture)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn DeleteProgram(&self, program: Option<&WebGLProgram>) {
+        if self.base.is_context_lost() { return; }
         self.base.DeleteProgram(program)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn DeleteShader(&self, shader: Option<&WebGLShader>) {
+        if self.base.is_context_lost() { return; }
         self.base.DeleteShader(shader)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.17>
     fn DeleteVertexArray(&self, cx: &mut JSContext, vertex_array: Option<&WebGLVertexArrayObject>) {
+        if self.base.is_context_lost() { return; }
         self.base.delete_vertex_array_webgl2(cx, vertex_array);
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.11>
     fn DrawArrays(&self, cx: &mut JSContext, mode: u32, first: i32, count: i32) {
+        if self.base.is_context_lost() { return; }
         self.validate_uniform_block_for_draw();
         self.validate_vertex_attribs_for_draw(cx);
         self.base.DrawArrays(cx, mode, first, count)
@@ -1984,6 +2060,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.11>
     fn DrawElements(&self, cx: &mut JSContext, mode: u32, count: i32, type_: u32, offset: i64) {
+        if self.base.is_context_lost() { return; }
         self.validate_uniform_block_for_draw();
         self.validate_vertex_attribs_for_draw(cx);
         self.base.DrawElements(cx, mode, count, type_, offset)
@@ -1991,11 +2068,13 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn EnableVertexAttribArray(&self, cx: &mut JSContext, attrib_id: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.EnableVertexAttribArray(cx, attrib_id)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn DisableVertexAttribArray(&self, cx: &mut JSContext, attrib_id: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.DisableVertexAttribArray(cx, attrib_id)
     }
 
@@ -2006,6 +2085,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         program: &WebGLProgram,
         index: u32,
     ) -> Option<DomRoot<WebGLActiveInfo>> {
+        if self.base.is_context_lost() { return None; }
         self.base.GetActiveUniform(cx, program, index)
     }
 
@@ -2016,22 +2096,26 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         program: &WebGLProgram,
         index: u32,
     ) -> Option<DomRoot<WebGLActiveInfo>> {
+        if self.base.is_context_lost() { return None; }
         self.base.GetActiveAttrib(cx, program, index)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn GetAttribLocation(&self, program: &WebGLProgram, name: DOMString) -> i32 {
+        if self.base.is_context_lost() { return -1; }
         self.base.GetAttribLocation(program, name)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.7>
     fn GetFragDataLocation(&self, program: &WebGLProgram, name: DOMString) -> i32 {
+        if self.base.is_context_lost() { return -1; }
         handle_potential_webgl_error!(self.base, self.base.validate_ownership(program), return -1);
         handle_potential_webgl_error!(self.base, program.get_frag_data_location(name), -1)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn GetProgramInfoLog(&self, program: &WebGLProgram) -> Option<DOMString> {
+        if self.base.is_context_lost() { return None; }
         self.base.GetProgramInfoLog(program)
     }
 
@@ -2043,6 +2127,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         param_id: u32,
         mut retval: MutableHandleValue,
     ) {
+        if self.base.is_context_lost() { return retval.set(NullValue()); }
         handle_potential_webgl_error!(
             self.base,
             self.base.validate_ownership(program),
@@ -2068,6 +2153,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn GetShaderInfoLog(&self, shader: &WebGLShader) -> Option<DOMString> {
+        if self.base.is_context_lost() { return None; }
         self.base.GetShaderInfoLog(shader)
     }
 
@@ -2077,8 +2163,9 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         cx: &mut JSContext,
         shader: &WebGLShader,
         param_id: u32,
-        retval: MutableHandleValue,
+        mut retval: MutableHandleValue,
     ) {
+        if self.base.is_context_lost() { return retval.set(NullValue()); }
         self.base.GetShaderParameter(cx, shader, param_id, retval)
     }
 
@@ -2089,6 +2176,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         shader_type: u32,
         precision_type: u32,
     ) -> Option<DomRoot<WebGLShaderPrecisionFormat>> {
+        if self.base.is_context_lost() { return None; }
         self.base
             .GetShaderPrecisionFormat(cx, shader_type, precision_type)
     }
@@ -2101,6 +2189,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         index: u32,
         mut retval: MutableHandleValue,
     ) {
+        if self.base.is_context_lost() { return retval.set(NullValue()); }
         let bindings = match target {
             constants::TRANSFORM_FEEDBACK_BUFFER_BINDING |
             constants::TRANSFORM_FEEDBACK_BUFFER_SIZE |
@@ -2145,6 +2234,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         program: &WebGLProgram,
         name: DOMString,
     ) -> Option<DomRoot<WebGLUniformLocation>> {
+        if self.base.is_context_lost() { return None; }
         self.base.GetUniformLocation(cx, program, name)
     }
 
@@ -2154,29 +2244,34 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         cx: &mut JSContext,
         index: u32,
         pname: u32,
-        retval: MutableHandleValue,
+        mut retval: MutableHandleValue,
     ) {
+        if self.base.is_context_lost() { return retval.set(NullValue()); }
         self.base.GetVertexAttrib(cx, index, pname, retval)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn GetVertexAttribOffset(&self, cx: &mut JSContext, index: u32, pname: u32) -> i64 {
+        if self.base.is_context_lost() { return 0; }
         self.base.GetVertexAttribOffset(cx, index, pname)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn Hint(&self, target: u32, mode: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.Hint(target, mode)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.5>
     fn IsBuffer(&self, buffer: Option<&WebGLBuffer>) -> bool {
+        if self.base.is_context_lost() { return false; }
         self.base.IsBuffer(buffer)
     }
 
     // TODO: We could write this without IPC, recording the calls to `enable` and `disable`.
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.2>
     fn IsEnabled(&self, cap: u32) -> bool {
+        if self.base.is_context_lost() { return false; }
         match cap {
             constants::RASTERIZER_DISCARD => self.enable_rasterizer_discard.get(),
             _ => self.base.IsEnabled(cap),
@@ -2185,41 +2280,49 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.6>
     fn IsFramebuffer(&self, frame_buffer: Option<&WebGLFramebuffer>) -> bool {
+        if self.base.is_context_lost() { return false; }
         self.base.IsFramebuffer(frame_buffer)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn IsProgram(&self, program: Option<&WebGLProgram>) -> bool {
+        if self.base.is_context_lost() { return false; }
         self.base.IsProgram(program)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.7>
     fn IsRenderbuffer(&self, render_buffer: Option<&WebGLRenderbuffer>) -> bool {
+        if self.base.is_context_lost() { return false; }
         self.base.IsRenderbuffer(render_buffer)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn IsShader(&self, shader: Option<&WebGLShader>) -> bool {
+        if self.base.is_context_lost() { return false; }
         self.base.IsShader(shader)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.8>
     fn IsTexture(&self, texture: Option<&WebGLTexture>) -> bool {
+        if self.base.is_context_lost() { return false; }
         self.base.IsTexture(texture)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.17>
     fn IsVertexArray(&self, vertex_array: Option<&WebGLVertexArrayObject>) -> bool {
+        if self.base.is_context_lost() { return false; }
         self.base.is_vertex_array_webgl2(vertex_array)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn LineWidth(&self, width: f32) {
+        if self.base.is_context_lost() { return; }
         self.base.LineWidth(width)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.2>
     fn PixelStorei(&self, param_name: u32, param_value: i32) {
+        if self.base.is_context_lost() { return; }
         if param_value < 0 {
             return self.base.webgl_error(InvalidValue);
         }
@@ -2250,6 +2353,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn PolygonOffset(&self, factor: f32, units: f32) {
+        if self.base.is_context_lost() { return; }
         self.base.PolygonOffset(factor, units)
     }
 
@@ -2265,6 +2369,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         pixel_type: u32,
         mut pixels: CustomAutoRooterGuard<Option<ArrayBufferView>>,
     ) {
+        if self.base.is_context_lost() { return; }
         let pixels =
             handle_potential_webgl_error!(self.base, pixels.as_mut().ok_or(InvalidValue), return);
 
@@ -2283,6 +2388,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         pixel_type: u32,
         dst_byte_offset: i64,
     ) {
+        if self.base.is_context_lost() { return; }
         handle_potential_webgl_error!(self.base, self.base.validate_read_framebuffer(), return);
 
         let dst = match self.bound_pixel_pack_buffer.get() {
@@ -2376,6 +2482,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         mut dst: CustomAutoRooterGuard<ArrayBufferView>,
         dst_elem_offset: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.read_pixels_into(
             no_gc,
             x,
@@ -2391,66 +2498,79 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn SampleCoverage(&self, value: f32, invert: bool) {
+        if self.base.is_context_lost() { return; }
         self.base.SampleCoverage(value, invert)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.4>
     fn Scissor(&self, x: i32, y: i32, width: i32, height: i32) {
+        if self.base.is_context_lost() { return; }
         self.base.Scissor(x, y, width, height)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn StencilFunc(&self, func: u32, ref_: i32, mask: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.StencilFunc(func, ref_, mask)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn StencilFuncSeparate(&self, face: u32, func: u32, ref_: i32, mask: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.StencilFuncSeparate(face, func, ref_, mask)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn StencilMask(&self, mask: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.StencilMask(mask)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn StencilMaskSeparate(&self, face: u32, mask: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.StencilMaskSeparate(face, mask)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn StencilOp(&self, fail: u32, zfail: u32, zpass: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.StencilOp(fail, zfail, zpass)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn StencilOpSeparate(&self, face: u32, fail: u32, zfail: u32, zpass: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.StencilOpSeparate(face, fail, zfail, zpass)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn LinkProgram(&self, program: &WebGLProgram) {
+        if self.base.is_context_lost() { return; }
         self.base.LinkProgram(program)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn ShaderSource(&self, shader: &WebGLShader, source: DOMString) {
+        if self.base.is_context_lost() { return; }
         self.base.ShaderSource(shader, source)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn GetShaderSource(&self, shader: &WebGLShader) -> Option<DOMString> {
+        if self.base.is_context_lost() { return None; }
         self.base.GetShaderSource(shader)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform1f(&self, location: Option<&WebGLUniformLocation>, val: f32) {
+        if self.base.is_context_lost() { return; }
         self.base.Uniform1f(location, val)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform1i(&self, location: Option<&WebGLUniformLocation>, val: i32) {
+        if self.base.is_context_lost() { return; }
         self.base.Uniform1i(location, val)
     }
 
@@ -2462,11 +2582,13 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.uniform1iv(location, v, src_offset, src_length)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.8>
     fn Uniform1ui(&self, location: Option<&WebGLUniformLocation>, val: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.with_location(location, |location| {
             match location.type_() {
                 constants::BOOL | constants::UNSIGNED_INT => (),
@@ -2486,6 +2608,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.with_location(location, |location| {
             match location.type_() {
                 constants::BOOL |
@@ -2526,11 +2649,13 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.uniform1fv(location, v, src_offset, src_length);
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform2f(&self, location: Option<&WebGLUniformLocation>, x: f32, y: f32) {
+        if self.base.is_context_lost() { return; }
         self.base.Uniform2f(location, x, y)
     }
 
@@ -2542,11 +2667,13 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.uniform2fv(location, v, src_offset, src_length);
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform2i(&self, location: Option<&WebGLUniformLocation>, x: i32, y: i32) {
+        if self.base.is_context_lost() { return; }
         self.base.Uniform2i(location, x, y)
     }
 
@@ -2558,11 +2685,13 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.uniform2iv(location, v, src_offset, src_length)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.8>
     fn Uniform2ui(&self, location: Option<&WebGLUniformLocation>, x: u32, y: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.with_location(location, |location| {
             match location.type_() {
                 constants::BOOL_VEC2 | constants::UNSIGNED_INT_VEC2 => {},
@@ -2582,6 +2711,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.with_location(location, |location| {
             match location.type_() {
                 constants::BOOL_VEC2 | constants::UNSIGNED_INT_VEC2 => {},
@@ -2596,6 +2726,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform3f(&self, location: Option<&WebGLUniformLocation>, x: f32, y: f32, z: f32) {
+        if self.base.is_context_lost() { return; }
         self.base.Uniform3f(location, x, y, z)
     }
 
@@ -2607,11 +2738,13 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.uniform3fv(location, v, src_offset, src_length);
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform3i(&self, location: Option<&WebGLUniformLocation>, x: i32, y: i32, z: i32) {
+        if self.base.is_context_lost() { return; }
         self.base.Uniform3i(location, x, y, z)
     }
 
@@ -2623,11 +2756,13 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.uniform3iv(location, v, src_offset, src_length)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.8>
     fn Uniform3ui(&self, location: Option<&WebGLUniformLocation>, x: u32, y: u32, z: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.with_location(location, |location| {
             match location.type_() {
                 constants::BOOL_VEC3 | constants::UNSIGNED_INT_VEC3 => {},
@@ -2647,6 +2782,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.with_location(location, |location| {
             match location.type_() {
                 constants::BOOL_VEC3 | constants::UNSIGNED_INT_VEC3 => {},
@@ -2661,6 +2797,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform4i(&self, location: Option<&WebGLUniformLocation>, x: i32, y: i32, z: i32, w: i32) {
+        if self.base.is_context_lost() { return; }
         self.base.Uniform4i(location, x, y, z, w)
     }
 
@@ -2672,11 +2809,13 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.uniform4iv(location, v, src_offset, src_length)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.8>
     fn Uniform4ui(&self, location: Option<&WebGLUniformLocation>, x: u32, y: u32, z: u32, w: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.with_location(location, |location| {
             match location.type_() {
                 constants::BOOL_VEC4 | constants::UNSIGNED_INT_VEC4 => {},
@@ -2696,6 +2835,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.with_location(location, |location| {
             match location.type_() {
                 constants::BOOL_VEC4 | constants::UNSIGNED_INT_VEC4 => {},
@@ -2710,6 +2850,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn Uniform4f(&self, location: Option<&WebGLUniformLocation>, x: f32, y: f32, z: f32, w: f32) {
+        if self.base.is_context_lost() { return; }
         self.base.Uniform4f(location, x, y, z, w)
     }
 
@@ -2721,6 +2862,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.uniform4fv(location, v, src_offset, src_length);
     }
 
@@ -2733,6 +2875,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base
             .uniform_matrix_2fv(location, transpose, v, src_offset, src_length)
     }
@@ -2746,6 +2889,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base
             .uniform_matrix_3fv(location, transpose, v, src_offset, src_length)
     }
@@ -2759,6 +2903,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base
             .uniform_matrix_4fv(location, transpose, v, src_offset, src_length)
     }
@@ -2772,6 +2917,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.with_location(location, |location| {
             match location.type_() {
                 constants::FLOAT_MAT3x2 => {},
@@ -2800,6 +2946,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.with_location(location, |location| {
             match location.type_() {
                 constants::FLOAT_MAT4x2 => {},
@@ -2828,6 +2975,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.with_location(location, |location| {
             match location.type_() {
                 constants::FLOAT_MAT2x3 => {},
@@ -2856,6 +3004,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.with_location(location, |location| {
             match location.type_() {
                 constants::FLOAT_MAT4x3 => {},
@@ -2884,6 +3033,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.with_location(location, |location| {
             match location.type_() {
                 constants::FLOAT_MAT2x4 => {},
@@ -2912,6 +3062,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
         src_length: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.with_location(location, |location| {
             match location.type_() {
                 constants::FLOAT_MAT3x4 => {},
@@ -2939,6 +3090,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         location: &WebGLUniformLocation,
         mut retval: MutableHandleValue,
     ) {
+        if self.base.is_context_lost() { return retval.set(NullValue()); }
         handle_potential_webgl_error!(
             self.base,
             self.base.uniform_check_program(program, location),
@@ -3006,16 +3158,19 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn UseProgram(&self, program: Option<&WebGLProgram>) {
+        if self.base.is_context_lost() { return; }
         self.base.UseProgram(program)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn ValidateProgram(&self, program: &WebGLProgram) {
+        if self.base.is_context_lost() { return; }
         self.base.ValidateProgram(program)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn VertexAttrib1f(&self, cx: &mut JSContext, indx: u32, x: f32) {
+        if self.base.is_context_lost() { return; }
         self.base.VertexAttrib1f(cx, indx, x)
     }
 
@@ -3026,11 +3181,13 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         indx: u32,
         v: Float32ArrayOrUnrestrictedFloatSequence,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.VertexAttrib1fv(cx, indx, v)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn VertexAttrib2f(&self, cx: &mut JSContext, indx: u32, x: f32, y: f32) {
+        if self.base.is_context_lost() { return; }
         self.base.VertexAttrib2f(cx, indx, x, y)
     }
 
@@ -3041,11 +3198,13 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         indx: u32,
         v: Float32ArrayOrUnrestrictedFloatSequence,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.VertexAttrib2fv(cx, indx, v)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn VertexAttrib3f(&self, cx: &mut JSContext, indx: u32, x: f32, y: f32, z: f32) {
+        if self.base.is_context_lost() { return; }
         self.base.VertexAttrib3f(cx, indx, x, y, z)
     }
 
@@ -3056,11 +3215,13 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         indx: u32,
         v: Float32ArrayOrUnrestrictedFloatSequence,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.VertexAttrib3fv(cx, indx, v)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn VertexAttrib4f(&self, cx: &mut JSContext, indx: u32, x: f32, y: f32, z: f32, w: f32) {
+        if self.base.is_context_lost() { return; }
         self.base.VertexAttrib4f(cx, indx, x, y, z, w)
     }
 
@@ -3071,16 +3232,19 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         indx: u32,
         v: Float32ArrayOrUnrestrictedFloatSequence,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base.VertexAttrib4fv(cx, indx, v)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.8>
     fn VertexAttribI4i(&self, _cx: &mut JSContext, index: u32, x: i32, y: i32, z: i32, w: i32) {
+        if self.base.is_context_lost() { return; }
         self.vertex_attrib_i(index, x, y, z, w)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.8>
     fn VertexAttribI4iv(&self, _cx: &mut JSContext, index: u32, v: Int32ArrayOrLongSequence) {
+        if self.base.is_context_lost() { return; }
         let values = match v {
             Int32ArrayOrLongSequence::Int32Array(v) => v.to_vec().unwrap_or_default(),
             Int32ArrayOrLongSequence::LongSequence(v) => v,
@@ -3093,6 +3257,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.8>
     fn VertexAttribI4ui(&self, _cx: &mut JSContext, index: u32, x: u32, y: u32, z: u32, w: u32) {
+        if self.base.is_context_lost() { return; }
         self.vertex_attrib_u(index, x, y, z, w)
     }
 
@@ -3103,6 +3268,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         index: u32,
         v: Uint32ArrayOrUnsignedLongSequence,
     ) {
+        if self.base.is_context_lost() { return; }
         let values = match v {
             Uint32ArrayOrUnsignedLongSequence::Uint32Array(v) => v.to_vec().unwrap_or_default(),
             Uint32ArrayOrUnsignedLongSequence::UnsignedLongSequence(v) => v,
@@ -3124,6 +3290,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         stride: i32,
         offset: i64,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base
             .VertexAttribPointer(cx, attrib_id, size, data_type, normalized, stride, offset)
     }
@@ -3138,6 +3305,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         stride: i32,
         offset: i64,
     ) {
+        if self.base.is_context_lost() { return; }
         match type_ {
             constants::BYTE |
             constants::UNSIGNED_BYTE |
@@ -3160,6 +3328,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.4>
     fn Viewport(&self, x: i32, y: i32, width: i32, height: i32) {
+        if self.base.is_context_lost() { return; }
         self.base.Viewport(x, y, width, height)
     }
 
@@ -3181,6 +3350,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         type_: u32,
         src_data: CustomAutoRooterGuard<Option<ArrayBufferView>>,
     ) -> Fallible<()> {
+        if self.base.is_context_lost() { return Ok(()); }
         // If a WebGLBuffer is bound to the PIXEL_UNPACK_BUFFER target,
         // generates an INVALID_OPERATION error.
         if self.bound_pixel_unpack_buffer.get().is_some() {
@@ -3326,6 +3496,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         data_type: u32,
         pixels: CustomAutoRooterGuard<Option<ArrayBufferView>>,
     ) -> Fallible<()> {
+        if self.base.is_context_lost() { return Ok(()); }
         self.base.TexImage2D(
             no_gc,
             target,
@@ -3351,6 +3522,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         data_type: u32,
         source: TexImageSource,
     ) -> ErrorResult {
+        if self.base.is_context_lost() { return Ok(()); }
         self.base.TexImage2D_(
             no_gc,
             target,
@@ -3376,6 +3548,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         type_: u32,
         pbo_offset: i64,
     ) -> Fallible<()> {
+        if self.base.is_context_lost() { return Ok(()); }
         let pixel_unpack_buffer = match self.bound_pixel_unpack_buffer.get() {
             Some(pixel_unpack_buffer) => pixel_unpack_buffer,
             None => {
@@ -3464,6 +3637,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         type_: u32,
         source: TexImageSource,
     ) -> Fallible<()> {
+        if self.base.is_context_lost() { return Ok(()); }
         if self.bound_pixel_unpack_buffer.get().is_some() {
             self.base.webgl_error(InvalidOperation);
             return Ok(());
@@ -3540,6 +3714,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_data: CustomAutoRooterGuard<ArrayBufferView>,
         src_offset: u32,
     ) -> Fallible<()> {
+        if self.base.is_context_lost() { return Ok(()); }
         if self.bound_pixel_unpack_buffer.get().is_some() {
             self.base.webgl_error(InvalidOperation);
             return Ok(());
@@ -3657,6 +3832,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         data_type: u32,
         pixels: CustomAutoRooterGuard<Option<ArrayBufferView>>,
     ) -> Fallible<()> {
+        if self.base.is_context_lost() { return Ok(()); }
         self.base.TexSubImage2D(
             no_gc, target, level, xoffset, yoffset, width, height, format, data_type, pixels,
         )
@@ -3674,6 +3850,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         data_type: u32,
         source: TexImageSource,
     ) -> ErrorResult {
+        if self.base.is_context_lost() { return Ok(()); }
         self.base.TexSubImage2D_(
             no_gc, target, level, xoffset, yoffset, format, data_type, source,
         )
@@ -3681,16 +3858,19 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.8>
     fn TexParameterf(&self, target: u32, name: u32, value: f32) {
+        if self.base.is_context_lost() { return; }
         self.base.TexParameterf(target, name, value)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.8>
     fn TexParameteri(&self, target: u32, name: u32, value: i32) {
+        if self.base.is_context_lost() { return; }
         self.base.TexParameteri(target, name, value)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.6>
     fn CheckFramebufferStatus(&self, target: u32) -> u32 {
+        if self.base.is_context_lost() { return constants::FRAMEBUFFER_UNSUPPORTED; }
         let fb_slot = match target {
             constants::FRAMEBUFFER | constants::DRAW_FRAMEBUFFER => {
                 self.base.get_draw_framebuffer_slot()
@@ -3709,6 +3889,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.7>
     fn RenderbufferStorage(&self, target: u32, internal_format: u32, width: i32, height: i32) {
+        if self.base.is_context_lost() { return; }
         self.base
             .RenderbufferStorage(target, internal_format, width, height)
     }
@@ -3727,6 +3908,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         mask: u32,
         filter: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         bitflags! {
             struct BlitFrameBufferFlags: u32 {
                 const DEPTH = constants::DEPTH_BUFFER_BIT;
@@ -3839,6 +4021,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         renderbuffertarget: u32,
         rb: Option<&WebGLRenderbuffer>,
     ) {
+        if self.base.is_context_lost() { return; }
         if let Some(rb) = rb {
             handle_potential_webgl_error!(self.base, self.base.validate_ownership(rb), return);
         }
@@ -3870,6 +4053,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         texture: Option<&WebGLTexture>,
         level: i32,
     ) {
+        if self.base.is_context_lost() { return; }
         if let Some(texture) = texture {
             handle_potential_webgl_error!(self.base, self.base.validate_ownership(texture), return);
         }
@@ -3892,6 +4076,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn GetAttachedShaders(&self, program: &WebGLProgram) -> Option<Vec<DomRoot<WebGLShader>>> {
+        if self.base.is_context_lost() { return None; }
         self.base.GetAttachedShaders(program)
     }
 
@@ -3904,6 +4089,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         count: i32,
         primcount: i32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.validate_uniform_block_for_draw();
         self.validate_vertex_attribs_for_draw(cx);
         handle_potential_webgl_error!(
@@ -3923,6 +4109,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         offset: i64,
         primcount: i32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.validate_uniform_block_for_draw();
         self.validate_vertex_attribs_for_draw(cx);
         handle_potential_webgl_error!(
@@ -3943,6 +4130,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         type_: u32,
         offset: i64,
     ) {
+        if self.base.is_context_lost() { return; }
         if end < start {
             self.base.webgl_error(InvalidValue);
             return;
@@ -3958,6 +4146,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.9>
     fn VertexAttribDivisor(&self, cx: &mut JSContext, index: u32, divisor: u32) {
+        if self.base.is_context_lost() { return; }
         self.base.vertex_attrib_divisor(cx, index, divisor);
     }
 
@@ -3968,6 +4157,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.12>
     fn DeleteQuery(&self, query: Option<&WebGLQuery>) {
+        if self.base.is_context_lost() { return; }
         if let Some(query) = query {
             handle_potential_webgl_error!(self.base, self.base.validate_ownership(query), return);
 
@@ -3992,6 +4182,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.12>
     fn IsQuery(&self, query: Option<&WebGLQuery>) -> bool {
+        if self.base.is_context_lost() { return false; }
         match query {
             Some(query) => self.base.validate_ownership(query).is_ok() && query.is_valid(),
             None => false,
@@ -4005,6 +4196,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.13>
     fn DeleteSampler(&self, sampler: Option<&WebGLSampler>) {
+        if self.base.is_context_lost() { return; }
         if let Some(sampler) = sampler {
             handle_potential_webgl_error!(self.base, self.base.validate_ownership(sampler), return);
             for slot in self.samplers.iter() {
@@ -4018,6 +4210,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.13>
     fn IsSampler(&self, sampler: Option<&WebGLSampler>) -> bool {
+        if self.base.is_context_lost() { return false; }
         match sampler {
             Some(sampler) => self.base.validate_ownership(sampler).is_ok() && sampler.is_valid(),
             None => false,
@@ -4026,6 +4219,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.12>
     fn BeginQuery(&self, target: u32, query: &WebGLQuery) {
+        if self.base.is_context_lost() { return; }
         handle_potential_webgl_error!(self.base, self.base.validate_ownership(query), return);
 
         let active_query = match target {
@@ -4051,6 +4245,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.12>
     fn EndQuery(&self, target: u32) {
+        if self.base.is_context_lost() { return; }
         let active_query = match target {
             constants::ANY_SAMPLES_PASSED | constants::ANY_SAMPLES_PASSED_CONSERVATIVE => {
                 self.occlusion_query.take()
@@ -4074,6 +4269,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.12>
     fn GetQuery(&self, target: u32, pname: u32) -> Option<DomRoot<WebGLQuery>> {
+        if self.base.is_context_lost() { return None; }
         if pname != constants::CURRENT_QUERY {
             self.base.webgl_error(InvalidEnum);
             return None;
@@ -4104,6 +4300,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         pname: u32,
         mut retval: MutableHandleValue,
     ) {
+        if self.base.is_context_lost() { return retval.set(NullValue()); }
         handle_potential_webgl_error!(
             self.base,
             self.base.validate_ownership(query),
@@ -4129,6 +4326,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         condition: u32,
         flags: u32,
     ) -> Option<DomRoot<WebGLSync>> {
+        if self.base.is_context_lost() { return None; }
         if flags != 0 {
             self.base.webgl_error(InvalidValue);
             return None;
@@ -4143,6 +4341,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.14>
     fn IsSync(&self, sync: Option<&WebGLSync>) -> bool {
+        if self.base.is_context_lost() { return false; }
         match sync {
             Some(sync) => {
                 // Returns false if the sync was generated by a different
@@ -4173,6 +4372,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.14>
     fn ClientWaitSync(&self, sync: &WebGLSync, flags: u32, timeout: u64) -> u32 {
+        if self.base.is_context_lost() { return constants::WAIT_FAILED; }
         if !sync.is_valid() {
             self.base.webgl_error(InvalidOperation);
             return constants::WAIT_FAILED;
@@ -4199,6 +4399,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.14>
     fn WaitSync(&self, sync: &WebGLSync, flags: u32, timeout: i64) {
+        if self.base.is_context_lost() { return; }
         if !sync.is_valid() {
             self.base.webgl_error(InvalidOperation);
             return;
@@ -4225,6 +4426,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         pname: u32,
         mut retval: MutableHandleValue,
     ) {
+        if self.base.is_context_lost() { return retval.set(NullValue()); }
         if !sync.is_valid() {
             self.base.webgl_error(InvalidOperation);
             return retval.set(NullValue());
@@ -4254,6 +4456,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.14>
     fn DeleteSync(&self, sync: Option<&WebGLSync>) {
+        if self.base.is_context_lost() { return; }
         if let Some(sync) = sync {
             handle_potential_webgl_error!(self.base, self.base.validate_ownership(sync), return);
             sync.delete(Operation::Infallible);
@@ -4262,6 +4465,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.13>
     fn BindSampler(&self, unit: u32, sampler: Option<&WebGLSampler>) {
+        if self.base.is_context_lost() { return; }
         if let Some(sampler) = sampler {
             handle_potential_webgl_error!(self.base, self.base.validate_ownership(sampler), return);
 
@@ -4280,11 +4484,13 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.17>
     fn BindVertexArray(&self, array: Option<&WebGLVertexArrayObject>) {
+        if self.base.is_context_lost() { return; }
         self.base.bind_vertex_array_webgl2(array);
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.13>
     fn SamplerParameteri(&self, sampler: &WebGLSampler, pname: u32, param: i32) {
+        if self.base.is_context_lost() { return; }
         handle_potential_webgl_error!(self.base, self.base.validate_ownership(sampler), return);
         let param = WebGLSamplerValue::GLenum(param as u32);
         let result = sampler.set_parameter(&self.base, pname, param);
@@ -4295,6 +4501,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.13>
     fn SamplerParameterf(&self, sampler: &WebGLSampler, pname: u32, param: f32) {
+        if self.base.is_context_lost() { return; }
         handle_potential_webgl_error!(self.base, self.base.validate_ownership(sampler), return);
         let param = WebGLSamplerValue::Float(param);
         let result = sampler.set_parameter(&self.base, pname, param);
@@ -4311,6 +4518,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         pname: u32,
         mut retval: MutableHandleValue,
     ) {
+        if self.base.is_context_lost() { return retval.set(NullValue()); }
         handle_potential_webgl_error!(
             self.base,
             self.base.validate_ownership(sampler),
@@ -4338,6 +4546,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.15>
     fn DeleteTransformFeedback(&self, tf: Option<&WebGLTransformFeedback>) {
+        if self.base.is_context_lost() { return; }
         if let Some(tf) = tf {
             handle_potential_webgl_error!(self.base, self.base.validate_ownership(tf), return);
             if tf.is_active() {
@@ -4351,6 +4560,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.15>
     fn IsTransformFeedback(&self, tf: Option<&WebGLTransformFeedback>) -> bool {
+        if self.base.is_context_lost() { return false; }
         match tf {
             Some(tf) => {
                 // Returns false if the transform feedback was generated by a different
@@ -4382,6 +4592,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.15>
     fn BindTransformFeedback(&self, target: u32, tf: Option<&WebGLTransformFeedback>) {
+        if self.base.is_context_lost() { return; }
         if target != constants::TRANSFORM_FEEDBACK {
             self.base.webgl_error(InvalidEnum);
             return;
@@ -4417,6 +4628,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.15>
     #[expect(non_snake_case)]
     fn BeginTransformFeedback(&self, primitiveMode: u32) {
+        if self.base.is_context_lost() { return; }
         match primitiveMode {
             constants::POINTS | constants::LINES | constants::TRIANGLES => {},
             _ => {
@@ -4451,6 +4663,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.15>
     fn EndTransformFeedback(&self) {
+        if self.base.is_context_lost() { return; }
         if let Some(current_tf) = self.current_transform_feedback.get() {
             if !current_tf.is_active() {
                 self.base.webgl_error(InvalidOperation);
@@ -4462,6 +4675,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.15>
     fn ResumeTransformFeedback(&self) {
+        if self.base.is_context_lost() { return; }
         if let Some(current_tf) = self.current_transform_feedback.get() {
             if !current_tf.is_active() || !current_tf.is_paused() {
                 self.base.webgl_error(InvalidOperation);
@@ -4473,6 +4687,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.15>
     fn PauseTransformFeedback(&self) {
+        if self.base.is_context_lost() { return; }
         if let Some(current_tf) = self.current_transform_feedback.get() {
             if !current_tf.is_active() || current_tf.is_paused() {
                 self.base.webgl_error(InvalidOperation);
@@ -4490,6 +4705,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         varyings: Vec<DOMString>,
         bufferMode: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         // Spec: If program was generated by a different WebGL2RenderingContext
         // than this one, generates an INVALID_OPERATION error.
         if let Err(error) = self.base.validate_ownership(program) {
@@ -4535,6 +4751,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         program: &WebGLProgram,
         index: u32,
     ) -> Option<DomRoot<WebGLActiveInfo>> {
+        if self.base.is_context_lost() { return None; }
         // Spec: If program was generated by a different WebGL2RenderingContext,
         // generate INVALID_OPERATION and return null.
         if let Err(error) = self.base.validate_ownership(program) {
@@ -4568,6 +4785,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.16>
     fn BindBufferBase(&self, target: u32, index: u32, buffer: Option<&WebGLBuffer>) {
+        if self.base.is_context_lost() { return; }
         let (generic_slot, indexed_bindings) = match target {
             constants::TRANSFORM_FEEDBACK_BUFFER => (
                 &self.bound_transform_feedback_buffer,
@@ -4622,6 +4840,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         offset: i64,
         size: i64,
     ) {
+        if self.base.is_context_lost() { return; }
         let (generic_slot, indexed_bindings) = match target {
             constants::TRANSFORM_FEEDBACK_BUFFER => (
                 &self.bound_transform_feedback_buffer,
@@ -4693,6 +4912,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.16>
     fn GetUniformIndices(&self, program: &WebGLProgram, names: Vec<DOMString>) -> Option<Vec<u32>> {
+        if self.base.is_context_lost() { return None; }
         handle_potential_webgl_error!(
             self.base,
             self.base.validate_ownership(program),
@@ -4715,6 +4935,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         pname: u32,
         mut rval: MutableHandleValue,
     ) {
+        if self.base.is_context_lost() { return rval.set(NullValue()); }
         handle_potential_webgl_error!(
             self.base,
             self.base.validate_ownership(program),
@@ -4745,6 +4966,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.16>
     fn GetUniformBlockIndex(&self, program: &WebGLProgram, block_name: DOMString) -> u32 {
+        if self.base.is_context_lost() { return constants::INVALID_INDEX; }
         handle_potential_webgl_error!(
             self.base,
             self.base.validate_ownership(program),
@@ -4766,6 +4988,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         pname: u32,
         mut retval: MutableHandleValue,
     ) {
+        if self.base.is_context_lost() { return retval.set(NullValue()); }
         handle_potential_webgl_error!(
             self.base,
             self.base.validate_ownership(program),
@@ -4804,6 +5027,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         program: &WebGLProgram,
         block_index: u32,
     ) -> Option<DOMString> {
+        if self.base.is_context_lost() { return None; }
         handle_potential_webgl_error!(
             self.base,
             self.base.validate_ownership(program),
@@ -4819,6 +5043,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.16>
     fn UniformBlockBinding(&self, program: &WebGLProgram, block_index: u32, block_binding: u32) {
+        if self.base.is_context_lost() { return; }
         handle_potential_webgl_error!(self.base, self.base.validate_ownership(program), return);
 
         if block_binding >= self.base.limits().max_uniform_buffer_bindings {
@@ -4839,6 +5064,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         values: Float32ArrayOrUnrestrictedFloatSequence,
         src_offset: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         let array = match values {
             Float32ArrayOrUnrestrictedFloatSequence::Float32Array(v) => {
                 v.to_vec().unwrap_or_default()
@@ -4863,6 +5089,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         values: Int32ArrayOrLongSequence,
         src_offset: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         let array = match values {
             Int32ArrayOrLongSequence::Int32Array(v) => v.to_vec().unwrap_or_default(),
             Int32ArrayOrLongSequence::LongSequence(v) => v,
@@ -4885,6 +5112,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         values: Uint32ArrayOrUnsignedLongSequence,
         src_offset: u32,
     ) {
+        if self.base.is_context_lost() { return; }
         let array = match values {
             Uint32ArrayOrUnsignedLongSequence::Uint32Array(v) => v.to_vec().unwrap_or_default(),
             Uint32ArrayOrUnsignedLongSequence::UnsignedLongSequence(v) => v,
@@ -4901,6 +5129,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.11>
     fn ClearBufferfi(&self, buffer: u32, draw_buffer: i32, depth: f32, stencil: i32) {
+        if self.base.is_context_lost() { return; }
         if buffer != constants::DEPTH_STENCIL {
             return self.base.webgl_error(InvalidEnum);
         }
@@ -4922,6 +5151,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.4>
     fn InvalidateFramebuffer(&self, target: u32, attachments: Vec<u32>) {
+        if self.base.is_context_lost() { return; }
         if !self.valid_fb_attachment_values(target, &attachments) {
             return;
         }
@@ -4940,6 +5170,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         width: i32,
         height: i32,
     ) {
+        if self.base.is_context_lost() { return; }
         if !self.valid_fb_attachment_values(target, &attachments) {
             return;
         }
@@ -4968,6 +5199,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         level: i32,
         layer: i32,
     ) {
+        if self.base.is_context_lost() { return; }
         if let Some(tex) = texture {
             handle_potential_webgl_error!(self.base, self.base.validate_ownership(tex), return);
         }
@@ -4998,6 +5230,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         pname: u32,
         mut retval: MutableHandleValue,
     ) {
+        if self.base.is_context_lost() { return retval.set(NullValue()); }
         if target != constants::RENDERBUFFER {
             self.base.webgl_error(InvalidEnum);
             return retval.set(NullValue());
@@ -5041,12 +5274,14 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         width: i32,
         height: i32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.base
             .renderbuffer_storage(target, samples, internal_format, width, height)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.4>
     fn ReadBuffer(&self, src: u32) {
+        if self.base.is_context_lost() { return; }
         match src {
             constants::BACK | constants::NONE => {},
             _ if self.base.valid_color_attachment_enum(src) => {},
@@ -5068,6 +5303,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.11>
     fn DrawBuffers(&self, buffers: Vec<u32>) {
+        if self.base.is_context_lost() { return; }
         if let Some(fb) = self.base.get_draw_framebuffer_slot().get() {
             handle_potential_webgl_error!(self.base, fb.set_draw_buffers(buffers))
         } else {
@@ -5094,6 +5330,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         width: i32,
         height: i32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.tex_storage(2, target, levels, internal_format, width, height, 1)
     }
 
@@ -5107,6 +5344,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         height: i32,
         depth: i32,
     ) {
+        if self.base.is_context_lost() { return; }
         self.tex_storage(3, target, levels, internal_format, width, height, depth)
     }
 

@@ -316,7 +316,7 @@ impl XRWebGLLayerMethods<crate::DomTypeHolder> for XRWebGLLayer {
         if session.is_ended() {
             return Err(Error::InvalidState(None));
         }
-        // XXXManishearth step 3: throw error if context is lost
+        if context.is_context_lost() { return Err(Error::InvalidState(None)); }
         if session.is_immersive() && !context.is_xr_compatible() {
             return Err(Error::InvalidState(None));
         }

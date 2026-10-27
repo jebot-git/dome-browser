@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::iter::FromIterator;
 
@@ -169,6 +170,7 @@ impl WebGLExtensionFeatures {
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 #[derive(JSTraceable, MallocSizeOf)]
 pub(crate) struct WebGLExtensions {
+    initialized: Cell<bool>,
     extensions: DomRefCell<HashMap<String, Box<dyn WebGLExtensionWrapper>>>,
     features: DomRefCell<WebGLExtensionFeatures>,
     #[no_trace]
@@ -186,6 +188,7 @@ impl WebGLExtensions {
         glsl_version: WebGLSLVersion,
     ) -> WebGLExtensions {
         Self {
+            initialized: Cell::new(false),
             extensions: DomRefCell::new(HashMap::new()),
             features: DomRefCell::new(WebGLExtensionFeatures::new(webgl_version)),
             webgl_version,
@@ -198,11 +201,12 @@ impl WebGLExtensions {
     where
         F: FnOnce() -> String,
     {
-        if self.extensions.borrow().is_empty() {
+        if !self.initialized.get() {
             let gl_str = cb();
             self.features.borrow_mut().gl_extensions =
                 FxHashSet::from_iter(gl_str.split(&[',', ' '][..]).map(|s| s.into()));
             self.register_all_extensions();
+            self.initialized.set(true);
         }
     }
 
@@ -241,6 +245,9 @@ impl WebGLExtensions {
         let Some(extension) = extensions.get(&name) else {
             return;
         };
+        if let WebGLExtensionSpec::Specific(version) = extension.spec() {
+            if self.webgl_version != version { return; }
+        }
         if extension.is_supported(self) {
             extension.instance_or_init(cx, ctx, self, rval);
         }
@@ -414,7 +421,19 @@ impl WebGLExtensions {
             .collect()
     }
 
+    pub(crate) fn reset_after_loss(&self) {
+        self.initialized.set(false);
+        self.extensions.borrow_mut().retain(|name, _| name == "WEBGL_LOSE_CONTEXT");
+        *self.features.borrow_mut() = WebGLExtensionFeatures::new(self.webgl_version);
+        // Keep the loss extension instance, but repopulate the supported list
+        // without enabling or retaining any other extension objects.
+        self.register_all_extensions();
+    }
+
     fn register_all_extensions(&self) {
+        if !self.extensions.borrow().contains_key("WEBGL_LOSE_CONTEXT") {
+            self.register::<ext::webgllosecontext::WEBGLLoseContext>();
+        }
         self.register::<ext::angleinstancedarrays::ANGLEInstancedArrays>();
         self.register::<ext::extblendminmax::EXTBlendMinmax>();
         self.register::<ext::extcolorbufferhalffloat::EXTColorBufferHalfFloat>();

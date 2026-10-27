@@ -2,7 +2,7 @@
 <style>body{background:#11334c;color:white;font:18px monospace}button{padding:18px}canvas{width:220px;height:120px}</style>
 <button id="start" disabled>Start context validation</button>
 <script>
-let order=0,count=0;const states=[],noHost=location.hash==='#no-host';
+let order=0,count=0;const states=[],noHost=location.hash==='#no-host',contextLoss=location.hash==='#context-loss';
 const post=(type,data)=>fetch('/event',{method:'POST',body:JSON.stringify({order:++order,type,data})});
 const check=(passed,name,data={})=>{count++;post('check',{passed:!!passed,name,data})};
 const rect=v=>({x:v.x,y:v.y,width:v.width,height:v.height});
@@ -74,6 +74,27 @@ start.onclick=async()=>{
     for(const view of pose.views){const v=layer.getViewport(view);guard.scissor(v.x,v.y,v.width,v.height);guard.clearColor(view.eye==='left'?1:0,view.eye==='right'?1:0,marker/255,1);guard.clear(guard.COLOR_BUFFER_BIT)}
     guard.disable(guard.SCISSOR_TEST);check(guard.getError()===0,version+': negotiated context renders an immersive frame');setTimeout(resolve,0);
    }catch(e){reject(e)}}));
+   if(contextLoss){
+    const extension=guard.getExtension('WEBGL_lose_context');check(!!extension,version+': context loss extension available during XR');
+    let pending;
+    const lost=new Promise(resolve=>guard.canvas.addEventListener('webglcontextlost',e=>{e.preventDefault();resolve();},{once:true}));
+    await new Promise(resolve=>session.requestAnimationFrame(()=>{pending=make(guard);extension.loseContext();resolve();}));
+    check(guard.isContextLost(),version+': active immersive context is synchronously lost');
+    let error=null;try{new XRWebGLLayer(session,guard)}catch(e){error=e.name}
+    check(error==='InvalidStateError',version+': a lost context cannot create an XR layer');
+    await lost;check(await pending==='InvalidStateError',version+': pending compatibility cannot revive a lost generation');
+    const restored=new Promise(resolve=>guard.canvas.addEventListener('webglcontextrestored',resolve,{once:true}));extension.restoreContext();await restored;
+    check(!guard.isContextLost()&&guard.getContextAttributes().xrCompatible===false,version+': restored context requires fresh XR negotiation');
+    guard.bindFramebuffer(guard.FRAMEBUFFER,layer.framebuffer);check(guard.getError()===guard.INVALID_OPERATION,version+': old opaque framebuffer is invalid after restoration');
+    check(await make(guard)===null&&guard.getContextAttributes().xrCompatible===true,version+': recreated native context negotiates XR compatibility');
+    const replacement=new XRWebGLLayer(session,guard);session.updateRenderState({baseLayer:replacement});
+    check(replacement.framebuffer!==layer.framebuffer,version+': restored XR context uses a new opaque framebuffer');
+    for(let i=0;i<2;i++)await new Promise((resolve,reject)=>session.requestAnimationFrame((time,frame)=>{try{
+     const pose=frame.getViewerPose(space);if(!pose)throw Error('No restored XR pose');guard.bindFramebuffer(guard.FRAMEBUFFER,replacement.framebuffer);guard.enable(guard.SCISSOR_TEST);
+     for(const view of pose.views){const v=replacement.getViewport(view);guard.scissor(v.x,v.y,v.width,v.height);guard.clearColor(view.eye==='left'?1:0,view.eye==='right'?1:0,(marker+8)/255,1);guard.clear(guard.COLOR_BUFFER_BIT)}
+     guard.disable(guard.SCISSOR_TEST);check(guard.getError()===0,version+': restored context renders immersive pixels');setTimeout(resolve,0);
+    }catch(e){reject(e)}}));
+   }
   }
   await session.end();
   if(!noHost){

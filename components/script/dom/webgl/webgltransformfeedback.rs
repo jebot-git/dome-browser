@@ -5,32 +5,29 @@
 use std::cell::Cell;
 
 use dom_struct::dom_struct;
+use servo_canvas_traits::webgl::WebGLMsgSender;
+use crate::dom::webgl::webglrenderingcontext::send_webgl_cleanup_command;
 use js::context::JSContext;
 use script_bindings::reflector::reflect_dom_object;
-use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{WebGLCommand, webgl_channel};
 
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::webgl::webglobject::WebGLObject;
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
-use crate::dom::webglrenderingcontext::capture_webgl_backtrace;
 
 #[derive(JSTraceable, MallocSizeOf)]
 struct DroppableWebGLTransformFeedback {
-    context: WeakRef<WebGLRenderingContext>,
+    #[no_trace]
+    #[ignore_malloc_size_of = "Non-owning channel for the creating native generation"]
+    cleanup_sender: std::rc::Weak<WebGLMsgSender>,
     id: u32,
     marked_for_deletion: Cell<bool>,
 }
 
 impl DroppableWebGLTransformFeedback {
     fn send_with_fallibility(&self, command: WebGLCommand, fallibility: Operation) {
-        if let Some(root) = self.context.root() {
-            let result = root.sender().send(command, capture_webgl_backtrace());
-            if matches!(fallibility, Operation::Infallible) {
-                result.expect("Operation failed");
-            }
-        }
+        send_webgl_cleanup_command(&self.cleanup_sender, command, fallibility);
     }
 
     fn delete(&self, operation_fallibility: Operation) {
@@ -75,7 +72,7 @@ impl WebGLTransformFeedback {
             is_active: Cell::new(false),
             is_paused: Cell::new(false),
             droppable: DroppableWebGLTransformFeedback {
-                context: WeakRef::new(context),
+                cleanup_sender: context.cleanup_sender(),
                 id,
                 marked_for_deletion: Cell::new(false),
             },
@@ -83,6 +80,9 @@ impl WebGLTransformFeedback {
     }
 
     pub(crate) fn new(cx: &mut JSContext, context: &WebGLRenderingContext) -> DomRoot<Self> {
+        if context.is_context_lost() {
+            return reflect_dom_object(cx, Box::new(Self::new_inherited(context, 1)), &*context.global());
+        }
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::CreateTransformFeedback(sender));
         let id = receiver.recv().unwrap();

@@ -1,0 +1,302 @@
+{
+  "completed_utc": "2026-10-27T17:58:01.982313+00:00",
+  "source_base_commit": "05d4fe2f0d7f9ea8a180a41aaf621dc5430a6710",
+  "candidate_sha256": "b1ad9d7f3b0eddc969bb9a9fb5653a8da4088ec0f6ec8d4264db3f31b98f0e87",
+  "test_embedder_sha256": "71da8b3943f3388891c969d8b24afbad20e4b9f6ad78574f7fba7cd85fd5a4a8",
+  "compiled_inputs_unchanged": true,
+  "source_file_sha256": {
+    "components/script/dom/html/embedded_content/htmlcanvaselement.rs": "0928655a5e7463c89d4ced86259b1e08393f3a6a0bcd50b09f67ba426514cdab",
+    "components/script/dom/webgl/extensions/ext/angleinstancedarrays.rs": "092a370c8207ef8d47511352f2deb2b5053871cae94f2d1b2999967c175f8448",
+    "components/script/dom/webgl/extensions/ext/mod.rs": "f6e73caaae39e02560028c0ec48219bc789060335ffb4f646ac90152ddf13f81",
+    "components/script/dom/webgl/extensions/ext/oesvertexarrayobject.rs": "d0bc2298aed6ae344c144804e6896c025030c74807ca35dfc13f099cf3876e28",
+    "components/script/dom/webgl/extensions/extensions.rs": "c883ee6b874df7f5d97b65990cbff52bd6a97d7d835e00c0b153239ed0ec3e90",
+    "components/script/dom/webgl/webgl2renderingcontext.rs": "9d41dfc1edf6acec762681bb27eed96cc7f8d4ba55ae7b2d152187db5c17524f",
+    "components/script/dom/webgl/webglframebuffer.rs": "20dcd70f73d4adc204a410699b986200377afa11e5c45aa705cecf8606703a66",
+    "components/script/dom/webgl/webglobject.rs": "d6da7b0776a895086716151e76bddad6a00baee85ac43eb133dc26bd0f285a72",
+    "components/script/dom/webgl/webglprogram.rs": "1ae46dc7c63a4cdcf2e66d98cef32208eb4e25419dbc5910052e29d49f6bbb06",
+    "components/script/dom/webgl/webglquery.rs": "19c7ad77ffeb239ec7bcb8033589c0240d80d4148ba6fa0c3db77c5490c72c36",
+    "components/script/dom/webgl/webglrenderbuffer.rs": "18b26872afcdb94b5de5dd84cfe160a286ef7c1261621a010122b9782a286ac0",
+    "components/script/dom/webgl/webglrenderingcontext.rs": "be3a42567503bbe8982a7ed24cc6b0a46838b0cf5be1f21f606b7159a3a3deb5",
+    "components/script/dom/webgl/webglsampler.rs": "0b2b8d8bf58e395779eff89e364457c05ab191d8763a49ef64df1b6730cfa97e",
+    "components/script/dom/webgl/webglshader.rs": "2fe9ccf4b6cd55faaf641f699d5226b36bdca9b40103290c5d57cc462f67dbcb",
+    "components/script/dom/webgl/webglsync.rs": "0dcb7bd6278a30fdbc3aba33a7f3727dc9dfd596959e62e351d87ec4044c1bfe",
+    "components/script/dom/webgl/webgltexture.rs": "fe01b08ff923b250c46eb0c29eda5117466a83bf1c556e279dae733cc13d9f66",
+    "components/script/dom/webgl/webgltransformfeedback.rs": "98c3e205736d843bd75ba4c26347d57be50252158d95d0d07472865122cfd04c",
+    "components/script/dom/webxr/xrlayer.rs": "07486d46e5d6dfd56974f566c4ed6de04d21a595a42902b084a91b776c56f7d3",
+    "components/script/dom/webxr/xrwebgllayer.rs": "1fbea87f284134856e72209cf9884fe81ce50c9404517d880f70f1efc0b5a0d7",
+    "components/script/tasks/task_manager.rs": "6f6af3c9e0dc0cc3ef10a2e04b33683320c95763496ca3b87d9ecdde9d46831a",
+    "components/script/tasks/task_source.rs": "f04e706fe70f34f95aa5d3ff7b081bc76dcbaa4b66e33b6cfbf04e6088dab22a",
+    "components/script_bindings/codegen/Bindings.conf": "448e06f7ac581f372489a01e8c647d370ea9eb0bcfa1fa84656011937bc80705",
+    "components/shared/canvas/webgl.rs": "c0b7e3d5585898c4c9c228b4dc1b705d311642facf35121cdf48403d77fa50f4",
+    "components/webgl/webxr.rs": "7cd820927ef5b9840ba149bcc72f82c661d5fe93031e243e2252280953ee91e1",
+    "ports/dome-fltk/src/xr.rs": "4ac9d24ef6ba0010219f2434ea07b13704238fd70ee9579f33cdc760c70f59e7",
+    "ports/dome-fltk/tests/webxr-context-compatibility.html": "fa4b3798802f168fe385f7efe1ea23e2e2ea89fc0d2915ec693d7c282c58c15c",
+    "ports/dome-fltk/tests/webxr-context-compatibility.py": "6344d5373915577ba88fe0840d2a3f240a7ab966652035fe8a9d18baf7646a14",
+    "components/script/dom/webgl/extensions/ext/webgllosecontext.rs": "bfcc6d9f6e81e4469ea576a21ff729fa5b903357a97e0e9e851e469688f0e214",
+    "components/script_bindings/webidls/WEBGLLoseContext.webidl": "ae464d04d576096600b5f60bef34ad58293798c82df8d54bfbcfe9c8ea593e94",
+    "ports/dome-fltk/tests/webgl-context-loss.html": "9f533839434be3bd55f0607130d1097e7795d0a938c99992cf987bee85714d9d",
+    "ports/dome-fltk/tests/webgl-context-loss.py": "ebc4c542652e44d787ac506b63c9aa6d0385a1d8e7f5229fd836326f24f0726d"
+  },
+  "selected_units": 209,
+  "runtime_checks": 4909,
+  "worker_shutdown_cases": 3,
+  "upstream_passed_cases": 558,
+  "upstream_optional_unsupported": 4,
+  "regression_jobs": 37,
+  "all_required_passed": true,
+  "units": [
+    {
+      "name": "frontend",
+      "passed": 184,
+      "log_sha256": "4697d83a8dd369a340c48355487d3e4e45a6a017161e7d6d517ecad234b35027"
+    },
+    {
+      "name": "geometry",
+      "passed": 10,
+      "log_sha256": "e1b81271c102e057e059032051ec8c3f9b279339e416ac7256c0d18402a34546"
+    },
+    {
+      "name": "pointer-ids",
+      "passed": 2,
+      "log_sha256": "c466f143477d20df9d8b579eeab7e908e817f7b50e38b53d9c76ebdfdb2a52b7"
+    },
+    {
+      "name": "pen-payload",
+      "passed": 3,
+      "log_sha256": "572c23ffd995ead5cdd04840b567cbaa405b948a0ad374c6d0cd5fc62c06c2f3"
+    },
+    {
+      "name": "factory",
+      "passed": 1,
+      "log_sha256": "73a021bd78ffc0c5bf2eeb16f2a3c5c1c85a60b0386231ade76c74ecbf7f3e94"
+    },
+    {
+      "name": "secondary",
+      "passed": 4,
+      "log_sha256": "75c01517ee7e5e9cf98ac315b96add311945a46ea119cbb0ce4a0068c217d272"
+    },
+    {
+      "name": "renderer",
+      "passed": 5,
+      "log_sha256": "59499ea5c186096138809851dccfd422c3d5b0dcc2da2ccd4cdd69f945745b99"
+    }
+  ],
+  "suites": [
+    {
+      "name": "webgl-loss",
+      "runtime_checks": 280,
+      "upstream_passed_cases": 489,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "a6b4d6603a1fcb8b8b08914ec5acff1de54bb0390b6e2bdcf3785020b4777368"
+    },
+    {
+      "name": "xr-loss",
+      "runtime_checks": 68,
+      "report_sha256": "e7bc75ce5d70fb99b6eac61b781935346a54ad5f8b4d7f2313e196cc907f309c"
+    },
+    {
+      "name": "general-new",
+      "runtime_checks": 46,
+      "report_sha256": "90ae9fa47a09d413d31d88329faa5e9b44df0d28fe73493d31a325e823e1066a"
+    },
+    {
+      "name": "general-old",
+      "runtime_checks": 46,
+      "report_sha256": "90ae9fa47a09d413d31d88329faa5e9b44df0d28fe73493d31a325e823e1066a"
+    },
+    {
+      "name": "native-touch",
+      "runtime_checks": 22,
+      "report_sha256": "c57fa2adefec30239e4c5bb6ec1dc661b34e36aae8bee7f6f00a47e6a6901668"
+    },
+    {
+      "name": "mouse-inline",
+      "runtime_checks": 34,
+      "report_sha256": "a01e791715ae22185fccf8d4ae5ae1c2710f619a85133936b5b04c51a4d198e9"
+    },
+    {
+      "name": "controller",
+      "runtime_checks": 60,
+      "report_sha256": "71430d7fc433586d627933d90b099bae59cb645b742f4fbbab7d1cd0267b0f8f"
+    },
+    {
+      "name": "mouse-immersive",
+      "runtime_checks": 38,
+      "report_sha256": "0f922d051b4fde03723dbd3ce8ca39d1c56b891b33b832ff9d943bf6f37363e5"
+    },
+    {
+      "name": "reset",
+      "runtime_checks": 101,
+      "report_sha256": "fb25246f0da779edacd6cbed528737993c59d21c3900d7030fb440c75ea899d6"
+    },
+    {
+      "name": "engine-touch",
+      "runtime_checks": 43,
+      "report_sha256": "e8d3e3d7482530b8cbf7c3de880c7c7663e42630b4b36191577ac2f828dffaaf"
+    },
+    {
+      "name": "visibility",
+      "runtime_checks": 77,
+      "report_sha256": "2da111781316aa2dde11ee8aa812a2cf22a56535f6e3340ead5918cc8af7f346"
+    },
+    {
+      "name": "frame-same",
+      "runtime_checks": 17,
+      "report_sha256": "c8206cb861c5b8ed07ed637bf0ea5aac70025aeba7b31449e1e3ecab8589d6d9"
+    },
+    {
+      "name": "frame-cross",
+      "runtime_checks": 17,
+      "report_sha256": "9dc1e73698fe52e7a1ed08e042d4ab40099f69b7f71ccf22b497c848dfa70372"
+    },
+    {
+      "name": "outcomes",
+      "runtime_checks": 9,
+      "report_sha256": "3ea178e01294ab974c3ac19b029a8e42305727f31f66155b7cfc2bf1055ec4d2"
+    },
+    {
+      "name": "native-pen",
+      "runtime_checks": 87,
+      "report_sha256": "048fff2726b5dd8404a743e177d9064e0d2e55665da7fb32fdac64be1f709f5e"
+    },
+    {
+      "name": "upstream",
+      "upstream_passed_cases": 7,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "1716fac02f14f1c01bf614c91541794951374fd0547f269595f02a4f7caa7fa6"
+    },
+    {
+      "name": "layer-scaling",
+      "runtime_checks": 369,
+      "report_sha256": "f9b521a1faf5adca0ea26e4c6773858c4d8c05adbebf2b9d98c7237c2286a56f"
+    },
+    {
+      "name": "layers-upstream",
+      "upstream_passed_cases": 22,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "c59b421fe7a9bd531198d42599e4c14de456a2f4fa0f458185c2325d61e12542"
+    },
+    {
+      "name": "bounded",
+      "runtime_checks": 21,
+      "report_sha256": "b2e890bcdbcaaf58c1365cc0c5b8f5b08e2a655d02484041a6737d009f309f85"
+    },
+    {
+      "name": "reset-upstream",
+      "upstream_passed_cases": 4,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "69290e994fb0c0e204814bb382e8d97a00e5e16cafaf6e8cf6f49c1f064340e1"
+    },
+    {
+      "name": "layer-attributes",
+      "runtime_checks": 1037,
+      "report_sha256": "74f3e88e1ed55637db122d3c856ed23be2adb958966c7e03f0a822a9389db119"
+    },
+    {
+      "name": "layer-attributes-opaque-context",
+      "runtime_checks": 1037,
+      "report_sha256": "bc4e8faa6e78742492c8471f0a856d69d6d7c4de576b3104bd973dda4d2bdd58"
+    },
+    {
+      "name": "compatibility-native",
+      "runtime_checks": 45,
+      "report_sha256": "8286a31eac9d4872159c9dedb9f333ff69609c790aa553d15537f06073329dc4"
+    },
+    {
+      "name": "compatibility-nohost",
+      "runtime_checks": 31,
+      "report_sha256": "f481a80927ce6322c3f35fd872a686567810fdd3d77e2c987bc1a84c0260d4e6"
+    },
+    {
+      "name": "dynamic-upstream",
+      "upstream_passed_cases": 24,
+      "upstream_optional_unsupported": 4,
+      "report_sha256": "dc9cb3e0d26cf221179881fae7987df541b10767a20ec33d802f1d44bbfd3929"
+    },
+    {
+      "name": "dynamic",
+      "runtime_checks": 610,
+      "report_sha256": "a4a773edcc98f1f16e3c68c029566d8dcd29f55835369b72130b927a68a51737"
+    },
+    {
+      "name": "secondary",
+      "runtime_checks": 624,
+      "report_sha256": "660d54a66f2a9851af2db27b1d2010e27d26a62076a8642802c07424ccde3496"
+    },
+    {
+      "name": "secondary-upstream",
+      "upstream_passed_cases": 12,
+      "upstream_optional_unsupported": 0,
+      "report_sha256": "86ac13fe0b4cc761a0dada5f8402b4ff43a53392a14d3d1fc7031cc3cbae931a"
+    },
+    {
+      "name": "pdf-new",
+      "runtime_checks": 25,
+      "report_sha256": "0a47a388f14f6f96708f7d77b74c2f5e291c0f347ee94df2102c142018c2ac0d"
+    },
+    {
+      "name": "pdf-old",
+      "runtime_checks": 25,
+      "report_sha256": "0a47a388f14f6f96708f7d77b74c2f5e291c0f347ee94df2102c142018c2ac0d"
+    },
+    {
+      "name": "history-new",
+      "runtime_checks": 13,
+      "report_sha256": "0b890dccf492aadc54bd6503b0c2a1507e2bcb851913c5370e0ca0a3ce8a138b"
+    },
+    {
+      "name": "history-old",
+      "runtime_checks": 13,
+      "report_sha256": "0b890dccf492aadc54bd6503b0c2a1507e2bcb851913c5370e0ca0a3ce8a138b"
+    },
+    {
+      "name": "external-links",
+      "runtime_checks": 63,
+      "report_sha256": "2e5e35d9c73c41915b8c2790ce331f1ac993afac1f9aabbef8d3927ac85f9f51"
+    },
+    {
+      "name": "wasm-streams",
+      "runtime_checks": 17,
+      "report_sha256": "6585801c17c32aec1436dd22770d89ac633589fe96a32a32f71926a5a2f97c9b"
+    },
+    {
+      "name": "downloads",
+      "runtime_checks": 18,
+      "report_sha256": "7f3f0a94b5d9d9472f0d8b127774b0a254e273f94bc4184d0a0ace39be8302bf"
+    },
+    {
+      "name": "worker-shutdown",
+      "worker_shutdown_cases": 3,
+      "report_sha256": "a636f80256ada66d335a05b059621f4555bbadd0182f2473c636f4060ff7148c"
+    },
+    {
+      "name": "webgl-gc",
+      "runtime_checks": 16,
+      "report_sha256": "79d17b183ffae4eec613099ac08146091ce1272566da5bcfb17b2bd9ccce6891"
+    }
+  ],
+  "initial_reports": [
+    "before-native-r2/report.json",
+    "r1-webgl-loss/report.json",
+    "r1-webgl-loss-corrected/report.json",
+    "r1-xr-loss/report.json",
+    "r2-webgl-loss/report.json"
+  ],
+  "remaining": [
+    "Automatic GPU-reset detection, adapter migration and capability changes",
+    "Permissions Policy integration and broader WebXR coverage",
+    "DomeD shell touch/stylus interactions beyond native client surfaces",
+    "Dynamic scaling on optional native backends",
+    "Physical device validation",
+    "Continuous stability, web adblocking/privacy and local workstation protection maintenance",
+    "Final standards-focused Discord/x.com rendering"
+  ],
+  "unadvertised_features": [
+    "OffscreenCanvas"
+  ],
+  "physical_device_validation": false,
+  "optional_windows_openxr_compiled": false,
+  "installed": false,
+  "sessions_restarted": false,
+  "artifacts_directory": "artifacts/servo-rendering-goal/webgl-context-loss-v1"
+}
