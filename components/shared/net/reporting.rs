@@ -13,6 +13,65 @@ use sfv::{BareItem, Dictionary, ListEntry, Parser};
 
 use crate::fetch::headers::get_value_from_header_list;
 
+/// The response outcome defined by Reporting's delivery algorithm. Attempted
+/// reports are consumed for every outcome; this does not request a retry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeliveryOutcome {
+    Success,
+    Failure,
+    RemoveEndpoint,
+}
+
+impl DeliveryOutcome {
+    pub fn from_status(status: Option<u16>) -> Self {
+        match status {
+            Some(200..=299) => Self::Success,
+            Some(410) => Self::RemoveEndpoint,
+            _ => Self::Failure,
+        }
+    }
+
+    /// None retires this endpoint; successful responses end a failure streak.
+    pub fn updated_failures(self, failures: u32) -> Option<u32> {
+        match self {
+            Self::Success => Some(0),
+            Self::Failure => Some(failures.saturating_add(1)),
+            Self::RemoveEndpoint => None,
+        }
+    }
+}
+
+/// Build the Reporting transport request without a Fetch client or a window.
+/// Browser cookie policy retains its ancestor-aware provenance separately.
+pub fn reporting_request(
+    url: crate::blob_url_store::UrlWithBlobClaim,
+    origin: servo_url::ImmutableOrigin,
+    source: crate::request::RequestClient,
+    pipeline: Option<servo_base::id::PipelineId>,
+    body: Option<crate::request::RequestBody>,
+) -> crate::request::RequestBuilder {
+    use crate::request::{
+        CredentialsMode, Destination, Referrer, RequestBuilder, RequestMode, ServiceWorkersMode,
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/reports+json"),
+    );
+    RequestBuilder::new(None, url, Referrer::NoReferrer)
+        .method(http::Method::POST)
+        .headers(headers)
+        .body(body)
+        .origin(origin)
+        .destination(Destination::Report)
+        .mode(RequestMode::CorsMode)
+        .credentials_mode(CredentialsMode::CredentialsSameOrigin)
+        .service_workers_mode(ServiceWorkersMode::None)
+        .unsafe_request(true)
+        .pipeline_id(pipeline)
+        .reporting_cookie_client(source)
+}
+
 /// Owned DOM string data for reports. Queued tasks can carry this without a JS
 /// root, and both observer snapshots and JSON preserve all UTF-16 code units.
 #[derive(Clone, Debug, Eq, MallocSizeOf, PartialEq)]

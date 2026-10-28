@@ -694,11 +694,17 @@ impl Window {
             .queue(task!(send_to_reporting_endpoints: move || {
                 let window = trusted_window.root();
                 let reports = std::mem::take(&mut *window.report_list.borrow_mut());
-                window.upcast::<GlobalScope>().send_reports_to_endpoints(
-                    reports,
-                    window.endpoints_list.borrow().clone(),
-                );
+                let endpoints = window.endpoints_list.borrow().clone();
+                window.upcast::<GlobalScope>().send_reports_to_endpoints(reports, endpoints);
             }));
+    }
+
+    pub(crate) fn record_reporting_endpoint_outcome(
+        &self,
+        endpoint: u64,
+        outcome: net_traits::reporting::DeliveryOutcome,
+    ) {
+        ReportingEndpoint::record_outcome(&mut self.endpoints_list.borrow_mut(), endpoint, outcome);
     }
 
     pub(crate) fn buffered_reports(&self) -> Vec<Report> {

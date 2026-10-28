@@ -470,6 +470,9 @@ pub struct RequestBuilder {
     /// <https://fetch.spec.whatwg.org/#request-service-workers-mode>
     pub service_workers_mode: ServiceWorkersMode,
     pub client: Option<RequestClient>,
+    /// Cookie-policy provenance for clientless reporting requests; never a Fetch client.
+    #[serde(default)]
+    pub reporting_cookie_client: Option<RequestClient>,
     /// <https://fetch.spec.whatwg.org/#concept-request-destination>
     pub destination: Destination,
     pub synchronous: bool,
@@ -529,15 +532,23 @@ pub struct RequestBuilder {
 }
 
 impl RequestBuilder {
+    /// User cookie policy also applies to clientless Reporting transport.
+    pub fn cookie_client(&self) -> Option<&RequestClient> {
+        self.client.as_ref().or_else(|| {
+            (self.destination == Destination::Report)
+                .then_some(self.reporting_cookie_client.as_ref()).flatten()
+        })
+    }
+
     pub fn cookie_context(&self) -> crate::CookieContext {
         let urls = if self.url_list.is_empty() { vec![self.url.url()] } else {
             self.url_list.iter().map(|url| url.url()).collect()
         };
-        cookie_context(self.client.as_ref(), urls.into_iter(), &self.mode, self.destination, &self.method)
+        cookie_context(self.cookie_client(), urls.into_iter(), &self.mode, self.destination, &self.method)
     }
 
     pub fn is_first_party_for_cookies(&self) -> bool {
-        cookie_context_is_first_party(&self.mode, self.destination, self.client.as_ref(), &self.url)
+        cookie_context_is_first_party(&self.mode, self.destination, self.cookie_client(), &self.url)
     }
 
     pub fn new(
@@ -568,6 +579,7 @@ impl RequestBuilder {
             use_url_credentials: false,
             origin: Origin::Client,
             client: None,
+            reporting_cookie_client: None,
             policy_container: RequestPolicyContainer::default(),
             referrer,
             referrer_policy: ReferrerPolicy::EmptyString,
@@ -728,6 +740,12 @@ impl RequestBuilder {
         self
     }
 
+    /// Cookie-policy provenance without assigning a Fetch client.
+    pub fn reporting_cookie_client(mut self, client: RequestClient) -> RequestBuilder {
+        self.reporting_cookie_client = Some(client);
+        self
+    }
+
     /// <https://fetch.spec.whatwg.org/#concept-request-client>
     pub fn client(mut self, client: RequestClient) -> RequestBuilder {
         self.client = Some(client);
@@ -796,6 +814,10 @@ impl RequestBuilder {
         request.response_tainting = self.response_tainting;
         request.crash = self.crash;
         request.client = self.client;
+        request.reporting_cookie_client = self.reporting_cookie_client;
+        if request.destination == Destination::Report && request.client.is_none() {
+            request.traversable_for_user_prompts = TraversableForUserPrompts::NoTraversable;
+        }
         request.policy_container = self.policy_container;
         request.is_internal_request = self.is_internal_request;
         request
@@ -836,6 +858,8 @@ pub struct Request {
     pub history_navigation: bool,
     /// <https://fetch.spec.whatwg.org/#concept-request-client>
     pub client: Option<RequestClient>,
+    /// Cookie-policy provenance for clientless reporting requests; never a Fetch client.
+    pub reporting_cookie_client: Option<RequestClient>,
     /// <https://fetch.spec.whatwg.org/#concept-request-window>
     pub traversable_for_user_prompts: TraversableForUserPrompts,
     pub target_webview_id: Option<WebViewId>,
@@ -914,8 +938,16 @@ fn cookie_context_is_first_party(mode: &RequestMode, destination: Destination, c
 }
 
 impl Request {
+    /// User cookie policy also applies to clientless Reporting transport.
+    pub fn cookie_client(&self) -> Option<&RequestClient> {
+        self.client.as_ref().or_else(|| {
+            (self.destination == Destination::Report)
+                .then_some(self.reporting_cookie_client.as_ref()).flatten()
+        })
+    }
+
     pub fn cookie_context(&self) -> crate::CookieContext {
-        cookie_context(self.client.as_ref(), self.url_list.iter().map(|url| url.url()),
+        cookie_context(self.cookie_client(), self.url_list.iter().map(|url| url.url()),
             &self.mode, self.destination, &self.method)
     }
 
@@ -923,7 +955,7 @@ impl Request {
     /// A top-level navigation establishes its own first-party context. Embedded
     /// navigations and subresources retain the client's ancestor-aware site.
     pub fn is_first_party_for_cookies(&self) -> bool {
-        cookie_context_is_first_party(&self.mode, self.destination, self.client.as_ref(), &self.current_url())
+        cookie_context_is_first_party(&self.mode, self.destination, self.cookie_client(), &self.current_url())
     }
 
     pub fn new(
@@ -946,6 +978,7 @@ impl Request {
             reload_navigation: false,
             history_navigation: false,
             client: None,
+            reporting_cookie_client: None,
             traversable_for_user_prompts: TraversableForUserPrompts::Client,
             keep_alive: false,
             is_beacon: false,

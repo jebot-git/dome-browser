@@ -639,11 +639,17 @@ impl WorkerGlobalScope {
             .queue(task!(send_to_reporting_endpoints: move || {
                 let worker = trusted_worker.root();
                 let reports = std::mem::take(&mut *worker.report_list.borrow_mut());
-                worker.upcast::<GlobalScope>().send_reports_to_endpoints(
-                    reports,
-                    worker.endpoints_list.borrow().clone(),
-                );
+                let endpoints = worker.endpoints_list.borrow().clone();
+                worker.upcast::<GlobalScope>().send_reports_to_endpoints(reports, endpoints);
             }));
+    }
+
+    pub(crate) fn record_reporting_endpoint_outcome(
+        &self,
+        endpoint: u64,
+        outcome: net_traits::reporting::DeliveryOutcome,
+    ) {
+        ReportingEndpoint::record_outcome(&mut self.endpoints_list.borrow_mut(), endpoint, outcome);
     }
 
     pub(crate) fn buffered_reports(&self) -> Vec<Report> {

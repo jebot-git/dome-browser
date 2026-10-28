@@ -1673,3 +1673,53 @@ fn test_interception_top_level_context_is_not_inferred_from_initiator() {
         assert_eq!(intercepted.initiator_origin.as_deref(), Some("http://sub.site.example:8181"));
     }
 }
+
+#[test]
+fn test_clientless_reporting_retains_interceptor_ancestry() {
+    use net_traits::request::{InsecureRequestsPolicy, Origin, RequestClient};
+
+    let _ = create_generic_embedder_proxy::<net::embedder::NetToEmbedderMsg>();
+    let source = ServoUrl::parse("http://page.example:8181/collect").unwrap();
+    for (site, expected) in [
+        (Some(source.origin()), Some("http://page.example:8181")),
+        (None, None),
+        (Some(ImmutableOrigin::new_opaque()), None),
+    ] {
+        let (proxy, receiver) = create_generic_embedder_proxy_and_receiver();
+        let responder = std::thread::spawn(move || {
+            let net::embedder::NetToEmbedderMsg::WebResourceRequested(_, request, sender) = receiver.recv().unwrap() else {
+                panic!("Expected intercepted reporting request");
+            };
+            sender.send(embedder_traits::WebResourceResponseMsg::Start(
+                embedder_traits::WebResourceResponse::new(request.url.clone().into_url()),
+            )).unwrap();
+            sender.send(embedder_traits::WebResourceResponseMsg::FinishLoad).unwrap();
+            request
+        });
+        let builder = net_traits::reporting::reporting_request(
+            UrlWithBlobClaim::from_url_without_having_claimed_blob(source.clone()),
+            source.origin(),
+            RequestClient {
+                preloaded_resources: Default::default(),
+                policy_container: Default::default(),
+                origin: Origin::Origin(source.origin()),
+                cookie_site: site,
+                cookie_client_is_null: false,
+                is_nested_browsing_context: true,
+                insecure_requests_policy: InsecureRequestsPolicy::DoNotUpgrade,
+                has_trustworthy_ancestor_origin: false,
+            },
+            None,
+            None,
+        );
+        assert!(builder.client.is_none());
+        let response = fetch_with_context(builder.build(), &mut new_fetch_context(None, Some(proxy)));
+        assert!(!response.is_network_error());
+        let intercepted = responder.join().unwrap();
+        assert_eq!(intercepted.destination, Destination::Report);
+        assert_eq!(intercepted.top_level_origin.as_deref(), expected);
+        assert_eq!(intercepted.initiator_origin.as_deref(), Some("http://page.example:8181"));
+        assert!(!intercepted.is_for_main_frame);
+        assert!(intercepted.referrer_url.is_none());
+    }
+}

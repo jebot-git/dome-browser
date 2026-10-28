@@ -190,6 +190,7 @@ impl ReportingObserver {
         Report {
             type_: type_.to_owned(),
             url,
+            user_agent: servo_config::pref!(user_agent),
             body,
             destination,
             timestamp: SystemTime::now()

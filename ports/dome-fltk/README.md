@@ -2231,3 +2231,28 @@ non-reporting query/listener controls. They use separate profiles and no
 controller gesture. Two unchanged original gamepad WPT pages cover advertised
 policy support and blocked-frame listener registration through the local WPT
 adapter. This is scoped regression coverage, not complete Gamepad conformance.
+
+## Reporting delivery outcomes and request metadata
+
+Reporting delivery handles successful responses, ordinary failures and HTTP 410
+endpoint retirement on the owning document or worker. Endpoint identities keep
+late results separate from another name, global or response configuration.
+Observer history remains independent of delivery. The serialized User-Agent is
+captured when each report is created.
+
+Transport uses a null Fetch client, no window, no referrer, no service-worker
+interception, CORS mode and same-origin credentials. Ancestor-aware cookie and
+content-filtering context is carried separately, so this metadata correction
+preserves third-party cookie controls and native adblock site exceptions.
+Delivery remains best effort: attempted reports are consumed even on failure;
+this change does not add a retry loop.
+
+The contract follows the [Reporting draft delivery algorithm](https://w3c.github.io/reporting/#try-delivery).
+`tests/reporting-delivery.py` covers response outcomes, creation-time metadata,
+endpoint name/global isolation, worker termination, document removal and CORS.
+`tests/reporting-filtering.py` checks native network/cosmetic filtering and a
+trusted top-level exception. Run the latter with `--allowlisted` for that case.
+Scoped validation totals are recorded in
+`docs/validation-reporting-delivery-2026-10-29.json`. Geolocation implementation
+and API tests are excluded. These checks do not establish whole-API or physical
+headset conformance.

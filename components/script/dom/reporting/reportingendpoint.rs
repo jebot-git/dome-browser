@@ -3,35 +3,39 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use headers::{ContentType, HeaderMapExt};
 use http::HeaderMap;
 use hyper_serde::Serde;
 use malloc_size_of_derive::MallocSizeOf;
-use net_traits::request::{
-    CredentialsMode, Destination, RequestBody, RequestId, RequestMode,
-    create_request_body_with_content,
-};
-use net_traits::{FetchMetadata, NetworkError, ResourceFetchTiming};
+use net_traits::reporting::DeliveryOutcome;
+use net_traits::request::{RequestBody, RequestId, create_request_body_with_content};
+use net_traits::{FetchMetadata, FilteredMetadata, NetworkError, ResourceFetchTiming};
 use script_bindings::str::DOMString;
 use serde::Serialize;
 use servo_url::{ImmutableOrigin, ServoUrl};
 
+use crate::dom::bindings::inheritance::Castable;
 use crate::dom::csp::Violation;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::performance::performanceresourcetiming::InitiatorType;
 use crate::dom::reporting::report::{Report, ReportBody};
-use crate::fetch::fetch::{RequestWithGlobalScope, create_a_potential_cors_request_with_claim};
+use crate::dom::window::Window;
+use crate::dom::workerglobalscope::WorkerGlobalScope;
 use crate::fetch::network_listener::{
     FetchResponseListener, ResourceTimingListener, submit_timing,
 };
 use crate::url::ensure_blob_referenced_by_url_is_kept_alive;
 
+static NEXT_ENDPOINT_ID: AtomicU64 = AtomicU64::new(0);
+
 /// <https://w3c.github.io/reporting/#endpoint>
 #[derive(Clone, Eq, Hash, MallocSizeOf, PartialEq)]
 pub(crate) struct ReportingEndpoint {
+    /// Stable within this response configuration, including delivery snapshots.
+    id: u64,
     /// <https://w3c.github.io/reporting/#dom-endpoint-name>
     name: DOMString,
     /// <https://w3c.github.io/reporting/#dom-endpoint-url>
@@ -41,6 +45,19 @@ pub(crate) struct ReportingEndpoint {
 }
 
 impl ReportingEndpoint {
+    pub(crate) fn record_outcome(endpoints: &mut Vec<Self>, id: u64, outcome: DeliveryOutcome) {
+        let Some(index) = endpoints.iter().position(|endpoint| endpoint.id == id) else {
+            // A retired or replaced response configuration is not the current endpoint.
+            return;
+        };
+        match outcome.updated_failures(endpoints[index].failures) {
+            Some(failures) => endpoints[index].failures = failures,
+            None => {
+                endpoints.remove(index);
+            },
+        }
+    }
+
     /// <https://w3c.github.io/reporting/#process-header>
     pub(crate) fn parse_reporting_endpoints_header(
         response_url: &ServoUrl,
@@ -51,6 +68,7 @@ impl ReportingEndpoint {
             net_traits::reporting::parse_reporting_endpoints(response_url, headers)?
                 .into_iter()
                 .map(|endpoint| ReportingEndpoint {
+                    id: NEXT_ENDPOINT_ID.fetch_add(1, Ordering::Relaxed),
                     name: endpoint.name.into(),
                     url: endpoint.url,
                     failures: 0,
@@ -66,7 +84,7 @@ pub(crate) trait SendReportsToEndpoints {
     /// <https://w3c.github.io/reporting/#try-delivery>
     fn attempt_to_deliver_reports_to_endpoints(
         &self,
-        endpoint: &ServoUrl,
+        endpoint: &ReportingEndpoint,
         origin: ImmutableOrigin,
         reports: &[&Report],
     );
@@ -122,70 +140,44 @@ impl SendReportsToEndpoints for GlobalScope {
                 // Step 3.3.1. Let result be the result of executing
                 // § 3.5.2 Attempt to deliver reports to endpoint on endpoint, origin, and per-origin reports.
                 self.attempt_to_deliver_reports_to_endpoints(
-                    &endpoint.url,
+                    endpoint,
                     origin.clone(),
                     origin_report_list,
                 );
-                // Step 3.3.2. If result is "Failure":
-                // TODO(37238)
-                // Step 3.3.2.1. Increment endpoint’s failures.
-                // TODO(37238)
-                // Step 3.3.3. If result is "Remove Endpoint":
-                // TODO(37238)
-                // Step 3.3.3.1 Remove endpoint from context’s endpoints list.
-                // TODO(37238)
-                // Step 3.3.4. Remove each report from reports.
-                // TODO(37238)
+                // Response processing updates this endpoint's outcome asynchronously.
+                // Attempted reports are consumed; Reporting does not require retries.
             }
         }
     }
 
     fn attempt_to_deliver_reports_to_endpoints(
         &self,
-        endpoint: &ServoUrl,
+        endpoint: &ReportingEndpoint,
         origin: ImmutableOrigin,
         reports: &[&Report],
     ) {
         // Step 1. Let body be the result of executing serialize a list of reports to JSON on reports.
         let request_body = Self::serialize_list_of_reports(reports);
         // Step 2. Let request be a new request with the following properties [FETCH]:
-        let mut headers = HeaderMap::with_capacity(1);
-        headers.typed_insert(ContentType::from(
-            "application/reports+json".parse::<mime::Mime>().unwrap(),
-        ));
-        let url = ensure_blob_referenced_by_url_is_kept_alive(self, endpoint.clone());
-        let request = create_a_potential_cors_request_with_claim(
-            None,
+        let url = ensure_blob_referenced_by_url_is_kept_alive(self, endpoint.url.clone());
+        let request = net_traits::reporting::reporting_request(
             url,
-            Destination::Report,
-            None,
-            None,
-            self.get_referrer(),
-        )
-        .with_global_scope(self)
-        .method(http::Method::POST)
-        .body(request_body)
-        .origin(origin)
-        .mode(RequestMode::CorsMode)
-        .credentials_mode(CredentialsMode::CredentialsSameOrigin)
-        .unsafe_request(true)
-        .headers(headers);
+            origin,
+            self.request_client(None),
+            Some(self.pipeline_id()),
+            request_body,
+        );
         // Step 3. Queue a task to fetch request.
         self.fetch(
             request,
-            CSPReportEndpointFetchListener {
-                endpoint: endpoint.clone(),
+            ReportingEndpointFetchListener {
+                endpoint: endpoint.url.clone(),
+                endpoint_id: endpoint.id,
+                outcome_recorded: false,
             },
             self.task_manager().networking_task_source().into(),
         );
-        // Step 4. Wait for a response (response).
-        // TODO(37238)
-        // Step 5. If response’s status is an OK status (200-299), return "Success".
-        // TODO(37238)
-        // Step 6. If response’s status is 410 Gone [RFC9110], return "Remove Endpoint".
-        // TODO(37238)
-        // Step 7. Return "Failure".
-        // TODO(37238)
+        // The listener applies the response result on the owning global's task source.
     }
 
     fn serialize_list_of_reports(reports: &[&Report]) -> Option<RequestBody> {
@@ -203,7 +195,7 @@ impl SendReportsToEndpoints for GlobalScope {
                 age: now.saturating_sub(r.timestamp),
                 type_: r.type_.to_string(),
                 url: r.url.to_string(),
-                user_agent: String::new(),
+                user_agent: r.user_agent.clone(),
                 body: r.body.clone(),
             })
             // Attempts are counted when each pending report is selected for delivery.
@@ -227,22 +219,40 @@ struct SerializedReport {
     body: ReportBody,
 }
 
-struct CSPReportEndpointFetchListener {
+struct ReportingEndpointFetchListener {
     /// Endpoint URL of this request.
     endpoint: ServoUrl,
+    endpoint_id: u64,
+    outcome_recorded: bool,
 }
 
-impl FetchResponseListener for CSPReportEndpointFetchListener {
+impl FetchResponseListener for ReportingEndpointFetchListener {
     fn process_request_body(&mut self, _: &GlobalScope, _: RequestId) {}
 
     fn process_response(
         &mut self,
         _: &mut js::context::JSContext,
-        _: &GlobalScope,
+        global: &GlobalScope,
         _: RequestId,
-        fetch_metadata: Result<FetchMetadata, NetworkError>,
+        metadata: Result<FetchMetadata, NetworkError>,
     ) {
-        _ = fetch_metadata;
+        if self.outcome_recorded {
+            return;
+        }
+        let status = match metadata {
+            Ok(FetchMetadata::Unfiltered(metadata)) => Some(metadata.status.raw_code()),
+            Ok(FetchMetadata::Filtered {
+                filtered: FilteredMetadata::Basic(metadata) | FilteredMetadata::Cors(metadata),
+                ..
+            }) => Some(metadata.status.raw_code()),
+            _ => None,
+        };
+        record_outcome(
+            global,
+            self.endpoint_id,
+            DeliveryOutcome::from_status(status),
+        );
+        self.outcome_recorded = true;
     }
 
     fn process_response_chunk(
@@ -263,6 +273,9 @@ impl FetchResponseListener for CSPReportEndpointFetchListener {
         response: Result<(), NetworkError>,
         timing: ResourceFetchTiming,
     ) {
+        if !self.outcome_recorded {
+            record_outcome(global, self.endpoint_id, DeliveryOutcome::Failure);
+        }
         submit_timing(cx, global, &self, &response, &timing);
     }
 
@@ -276,8 +289,16 @@ impl FetchResponseListener for CSPReportEndpointFetchListener {
     }
 }
 
-impl ResourceTimingListener for CSPReportEndpointFetchListener {
+impl ResourceTimingListener for ReportingEndpointFetchListener {
     fn resource_timing_information(&self) -> (InitiatorType, ServoUrl) {
         (InitiatorType::Other, self.endpoint.clone())
+    }
+}
+
+fn record_outcome(global: &GlobalScope, endpoint: u64, outcome: DeliveryOutcome) {
+    if let Some(window) = global.downcast::<Window>() {
+        window.record_reporting_endpoint_outcome(endpoint, outcome);
+    } else if let Some(worker) = global.downcast::<WorkerGlobalScope>() {
+        worker.record_reporting_endpoint_outcome(endpoint, outcome);
     }
 }

@@ -38,7 +38,7 @@ impl RequestInterceptor {
         let top_level_origin = if is_for_main_frame {
             Some(request.current_url().origin())
         } else {
-            request.client.as_ref().and_then(|client| client.cookie_site.clone())
+            request.cookie_client().and_then(|client| client.cookie_site.clone())
         }.filter(|origin| origin.is_tuple()).map(|origin| origin.ascii_serialization().into_owned());
         let web_resource_request = WebResourceRequest {
             method: request.method.clone(),

@@ -31,6 +31,7 @@ use crate::dom::csppolicyviolationreport::serialize_disposition;
 pub(crate) struct Report {
     pub(crate) type_: String,
     pub(crate) url: String,
+    pub(crate) user_agent: String,
     pub(crate) body: ReportBody,
     pub(crate) destination: String,
     pub(crate) timestamp: u64,

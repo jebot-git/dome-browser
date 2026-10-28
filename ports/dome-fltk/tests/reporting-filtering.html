@@ -1,0 +1,34 @@
+<!doctype html><meta charset="utf-8"><title>Reporting filtering fixture</title>
+<style>.ad,.legitimate{width:100px;height:30px}</style>
+<div class="ad">Advertisement fixture</div><div class="legitimate">Document fixture</div>
+<script>
+const expectedBlocked = ALLOWLISTED ? 1 : 0;
+const checks = [], reports = [];
+const check = (passed, name) => { checks.push({name, passed: !!passed}); if (!passed) throw new Error(name); };
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function until(fn) {
+  const end = performance.now() + 6000;
+  while (!await fn()) { if (performance.now() > end) throw new Error('Filtering fixture timed out'); await delay(10); }
+}
+async function main() {
+  const observer = new ReportingObserver(batch => reports.push(...batch)); observer.observe();
+  new Image().src = '/image-target';
+  await until(() => reports.length === 2);
+  check(reports.every(report => report.type === 'csp-violation'), 'Both policy dispositions reach the observer');
+  check(reports.map(report => report.body.disposition).sort().join(',') === 'enforce,report',
+        'Observer preserves enforced and report-only dispositions');
+  observer.disconnect();
+  const history = []; const buffered = new ReportingObserver(batch => history.push(...batch), {buffered: true});
+  buffered.observe(); await until(() => history.length === 2); buffered.disconnect();
+  check(JSON.stringify(history) === JSON.stringify(reports), 'Network filtering preserves independent observer history');
+  await until(async () => (await (await fetch('/__counts')).json()).allowed === 1);
+  await delay(300);
+  const wire = await (await fetch('/__counts')).json();
+  check(wire.allowed === 1 && wire.blocked === expectedBlocked, 'Reporting obeys blocking rules and trusted top-level exceptions');
+  await until(() => (getComputedStyle(document.querySelector('.ad')).display === 'none') === !ALLOWLISTED);
+  check(getComputedStyle(document.querySelector('.legitimate')).display !== 'none', 'Cosmetic filtering preserves legitimate content');
+  return {checks, wire};
+}
+main().then(result => fetch('/report', {method:'POST', body:JSON.stringify(result)})).catch(error =>
+  fetch('/report', {method:'POST', body:JSON.stringify({checks,error:String(error)})}));
+</script>

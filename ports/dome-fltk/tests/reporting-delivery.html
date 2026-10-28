@@ -1,0 +1,120 @@
+<!doctype html><meta charset="utf-8"><title>Local reporting delivery lifecycle</title>
+<p>Testing report delivery outcomes and observer history.</p>
+<script id="configuration" type="application/json">CONFIGURATION</script>
+<script>
+const cfg = JSON.parse(document.getElementById('configuration').textContent);
+const checks = [], reports = [], agents = [];
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+function check(passed, name) {
+  checks.push({name, passed: !!passed});
+  if (!passed) throw new Error(name);
+}
+async function until(fn) {
+  const end = performance.now() + 7000;
+  while (!await fn()) {
+    if (performance.now() > end) throw new Error('Delivery fixture timed out');
+    await delay(10);
+  }
+}
+async function counts() { return (await fetch('/__counts?case=' + cfg.case)).json(); }
+const observer = new ReportingObserver(batch => reports.push(...batch),
+                                      {types: ['permissions-policy-violation', 'csp-violation']});
+observer.observe();
+function poll() {
+  agents.push(navigator.userAgent);
+  try { navigator.getGamepads(); throw new Error('Expected restricted gamepad call'); }
+  catch (error) { check(error.name === 'SecurityError', 'Restricted API retains SecurityError'); }
+}
+async function image() {
+  const done = new Promise(resolve => addEventListener('securitypolicyviolation', resolve, {once: true}));
+  new Image().src = '/blocked';
+  await done;
+}
+async function frame(slot) {
+  const child = document.createElement('iframe');
+  const result = new Promise((resolve, reject) => {
+    const listener = event => {
+      if (event.source !== child.contentWindow || event.data.slot !== slot) return;
+      removeEventListener('message', listener);
+      event.data.error ? reject(new Error(event.data.error)) : resolve(event.data);
+    };
+    addEventListener('message', listener);
+  });
+  child.src = '/child?case=' + cfg.case + '&slot=' + slot;
+  document.body.append(child);
+  return {child, result};
+}
+async function main() {
+  check(typeof ReportingObserver === 'function', 'ReportingObserver is exposed');
+  document.cookie = 'delivery_fixture=one; SameSite=Strict; Path=/';
+  if (cfg.case.startsWith('worker-')) {
+    const worker = new Worker('/worker.js?case=' + cfg.case);
+    if (cfg.case === 'worker-terminate') {
+      worker.postMessage({case: cfg.case, terminate: true});
+      await until(async () => (await counts()).total === 1);
+      worker.terminate();
+      await until(async () => (await counts()).completed === 1);
+      await delay(150);
+      check(reports.length === 0, 'Terminated worker reports do not enter document history');
+    } else {
+      const result = new Promise((resolve, reject) => {
+        worker.onmessage = event => event.data.error ? reject(new Error(event.data.error)) : resolve(event.data);
+        worker.onerror = event => reject(new Error(event.message));
+      });
+      worker.postMessage({case: cfg.case});
+      const row = await result;
+      checks.push(...row.checks); agents.push(...row.agents);
+      check(reports.length === 0, 'Worker history remains separate from its document');
+      worker.terminate();
+    }
+    await delay(300);
+    return {checks, reports, agents};
+  }
+  if (!cfg.slot && ['global-isolation', 'document-removal'].includes(cfg.case)) {
+    const first = await frame('a');
+    if (cfg.case === 'document-removal') {
+      await until(async () => (await counts()).total === 1);
+      first.child.remove();
+    } else {
+      const row = await first.result; checks.push(...row.checks);
+      check(row.reports.length === 2, 'Retired endpoint retains the first document observer history');
+      first.child.remove();
+    }
+    const second = await frame('b'); const row = await second.result;
+    checks.push(...row.checks);
+    check(row.reports.length === 2, 'Another document keeps its own reports and endpoint');
+    second.child.remove();
+    await until(async () => (await counts()).completed >= 3);
+    await delay(150);
+    check(reports.length === 0, 'Child reports do not enter parent observer history');
+    return {checks, reports, agents};
+  }
+  poll();
+  if (cfg.case === 'ua-snapshot') navigator.servo.setStringPreference('user_agent', 'DomeDeliveryFixture/2');
+  if (cfg.case !== 'ua-snapshot') {
+    await until(async () => (await counts()).total >= (cfg.slot === 'b' ? 2 : 1));
+    await delay(150);
+  }
+  if (cfg.case === 'name-isolation') await image();
+  // The removed document intentionally stays alive only until its first request starts.
+  if (!(cfg.case === 'document-removal' && cfg.slot === 'a')) poll();
+  const expected = cfg.case === 'name-isolation' ? 3 : 2;
+  await until(() => reports.length === expected);
+  await delay(300);
+  check(reports.length === expected, 'Endpoint outcomes do not erase or duplicate observer notifications');
+  check(reports.every(report => Object.keys(report).sort().join(',') === 'body,type,url'),
+        'Delivery bookkeeping stays out of observer snapshots');
+  observer.disconnect();
+  const buffered = [];
+  const later = new ReportingObserver(batch => buffered.push(...batch), {buffered: true});
+  later.observe(); await until(() => buffered.length === expected); later.disconnect();
+  check(JSON.stringify(buffered) === JSON.stringify(reports), 'Endpoint retirement preserves observer history');
+  return {checks, reports, agents};
+}
+main().then(result => cfg.slot ? parent.postMessage({...result, slot: cfg.slot}, '*') :
+  fetch('/__result?case=' + cfg.case, {method: 'POST', body: JSON.stringify(result)})).catch(error => {
+  const result = {checks, reports, agents, error: String(error), slot: cfg.slot};
+  cfg.slot ? parent.postMessage(result, '*') :
+    fetch('/__result?case=' + cfg.case, {method: 'POST', body: JSON.stringify(result)});
+});
+</script>
