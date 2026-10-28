@@ -127,11 +127,13 @@ impl RenderingContext for ConnectionlessRenderingContext {
     fn create_texture(
         &self,
         surface: Surface,
-    ) -> Option<(SurfaceTexture, u32, UntypedSize2D<i32>)> {
+    ) -> Result<(SurfaceTexture, u32, UntypedSize2D<i32>), (surfman::Error, Surface)> {
         self.0.create_texture(surface)
     }
 
-    fn destroy_texture(&self, surface_texture: SurfaceTexture) -> Option<Surface> {
+    fn native_context_is_lost(&self) -> bool { self.0.native_context_is_lost() }
+
+    fn destroy_texture(&self, surface_texture: SurfaceTexture) -> Result<Surface, (surfman::Error, SurfaceTexture)> {
         self.0.destroy_texture(surface_texture)
     }
 

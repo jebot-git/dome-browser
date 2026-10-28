@@ -109,3 +109,6 @@ impl WebRenderEpochToU16 for WebRenderEpoch {
         (self.0 % u16::MAX as u32) as u16
     }
 }
+
+mod cleanup_wakeup;
+pub mod deferred_cleanup;

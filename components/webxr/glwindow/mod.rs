@@ -11,7 +11,7 @@ use euclid::{
 use glow::{self as gl, Context as Gl, HasContext};
 use profile_traits::generic_callback::GenericCallback as ProfileGenericCallback;
 use raw_window_handle::DisplayHandle;
-use surfman::chains::{PreserveBuffer, SwapChain, SwapChainAPI, SwapChains, SwapChainsAPI};
+use surfman::chains::{PreserveBuffer, SurfaceConsumer, SwapChain, SwapChains, SwapChainsAPI};
 use surfman::{
     Adapter, Connection, Context as SurfmanContext, ContextAttributeFlags, ContextAttributes,
     Device as SurfmanDevice, GLApi, GLVersion, NativeWidget, SurfaceAccess, SurfaceType,
@@ -20,9 +20,9 @@ use webxr_api::util::ClipPlanes;
 use webxr_api::{
     CUBE_BACK, CUBE_BOTTOM, CUBE_LEFT, CUBE_RIGHT, CUBE_TOP, ContextId, DeviceAPI, DiscoveryAPI,
     Display, Error, Event, EventBuffer, Floor, Frame, InputSource, LEFT_EYE, LayerGrandManager,
-    LayerId, LayerInfo, LayerInit, LayerManager, Native, Quitter, RIGHT_EYE, Session, SessionBuilder,
-    SessionInit, SessionMode, SomeEye, VIEWER, View, Viewer, ViewerPose, Viewport, Viewports,
-    Views,
+    LayerId, LayerInfo, LayerInit, LayerManager, Native, Quitter, RIGHT_EYE, Session,
+    SessionBuilder, SessionInit, SessionMode, SomeEye, VIEWER, View, Viewer, ViewerPose, Viewport,
+    Viewports, Views,
 };
 
 use crate::{SurfmanGL, SurfmanLayerManager};
@@ -46,7 +46,7 @@ pub trait GlWindow {
         &self,
         device: &mut SurfmanDevice,
         context: &mut SurfmanContext,
-    ) -> GlWindowRenderTarget;
+    ) -> Result<GlWindowRenderTarget, String>;
     fn get_rotation(&self) -> Rotation3D<f32, UnknownUnit, UnknownUnit>;
     fn get_translation(&self) -> Vector3D<f32, UnknownUnit>;
 
@@ -81,9 +81,9 @@ impl GlWindowDiscovery {
     pub fn new(window: Rc<dyn GlWindow>) -> GlWindowDiscovery {
         let connection = Connection::from_display_handle(window.display_handle()).unwrap();
         let adapter = connection.create_adapter().unwrap();
-        let flags = ContextAttributeFlags::ALPHA |
-            ContextAttributeFlags::DEPTH |
-            ContextAttributeFlags::STENCIL;
+        let flags = ContextAttributeFlags::ALPHA
+            | ContextAttributeFlags::DEPTH
+            | ContextAttributeFlags::STENCIL;
         let version = match connection.gl_api() {
             GLApi::GLES => GLVersion { major: 3, minor: 0 },
             GLApi::GL => GLVersion { major: 3, minor: 2 },
@@ -111,7 +111,6 @@ impl DiscoveryAPI<SurfmanGL> for GlWindowDiscovery {
             self.adapter.clone(),
         )
     }
-
 
     fn request_session(
         &mut self,
@@ -155,6 +154,9 @@ pub struct GlWindowDevice {
     target_swap_chain: Option<SwapChain<SurfmanDevice>>,
     swap_chains: SwapChains<LayerId, SurfmanDevice>,
     read_fbo: Option<gl::NativeFramebuffer>,
+    pending_consumer: Option<SurfaceConsumer<SurfmanDevice>>,
+    pending_present: Option<surfman::Surface>,
+    cleanup_phase: crate::native_cleanup::CleanupPhase,
     events: EventBuffer,
     clip_planes: ClipPlanes,
     granted_features: Vec<String>,
@@ -191,7 +193,8 @@ impl DeviceAPI for GlWindowDevice {
 
     fn create_layer(&mut self, context_id: ContextId, init: LayerInit) -> Result<LayerInfo, Error> {
         let viewports = self.viewports();
-        self.layer_manager()?.create_layer(context_id, init, viewports)
+        self.layer_manager()?
+            .create_layer(context_id, init, viewports)
     }
 
     fn destroy_layer(&mut self, context_id: ContextId, layer_id: LayerId) {
@@ -224,98 +227,9 @@ impl DeviceAPI for GlWindowDevice {
     }
 
     fn end_animation_frame(&mut self, layers: &[(ContextId, LayerId)]) {
-        log::debug!("End animation frame for layers {:?}", layers);
-        self.device.make_context_current(&self.context).unwrap();
-        debug_assert_eq!(unsafe { self.gl.get_error() }, gl::NO_ERROR);
-
-        let _ = self.layer_manager().unwrap().end_frame(layers);
-
-        let window_size = self.window_size();
-        let viewport_size = self.viewport_size();
-
-        let framebuffer_object = self
-            .device
-            .context_surface_info(&self.context)
-            .unwrap()
-            .and_then(|info| info.framebuffer_object);
-        unsafe {
-            self.gl
-                .bind_framebuffer(gl::FRAMEBUFFER, framebuffer_object);
-            debug_assert_eq!(
-                (
-                    self.gl.get_error(),
-                    self.gl.check_framebuffer_status(gl::FRAMEBUFFER)
-                ),
-                (gl::NO_ERROR, gl::FRAMEBUFFER_COMPLETE)
-            );
-
-            self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
-            self.gl.clear(gl::COLOR_BUFFER_BIT);
-            debug_assert_eq!(self.gl.get_error(), gl::NO_ERROR);
+        if let Err(error) = self.render_frame(layers) {
+            log::warn!("Deferring XR window frame: {error}");
         }
-
-        for &(_, layer_id) in layers {
-            let swap_chain = match self.swap_chains.get(layer_id) {
-                Some(swap_chain) => swap_chain,
-                None => continue,
-            };
-            let surface = match swap_chain.take_surface() {
-                Some(surface) => surface,
-                None => return,
-            };
-            let texture_size = self.device.surface_info(&surface).size;
-            let surface_texture = self
-                .device
-                .create_surface_texture(&mut self.context, surface)
-                .unwrap();
-            let texture_id = self.device.surface_texture_object(&surface_texture);
-            let texture_target = self.device.surface_gl_texture_target();
-            log::debug!("Presenting texture {:?}", texture_id);
-
-            if let Some(ref shader) = self.shader {
-                shader.draw_texture(
-                    texture_id,
-                    texture_target,
-                    texture_size,
-                    viewport_size,
-                    window_size,
-                );
-            } else {
-                self.blit_texture(texture_id, texture_target, texture_size, window_size);
-            }
-            debug_assert_eq!(unsafe { self.gl.get_error() }, gl::NO_ERROR);
-
-            let surface = self
-                .device
-                .destroy_surface_texture(&mut self.context, surface_texture)
-                .unwrap();
-            swap_chain.recycle_surface(surface);
-        }
-
-        match self.target_swap_chain.as_ref() {
-            Some(target_swap_chain) => {
-                // Rendering to a surfman swap chain
-                target_swap_chain
-                    .swap_buffers(&self.device, &mut self.context, PreserveBuffer::No)
-                    .unwrap();
-            },
-            None => {
-                // Rendering to a native widget
-                let mut surface = self
-                    .device
-                    .unbind_surface_from_context(&mut self.context)
-                    .unwrap()
-                    .unwrap();
-                self.device
-                    .present_surface(&self.context, &mut surface)
-                    .unwrap();
-                self.device
-                    .bind_surface_to_context(&mut self.context, surface)
-                    .unwrap();
-            },
-        }
-
-        debug_assert_eq!(unsafe { self.gl.get_error() }, gl::NO_ERROR);
     }
 
     fn initial_inputs(&self) -> Vec<InputSource> {
@@ -340,23 +254,198 @@ impl DeviceAPI for GlWindowDevice {
         self.clip_planes.update(near, far)
     }
 
+    fn poll_cleanup(&mut self) -> bool {
+        let mut phase = self.cleanup_phase;
+        let complete = crate::native_cleanup::advance(&mut phase, self);
+        self.cleanup_phase = phase;
+        complete
+    }
     fn granted_features(&self) -> &[String] {
         &self.granted_features
     }
 }
 
-impl Drop for GlWindowDevice {
-    fn drop(&mut self) {
-        if let Some(read_fbo) = self.read_fbo {
-            unsafe {
-                self.gl.delete_framebuffer(read_fbo);
+impl crate::native_cleanup::CleanupOwner for GlWindowDevice {
+    type Error = String;
+    fn release_resources(&mut self) -> Result<(), String> {
+        self.layer_manager.take();
+        self.return_consumer()?;
+        if let Some(surface) = self.pending_present.as_mut() {
+            self.device
+                .destroy_surface(&mut self.context, surface)
+                .map_err(|e| format!("{e:?}"))?;
+            self.pending_present = None;
+        }
+        if let Some(chain) = self.target_swap_chain.as_ref() {
+            chain
+                .destroy(&self.device, &mut self.context)
+                .map_err(|e| format!("{e:?}"))?;
+            self.target_swap_chain = None;
+        }
+        let lost = self.device.context_is_lost(&self.context);
+        if !lost {
+            self.device
+                .make_context_current(&self.context)
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        if let Some(shader) = self.shader.as_mut() {
+            shader.dispose(lost);
+        }
+        self.shader = None;
+        if let Some(read_fbo) = self.read_fbo.take() {
+            if !lost {
+                unsafe {
+                    self.gl.delete_framebuffer(read_fbo);
+                }
             }
         }
-        let _ = self.device.destroy_context(&mut self.context);
+        Ok(())
+    }
+    fn destroy_native(&mut self) -> Result<(), String> {
+        self.device
+            .destroy_context(&mut self.context)
+            .map_err(|e| format!("{e:?}"))
+    }
+}
+impl Drop for GlWindowDevice {
+    fn drop(&mut self) {
+        self.poll_cleanup();
+    }
+}
+
+// Failed binds must return ownership to the presentation slot, including a
+// surface already presented but not yet rebound to its rendering context.
+fn restore_present_surface(
+    device: &SurfmanDevice,
+    context: &mut SurfmanContext,
+    pending: &mut Option<surfman::Surface>,
+) -> Result<(), String> {
+    let Some(surface) = pending.take() else {
+        return Ok(());
+    };
+    match device.bind_surface_to_context(context, surface) {
+        Ok(()) => Ok(()),
+        Err((error, surface)) => {
+            *pending = Some(surface);
+            Err(format!("{error:?}"))
+        },
     }
 }
 
 impl GlWindowDevice {
+    fn return_consumer(&mut self) -> Result<(), String> {
+        if let Some(consumer) = self.pending_consumer.as_mut() {
+            consumer
+                .release(&self.device, &mut self.context)
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        self.pending_consumer = None;
+        Ok(())
+    }
+    fn restore_present_surface(&mut self) -> Result<(), String> {
+        restore_present_surface(&self.device, &mut self.context, &mut self.pending_present)
+    }
+    fn render_frame(&mut self, layers: &[(ContextId, LayerId)]) -> Result<(), String> {
+        log::debug!("End animation frame for layers {:?}", layers);
+        self.device
+            .make_context_current(&self.context)
+            .map_err(|e| format!("{e:?}"))?;
+        self.return_consumer()?;
+        self.restore_present_surface()?;
+        debug_assert_eq!(unsafe { self.gl.get_error() }, gl::NO_ERROR);
+
+        self.layer_manager()
+            .map_err(|e| format!("{e:?}"))?
+            .end_frame(layers)
+            .map_err(|e| format!("{e:?}"))?;
+
+        let window_size = self.window_size();
+        let viewport_size = self.viewport_size();
+
+        let framebuffer_object = self
+            .device
+            .context_surface_info(&self.context)
+            .map_err(|e| format!("{e:?}"))?
+            .and_then(|info| info.framebuffer_object);
+        unsafe {
+            self.gl
+                .bind_framebuffer(gl::FRAMEBUFFER, framebuffer_object);
+            debug_assert_eq!(
+                (
+                    self.gl.get_error(),
+                    self.gl.check_framebuffer_status(gl::FRAMEBUFFER)
+                ),
+                (gl::NO_ERROR, gl::FRAMEBUFFER_COMPLETE)
+            );
+
+            self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            self.gl.clear(gl::COLOR_BUFFER_BIT);
+            debug_assert_eq!(self.gl.get_error(), gl::NO_ERROR);
+        }
+
+        for &(_, layer_id) in layers {
+            let swap_chain = match self.swap_chains.get(layer_id) {
+                Some(swap_chain) => swap_chain,
+                None => continue,
+            };
+            let Some(consumer) =
+                SurfaceConsumer::acquire(swap_chain, &self.device, &mut self.context)
+                    .map_err(|e| format!("{e:?}"))?
+            else {
+                continue;
+            };
+            let texture_size = consumer.size();
+            let texture_id = self
+                .device
+                .surface_texture_object(consumer.texture().unwrap());
+            self.pending_consumer = Some(consumer);
+            let texture_target = self.device.surface_gl_texture_target();
+            log::debug!("Presenting texture {:?}", texture_id);
+
+            if let Some(ref shader) = self.shader {
+                shader.draw_texture(
+                    texture_id,
+                    texture_target,
+                    texture_size,
+                    viewport_size,
+                    window_size,
+                );
+            } else {
+                self.blit_texture(texture_id, texture_target, texture_size, window_size);
+            }
+            debug_assert_eq!(unsafe { self.gl.get_error() }, gl::NO_ERROR);
+
+            self.return_consumer()?;
+        }
+
+        match self.target_swap_chain.as_ref() {
+            Some(target_swap_chain) => {
+                // Rendering to a surfman swap chain
+                target_swap_chain
+                    .swap_buffers(&self.device, &mut self.context, PreserveBuffer::No)
+                    .map_err(|e| format!("{e:?}"))?;
+            },
+            None => {
+                // Rendering to a native widget
+                self.pending_present = self
+                    .device
+                    .unbind_surface_from_context(&mut self.context)
+                    .map_err(|e| format!("{e:?}"))?;
+                let surface = self
+                    .pending_present
+                    .as_mut()
+                    .ok_or("XR window has no surface")?;
+                self.device
+                    .present_surface(&self.context, surface)
+                    .map_err(|e| format!("{e:?}"))?;
+                self.restore_present_surface()?;
+            },
+        }
+
+        debug_assert_eq!(unsafe { self.gl.get_error() }, gl::NO_ERROR);
+        Ok(())
+    }
+
     fn new(
         connection: Connection,
         adapter: Adapter,
@@ -365,53 +454,60 @@ impl GlWindowDevice {
         granted_features: Vec<String>,
         grand_manager: LayerGrandManager<SurfmanGL>,
     ) -> Result<GlWindowDevice, Error> {
-        let mut device = connection.create_device(&adapter).unwrap();
+        let device = connection
+            .create_device(&adapter)
+            .map_err(|e| Error::BackendSpecific(format!("{e:?}")))?;
         let context_descriptor = device
             .create_context_descriptor(&context_attributes)
-            .unwrap();
-        let mut context = device.create_context(&context_descriptor, None).unwrap();
-        device.make_context_current(&context).unwrap();
-
-        let gl = Rc::new(unsafe {
-            match device.gl_api() {
-                GLApi::GL => Gl::from_loader_function(|symbol_name| {
-                    device.get_proc_address(&context, symbol_name)
-                }),
-                GLApi::GLES => Gl::from_loader_function(|symbol_name| {
-                    device.get_proc_address(&context, symbol_name)
-                }),
-            }
-        });
-
-        let target_swap_chain = match window.get_render_target(&mut device, &mut context) {
+            .map_err(|e| Error::BackendSpecific(format!("{e:?}")))?;
+        let context = device
+            .create_context(&context_descriptor, None)
+            .map_err(|e| Error::BackendSpecific(format!("{e:?}")))?;
+        let mut pending = crate::pending_context::PendingContext::new(device, context);
+        let (device, context) = pending.parts();
+        device
+            .make_context_current(context)
+            .map_err(|e| Error::BackendSpecific(format!("{e:?}")))?;
+        let gl = Rc::new(
+            unsafe { Gl::try_from_loader_function(|name| device.get_proc_address(context, name)) }
+                .map_err(|e| Error::BackendSpecific(format!("{e:?}")))?,
+        );
+        let (device, context) = pending.parts_mut();
+        match window
+            .get_render_target(device, context)
+            .map_err(Error::BackendSpecific)?
+        {
             GlWindowRenderTarget::NativeWidget(native_widget) => {
-                let surface_type = SurfaceType::Widget { native_widget };
                 let surface = device
-                    .create_surface(&context, SurfaceAccess::GPUOnly, surface_type)
-                    .unwrap();
-                device
-                    .bind_surface_to_context(&mut context, surface)
-                    .unwrap();
-                None
+                    .create_surface(
+                        context,
+                        SurfaceAccess::GPUOnly,
+                        SurfaceType::Widget { native_widget },
+                    )
+                    .map_err(|e| Error::BackendSpecific(format!("{e:?}")))?;
+                pending
+                    .bind(surface)
+                    .map_err(|e| Error::BackendSpecific(format!("{e:?}")))?;
             },
-            GlWindowRenderTarget::SwapChain(target_swap_chain) => {
-                debug_assert!(target_swap_chain.is_attached());
-                Some(target_swap_chain)
-            },
-        };
-
-        let read_fbo = unsafe { gl.create_framebuffer().ok() };
+            GlWindowRenderTarget::SwapChain(chain) => pending.adopt_chain(chain),
+        }
+        let (device, context) = pending.parts();
+        device
+            .make_context_current(context)
+            .map_err(|e| Error::BackendSpecific(format!("{e:?}")))?;
+        let read_fbo = Some(unsafe { gl.create_framebuffer() }.map_err(Error::BackendSpecific)?);
+        let framebuffer_object = device
+            .context_surface_info(context)
+            .map_err(|e| Error::BackendSpecific(format!("{e:?}")))?
+            .ok_or_else(|| {
+                Error::BackendSpecific("XR render target has no attached surface".into())
+            })?
+            .framebuffer_object;
         unsafe {
-            let framebuffer_object = device
-                .context_surface_info(&context)
-                .unwrap()
-                .and_then(|info| info.framebuffer_object);
             gl.bind_framebuffer(gl::FRAMEBUFFER, framebuffer_object);
-            debug_assert_eq!(
-                (gl.get_error(), gl.check_framebuffer_status(gl::FRAMEBUFFER)),
-                (gl::NO_ERROR, gl::FRAMEBUFFER_COMPLETE)
-            );
-
+            if gl.check_framebuffer_status(gl::FRAMEBUFFER) != gl::FRAMEBUFFER_COMPLETE {
+                return Err(Error::BackendSpecific("Incomplete XR render target".into()));
+            }
             gl.enable(gl::BLEND);
             gl.blend_func_separate(
                 gl::SRC_ALPHA,
@@ -420,12 +516,12 @@ impl GlWindowDevice {
                 gl::ONE_MINUS_SRC_ALPHA,
             );
         }
-
         let swap_chains = SwapChains::new();
         let layer_manager = None;
 
-        let shader = GlWindowShader::new(gl.clone(), window.get_mode());
-        debug_assert_eq!(unsafe { gl.get_error() }, gl::NO_ERROR);
+        let shader = GlWindowShader::new(gl.clone(), window.get_mode())?;
+        let target_swap_chain = pending.take_chain();
+        let (device, context) = pending.commit();
 
         Ok(GlWindowDevice {
             gl,
@@ -433,6 +529,9 @@ impl GlWindowDevice {
             device,
             context,
             read_fbo,
+            pending_consumer: None,
+            pending_present: None,
+            cleanup_phase: Default::default(),
             swap_chains,
             target_swap_chain,
             grand_manager,
@@ -615,6 +714,7 @@ impl GlWindowDevice {
 }
 
 struct GlWindowShader {
+    disposed: bool,
     gl: Rc<Gl>,
     buffer: Option<gl::NativeBuffer>,
     vao: Option<gl::NativeVertexArray>,
@@ -626,8 +726,7 @@ const VERTEX_ATTRIBUTE: u32 = 0;
 const VERTICES: &[[f32; 2]; 4] = &[[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]];
 
 const PASSTHROUGH_VERTEX_SHADER: &str = "
-  #version 330 core
-  layout(location=0) in vec2 coord;
+  in vec2 coord;
   out vec2 vTexCoord;
   void main(void) {
     gl_Position = vec4(coord, 0.0, 1.0);
@@ -636,8 +735,7 @@ const PASSTHROUGH_VERTEX_SHADER: &str = "
 ";
 
 const PASSTHROUGH_FRAGMENT_SHADER: &str = "
-  #version 330 core
-  layout(location=0) out vec4 color;
+  out vec4 color;
   uniform sampler2D image;
   in vec2 vTexCoord;
   void main() {
@@ -646,22 +744,20 @@ const PASSTHROUGH_FRAGMENT_SHADER: &str = "
 ";
 
 const ANAGLYPH_VERTEX_SHADER: &str = "
-  #version 330 core
-  layout(location=0) in vec2 coord;
+  in vec2 coord;
   uniform float wasted; // What fraction of the image is wasted?
   out vec2 left_coord;
   out vec2 right_coord;
   void main(void) {
     gl_Position = vec4(coord, 0.0, 1.0);
     vec2 coordn = coord * 0.5 + 0.5;
-    left_coord = vec2(mix(wasted/2, 0.5, coordn.x), coordn.y);
-    right_coord = vec2(mix(0.5, 1-wasted/2, coordn.x), coordn.y);
+    left_coord = vec2(mix(wasted/2.0, 0.5, coordn.x), coordn.y);
+    right_coord = vec2(mix(0.5, 1.0-wasted/2.0, coordn.x), coordn.y);
   }
 ";
 
 const ANAGLYPH_RED_CYAN_FRAGMENT_SHADER: &str = "
-  #version 330 core
-  layout(location=0) out vec4 color;
+  out vec4 color;
   uniform sampler2D image;
   in vec2 left_coord;
   in vec2 right_coord;
@@ -676,8 +772,7 @@ const ANAGLYPH_RED_CYAN_FRAGMENT_SHADER: &str = "
 ";
 
 const SPHERICAL_VERTEX_SHADER: &str = "
-  #version 330 core
-  layout(location=0) in vec2 coord;
+  in vec2 coord;
   out vec2 lon_lat;
   const float PI = 3.141592654;
   void main(void) {
@@ -687,8 +782,7 @@ const SPHERICAL_VERTEX_SHADER: &str = "
 ";
 
 const SPHERICAL_FRAGMENT_SHADER: &str = "
-  #version 330 core
-  layout(location=0) out vec4 color;
+  out vec4 color;
   uniform sampler2D image;
   in vec2 lon_lat;
   void main() {
@@ -727,31 +821,42 @@ const SPHERICAL_FRAGMENT_SHADER: &str = "
   }
 ";
 
-impl GlWindowShader {
-    fn new(gl: Rc<Gl>, mode: GlWindowMode) -> Option<GlWindowShader> {
-        // The shader source
-        let (vertex_source, fragment_source) = match mode {
-            GlWindowMode::Blit => {
-                return None;
-            },
-            GlWindowMode::StereoLeftRight | GlWindowMode::Cubemap => {
-                (PASSTHROUGH_VERTEX_SHADER, PASSTHROUGH_FRAGMENT_SHADER)
-            },
-            GlWindowMode::StereoRedCyan => {
-                (ANAGLYPH_VERTEX_SHADER, ANAGLYPH_RED_CYAN_FRAGMENT_SHADER)
-            },
-            GlWindowMode::Spherical => (SPHERICAL_VERTEX_SHADER, SPHERICAL_FRAGMENT_SHADER),
-        };
+fn shader_sources(mode: GlWindowMode, embedded: bool) -> Option<(String, String)> {
+    let (vertex, fragment) = match mode {
+        GlWindowMode::Blit => return None,
+        GlWindowMode::StereoLeftRight | GlWindowMode::Cubemap => {
+            (PASSTHROUGH_VERTEX_SHADER, PASSTHROUGH_FRAGMENT_SHADER)
+        },
+        GlWindowMode::StereoRedCyan => (ANAGLYPH_VERTEX_SHADER, ANAGLYPH_RED_CYAN_FRAGMENT_SHADER),
+        GlWindowMode::Spherical => (SPHERICAL_VERTEX_SHADER, SPHERICAL_FRAGMENT_SHADER),
+    };
+    let header = if embedded {
+        "#version 300 es\nprecision highp float;\nprecision highp int;\n"
+    } else {
+        "#version 150 core\n"
+    };
+    let fragment = if embedded {
+        fragment.replace("out vec4 color;", "layout(location=0) out vec4 color;")
+    } else {
+        fragment.into()
+    };
+    Some((
+        format!("{header}{}", vertex.trim_start()),
+        format!("{header}{}", fragment.trim_start()),
+    ))
+}
 
-        // TODO: work out why shaders don't work on macos
-        if cfg!(target_os = "macos") {
-            log::warn!("XR shaders may not render on MacOS.");
-        }
+impl GlWindowShader {
+    fn new(gl: Rc<Gl>, mode: GlWindowMode) -> Result<Option<GlWindowShader>, Error> {
+        let Some((vertex_source, fragment_source)) = shader_sources(mode, gl.version().is_embedded)
+        else {
+            return Ok(None);
+        };
 
         unsafe {
             // The four corners of the window in a VAO, set to attribute 0
-            let buffer = gl.create_buffer().ok();
-            let vao = gl.create_vertex_array().ok();
+            let buffer = Some(gl.create_buffer().map_err(Error::BackendSpecific)?);
+            let vao = Some(gl.create_vertex_array().map_err(Error::BackendSpecific)?);
             gl.bind_buffer(gl::ARRAY_BUFFER, buffer);
 
             let data =
@@ -768,56 +873,58 @@ impl GlWindowShader {
                 0,
             );
             gl.enable_vertex_attrib_array(VERTEX_ATTRIBUTE);
-            debug_assert_eq!(gl.get_error(), gl::NO_ERROR);
 
             // The shader program
-            let program = gl.create_program().unwrap();
-            let vertex_shader = gl.create_shader(gl::VERTEX_SHADER).unwrap();
-            let fragment_shader = gl.create_shader(gl::FRAGMENT_SHADER).unwrap();
-            gl.shader_source(vertex_shader, vertex_source);
+            let program = gl.create_program().map_err(Error::BackendSpecific)?;
+            let vertex_shader = gl
+                .create_shader(gl::VERTEX_SHADER)
+                .map_err(Error::BackendSpecific)?;
+            let fragment_shader = gl
+                .create_shader(gl::FRAGMENT_SHADER)
+                .map_err(Error::BackendSpecific)?;
+            gl.shader_source(vertex_shader, &vertex_source);
             gl.compile_shader(vertex_shader);
-            gl.attach_shader(program, vertex_shader);
-            gl.shader_source(fragment_shader, fragment_source);
+            if !gl.get_shader_compile_status(vertex_shader) {
+                return Err(Error::BackendSpecific(format!(
+                    "XR vertex shader: {}",
+                    gl.get_shader_info_log(vertex_shader)
+                )));
+            }
+            gl.shader_source(fragment_shader, &fragment_source);
             gl.compile_shader(fragment_shader);
+            if !gl.get_shader_compile_status(fragment_shader) {
+                return Err(Error::BackendSpecific(format!(
+                    "XR fragment shader: {}",
+                    gl.get_shader_info_log(fragment_shader)
+                )));
+            }
+            gl.attach_shader(program, vertex_shader);
             gl.attach_shader(program, fragment_shader);
+            gl.bind_attrib_location(program, VERTEX_ATTRIBUTE, "coord");
+            if !gl.version().is_embedded {
+                gl.bind_frag_data_location(program, 0, "color");
+            }
             gl.link_program(program);
-            debug_assert_eq!(gl.get_error(), gl::NO_ERROR);
-
-            // Check for errors
-            // TODO: something other than panic?
-            let status = gl.get_shader_compile_status(vertex_shader);
-            assert!(
-                status,
-                "Failed to compile vertex shader: {}",
-                gl.get_shader_info_log(vertex_shader)
-            );
-            let status = gl.get_shader_compile_status(fragment_shader);
-            assert!(
-                status,
-                "Failed to compile fragment shader: {}",
-                gl.get_shader_info_log(fragment_shader)
-            );
-            let status = gl.get_program_link_status(program);
-            assert!(
-                status,
-                "Failed to link: {}",
-                gl.get_program_info_log(program)
-            );
+            if !gl.get_program_link_status(program) {
+                return Err(Error::BackendSpecific(format!(
+                    "XR shader link: {}",
+                    gl.get_program_info_log(program)
+                )));
+            }
 
             // Clean up
             gl.delete_shader(vertex_shader);
-            debug_assert_eq!(gl.get_error(), gl::NO_ERROR);
             gl.delete_shader(fragment_shader);
-            debug_assert_eq!(gl.get_error(), gl::NO_ERROR);
 
             // And we're done
-            Some(GlWindowShader {
+            Ok(Some(GlWindowShader {
+                disposed: false,
                 gl,
                 buffer,
                 vao,
                 program,
                 mode,
-            })
+            }))
         }
     }
 
@@ -849,15 +956,15 @@ impl GlWindowShader {
 
             match self.mode {
                 GlWindowMode::StereoRedCyan => {
-                    let wasted = 1.0 -
-                        (texture_size.width as f32 / viewport_size.width as f32).clamp(0.0, 1.0);
+                    let wasted = 1.0
+                        - (texture_size.width as f32 / viewport_size.width as f32).clamp(0.0, 1.0);
                     let wasted_location = self.gl.get_uniform_location(self.program, "wasted");
                     self.gl.uniform_1_f32(wasted_location.as_ref(), wasted);
                 },
-                GlWindowMode::Blit |
-                GlWindowMode::Cubemap |
-                GlWindowMode::Spherical |
-                GlWindowMode::StereoLeftRight => {},
+                GlWindowMode::Blit
+                | GlWindowMode::Cubemap
+                | GlWindowMode::Spherical
+                | GlWindowMode::StereoLeftRight => {},
             }
 
             self.gl
@@ -870,8 +977,15 @@ impl GlWindowShader {
     }
 }
 
-impl Drop for GlWindowShader {
-    fn drop(&mut self) {
+impl GlWindowShader {
+    fn dispose(&mut self, lost: bool) {
+        if self.disposed {
+            return;
+        }
+        self.disposed = true;
+        if lost {
+            return;
+        }
         unsafe {
             if let Some(buffer) = self.buffer {
                 self.gl.delete_buffer(buffer);
@@ -880,6 +994,295 @@ impl Drop for GlWindowShader {
                 self.gl.delete_vertex_array(vao);
             }
             self.gl.delete_program(self.program);
+        }
+    }
+}
+
+impl Drop for GlWindowShader {
+    fn drop(&mut self) {
+        self.dispose(false);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod presentation_tests {
+    use super::*;
+    #[test]
+    fn failed_presentation_rebind_retains_surface_for_retry() {
+        let connection = surfman::mesa_surfaceless::connection::Connection::new().unwrap();
+        let adapter = if std::env::var_os("DOME_XR_RETIRE_SOFTWARE").is_some() {
+            connection.create_software_adapter().unwrap()
+        } else {
+            connection.create_low_power_adapter().unwrap()
+        };
+        let device = SurfmanDevice::Alternate(connection.create_device(&adapter).unwrap());
+        let descriptor = device
+            .create_context_descriptor(&ContextAttributes {
+                version: GLVersion::new(3, 2),
+                flags: ContextAttributeFlags::ALPHA,
+            })
+            .unwrap();
+        let mut owner = device.create_context(&descriptor, None).unwrap();
+        let mut other = device.create_context(&descriptor, None).unwrap();
+        let surface = device
+            .create_surface(
+                &owner,
+                SurfaceAccess::GPUOnly,
+                SurfaceType::Generic {
+                    size: Size2D::new(8, 8),
+                },
+            )
+            .unwrap();
+        let id = device.surface_info(&surface).id;
+        let mut pending = Some(surface);
+        let failed = restore_present_surface(&device, &mut other, &mut pending).is_err();
+        let retained = pending.as_ref().map(|s| device.surface_info(s).id) == Some(id);
+        restore_present_surface(&device, &mut owner, &mut pending).unwrap();
+        let released = pending.is_none();
+        restore_present_surface(&device, &mut owner, &mut pending).unwrap();
+        let attached = device.context_surface_info(&owner).unwrap().unwrap().id == id;
+        device.destroy_context(&mut owner).unwrap();
+        device.destroy_context(&mut other).unwrap();
+        assert!(failed && retained && released && attached);
+    }
+    struct PrivateWindow {
+        reject: bool,
+        detached: bool,
+        mode: GlWindowMode,
+    }
+    impl GlWindow for PrivateWindow {
+        fn get_render_target(
+            &self,
+            device: &mut SurfmanDevice,
+            context: &mut SurfmanContext,
+        ) -> Result<GlWindowRenderTarget, String> {
+            if self.reject {
+                return Err("XR fixture target unavailable".into());
+            }
+            let surface = device
+                .create_surface(
+                    context,
+                    SurfaceAccess::GPUOnly,
+                    SurfaceType::Generic {
+                        size: Size2D::new(8, 8),
+                    },
+                )
+                .unwrap();
+            device.bind_surface_to_context(context, surface).unwrap();
+            let chain =
+                SwapChain::create_attached(device, context, SurfaceAccess::GPUOnly).unwrap();
+            if self.detached {
+                chain
+                    .take_surface_texture(device, context)
+                    .map(|texture| {
+                        let mut slot = Some(texture);
+                        chain
+                            .recycle_surface_texture(device, context, &mut slot)
+                            .unwrap();
+                    })
+                    .unwrap();
+                // A valid, independently owned detached target is incompatible
+                // with presentation, but must still be retired without panic.
+                chain.destroy(device, context).unwrap();
+                return Ok(GlWindowRenderTarget::SwapChain(
+                    SwapChain::create_detached(
+                        device,
+                        context,
+                        SurfaceAccess::GPUOnly,
+                        Size2D::new(8, 8),
+                    )
+                    .unwrap(),
+                ));
+            }
+            Ok(GlWindowRenderTarget::SwapChain(chain))
+        }
+        fn get_rotation(&self) -> Rotation3D<f32, UnknownUnit, UnknownUnit> {
+            Rotation3D::identity()
+        }
+        fn get_translation(&self) -> Vector3D<f32, UnknownUnit> {
+            Vector3D::zero()
+        }
+        fn get_mode(&self) -> GlWindowMode {
+            self.mode
+        }
+        fn display_handle(&self) -> DisplayHandle<'_> {
+            unreachable!("offscreen fixture opens no desktop")
+        }
+    }
+    #[derive(Clone)]
+    struct UnusedGrand;
+    impl webxr_api::LayerGrandManagerAPI<SurfmanGL> for UnusedGrand {
+        fn create_layer_manager(
+            &self,
+            _: webxr_api::LayerManagerFactory<SurfmanGL>,
+        ) -> Result<LayerManager, Error> {
+            unreachable!()
+        }
+        fn clone_layer_grand_manager(&self) -> LayerGrandManager<SurfmanGL> {
+            LayerGrandManager::new(self.clone())
+        }
+    }
+    fn private_window(detached: bool, mode: GlWindowMode) -> Result<GlWindowDevice, Error> {
+        private_window_with_rejection(detached, mode, false)
+    }
+    fn private_window_with_rejection(
+        detached: bool,
+        mode: GlWindowMode,
+        reject: bool,
+    ) -> Result<GlWindowDevice, Error> {
+        let connection = surfman::mesa_surfaceless::connection::Connection::new().unwrap();
+        let adapter = if std::env::var_os("DOME_XR_RETIRE_SOFTWARE").is_some() {
+            connection.create_software_adapter().unwrap()
+        } else {
+            connection.create_low_power_adapter().unwrap()
+        };
+        GlWindowDevice::new(
+            Connection::Alternate(connection),
+            Adapter::Alternate(adapter),
+            ContextAttributes {
+                version: GLVersion::new(3, 2),
+                flags: ContextAttributeFlags::ALPHA,
+            },
+            Rc::new(PrivateWindow {
+                reject,
+                detached,
+                mode,
+            }),
+            vec![],
+            LayerGrandManager::new(UnusedGrand),
+        )
+    }
+    #[test]
+    fn private_blit_initialization_and_cleanup_succeed() {
+        let mut window = private_window(false, GlWindowMode::Blit).unwrap();
+        assert!(window.read_fbo.is_some() && window.target_swap_chain.is_some());
+        assert!(window.poll_cleanup());
+        assert!(window.poll_cleanup());
+        assert_eq!(
+            window.cleanup_phase,
+            crate::native_cleanup::CleanupPhase::Complete
+        );
+        assert!(window.read_fbo.is_none() && window.target_swap_chain.is_none());
+    }
+    #[test]
+    fn private_shader_is_disposed_before_native_context() {
+        let mut window = private_window(false, GlWindowMode::StereoLeftRight).unwrap();
+        assert!(window.shader.is_some());
+        assert!(window.poll_cleanup());
+        assert!(window.shader.is_none());
+        assert!(window.poll_cleanup());
+    }
+    #[test]
+    fn rejected_detached_target_rolls_back_instead_of_dropping_live_owner() {
+        assert!(private_window(true, GlWindowMode::Blit).is_err());
+        assert!(!webxr_api::deferred_cleanup::pending());
+    }
+    #[test]
+    fn host_target_error_releases_unpublished_context() {
+        let result = private_window_with_rejection(false, GlWindowMode::Blit, true);
+        assert!(
+            matches!(result,Err(Error::BackendSpecific(message)) if message.contains("target unavailable"))
+        );
+        assert!(!webxr_api::deferred_cleanup::pending());
+    }
+    #[test]
+    fn all_shader_modes_draw_native_pixels() {
+        for mode in [
+            GlWindowMode::StereoLeftRight,
+            GlWindowMode::StereoRedCyan,
+            GlWindowMode::Cubemap,
+            GlWindowMode::Spherical,
+        ] {
+            let mut window = private_window(false, mode).unwrap();
+            let mut pixel = [0; 4];
+            let error;
+            unsafe {
+                let gl = &window.gl;
+                let target = window
+                    .device
+                    .context_surface_info(&window.context)
+                    .unwrap()
+                    .unwrap()
+                    .framebuffer_object;
+                gl.bind_framebuffer(gl::FRAMEBUFFER, target);
+                let texture = gl.create_texture().unwrap();
+                gl.bind_texture(gl::TEXTURE_2D, Some(texture));
+                gl.tex_parameter_i32(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as i32);
+                gl.tex_parameter_i32(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
+                gl.tex_image_2d(
+                    gl::TEXTURE_2D,
+                    0,
+                    gl::RGBA as i32,
+                    2,
+                    2,
+                    0,
+                    gl::RGBA,
+                    gl::UNSIGNED_BYTE,
+                    gl::PixelUnpackData::Slice(Some(&[
+                        0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255,
+                    ])),
+                );
+                window.shader.as_ref().unwrap().draw_texture(
+                    Some(texture),
+                    gl::TEXTURE_2D,
+                    Size2D::new(2, 2),
+                    Size2D::new(8, 8),
+                    Size2D::new(8, 8),
+                );
+                gl.read_pixels(
+                    4,
+                    4,
+                    1,
+                    1,
+                    gl::RGBA,
+                    gl::UNSIGNED_BYTE,
+                    gl::PixelPackData::Slice(Some(&mut pixel)),
+                );
+                error = gl.get_error();
+                gl.delete_texture(texture);
+            }
+            assert!(window.poll_cleanup());
+            assert_eq!(pixel, [0, 255, 0, 255], "mode {mode:?}");
+            assert_eq!(error, gl::NO_ERROR, "mode {mode:?}");
+        }
+    }
+    #[test]
+    #[ignore = "Requires independent glslangValidator; run explicitly with --ignored"]
+    fn shader_sources_pass_standard_validator() {
+        let out = std::env::var_os("DOME_XR_GLSL_TEST_OUTPUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("dome-glsl-{}", std::process::id()))
+            });
+        std::fs::create_dir_all(&out).unwrap();
+        let validator =
+            std::env::var_os("DOME_XR_GLSL_VALIDATOR").unwrap_or_else(|| "glslangValidator".into());
+        for embedded in [false, true] {
+            for (name, mode) in [
+                ("passthrough", GlWindowMode::StereoLeftRight),
+                ("anaglyph", GlWindowMode::StereoRedCyan),
+                ("spherical", GlWindowMode::Spherical),
+            ] {
+                let (vertex, fragment) = shader_sources(mode, embedded).unwrap();
+                let name = format!("{}-{name}", if embedded { "gles300" } else { "gl150" });
+                let vp = out.join(format!("{name}.vert"));
+                let fp = out.join(format!("{name}.frag"));
+                std::fs::write(&vp, vertex).unwrap();
+                std::fs::write(&fp, fragment).unwrap();
+                let result = std::process::Command::new(&validator)
+                    .arg("-l")
+                    .arg(vp)
+                    .arg(fp)
+                    .output()
+                    .unwrap();
+                assert!(
+                    result.status.success(),
+                    "{name}: {}{}",
+                    String::from_utf8_lossy(&result.stdout),
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                println!("GLSL_VALIDATED={name}");
+            }
         }
     }
 }

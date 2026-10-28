@@ -37,7 +37,7 @@ impl SessionActivity {
     pub(crate) fn begin_closing(&self) {
         self.0.store(1, Ordering::Release);
     }
-    fn finish_closing(&self) {
+    pub(crate) fn finish_closing(&self) {
         self.0.store(2, Ordering::Release);
     }
 }
@@ -345,23 +345,26 @@ enum RenderState {
 }
 
 /// For devices that want to do their own thread management, the `SessionThread` type is exposed.
-pub struct SessionThread<Device> {
-    receiver: GenericReceiver<SessionMsg>,
+pub struct SessionThread<Device: DeviceAPI> {
+    receiver: Option<GenericReceiver<SessionMsg>>,
     sender: GenericSender<SessionMsg>,
     layers: Vec<(ContextId, LayerId)>,
     pending_layers: Option<Vec<(ContextId, LayerId)>>,
     frame_count: u64,
     frame_sender: Option<ProfileGenericCallback<Frame>>,
     running: bool,
-    device: Device,
+    closing: bool,
+    device: crate::session_device::SessionDevice<Device>,
     id: SessionId,
     render_state: RenderState,
     active: Arc<SessionActivity>,
 }
 
-impl<Device> Drop for SessionThread<Device> {
+impl<Device: DeviceAPI> Drop for SessionThread<Device> {
     fn drop(&mut self) {
-        self.active.finish_closing();
+        // Release queued reply senders before any potentially deferred cleanup.
+        self.receiver.take();
+        self.device.retire_or_defer();
     }
 }
 
@@ -369,7 +372,11 @@ impl<Device> SessionThread<Device>
 where
     Device: DeviceAPI,
 {
-    pub fn new(mut device: Device, id: SessionId) -> Result<Self, Error> {
+    pub fn new(device: Device, id: SessionId) -> Result<Self, Error> {
+        Self::with_activity(device, id, Arc::new(SessionActivity::new()))
+    }
+    fn with_activity(device: Device, id: SessionId, active: Arc<SessionActivity>) -> Result<Self, Error> {
+        let mut device = crate::session_device::SessionDevice::new(device, active.clone());
         let Some((sender, receiver)) = generic_channel::channel() else {
             return Err(Error::CommunicationError);
         };
@@ -382,16 +389,17 @@ where
         let pending_layers = None;
         Ok(SessionThread {
             sender,
-            receiver,
+            receiver: Some(receiver),
             device,
             layers,
             pending_layers,
             frame_count,
             frame_sender: None,
             running,
+            closing: false,
             id,
             render_state: RenderState::NotInRenderLoop,
-            active: Arc::new(SessionActivity::new()),
+            active,
         })
     }
 
@@ -417,12 +425,22 @@ where
     }
 
     pub fn run(&mut self) {
-        while let Ok(msg) = self.receiver.recv() {
-            if !self.handle_msg(msg) {
-                self.running = false;
-                break;
-            }
+        while let Some(receiver) = self.receiver.as_ref() {
+            let Ok(msg) = receiver.recv() else { break; };
+            if !self.handle_msg(msg) { break; }
         }
+        self.quit();
+        self.drain_cleanup();
+    }
+
+    fn drain_cleanup(&mut self) {
+        let mut delay = Duration::from_millis(10);
+        while !self.device.poll_cleanup() {
+            thread::sleep(delay);
+            delay = (delay * 2).min(Duration::from_millis(500));
+        }
+        self.running = false;
+        self.active.finish_closing();
     }
 
     fn handle_msg(&mut self, msg: SessionMsg) -> bool {
@@ -528,10 +546,14 @@ where
     }
 
     fn quit(&mut self) {
+        if self.closing { return; }
+        self.closing = true;
         self.active.begin_closing();
+        // A closing session accepts no new commands. Dropping the receiver also
+        // releases reply senders in commands queued behind Quit/Abort.
+        self.receiver.take();
         self.render_state = RenderState::NotInRenderLoop;
         self.device.quit();
-        self.active.finish_closing();
     }
 }
 
@@ -539,6 +561,8 @@ where
 pub trait MainThreadSession: 'static {
     fn run_one_frame(&mut self);
     fn running(&self) -> bool;
+    /// Closing sessions can stay owned without requesting continuous rendering.
+    fn needs_animation_frames(&self) -> bool { self.running() }
 }
 
 impl<Device> MainThreadSession for SessionThread<Device>
@@ -546,19 +570,31 @@ where
     Device: DeviceAPI,
 {
     fn run_one_frame(&mut self) {
+        if self.closing {
+            self.running = !self.device.poll_cleanup();
+            if self.running { self.device.defer_pending_cleanup(); }
+            else { self.active.finish_closing(); }
+            return;
+        }
         let frame_count = self.frame_count;
         while frame_count == self.frame_count && self.running {
-            if let Ok(msg) = self.receiver.try_recv_timeout(TIMEOUT) {
-                self.running = self.handle_msg(msg);
-            } else {
-                break;
+            let Some(receiver) = self.receiver.as_ref() else { self.running = false; break; };
+            match receiver.try_recv_timeout(TIMEOUT) {
+                Ok(msg) => self.running = self.handle_msg(msg),
+                Err(generic_channel::TryReceiveError::Empty) => break,
+                Err(_) => { self.running = false; break; },
             }
+        }
+        if !self.running {
+            self.quit();
+            self.running = !self.device.poll_cleanup();
+            if self.running { self.device.defer_pending_cleanup(); }
+            else { self.active.finish_closing(); }
         }
     }
 
-    fn running(&self) -> bool {
-        self.running
-    }
+    fn running(&self) -> bool { self.running }
+    fn needs_animation_frames(&self) -> bool { self.running && !self.closing }
 }
 
 /// A type for building XR sessions
@@ -601,20 +637,24 @@ impl<'a, GL: 'static> SessionBuilder<'a, GL> {
         let id = self.id;
         let active = self.active;
         thread::spawn(move || {
-            match factory(layer_grand_manager).and_then(|device| SessionThread::new(device, id)) {
+            match factory(layer_grand_manager).and_then(|device| SessionThread::with_activity(device, id, active.clone())) {
                 Ok(mut thread) => {
-                    thread.active = active;
                     let session = thread.new_session();
                     if acks.send(Ok(session)).is_ok() {
                         thread.run();
                     } else {
                         thread.quit();
+                        thread.drain_cleanup();
                     }
                 },
                 Err(err) => {
                     let _ = acks.send(Err(err));
                 },
             }
+            // Failed factories may retain private native contexts on this
+            // thread. The request result has already been delivered above.
+            crate::deferred_cleanup::drain();
+            active.finish_closing();
         });
         ackr.recv().unwrap_or(Err(Error::CommunicationError))
     }
@@ -626,10 +666,167 @@ impl<'a, GL: 'static> SessionBuilder<'a, GL> {
         Device: DeviceAPI,
     {
         let device = factory(self.layer_grand_manager)?;
-        let mut session_thread = SessionThread::new(device, self.id)?;
-        session_thread.active = self.active;
+        let mut session_thread = SessionThread::with_activity(device, self.id, self.active)?;
         let session = session_thread.new_session();
         self.sessions.push(Box::new(session_thread));
         Ok(session)
     }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use std::{cell::Cell, rc::Rc};
+    struct DelayedDevice { polls: Rc<Cell<usize>>, quits: Rc<Cell<usize>>, dropped: Rc<Cell<usize>>, during_quit: Option<Box<dyn FnMut()>> }
+    impl Drop for DelayedDevice { fn drop(&mut self) { self.dropped.set(self.dropped.get()+1); } }
+    impl DeviceAPI for DelayedDevice {
+        fn create_layer(&mut self, _: ContextId, _: LayerInit) -> Result<LayerInfo, Error> { unreachable!() }
+        fn destroy_layer(&mut self, _: ContextId, _: LayerId) { unreachable!() }
+        fn floor_transform(&self) -> Option<RigidTransform3D<f32, Native, Floor>> { None }
+        fn viewports(&self) -> Viewports { unreachable!() }
+        fn begin_animation_frame(&mut self, _: &[(ContextId, LayerId)]) -> Option<Frame> { unreachable!() }
+        fn end_animation_frame(&mut self, _: &[(ContextId, LayerId)]) { unreachable!() }
+        fn initial_inputs(&self) -> Vec<InputSource> { vec![] }
+        fn set_event_dest(&mut self, _: ProfileGenericCallback<Event>) {}
+        fn quit(&mut self) { self.quits.set(self.quits.get()+1); if let Some(probe) = self.during_quit.as_mut() { probe(); } }
+        fn poll_cleanup(&mut self) -> bool { self.polls.set(self.polls.get()+1); self.polls.get() >= 3 }
+        fn set_quitter(&mut self, _: Quitter) {}
+        fn update_clip_planes(&mut self, _: f32, _: f32) {}
+        fn granted_features(&self) -> &[String] { &[] }
+    }
+    fn session() -> SessionThread<DelayedDevice> {
+        SessionThread::new(DelayedDevice { polls: Rc::new(Cell::new(0)), quits: Rc::new(Cell::new(0)), dropped: Rc::new(Cell::new(0)), during_quit: None }, SessionId(1)).unwrap()
+    }
+    #[test]
+    fn main_thread_session_retains_pending_cleanup_without_blocking() {
+        let mut session = session();
+        let polls = session.device.polls.clone();
+        session.quit(); session.quit();
+        assert_eq!(session.device.quits.get(),1);
+        for attempt in 0..2 {
+            if attempt!=0 { crate::deferred_cleanup::poll(); }
+            session.run_one_frame();
+            assert!(session.running());
+            assert!(!session.active.is_active());
+            assert!(!session.active.is_closed());
+        }
+        crate::deferred_cleanup::poll();
+        session.run_one_frame();
+        assert!(!session.running());
+        assert!(session.active.is_closed());
+        assert_eq!(polls.get(),3);
+        assert!(!session.needs_animation_frames());
+    }
+    #[test]
+    fn dedicated_session_drains_before_announcing_closed() {
+        let mut session = session();
+        session.quit(); session.drain_cleanup();
+        assert_eq!(session.device.polls.get(),3);
+        assert_eq!(session.device.quits.get(),1);
+        assert!(session.active.is_closed());
+    }
+    #[test]
+    fn forced_session_drop_retains_device_and_closing_activity_until_cleanup() {
+        let session = session();
+        let active = session.active.clone(); let polls = session.device.polls.clone();
+        let quits = session.device.quits.clone(); let dropped = session.device.dropped.clone();
+        drop(session);
+        let retained = dropped.get()==0 && !active.is_closed();
+        // Record expectations before draining, but always finish cleanup before
+        // asserting so failed controls do not strand thread-local native owners.
+        let pending = crate::deferred_cleanup::pending();
+        crate::deferred_cleanup::drain();
+        assert!(retained && pending);
+        assert_eq!(polls.get(),3); assert_eq!(quits.get(),1); assert_eq!(dropped.get(),1);
+        assert!(active.is_closed());
+    }
+
+    #[test]
+    fn guard_before_controller_construction_retains_device() {
+        let polls = Rc::new(Cell::new(0)); let quits = Rc::new(Cell::new(0)); let dropped = Rc::new(Cell::new(0));
+        let active = Arc::new(SessionActivity::new());
+        let device = crate::session_device::SessionDevice::new(DelayedDevice {
+            polls: polls.clone(), quits: quits.clone(), dropped: dropped.clone(), during_quit: None,
+        },active.clone());
+        drop(device);
+        let retained = dropped.get()==0 && !active.is_closed();
+        crate::deferred_cleanup::drain();
+        assert!(retained); assert_eq!(polls.get(),3); assert_eq!(quits.get(),1); assert_eq!(dropped.get(),1);
+        assert!(active.is_closed());
+    }
+    #[test]
+    fn partial_session_cleanup_transfers_without_repeating_quit() {
+        let mut session = session();
+        let polls = session.device.polls.clone(); let quits = session.device.quits.clone();
+        let dropped = session.device.dropped.clone(); let active = session.active.clone();
+        session.quit(); session.run_one_frame();
+        assert_eq!(polls.get(),1);
+        drop(session);
+        let retained = dropped.get()==0 && polls.get()==1 && !active.is_closed();
+        crate::deferred_cleanup::drain();
+        assert!(retained); assert_eq!(polls.get(),3); assert_eq!(quits.get(),1); assert_eq!(dropped.get(),1);
+        assert!(active.is_closed());
+    }
+    #[test]
+    fn completed_session_drop_does_not_poll_native_cleanup_again() {
+        let mut session = session();
+        let polls = session.device.polls.clone(); let dropped = session.device.dropped.clone();
+        session.quit(); session.drain_cleanup(); drop(session);
+        assert_eq!(polls.get(),3); assert_eq!(dropped.get(),1);
+        assert!(!crate::deferred_cleanup::pending());
+    }
+
+    #[test]
+    fn closing_mailbox_releases_queued_response_before_native_cleanup() {
+        let mut session = session();
+        let polls = session.device.polls.clone();
+        let (send,reply) = generic_channel::channel().unwrap();
+        session.sender.send(SessionMsg::GetBoundsGeometry(send)).unwrap();
+        session.quit();
+        let released = matches!(reply.try_recv_timeout(Duration::from_millis(30)),
+            Err(generic_channel::TryReceiveError::ReceiveError(_)));
+        let still_owned = polls.get()==0 && !session.active.is_closed();
+        session.drain_cleanup();
+        assert!(released && still_owned);
+    }
+    #[test]
+    fn closing_mailbox_rejects_new_requests_without_waiting_for_native_cleanup() {
+        let mut session = session();
+        session.quit();
+        let (send,reply) = generic_channel::channel().unwrap();
+        let rejected = session.sender.send(SessionMsg::GetBoundsGeometry(send)).is_err();
+        let released = matches!(reply.try_recv_timeout(Duration::from_millis(30)),
+            Err(generic_channel::TryReceiveError::ReceiveError(_)));
+        session.drain_cleanup();
+        assert!(rejected && released);
+    }
+
+    #[test]
+    fn closing_mailbox_discards_requests_queued_behind_quit() {
+        let mut session = session();
+        let active = session.active.clone(); let dropped = session.device.dropped.clone();
+        let (send,reply) = generic_channel::channel().unwrap();
+        session.sender.send(SessionMsg::Quit).unwrap();
+        session.sender.send(SessionMsg::GetBoundsGeometry(send)).unwrap();
+        session.run_one_frame();
+        let released = matches!(reply.try_recv_timeout(Duration::from_millis(30)),
+            Err(generic_channel::TryReceiveError::ReceiveError(_)));
+        let cleanup_pending = session.running() && !active.is_closed() && dropped.get()==0;
+        crate::deferred_cleanup::drain(); session.run_one_frame();
+        assert!(released && cleanup_pending);
+        assert!(!session.running() && active.is_closed());
+    }
+    #[test]
+    fn closing_mailbox_forced_drop_closes_replies_before_device_quit() {
+        let mut session = session();
+        let (send,reply) = generic_channel::channel().unwrap();
+        session.sender.send(SessionMsg::GetBoundsGeometry(send)).unwrap();
+        let closed = Rc::new(Cell::new(false)); let recorded = closed.clone();
+        session.device.during_quit = Some(Box::new(move || {
+            recorded.set(matches!(reply.try_recv(),Err(generic_channel::TryReceiveError::ReceiveError(_))));
+        }));
+        drop(session); crate::deferred_cleanup::drain();
+        assert!(closed.get());
+    }
+
 }

@@ -263,6 +263,11 @@ impl GlClearer {
         Ok(())
     }
 
+    /// Discard local names after native loss; context destruction owns GL cleanup.
+    pub(crate) fn forget_layer(&mut self, layer: LayerId) {
+        self.fbos.retain(|(id, _, _), _| *id != layer);
+    }
+
     pub(crate) fn clear(
         &mut self,
         contexts: &mut dyn GLContexts<SurfmanGL>,
@@ -283,8 +288,6 @@ impl GlClearer {
             let mut clear_color = [0., 0., 0., 0.];
             let mut clear_depth = [0.];
             let mut clear_stencil = [0];
-            let mut stencil_mask = [0];
-            let mut stencil_back_mask = [0];
             let scissor_enabled = gl.is_enabled(gl::SCISSOR_TEST);
             let rasterizer_enabled = gl.is_enabled(gl::RASTERIZER_DISCARD);
 
@@ -294,8 +297,14 @@ impl GlClearer {
             gl.get_parameter_f32_slice(gl::DEPTH_CLEAR_VALUE, &mut clear_depth[..]);
             gl.get_parameter_i32_slice(gl::STENCIL_CLEAR_VALUE, &mut clear_stencil[..]);
             let depth_mask = gl.get_parameter_bool(gl::DEPTH_WRITEMASK);
-            gl.get_parameter_i32_slice(gl::STENCIL_WRITEMASK, &mut stencil_mask[..]);
-            gl.get_parameter_i32_slice(gl::STENCIL_BACK_WRITEMASK, &mut stencil_back_mask[..]);
+            let stencil_mask = gl.get_parameter_u32(gl::STENCIL_WRITEMASK).ok_or_else(|| {
+                Error::BackendSpecific("XR stencil mask query unavailable".into())
+            })?;
+            let stencil_back_mask = gl
+                .get_parameter_u32(gl::STENCIL_BACK_WRITEMASK)
+                .ok_or_else(|| {
+                    Error::BackendSpecific("XR back stencil mask query unavailable".into())
+                })?;
             let color_mask = gl.get_parameter_bool_array::<4>(gl::COLOR_WRITEMASK);
 
             // Clear it
@@ -323,8 +332,8 @@ impl GlClearer {
             gl.clear_depth(clear_depth[0] as f64);
             gl.clear_stencil(clear_stencil[0]);
             gl.depth_mask(depth_mask);
-            gl.stencil_mask_separate(gl::FRONT, stencil_mask[0] as _);
-            gl.stencil_mask_separate(gl::BACK, stencil_back_mask[0] as _);
+            gl.stencil_mask_separate(gl::FRONT, stencil_mask);
+            gl.stencil_mask_separate(gl::BACK, stencil_back_mask);
             if scissor_enabled {
                 gl.enable(gl::SCISSOR_TEST);
             }

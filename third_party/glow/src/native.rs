@@ -160,6 +160,26 @@ impl Context {
         Self::try_from_loader_function_cstr(move |name| loader_function(name.to_str().unwrap()))
     }
 
+    /// Whether required native renderbuffer allocation functions were loaded.
+    /// No GL command is issued by this capability check.
+    pub fn supports_renderbuffer_allocation(&self) -> bool {
+        let gl = &self.raw;
+        gl.GenRenderbuffers_is_loaded() && gl.DeleteRenderbuffers_is_loaded() &&
+            gl.BindRenderbuffer_is_loaded() && gl.RenderbufferStorage_is_loaded() &&
+            gl.GetRenderbufferParameteriv_is_loaded() && gl.FramebufferRenderbuffer_is_loaded()
+    }
+
+    /// Whether the native entry points for offscreen color allocation were loaded.
+    /// This validates dispatch availability, not the success of future allocations.
+    pub fn supports_framebuffer_allocation(&self) -> bool {
+        let gl = &self.raw;
+        gl.GenTextures_is_loaded() && gl.DeleteTextures_is_loaded() && gl.BindTexture_is_loaded() &&
+            gl.TexImage2D_is_loaded() && gl.GenFramebuffers_is_loaded() &&
+            gl.DeleteFramebuffers_is_loaded() && gl.BindFramebuffer_is_loaded() &&
+            gl.FramebufferTexture2D_is_loaded() && gl.CheckFramebufferStatus_is_loaded() &&
+            gl.BindRenderbuffer_is_loaded() && gl.BindBuffer_is_loaded()
+    }
+
     /// Re-reads GL_VERSION and checks the version captured at initialization.
     pub unsafe fn validate_current_version(&self) -> Result<(), String> {
         let text = checked_driver_string(self.raw.GetString(VERSION), "GL_VERSION")?;
@@ -169,6 +189,38 @@ impl Context {
             return Err("Current GL_VERSION differs from initialized metadata".into());
         }
         Ok(())
+    }
+
+    /// Queries one unsigned 32-bit scalar without signed clamping or float32 rounding.
+    ///
+    /// Desktop GL uses GetDoublev, including contexts predating GetInteger64v.
+    /// GLES 3 uses GetInteger64v. GLES 2 cannot query every uint exactly and
+    /// returns None, as does a missing entry point or an out-of-range result.
+    /// This leaves the caller's GL error state untouched.
+    ///
+    /// # Safety
+    /// The owning context must be current and `parameter` must name a valid,
+    /// single-valued unsigned integer state (not an array or normalized value).
+    pub unsafe fn get_parameter_u32(&self, parameter: u32) -> Option<u32> {
+        if self.version.is_embedded {
+            if self.version.major < 3 || !self.raw.GetInteger64v_is_loaded() {
+                return None;
+            }
+            let mut value = 0;
+            self.raw.GetInteger64v(parameter, &mut value);
+            u32::try_from(value).ok()
+        } else {
+            if !self.raw.GetDoublev_is_loaded() {
+                return None;
+            }
+            let mut value: f64 = 0.;
+            self.raw.GetDoublev(parameter, &mut value);
+            if value.is_finite() && value >= 0. && value <= u32::MAX as f64 && value.fract() == 0. {
+                Some(value as u32)
+            } else {
+                None
+            }
+        }
     }
 
     /// Creates a texture from an external GL name.

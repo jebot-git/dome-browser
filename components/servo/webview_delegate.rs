@@ -970,6 +970,8 @@ pub trait WebViewDelegate {
     fn notify_favicon_changed(&self, _webview: WebView) {}
     /// Notify the embedder that it needs to present a new frame.
     fn notify_new_frame_ready(&self, _webview: WebView) {}
+    /// Native root-document position, visible height and total height in CSS pixels.
+    fn notify_scroll_metrics(&self, _webview: WebView, _offset: f32, _visible: f32, _total: f32) {}
     /// The navigation history of this [`WebView`] has changed. The navigation history is represented
     /// as a `Vec<Url>` and `_current` denotes the current index in the history. New navigations,
     /// back navigation, and forward navigation modify this index.

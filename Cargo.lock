@@ -9814,6 +9814,7 @@ dependencies = [
  "dpi",
  "euclid",
  "gleam",
+ "glow",
  "image",
  "log",
  "rayon",

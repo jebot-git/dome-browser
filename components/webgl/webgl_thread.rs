@@ -49,7 +49,7 @@ use servo_canvas_traits::webgl::{
 use surfman::chains::{PreserveBuffer, SwapChains, SwapChainsAPI};
 use surfman::{
     self, Context, ContextAttributeFlags, ContextAttributes, Device, GLVersion, SurfaceAccess,
-    SurfaceInfo, SurfaceType,
+    Surface, SurfaceType,
 };
 use webrender_api::units::DeviceIntSize;
 use webrender_api::{
@@ -57,6 +57,8 @@ use webrender_api::{
     ImageDescriptorFlags, ImageFormat, ImageKey,
 };
 
+use crate::context_binding::bind_context;
+use crate::resource_retirement::{RetireOwner, RetirementPhase, retire_in_order};
 use crate::webgl_limits::GLLimitsDetect;
 #[cfg(feature = "webxr")]
 use crate::webxr::{WebXRBridge, WebXRBridgeInit};
@@ -83,7 +85,94 @@ pub(crate) struct GLContextData {
     /// WebRender to finish rendering to the context in order to delete it.
     marked_for_deletion: bool,
     lost: bool,
+    native_lost: bool,
+    retirement: RetirementPhase,
+    retiring_surfaces: Vec<Surface>,
     loss_observer: Option<servo_base::generic_channel::GenericCallback<WebGLContextId>>,
+}
+
+fn release_attached_surfaces(device: &Device, ctx: &mut Context, pending: &mut Vec<Surface>) -> Result<(), surfman::Error> {
+    if let Some(surface) = device.unbind_surface_from_context(ctx)? { pending.push(surface); }
+    while let Some(surface) = pending.first_mut() {
+        device.destroy_surface(ctx, surface)?;
+        pending.remove(0);
+    }
+    Ok(())
+}
+
+struct ContextRetirement<'a> {
+    data: &'a mut GLContextData,
+    chains: &'a SwapChains<WebGLContextId, Device>,
+    id: WebGLContextId,
+}
+impl RetireOwner for ContextRetirement<'_> {
+    type Error = surfman::Error;
+    fn release_resources(&mut self) -> Result<(), Self::Error> {
+        self.chains.destroy(self.id, &self.data.device, &mut self.data.ctx)?;
+        release_attached_surfaces(&self.data.device, &mut self.data.ctx, &mut self.data.retiring_surfaces)
+    }
+    fn destroy_native(&mut self) -> Result<(), Self::Error> {
+        self.data.device.destroy_context(&mut self.data.ctx)
+    }
+}
+
+/// Own every acquisition until initialization commits or native rollback completes.
+struct PendingCreation {
+    device: Rc<Device>,
+    ctx: Context,
+    returned_surfaces: Vec<Surface>,
+    chain_id: Option<WebGLContextId>,
+    chains: SwapChains<WebGLContextId, Device>,
+    gl: Option<Rc<Gl>>,
+    retirement: RetirementPhase,
+}
+impl PendingCreation {
+    fn bind_initial_surface(&mut self, surface: Surface) -> Result<(), String> {
+        match self.device.bind_surface_to_context(&mut self.ctx, surface) {
+            Ok(()) => Ok(()),
+            Err((error, surface)) => {
+                self.returned_surfaces.push(surface);
+                Err(format!("Failed to bind initial surface: {error:?}"))
+            },
+        }
+    }
+    /// Failed creations are unpublished and have no shared GL context or
+    /// consumers. Retire their private names with the context, without requiring
+    /// another successful GL binding. This never requests a device reset.
+    fn abort(&mut self) -> Result<(), surfman::Error> {
+        if self.device.supports_context_loss_recovery() {
+            let _ = self.device.mark_context_lost(&mut self.ctx);
+        }
+        self.retire()
+    }
+    fn retire(&mut self) -> Result<(), surfman::Error> {
+        let mut phase = self.retirement;
+        let result = retire_in_order(&mut phase, self);
+        self.retirement = phase;
+        if result.as_ref().is_err_and(surfman::Error::is_context_lost) && self.device.supports_context_loss_recovery() {
+            let _ = self.device.mark_context_lost(&mut self.ctx);
+        }
+        result
+    }
+}
+impl RetireOwner for PendingCreation {
+    type Error = surfman::Error;
+    fn release_resources(&mut self) -> Result<(), Self::Error> {
+        let needs_gl_cleanup = self.chain_id.is_some() || !self.returned_surfaces.is_empty() ||
+            self.device.context_surface_info(&self.ctx)?.is_some();
+        if needs_gl_cleanup && !self.device.context_is_lost(&self.ctx) {
+            self.device.make_context_current(&self.ctx)?;
+        }
+        if let Some(id) = self.chain_id {
+            self.chains.destroy(id, &self.device, &mut self.ctx)?;
+            self.chain_id = None;
+        }
+        // Also own an initial attachment that failed before chain registration.
+        release_attached_surfaces(&self.device, &mut self.ctx, &mut self.returned_surfaces)
+    }
+    fn destroy_native(&mut self) -> Result<(), Self::Error> {
+        self.device.destroy_context(&mut self.ctx)
+    }
 }
 
 #[derive(Debug)]
@@ -234,6 +323,7 @@ pub(crate) struct WebGLThread {
     paint_api: CrossProcessPaintApi,
     /// Map of live WebGLContexts.
     contexts: FxHashMap<WebGLContextId, GLContextData>,
+    pending_creations: Vec<PendingCreation>,
     /// Cached information for WebGLContexts.
     cached_context_info: FxHashMap<WebGLContextId, WebGLContextInfo>,
     /// Current bound context.
@@ -274,6 +364,46 @@ pub(crate) struct WebGLThreadInit {
 // A size at which it should be safe to create GL contexts
 const SAFE_VIEWPORT_DIMS: [u32; 2] = [1024, 1024];
 
+impl crate::retirement_loop::Worker for WebGLThread {
+    type Message = WebGLMsg;
+    fn receive(&mut self, timeout: Option<std::time::Duration>) -> crate::retirement_loop::Input<WebGLMsg> {
+        use crate::retirement_loop::Input;
+        match timeout {
+            Some(timeout) => match self.receiver.recv_timeout(timeout) {
+                Ok(Ok(message)) => Input::Message(message),
+                Ok(Err(_)) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => Input::Disconnected,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => Input::Timeout,
+            },
+            None => match self.receiver.recv() {
+                Ok(Ok(message)) => Input::Message(message),
+                _ => Input::Disconnected,
+            },
+        }
+    }
+    fn handle(&mut self, message: WebGLMsg, closing: bool) -> bool {
+        if closing {
+            // Refuse new rendering work; allow late consumer returns and XR
+            // manager/layer destruction needed to release existing ownership.
+            match message {
+                WebGLMsg::FinishedRenderingToContext(id) => self.handle_finished_rendering_to_context(id),
+                WebGLMsg::RemoveContext(id) => self.remove_webgl_context(id),
+                #[cfg(feature = "webxr")]
+                WebGLMsg::WebXRCommand(command @ (WebXRCommand::DestroyLayerManager(_) | WebXRCommand::DestroyLayer(..))) => self.handle_webxr_command(command),
+                _ => {},
+            }
+            return false;
+        }
+        let chan = WebGLChan(self.sender.clone());
+        self.handle_msg(message, &chan)
+    }
+    fn pending(&self) -> bool {
+        !self.pending_creations.is_empty() || self.contexts.values().any(|data| data.marked_for_deletion)
+            || { #[cfg(feature = "webxr")] { self.webxr_bridge.as_ref().is_some_and(|bridge| bridge.has_pending_retirement()) }
+                 #[cfg(not(feature = "webxr"))] { false } }
+    }
+    fn retire(&mut self, closing: bool) -> bool { self.retry_retirement(closing) }
+}
+
 impl WebGLThread {
     /// Create a new instance of WebGLThread.
     pub(crate) fn new(
@@ -293,6 +423,7 @@ impl WebGLThread {
             device_map: Default::default(),
             paint_api,
             contexts: Default::default(),
+            pending_creations: Vec::new(),
             cached_context_info: Default::default(),
             bound_context_id: None,
             external_image_id_manager: external_images,
@@ -319,13 +450,24 @@ impl WebGLThread {
     }
 
     fn process(&mut self) {
-        let webgl_chan = WebGLChan(self.sender.clone());
-        while let Ok(Ok(msg)) = self.receiver.recv() {
-            let exit = self.handle_msg(msg, &webgl_chan);
-            if exit {
-                break;
-            }
+        crate::retirement_loop::run(self);
+    }
+
+    fn retry_retirement(&mut self, closing: bool) -> bool {
+        self.retry_failed_creations();
+        #[cfg(feature = "webxr")]
+        {
+            let mut bridge = self.webxr_bridge.take();
+            if let Some(bridge) = bridge.as_mut() { bridge.retry_retirement(self); }
+            self.webxr_bridge = bridge;
         }
+        let ids: Vec<_> = self.contexts.iter().filter_map(|(id,data)|
+            (closing || data.marked_for_deletion).then_some(*id)).collect();
+        for id in ids { self.remove_webgl_context(id); }
+        let xr_pending = { #[cfg(feature = "webxr")] { self.webxr_bridge.as_ref().is_some_and(|bridge| bridge.has_pending_retirement()) }
+                           #[cfg(not(feature = "webxr"))] { false } };
+        if closing { self.contexts.is_empty() && self.pending_creations.is_empty() && !xr_pending }
+        else { !crate::retirement_loop::Worker::pending(self) }
     }
 
     /// Enable GL_POINT_SPRITE and GL_PROGRAM_POINT_SIZE on desktop OpenGL.
@@ -362,10 +504,11 @@ impl WebGLThread {
             WebGLMsg::CreateContext(painter_id, version, size, attributes, result_sender) => {
                 let result = self.create_webgl_context(painter_id, version, size, attributes);
 
-                let result = result.map(|(id, limits)| {
-                        let data = self
-                            .make_current_if_needed(id)
-                            .expect("WebGLContext not found");
+                let result = result.and_then(|(id, limits)| {
+                        let Some(data) = self.make_current_if_needed(id) else {
+                            self.remove_webgl_context(id);
+                            return Err("Cannot select newly created WebGL context".into());
+                        };
 
                         Self::ensure_point_sprite_and_program_point_size_enabled(data);
 
@@ -376,12 +519,12 @@ impl WebGLThread {
                             GlType::Gl
                         };
 
-                        WebGLCreateContextResult {
+                        Ok(WebGLCreateContextResult {
                             sender: WebGLMsgSender::new(id, webgl_chan.clone()),
                             limits,
                             glsl_version,
                             api_type,
-                        }
+                        })
                     });
                 let created_id = result.as_ref().ok().map(|result| result.sender.context_id());
                 if result_sender.send(result).is_err() {
@@ -401,7 +544,9 @@ impl WebGLThread {
                 self.handle_set_image_key(ctx_id, image_key);
             },
             WebGLMsg::ResizeContext(ctx_id, size, sender) => {
-                let _ = sender.send(self.resize_webgl_context(ctx_id, size));
+                let result = self.resize_webgl_context(ctx_id, size);
+                if result.is_err() { self.notify_context_loss(ctx_id); }
+                let _ = sender.send(result);
             },
             WebGLMsg::RemoveContext(ctx_id) => {
                 self.remove_webgl_context(ctx_id);
@@ -426,11 +571,6 @@ impl WebGLThread {
                 }
             },
             WebGLMsg::Exit => {
-                // Call remove_context functions in order to correctly delete WebRender image keys.
-                let context_ids: Vec<WebGLContextId> = self.contexts.keys().copied().collect();
-                for id in context_ids {
-                    self.remove_webgl_context(id);
-                }
                 return true;
             },
         }
@@ -481,7 +621,13 @@ impl WebGLThread {
                 webxr_bridge.destroy_layer_manager(manager_id);
             },
             WebXRCommand::CreateLayer(manager_id, context_id, layer_init, viewports, sender) => {
-                let result = webxr_bridge.create_layer(manager_id, self, context_id, layer_init, viewports);
+                let result = if self.contexts.get(&context_id.into())
+                    .is_none_or(|data| data.lost || data.marked_for_deletion)
+                {
+                    Err(webxr_api::Error::NoMatchingDevice)
+                } else {
+                    webxr_bridge.create_layer(manager_id, self, context_id, layer_init, viewports)
+                };
                 let _ = sender.send(result);
             },
             WebXRCommand::DestroyLayer(manager_id, context_id, layer_id) => {
@@ -497,6 +643,7 @@ impl WebGLThread {
             },
         }
 
+        webxr_bridge.retry_retirement(self);
         self.webxr_bridge.replace(webxr_bridge);
     }
 
@@ -524,6 +671,21 @@ impl WebGLThread {
         if let Some(observer) = data.loss_observer.take() { let _ = observer.send(id); }
     }
 
+    fn native_context_failed(&mut self, id: WebGLContextId, error: &surfman::Error) {
+        self.bound_context_id = None;
+        let native_loss = error.is_context_lost();
+        if native_loss {
+            if let Some(data) = self.contexts.get_mut(&id) {
+                if data.device.supports_context_loss_recovery() &&
+                    data.device.mark_context_lost(&mut data.ctx).is_ok()
+                {
+                    data.native_lost = true;
+                }
+            }
+        }
+        self.notify_context_loss(id);
+    }
+
     /// Handles a WebGLCommand for a specific WebGLContext
     fn handle_webgl_command(
         &mut self,
@@ -531,7 +693,7 @@ impl WebGLThread {
         command: WebGLCommand,
         backtrace: WebGLCommandBacktrace,
     ) {
-        if self.contexts.get(&context_id).is_some_and(|data| data.lost) { return; }
+        if self.contexts.get(&context_id).is_some_and(|data| data.lost || data.marked_for_deletion) { return; }
         if self.cached_context_info.get_mut(&context_id).is_none() {
             return;
         }
@@ -550,7 +712,15 @@ impl WebGLThread {
         }
     }
 
-    /// Creates a new WebGLContext
+    fn retry_failed_creations(&mut self) {
+        if self.pending_creations.is_empty() { return; }
+        for mut creation in std::mem::take(&mut self.pending_creations) {
+            if creation.retire().is_err() { self.pending_creations.push(creation); }
+        }
+        self.bound_context_id = None;
+    }
+
+    /// Acquire a complete context transactionally, including its native rollback owner.
     fn create_webgl_context(
         &mut self,
         painter_id: PainterId,
@@ -558,183 +728,103 @@ impl WebGLThread {
         requested_size: Size2D<u32>,
         attributes: GLContextAttributes,
     ) -> Result<(WebGLContextId, webgl::GLLimits), String> {
-        debug!(
-            "WebGLThread::create_webgl_context({:?}, {:?}, {:?})",
-            webgl_version, requested_size, attributes
-        );
-
-        // Creating a new GLContext may make the current bound context_id dirty.
-        // Clear it to ensure that  make_current() is called in subsequent commands.
+        self.retry_failed_creations();
         self.bound_context_id = None;
-
-        // This can happen if the Webview was dropped while one of its ScriptThreads
-        // is still issuing asynchronous commands to the WebGL thread.
-        let Some(painter_surfman_details) = self.painter_surfman_details_map.get(painter_id) else {
-            return Err(format!(
-                "PainterSurfmanDetails not found for {painter_id:?}"
-            ));
+        let Some(details) = self.painter_surfman_details_map.get(painter_id) else {
+            return Err(format!("PainterSurfmanDetails not found for {painter_id:?}"));
         };
-
-        let api_type = match painter_surfman_details.connection.gl_api() {
+        let api_type = match details.connection.gl_api() {
             surfman::GLApi::GL => GlType::Gl,
             surfman::GLApi::GLES => GlType::Gles,
         };
-
-        let requested_flags =
-            attributes.to_surfman_context_attribute_flags(webgl_version, api_type);
-        // Some GL implementations seem to only allow famebuffers
-        // to have alpha, depth and stencil if their creating context does.
-        // WebGL requires all contexts to be able to create framebuffers with
-        // alpha, depth and stencil. So we always create a context with them,
-        // and fake not having them if requested.
-        let flags = requested_flags |
-            ContextAttributeFlags::ALPHA |
-            ContextAttributeFlags::DEPTH |
-            ContextAttributeFlags::STENCIL;
-        let context_attributes = &ContextAttributes {
-            version: webgl_version.to_surfman_version(api_type),
-            flags,
-        };
-
+        let requested_flags = attributes.to_surfman_context_attribute_flags(webgl_version, api_type);
+        let flags = requested_flags | ContextAttributeFlags::ALPHA |
+            ContextAttributeFlags::DEPTH | ContextAttributeFlags::STENCIL;
         let device = self.get_or_create_device_for_painter(painter_id)?;
-        let context_descriptor = device
-            .create_context_descriptor(context_attributes)
-            .map_err(|err| format!("Failed to create context descriptor: {:?}", err))?;
-
-        let safe_size = Size2D::new(
-            requested_size.width.min(SAFE_VIEWPORT_DIMS[0]).max(1),
-            requested_size.height.min(SAFE_VIEWPORT_DIMS[1]).max(1),
-        );
-        let surface_type = SurfaceType::Generic {
-            size: safe_size.to_i32(),
+        let descriptor = device.create_context_descriptor(&ContextAttributes {
+            version: webgl_version.to_surfman_version(api_type), flags,
+        }).map_err(|error| format!("Failed to create context descriptor: {error:?}"))?;
+        let ctx = device.create_context(&descriptor, None)
+            .map_err(|error| format!("Failed to create the GL context: {error:?}"))?;
+        let id = WebGLContextId(self.external_image_id_manager.next_id(WebRenderImageHandlerType::WebGl).0);
+        let safe_size = Size2D::new(requested_size.width.min(SAFE_VIEWPORT_DIMS[0]).max(1),
+            requested_size.height.min(SAFE_VIEWPORT_DIMS[1]).max(1));
+        let access = self.surface_access();
+        let mut creation = PendingCreation {
+            device: device.clone(), ctx, returned_surfaces: Vec::new(), chain_id: None,
+            chains: self.webrender_swap_chains.clone(), gl: None, retirement: RetirementPhase::default(),
         };
-        let surface_access = self.surface_access();
-
-        let mut ctx = device
-            .create_context(&context_descriptor, None)
-            .map_err(|err| format!("Failed to create the GL context: {:?}", err))?;
-        let surface = device
-            .create_surface(&ctx, surface_access, surface_type)
-            .map_err(|err| format!("Failed to create the initial surface: {:?}", err))?;
-        device
-            .bind_surface_to_context(&mut ctx, surface)
-            .map_err(|err| format!("Failed to bind initial surface: {:?}", err))?;
-        // https://github.com/pcwalton/surfman/issues/7
-        device
-            .make_context_current(&ctx)
-            .map_err(|err| format!("Failed to make new context current: {:?}", err))?;
-
-        let context_id = WebGLContextId(
-            self.external_image_id_manager
-                .next_id(WebRenderImageHandlerType::WebGl)
-                .0,
-        );
-
-        self.webrender_swap_chains
-            .create_attached_swap_chain(context_id, &*device, &mut ctx, surface_access)
-            .map_err(|err| format!("Failed to create swap chain: {:?}", err))?;
-
-        let Some(swap_chain) = self.webrender_swap_chains.get(context_id) else {
-            return Err("Failed to get the swap chain".into());
-        };
-
-        debug!(
-            "Created webgl context {:?}/{:?}",
-            context_id,
-            device.context_id(&ctx),
-        );
-
-        let gl = unsafe {
-            Rc::new(match api_type {
-                GlType::Gl => glow::Context::from_loader_function(|symbol_name| {
-                    device.get_proc_address(&ctx, symbol_name)
-                }),
-                GlType::Gles => glow::Context::from_loader_function(|symbol_name| {
-                    device.get_proc_address(&ctx, symbol_name)
-                }),
-            })
-        };
-
-        let limits = GLLimits::detect(&gl, webgl_version);
-
-        let size = clamp_viewport(&gl, requested_size);
-        debug_assert_eq!(unsafe { gl.get_error() }, gl::NO_ERROR);
-
-        if safe_size != size {
-            debug!("Resizing swap chain from {:?} to {:?}", safe_size, size);
-            swap_chain
-                .resize(&device, &mut ctx, size.to_i32())
-                .map_err(|err| format!("Failed to resize swap chain: {:?}", err))?;
-        }
-
-        let descriptor = device.context_descriptor(&ctx);
-        let descriptor_attributes = device.context_descriptor_attributes(&descriptor);
-        let gl_version = descriptor_attributes.version;
-        let has_alpha = requested_flags.contains(ContextAttributeFlags::ALPHA);
-
-        device.make_context_current(&ctx).unwrap();
-        let framebuffer = device
-            .context_surface_info(&ctx)
-            .map_err(|err| format!("Failed to get context surface info: {:?}", err))?
-            .ok_or_else(|| "Failed to get context surface info".to_string())?
-            .framebuffer_object;
-
-        unsafe {
-            gl.bind_framebuffer(gl::FRAMEBUFFER, framebuffer);
-            gl.viewport(0, 0, size.width as i32, size.height as i32);
-            gl.scissor(0, 0, size.width as i32, size.height as i32);
-            gl.clear_color(0., 0., 0., !has_alpha as u32 as f32);
-            gl.clear_depth(1.);
-            gl.clear_stencil(0);
-            gl.clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT | gl::STENCIL_BUFFER_BIT);
-            gl.clear_color(0., 0., 0., 0.);
-            debug_assert_eq!(gl.get_error(), gl::NO_ERROR);
-        }
-
-        let default_vao = if let Some(vao) = WebGLImpl::create_vertex_array(&gl) {
-            unsafe { gl.bind_vertex_array(Some(vao.glow())) }
-            Some(vao.glow())
-        } else {
-            None
-        };
-        debug_assert_eq!(unsafe { gl.get_error() }, gl::NO_ERROR);
-
-        let state = GLState {
-            _gl_version: gl_version,
-            webgl_version,
-            requested_flags,
-            default_vao,
-            ..Default::default()
-        };
-        debug!("Created state {:?}", state);
-
-        state.restore_invariant(&gl);
-        debug_assert_eq!(unsafe { gl.get_error() }, gl::NO_ERROR);
-
-        self.contexts.insert(
-            context_id,
-            GLContextData {
-                ctx,
-                device,
-                gl,
-                state,
-                attributes,
-                marked_for_deletion: false,
-                lost: false,
-                loss_observer: None,
+        let initialization = (|| {
+            let surface = device.create_surface(&creation.ctx, access,
+                SurfaceType::Generic { size: safe_size.to_i32() })
+                .map_err(|error| format!("Failed to create initial surface: {error:?}"))?;
+            creation.bind_initial_surface(surface)?;
+            device.make_context_current(&creation.ctx)
+                .map_err(|error| format!("Failed to select new context: {error:?}"))?;
+            creation.chains.create_attached_swap_chain(id, &*device, &mut creation.ctx, access)
+                .map_err(|error| format!("Failed to create swap chain: {error:?}"))?;
+            creation.chain_id = Some(id);
+            let chain = creation.chains.get(id).ok_or_else(|| "Created swap chain is unavailable".to_owned())?;
+            let gl = Rc::new(unsafe {
+                Gl::try_from_loader_function(|name| device.get_proc_address(&creation.ctx, name))
+            }.map_err(|error| format!("Failed to initialize GL metadata: {error}"))?);
+            creation.gl = Some(gl.clone());
+            let limits = GLLimits::detect(&gl, webgl_version);
+            let size = clamp_viewport(&gl, requested_size);
+            if safe_size != size {
+                chain.resize(&device, &mut creation.ctx, size.to_i32())
+                    .map_err(|error| format!("Failed to resize initial swap chain: {error:?}"))?;
+            }
+            let descriptor = device.context_descriptor(&creation.ctx);
+            let gl_version = device.context_descriptor_attributes(&descriptor).version;
+            let has_alpha = requested_flags.contains(ContextAttributeFlags::ALPHA);
+            device.make_context_current(&creation.ctx)
+                .map_err(|error| format!("Failed to select initialized context: {error:?}"))?;
+            let framebuffer = device.context_surface_info(&creation.ctx)
+                .map_err(|error| format!("Failed to query initial surface: {error:?}"))?
+                .ok_or_else(|| "Initial context surface is unavailable".to_owned())?.framebuffer_object;
+            unsafe {
+                gl.bind_framebuffer(gl::FRAMEBUFFER, framebuffer);
+                gl.viewport(0, 0, size.width as i32, size.height as i32);
+                gl.scissor(0, 0, size.width as i32, size.height as i32);
+                gl.clear_color(0., 0., 0., !has_alpha as u32 as f32);
+                gl.clear_depth(1.); gl.clear_stencil(0);
+                gl.clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT | gl::STENCIL_BUFFER_BIT);
+                gl.clear_color(0., 0., 0., 0.);
+                debug_assert_eq!(gl.get_error(), gl::NO_ERROR);
+            }
+            let default_vao = if let Some(vao) = WebGLImpl::create_vertex_array(&gl) {
+                unsafe { gl.bind_vertex_array(Some(vao.glow())) };
+                Some(vao.glow())
+            } else { None };
+            let state = GLState { _gl_version: gl_version, webgl_version,
+                requested_flags, default_vao, ..Default::default() };
+            state.restore_invariant(&gl);
+            Ok::<_, String>((limits, size, has_alpha, state, gl))
+        })();
+        let (limits, size, has_alpha, state, gl) = match initialization {
+            Ok(ready) => ready,
+            Err(error) => {
+                if let Err(cleanup_error) = creation.abort() {
+                    warn!("Retaining failed WebGL creation for cleanup: {cleanup_error:?}");
+                    self.pending_creations.push(creation);
+                }
+                self.bound_context_id = None;
+                return Err(error);
             },
-        );
-
-        self.cached_context_info.insert(
-            context_id,
-            WebGLContextInfo {
-                image_key: None,
-                size: size.to_i32(),
-                alpha: has_alpha,
-            },
-        );
-
-        Ok((context_id, limits))
+        };
+        // Commit only after every fallible initialization step has succeeded.
+        debug_assert!(creation.returned_surfaces.is_empty());
+        let PendingCreation { ctx, device, .. } = creation;
+        self.contexts.insert(id, GLContextData {
+            ctx, device, gl, state, attributes, marked_for_deletion: false,
+            lost: false, native_lost: false, retirement: RetirementPhase::default(),
+            retiring_surfaces: Vec::new(), loss_observer: None,
+        });
+        self.cached_context_info.insert(id, WebGLContextInfo {
+            image_key: None, size: size.to_i32(), alpha: has_alpha,
+        });
+        Ok((id, limits))
     }
 
     /// Resizes a WebGLContext
@@ -743,10 +833,12 @@ impl WebGLThread {
         context_id: WebGLContextId,
         requested_size: Size2D<u32>,
     ) -> Result<(), String> {
-        if self.contexts.get(&context_id).is_some_and(|data| data.lost) {
+        if self.contexts.get(&context_id).is_some_and(|data| data.lost || data.marked_for_deletion) {
             return Err("WebGL context lost".into());
         }
-        self.make_current_if_needed(context_id);
+        if !self.ensure_context_current(context_id) {
+            return Err("Cannot make WebGL context current".into());
+        }
 
         let Some(data) = self.contexts.get_mut(&context_id) else {
             return Err("Missing WebGL context!".into());
@@ -758,7 +850,8 @@ impl WebGLThread {
         // Check to see if any of the current framebuffer bindings are the surface we're about to
         // throw out. If so, we'll have to reset them after destroying the surface.
         let framebuffer_rebinding_info =
-            FramebufferRebindingInfo::detect(&data.device, &data.ctx, &data.gl);
+            FramebufferRebindingInfo::detect(&data.device, &data.ctx, &data.gl)
+                .map_err(|error| format!("Cannot capture resized framebuffer state: {error:?}"))?;
 
         // Resize the swap chains
         if let Some(swap_chain) = self.webrender_swap_chains.get(context_id) {
@@ -778,7 +871,8 @@ impl WebGLThread {
         }
 
         // Reset framebuffer bindings as appropriate.
-        framebuffer_rebinding_info.apply(&data.device, &data.ctx, &data.gl);
+        framebuffer_rebinding_info.apply(&data.device, &data.ctx, &data.gl)
+            .map_err(|error| format!("Cannot restore resized framebuffer state: {error:?}"))?;
         debug_assert_eq!(unsafe { data.gl.get_error() }, gl::NO_ERROR);
 
         let has_alpha = data
@@ -836,8 +930,15 @@ impl WebGLThread {
             return;
         };
 
-        // We need to make the context current so its resources can be disposed of.
-        self.make_current_if_needed(context_id);
+        if let Some(data) = self.contexts.get_mut(&context_id) {
+            data.marked_for_deletion = true;
+        }
+        if self.contexts.get(&context_id).is_some_and(|data| data.retirement.needs_resources()) {
+        // A loss discovered while selecting the context can retire immediately
+        // through the native path; a transient non-loss failure keeps its owner.
+        if !self.native_context_lost(context_id) && !self.ensure_context_current(context_id)
+            && !self.native_context_lost(context_id)
+        { return; }
 
         // Destroy WebXR layers associated with this context
         #[cfg(feature = "webxr")]
@@ -845,27 +946,33 @@ impl WebGLThread {
             // We must temporarily take the WebXRBridge, as we are passing self to a
             // method on the bridge.
             let mut webxr_bridge = self.webxr_bridge.take();
-            if let Some(webxr_bridge) = &mut webxr_bridge {
-                webxr_bridge.destroy_all_layers(self, context_id.into());
-            }
+            let released = webxr_bridge.as_mut().is_none_or(|bridge| {
+                bridge.destroy_all_layers(self, context_id.into())
+            });
             self.webxr_bridge = webxr_bridge;
+            if !released {
+                if let Some(data) = self.contexts.get_mut(&context_id) {
+                    data.marked_for_deletion = true;
+                }
+                return;
+            }
         }
 
-        // Release GL context.
-        let Some(mut data) = self.contexts.remove(&context_id) else {
-            return;
-        };
+        }
 
-        // Destroy the swap chains
-        self.webrender_swap_chains
-            .destroy(context_id, &data.device, &mut data.ctx)
-            .unwrap();
-
-        // Destroy the context
-        data.device.destroy_context(&mut data.ctx).unwrap();
-
-        // Removing a GLContext may make the current bound context_id dirty.
+        let Some(data) = self.contexts.get_mut(&context_id) else { return; };
         self.bound_context_id = None;
+        let mut phase = data.retirement;
+        let result = retire_in_order(&mut phase, &mut ContextRetirement {
+            data: &mut *data, chains: &self.webrender_swap_chains, id: context_id,
+        });
+        data.retirement = phase;
+        if let Err(error) = result {
+            warn!("Deferring WebGL context retirement {context_id:?} at {phase:?}: {error:?}");
+            self.native_context_failed(context_id, &error);
+            return;
+        }
+        self.contexts.remove(&context_id);
     }
 
     fn handle_swap_buffers(
@@ -874,88 +981,41 @@ impl WebGLThread {
         context_ids: Vec<WebGLContextId>,
         _sent_time: u64,
     ) {
-        debug!("handle_swap_buffers()");
         for context_id in context_ids {
-            if self.contexts.get(&context_id).is_none_or(|data| data.lost) { continue; }
-            self.make_current_if_needed(context_id)
-                .expect("Where's the GL data?");
-
-            let data = self
-                .contexts
-                .get_mut(&context_id)
-                .expect("Missing WebGL context");
-
-            // Some surfman backends fail to create the next surface while a GL error is pending.
-            let pending_error = unsafe { data.gl.get_error() };
-            debug_assert_eq!(pending_error, gl::NO_ERROR);
-            if pending_error != gl::NO_ERROR {
-                warn!("Discarding GL error {pending_error:#x} before swapping {context_id:?}");
-            }
-
-            // Check to see if any of the current framebuffer bindings are the surface we're about
-            // to swap out. If so, we'll have to reset them after destroying the surface.
-            let framebuffer_rebinding_info =
-                FramebufferRebindingInfo::detect(&data.device, &data.ctx, &data.gl);
-            debug_assert_eq!(unsafe { data.gl.get_error() }, gl::NO_ERROR);
-
-            debug!("Getting swap chain for {:?}", context_id);
-            let swap_chain = self
-                .webrender_swap_chains
-                .get(context_id)
-                .expect("Where's the swap chain?");
-
-            debug!("Swapping {:?}", context_id);
-            swap_chain
-                .swap_buffers(
-                    &data.device,
-                    &mut data.ctx,
+            if self.contexts.get(&context_id)
+                .is_none_or(|data| data.lost || data.marked_for_deletion)
+            { continue; }
+            if !self.ensure_context_current(context_id) { continue; }
+            let operation = (|| -> Result<_, surfman::Error> {
+                let data = self.contexts.get_mut(&context_id).ok_or(surfman::Error::Failed)?;
+                let swap_chain = self.webrender_swap_chains.get(context_id)
+                    .ok_or(surfman::Error::Failed)?;
+                let pending_error = unsafe { data.gl.get_error() };
+                debug_assert_eq!(pending_error, gl::NO_ERROR);
+                if pending_error != gl::NO_ERROR {
+                    warn!("Discarding GL error {pending_error:#x} before swapping {context_id:?}");
+                }
+                let framebuffer = FramebufferRebindingInfo::detect(&data.device, &data.ctx, &data.gl)?;
+                swap_chain.swap_buffers(&data.device, &mut data.ctx,
                     if data.attributes.preserve_drawing_buffer {
                         PreserveBuffer::Yes(&data.gl)
-                    } else {
-                        PreserveBuffer::No
-                    },
-                )
-                .unwrap();
-            debug_assert_eq!(unsafe { data.gl.get_error() }, gl::NO_ERROR);
-
-            if !data.attributes.preserve_drawing_buffer {
-                debug!("Clearing {:?}", context_id);
-                let alpha = data
-                    .state
-                    .requested_flags
-                    .contains(ContextAttributeFlags::ALPHA);
-                let clear_color = [0.0, 0.0, 0.0, !alpha as i32 as f32];
-                swap_chain
-                    .clear_surface(&data.device, &mut data.ctx, &data.gl, clear_color)
-                    .unwrap();
-                debug_assert_eq!(unsafe { data.gl.get_error() }, gl::NO_ERROR);
+                    } else { PreserveBuffer::No })?;
+                let alpha = data.state.requested_flags.contains(ContextAttributeFlags::ALPHA);
+                if !data.attributes.preserve_drawing_buffer {
+                    swap_chain.clear_surface(&data.device, &mut data.ctx, &data.gl,
+                        [0., 0., 0., !alpha as i32 as f32])?;
+                }
+                framebuffer.apply(&data.device, &data.ctx, &data.gl)?;
+                let info = data.device.context_surface_info(&data.ctx)?.ok_or(surfman::Error::Failed)?;
+                Ok((info.size, alpha))
+            })();
+            match operation {
+                Ok((size, alpha)) => self.update_webrender_image_for_context(context_id, size, alpha, canvas_epoch),
+                Err(error) => {
+                    warn!("WebGL frame failed for {context_id:?}: {error:?}");
+                    self.native_context_failed(context_id, &error);
+                },
             }
-
-            // Rebind framebuffers as appropriate.
-            debug!("Rebinding {:?}", context_id);
-            framebuffer_rebinding_info.apply(&data.device, &data.ctx, &data.gl);
-            debug_assert_eq!(unsafe { data.gl.get_error() }, gl::NO_ERROR);
-
-            let SurfaceInfo {
-                size,
-                framebuffer_object,
-                id,
-                ..
-            } = data
-                .device
-                .context_surface_info(&data.ctx)
-                .unwrap()
-                .unwrap();
-            debug!(
-                "... rebound framebuffer {:?}, new back buffer surface is {:?}",
-                framebuffer_object, id
-            );
-
-            let has_alpha = data
-                .state
-                .requested_flags
-                .contains(ContextAttributeFlags::ALPHA);
-            self.update_webrender_image_for_context(context_id, size, has_alpha, canvas_epoch);
         }
     }
 
@@ -964,37 +1024,41 @@ impl WebGLThread {
         SurfaceAccess::GPUOnly
     }
 
-    /// Gets a reference to a Context for a given WebGLContextId and makes it current if required.
-    pub(crate) fn make_current_if_needed(
-        &mut self,
-        context_id: WebGLContextId,
-    ) -> Option<&GLContextData> {
-        let data = self.contexts.get(&context_id);
-
-        if let Some(data) = data &&
-            Some(context_id) != self.bound_context_id
-        {
-            data.device.make_context_current(&data.ctx).unwrap();
-            self.bound_context_id = Some(context_id);
+    fn ensure_context_current(&mut self, context_id: WebGLContextId) -> bool {
+        let Some(data) = self.contexts.get(&context_id) else { return false; };
+        if !data.retirement.needs_resources() { return false; }
+        let result = bind_context(&mut self.bound_context_id, context_id, || {
+            if data.native_lost || data.device.context_is_lost(&data.ctx) {
+                Err(surfman::Error::MakeCurrentFailed(surfman::WindowingApiError::ContextLost))
+            } else { Ok(()) }
+        }, || data.device.make_context_current(&data.ctx));
+        if let Err(error) = result {
+            warn!("Cannot select WebGL context {context_id:?}: {error:?}");
+            self.native_context_failed(context_id, &error);
+            return false;
         }
-
-        data
+        true
     }
 
-    /// Gets a mutable reference to a GLContextWrapper for a WebGLContextId and makes it current if required.
-    pub(crate) fn make_current_if_needed_mut(
-        &mut self,
-        context_id: WebGLContextId,
-    ) -> Option<&mut GLContextData> {
-        let data = self.contexts.get_mut(&context_id);
-        if let Some(ref data) = data &&
-            Some(context_id) != self.bound_context_id
-        {
-            data.device.make_context_current(&data.ctx).unwrap();
-            self.bound_context_id = Some(context_id);
-        }
+    /// Return a context only after its native binding has succeeded.
+    pub(crate) fn make_current_if_needed(&mut self, context_id: WebGLContextId) -> Option<&GLContextData> {
+        if !self.ensure_context_current(context_id) { return None; }
+        self.contexts.get(&context_id)
+    }
 
-        data
+    /// Mutable counterpart of `make_current_if_needed`.
+    pub(crate) fn make_current_if_needed_mut(&mut self, context_id: WebGLContextId) -> Option<&mut GLContextData> {
+        if !self.ensure_context_current(context_id) { return None; }
+        self.contexts.get_mut(&context_id)
+    }
+
+    pub(crate) fn native_context_lost(&self, context_id: WebGLContextId) -> bool {
+        self.contexts.get(&context_id).is_some_and(|data| data.native_lost || data.device.context_is_lost(&data.ctx))
+    }
+
+    #[cfg(feature = "webxr")]
+    pub(crate) fn context_for_retirement(&mut self, context_id: WebGLContextId) -> Option<&mut Context> {
+        self.contexts.get_mut(&context_id).filter(|data| data.native_lost || data.device.context_is_lost(&data.ctx)).map(|data| &mut data.ctx)
     }
 
     /// Tell WebRender to invalidate any cached tiles for a given `WebGLContextId`
@@ -1057,6 +1121,12 @@ impl WebGLThread {
     }
 
     fn handle_set_image_key(&mut self, context_id: WebGLContextId, image_key: ImageKey) {
+        if self.contexts.get(&context_id)
+            .is_none_or(|data| data.lost || data.marked_for_deletion)
+        {
+            self.paint_api.delete_image(image_key);
+            return;
+        }
         let external_image_data = self.external_image_data(context_id);
         let Some(info) = self.cached_context_info.get_mut(&context_id) else {
             self.paint_api.delete_image(image_key);
@@ -3405,62 +3475,134 @@ struct FramebufferRebindingInfo {
 }
 
 impl FramebufferRebindingInfo {
-    fn detect(device: &Device, context: &Context, gl: &Gl) -> FramebufferRebindingInfo {
+    fn detect(device: &Device, context: &Context, gl: &Gl) -> Result<Self, surfman::Error> {
+        let framebuffer = device.context_surface_info(context)?.ok_or(surfman::Error::Failed)?
+            .framebuffer_object;
         unsafe {
-            let read_framebuffer = gl.get_parameter_framebuffer(gl::READ_FRAMEBUFFER_BINDING);
-            let draw_framebuffer = gl.get_parameter_framebuffer(gl::DRAW_FRAMEBUFFER_BINDING);
-
-            let context_surface_framebuffer = device
-                .context_surface_info(context)
-                .unwrap()
-                .unwrap()
-                .framebuffer_object;
-
+            let read = gl.get_parameter_framebuffer(gl::READ_FRAMEBUFFER_BINDING);
+            let draw = gl.get_parameter_framebuffer(gl::DRAW_FRAMEBUFFER_BINDING);
             let mut flags = FramebufferRebindingFlags::empty();
-            if context_surface_framebuffer == read_framebuffer {
-                flags.insert(FramebufferRebindingFlags::REBIND_READ_FRAMEBUFFER);
-            }
-            if context_surface_framebuffer == draw_framebuffer {
-                flags.insert(FramebufferRebindingFlags::REBIND_DRAW_FRAMEBUFFER);
-            }
-
+            flags.set(FramebufferRebindingFlags::REBIND_READ_FRAMEBUFFER, framebuffer == read);
+            flags.set(FramebufferRebindingFlags::REBIND_DRAW_FRAMEBUFFER, framebuffer == draw);
             let mut viewport = [0; 4];
             gl.get_parameter_i32_slice(gl::VIEWPORT, &mut viewport);
-
-            FramebufferRebindingInfo { flags, viewport }
+            Ok(Self { flags, viewport })
         }
     }
 
-    fn apply(self, device: &Device, context: &Context, gl: &Gl) {
-        if self.flags.is_empty() {
-            return;
-        }
-
-        let context_surface_framebuffer = device
-            .context_surface_info(context)
-            .unwrap()
-            .unwrap()
+    fn apply(self, device: &Device, context: &Context, gl: &Gl) -> Result<(), surfman::Error> {
+        if self.flags.is_empty() { return Ok(()); }
+        let framebuffer = device.context_surface_info(context)?.ok_or(surfman::Error::Failed)?
             .framebuffer_object;
-        if self
-            .flags
-            .contains(FramebufferRebindingFlags::REBIND_READ_FRAMEBUFFER)
-        {
-            unsafe { gl.bind_framebuffer(gl::READ_FRAMEBUFFER, context_surface_framebuffer) };
-        }
-        if self
-            .flags
-            .contains(FramebufferRebindingFlags::REBIND_DRAW_FRAMEBUFFER)
-        {
-            unsafe { gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, context_surface_framebuffer) };
-        }
-
         unsafe {
-            gl.viewport(
-                self.viewport[0],
-                self.viewport[1],
-                self.viewport[2],
-                self.viewport[3],
-            )
-        };
+            if self.flags.contains(FramebufferRebindingFlags::REBIND_READ_FRAMEBUFFER) {
+                gl.bind_framebuffer(gl::READ_FRAMEBUFFER, framebuffer);
+            }
+            if self.flags.contains(FramebufferRebindingFlags::REBIND_DRAW_FRAMEBUFFER) {
+                gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, framebuffer);
+            }
+            gl.viewport(self.viewport[0], self.viewport[1], self.viewport[2], self.viewport[3]);
+        }
+        Ok(())
     }
+}
+
+#[cfg(all(test, feature = "webxr", target_os = "linux"))]
+mod creation_retirement_tests {
+    use super::*;
+
+    fn creation() -> PendingCreation {
+        let connection = surfman::mesa_surfaceless::connection::Connection::new().unwrap();
+        let adapter = if std::env::var_os("DOME_CREATION_SOFTWARE").is_some() {
+            connection.create_software_adapter().unwrap()
+        } else { connection.create_low_power_adapter().unwrap() };
+        let device = Rc::new(Device::Alternate(connection.create_device(&adapter).unwrap()));
+        let descriptor = device.create_context_descriptor(&ContextAttributes {
+            version: GLVersion::new(3, 3),
+            flags: ContextAttributeFlags::ALPHA | ContextAttributeFlags::DEPTH | ContextAttributeFlags::STENCIL,
+        }).unwrap();
+        let ctx = device.create_context(&descriptor, None).unwrap();
+        device.make_context_current(&ctx).unwrap();
+        let gl = Rc::new(unsafe { Gl::try_from_loader_function(|name|device.get_proc_address(&ctx, name)) }.unwrap());
+        unsafe { println!("DOME_CREATION_RENDERER={}", gl.get_parameter_string(gl::RENDERER)); }
+        PendingCreation {
+            device, ctx, returned_surfaces: vec![], chain_id: None,
+            chains: SwapChains::new(), gl: Some(gl), retirement: RetirementPhase::default(),
+        }
+    }
+    fn initial_surface(owner: &PendingCreation) -> Surface {
+        owner.device.create_surface(&owner.ctx, SurfaceAccess::GPUOnly,
+            SurfaceType::Generic { size: Size2D::new(8, 8) }).unwrap()
+    }
+    fn assert_native_destroyed(owner: &PendingCreation) {
+        let (Device::Alternate(device), Context::Alternate(context)) = (&*owner.device, &owner.ctx) else {
+            panic!("offscreen alternate required");
+        };
+        assert!(device.native_context(context).egl_context.is_null());
+    }
+    #[test]
+    fn creation_rollback_owns_surface_returned_by_failed_initial_bind() {
+        let mut owner = creation();
+        let surface = initial_surface(&owner);
+        owner.device.mark_context_lost(&mut owner.ctx).unwrap();
+        assert!(owner.bind_initial_surface(surface).is_err());
+        assert_eq!(owner.returned_surfaces.len(), 1);
+        owner.retire().unwrap();
+        assert!(owner.returned_surfaces.is_empty());
+        assert_eq!(owner.retirement, RetirementPhase::Complete);
+        assert_native_destroyed(&owner);
+    }
+    #[test]
+    fn creation_rollback_releases_attachment_before_native_destruction() {
+        let mut owner = creation();
+        let surface = initial_surface(&owner);
+        owner.bind_initial_surface(surface).unwrap();
+        owner.retire().unwrap();
+        assert_eq!(owner.retirement, RetirementPhase::Complete);
+        assert!(owner.device.context_surface_info(&owner.ctx).unwrap().is_none());
+        assert_native_destroyed(&owner);
+    }
+    #[test]
+    fn creation_rollback_releases_registered_chain_and_retains_metadata_until_native_cleanup() {
+        let mut owner = creation();
+        let surface = initial_surface(&owner);
+        owner.bind_initial_surface(surface).unwrap();
+        let id = WebGLContextId(1);
+        owner.chains.create_attached_swap_chain(id, &owner.device, &mut owner.ctx, SurfaceAccess::GPUOnly).unwrap();
+        owner.chain_id = Some(id);
+        let metadata = owner.gl.as_ref().unwrap().clone();
+        assert_eq!(Rc::strong_count(&metadata), 2);
+        owner.retire().unwrap();
+        assert!(owner.chains.get(id).is_none());
+        assert!(owner.chain_id.is_none());
+        assert_native_destroyed(&owner);
+        assert_eq!(Rc::strong_count(&metadata), 2);
+        drop(owner);
+        assert_eq!(Rc::strong_count(&metadata), 1);
+    }
+    #[test]
+    fn creation_abort_preserves_peer_binding_and_framebuffer() {
+        let mut owner = creation();
+        let surface = initial_surface(&owner);
+        owner.bind_initial_surface(surface).unwrap();
+        let mut peer = creation();
+        let surface = initial_surface(&peer);
+        peer.bind_initial_surface(surface).unwrap();
+        peer.device.make_context_current(&peer.ctx).unwrap();
+        let gl = peer.gl.as_ref().unwrap();
+        let before = unsafe { gl.get_parameter_framebuffer(gl::DRAW_FRAMEBUFFER_BINDING) };
+        unsafe { gl.clear_color(0., 1., 0., 1.); gl.clear(gl::COLOR_BUFFER_BIT); }
+        owner.abort().unwrap();
+        let same = unsafe { gl.get_parameter_framebuffer(gl::DRAW_FRAMEBUFFER_BINDING) } == before;
+        let mut pixel = [0; 4];
+        if same {
+            unsafe { gl.read_pixels(0, 0, 1, 1, gl::RGBA, gl::UNSIGNED_BYTE,
+                gl::PixelPackData::Slice(Some(&mut pixel))); }
+        }
+        assert_native_destroyed(&owner);
+        peer.retire().unwrap();
+        assert!(same);
+        assert_eq!(pixel, [0, 255, 0, 255]);
+    }
+
 }

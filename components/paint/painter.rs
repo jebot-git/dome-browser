@@ -315,6 +315,7 @@ impl Painter {
             .collect();
 
         self.send_zoom_and_scroll_offset_updates(need_zoom, scroll_offset_updates);
+        for renderer in self.webview_renderers.values() { renderer.notify_scroll_metrics(); }
 
         if let Some(colors) = self.web_content_animator.update(&self.webview_renderers) {
             let mut transaction = Transaction::new();

@@ -126,6 +126,15 @@ where
         }
     }
 
+    /// Read the matching backend's local native-loss state without GL calls.
+    pub fn context_is_lost(&self, context: &Context<Def, Alt>) -> bool {
+        match (self, context) {
+            (Device::Default(device), Context::Default(context)) => device.context_is_lost(context),
+            (Device::Alternate(device), Context::Alternate(context)) => device.context_is_lost(context),
+            _ => false,
+        }
+    }
+
     /// Whether the selected backend supports context-loss retirement.
     pub fn supports_context_loss_recovery(&self) -> bool {
         match self {

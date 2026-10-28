@@ -89,10 +89,10 @@ pub struct WebGLPaint {
 impl WebGLPaint {
     fn shutdown(&self) {
         self.webgl_threads.exit();
-        if let Some(webgl_join_handle) = self.webgl_join_handle.take()
-            && webgl_join_handle.join().is_err()
-        {
-            warn!("Could not join WebGLThread.");
+        if let Some(handle) = self.webgl_join_handle.take() {
+            if !webgl::join_retiring_thread(handle, std::time::Duration::from_millis(250)) {
+                warn!("WebGL cleanup continues on its owning thread or has exited with an error");
+            }
         }
     }
 }
@@ -166,6 +166,9 @@ pub struct Paint {
     /// An map of external images shared between all `WebGpuExternalImages`.
     #[cfg(feature = "webgpu")]
     webgpu_image_map: std::cell::OnceCell<WebGpuExternalImageMap>,
+    #[cfg(not(feature = "webxr"))]
+    _cleanup_wakeup: servo_base::deferred_cleanup::WakeRegistration,
+
 }
 
 /// Why we need to be repainted. This is used for debugging.
@@ -228,8 +231,15 @@ impl Paint {
             webgl_join_handle: Cell::new(Some(webgl_join_handle)),
             swap_chains,
         };
+        #[cfg(not(feature = "webxr"))]
+        let cleanup_waker = state.event_loop_waker.clone_box();
+        #[cfg(not(feature = "webxr"))]
+        let cleanup_wakeup = servo_base::deferred_cleanup::register_waker(move || cleanup_waker.wake())
+            .expect("Failed to register native cleanup wakeup");
         Rc::new(RefCell::new(Paint {
             painters: Default::default(),
+            #[cfg(not(feature = "webxr"))]
+            _cleanup_wakeup: cleanup_wakeup,
             paint_proxy: state.paint_proxy,
             event_loop_waker: state.event_loop_waker,
             shutdown_state: state.shutdown_state,
@@ -796,6 +806,7 @@ impl Paint {
 
     #[servo_tracing::instrument(skip_all)]
     pub fn perform_updates(&self) -> bool {
+        servo_base::deferred_cleanup::poll_scheduled();
         if self.shutdown_state() == ShutdownState::FinishedShuttingDown {
             return false;
         }

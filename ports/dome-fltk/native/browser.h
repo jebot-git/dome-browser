@@ -11,6 +11,7 @@ int browser_ui_page_focused();
 int browser_ui_visible();
 void browser_ui_wake();
 void browser_ui_close();
+void browser_ui_scroll_metrics(uint64_t tab, uint64_t generation, float offset, float visible, float total);
 void browser_ui_frame(const uint8_t *pixels, unsigned width, unsigned height);
 void browser_ui_title(const char *title, const char *url, int back, int forward);
 void browser_ui_tabs(const char *json, int active);

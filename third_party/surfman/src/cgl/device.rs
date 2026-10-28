@@ -527,7 +527,7 @@ impl Device {
             let context_attributes = self.context_descriptor_attributes(&context_descriptor);
 
             let mut renderbuffers =
-                Renderbuffers::new(gl, &system_surface.size, &context_attributes);
+                Renderbuffers::new_unchecked(gl, &system_surface.size, &context_attributes);
             renderbuffers.bind_to_current_framebuffer(gl);
 
             if gl.get_error() != gl::NO_ERROR
@@ -751,7 +751,7 @@ impl Device {
             );
 
             // Recreate the GL renderbuffers and bind them to the FBO
-            let renderbuffers = Renderbuffers::new(gl, &size, &context_attributes);
+            let renderbuffers = Renderbuffers::new_unchecked(gl, &size, &context_attributes);
             renderbuffers.bind_to_current_framebuffer(gl);
 
             if let Some(texture) = surface.texture_object {

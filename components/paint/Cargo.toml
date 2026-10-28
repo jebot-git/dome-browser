@@ -59,4 +59,5 @@ webxr-api = { workspace = true, optional = true }
 wr_malloc_size_of = { workspace = true }
 
 [dev-dependencies]
+glow = { workspace = true }
 surfman = { workspace = true }

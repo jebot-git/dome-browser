@@ -1197,19 +1197,19 @@ impl servo::webxr::GlWindow for XRWindow {
         &self,
         device: &mut surfman::Device,
         _context: &mut surfman::Context,
-    ) -> servo::webxr::GlWindowRenderTarget {
+    ) -> Result<servo::webxr::GlWindowRenderTarget, String> {
         self.winit_window.set_visible(true);
         let window_handle = self
             .winit_window
             .window_handle()
-            .expect("could not get window handle from window");
+            .map_err(|e| format!("Could not get XR window handle: {e}"))?;
         let size = self.winit_window.inner_size();
         let size = Size2D::new(size.width as i32, size.height as i32);
         let native_widget = device
             .connection()
             .create_native_widget_from_window_handle(window_handle, size)
-            .expect("Failed to create native widget");
-        servo::webxr::GlWindowRenderTarget::NativeWidget(native_widget)
+            .map_err(|e| format!("Could not create XR native widget: {e:?}"))?;
+        Ok(servo::webxr::GlWindowRenderTarget::NativeWidget(native_widget))
     }
 
     fn get_rotation(&self) -> Rotation3D<f32, UnknownUnit, UnknownUnit> {

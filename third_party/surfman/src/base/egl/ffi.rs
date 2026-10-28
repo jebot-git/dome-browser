@@ -38,16 +38,19 @@ pub const EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT: EGLint = 2;
 
 #[allow(non_snake_case)]
 pub(crate) struct EGLExtensionFunctions {
-    // Ubiquitous extensions assumed to be present
-    pub(crate) CreateImageKHR: extern "C" fn(
-        dpy: EGLDisplay,
-        ctx: EGLContext,
-        target: EGLenum,
-        buffer: EGLClientBuffer,
-        attrib_list: *const EGLint,
-    ) -> EGLImageKHR,
-    pub(crate) DestroyImageKHR: extern "C" fn(dpy: EGLDisplay, image: EGLImageKHR) -> EGLBoolean,
-    pub(crate) ImageTargetTexture2DOES: extern "C" fn(target: EGLenum, image: EGLImageKHR),
+    // Availability is checked before acquiring image-backed resources.
+    pub(crate) CreateImageKHR: Option<
+        extern "C" fn(
+            dpy: EGLDisplay,
+            ctx: EGLContext,
+            target: EGLenum,
+            buffer: EGLClientBuffer,
+            attrib_list: *const EGLint,
+        ) -> EGLImageKHR,
+    >,
+    pub(crate) DestroyImageKHR:
+        Option<extern "C" fn(dpy: EGLDisplay, image: EGLImageKHR) -> EGLBoolean>,
+    pub(crate) ImageTargetTexture2DOES: Option<extern "C" fn(target: EGLenum, image: EGLImageKHR)>,
 
     // Optional extensions
     pub(crate) CreateDeviceANGLE: Option<

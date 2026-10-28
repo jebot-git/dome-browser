@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "browser.h"
+#include "scroll-indicator.h"
+#include <chrono>
 #include "appearance.h"
 #include "desktop-menu.h"
 #include "notifications.h"
@@ -137,13 +139,35 @@ void reportPageFocus(bool focused);
 class Page : public Fl_Widget {
   std::vector<uint8_t> pixels;
   unsigned pw=0,ph=0;
+  ScrollIndicator indicator;
+  static double now() {return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();}
+  static void fade(void *data) {
+    auto *page=static_cast<Page*>(data); page->redraw();
+    if(page->indicator.opacity(now())>0)Fl::repeat_timeout(0.02,fade,data);
+  }
   void draw() override {
     fl_push_clip(x(),y(),w(),h());
     fl_color(FL_BACKGROUND2_COLOR); fl_rectf(x(),y(),w(),h());
     if (!pixels.empty()) { Fl_RGB_Image image(pixels.data(),pw,ph,4); image.draw(x(),y()); }
+    double top=0,length=0,alpha=indicator.opacity(now());
+    if(w()>12 && alpha>0 && indicator.geometry(h(),top,length)) {
+      Fl_Color background=FL_BACKGROUND2_COLOR;
+      if(pw && ph && !pixels.empty()) {
+        int sx=std::clamp(w()-7,0,int(pw)-1),sy=std::clamp(int(top+length/2),0,int(ph)-1);
+        size_t index=(size_t(sy)*pw+sx)*4;
+        background=fl_rgb_color(pixels[index],pixels[index+1],pixels[index+2]);
+      }
+      fl_color(fl_color_average(fl_contrast(FL_FOREGROUND_COLOR,background),background,float(alpha*0.7)));
+      fl_rounded_rectf(x()+w()-8,y()+int(top),3,std::max(1,int(length)),2);
+    }
     fl_pop_clip();
   }
 public:
+  ~Page() override {Fl::remove_timeout(fade,this);}
+  void scroll_metrics(uint64_t tab,uint64_t generation,float offset,float visible,float total) {
+    if(indicator.update(tab,generation,offset,visible,total,now()))redraw();
+    if(indicator.opacity(now())>0 && !Fl::has_timeout(fade,this))Fl::add_timeout(0.02,fade,this);
+  }
   Page(int x,int y,int w,int h):Fl_Widget(x,y,w,h){}
   void frame(const uint8_t *p,unsigned width,unsigned height) {
     if (!p || width>8192 || height>8192) return;
@@ -344,6 +368,7 @@ extern "C" int browser_ui_visible(){
 }
 extern "C" void browser_ui_wake(){Fl::awake();}
 extern "C" void browser_ui_close(){if(Fl::event_dispatch()==nativeDispatch)Fl::event_dispatch(previousDispatch);keyboardFocused=false;reportedPageFocus=-1;if(setNativePenHandler)setNativePenHandler(nullptr,nullptr);setNativePenHandler=nullptr;if(fl_wl_set_touch_handler)fl_wl_set_touch_handler(nullptr,nullptr);browser_ui_smallnet_form_close();browser.reset();if(applicationBus){if(applicationObject)g_dbus_connection_unregister_object(applicationBus,applicationObject);g_object_unref(applicationBus);applicationBus=nullptr;}if(applicationInfo){g_dbus_node_info_unref(applicationInfo);applicationInfo=nullptr;}}
+extern "C" void browser_ui_scroll_metrics(uint64_t tab,uint64_t generation,float offset,float visible,float total){if(browser)browser->page->scroll_metrics(tab,generation,offset,visible,total);}
 extern "C" void browser_ui_frame(const uint8_t *p,unsigned w,unsigned h){browser->page->frame(p,w,h);}
 extern "C" void browser_ui_title(const char *title,const char *url,int back,int forward){browser->copy_label((flatCaption(title,false,160)+" — Dome Browser").c_str());if(Fl::focus()!=browser->address)browser->address->setUrl(url);if(back)browser->back->activate();else browser->back->deactivate();if(forward)browser->forward->activate();else browser->forward->deactivate();}
 extern "C" void browser_ui_tabs(const char *text,int active){try{auto data=Json::parse(text);std::vector<std::string> labels;int index=0;for(const auto &item:data)labels.push_back(std::to_string(++index)+". "+item.get<std::string>());browser->tabs->assign(labels,active);}catch(...){} }

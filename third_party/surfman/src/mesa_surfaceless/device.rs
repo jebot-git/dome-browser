@@ -264,6 +264,14 @@ impl Device {
     ///
     /// The context must have been created on this device.
     pub fn destroy_context(&self, context: &mut Context) -> Result<(), Error> {
+        // Surface deletion uses GL object names belonging to this context.
+        // Keep it selected through deletion, then restore a different binding.
+        // Once attachments are gone, native destruction needs no GL binding.
+        let _previous_binding = if !context.0.lost.get() && !context.0.is_current() &&
+            matches!(&context.0.framebuffer, crate::surface::Framebuffer::Surface(_))
+        {
+            Some(self.temporarily_make_context_current(context)?)
+        } else { None };
         match self.unbind_surface_from_context(context) {
             Ok(Some(mut surface)) => {
                 if let Err(error) = self.destroy_surface(context, &mut surface) {
@@ -282,6 +290,9 @@ impl Device {
     pub fn native_context(&self, context: &Context) -> NativeContext {
         context.0.native_context()
     }
+
+    /// Read known native loss without selecting a context or issuing GL.
+    pub fn context_is_lost(&self, context: &Context) -> bool { context.0.lost.get() }
 
     /// This EGL backend supports loss-aware resource retirement.
     pub fn supports_context_loss_recovery(&self) -> bool {
@@ -484,14 +495,16 @@ impl Device {
         let context_descriptor = self.context_descriptor(context);
         let context_attributes = self.context_descriptor_attributes(&context_descriptor);
 
-        Ok(Surface(EGLBackedSurface::new_generic(
+        let result = EGLBackedSurface::new_generic(
             &context.1,
             self.native_connection.egl_display,
             context.0.egl_context,
             context.0.id,
             &context_attributes,
             size,
-        )))
+        );
+        if result.as_ref().is_err_and(Error::is_context_lost) { context.0.lost.set(true); }
+        result.map(Surface)
     }
 
     /// Creates a surface texture from an existing generic surface for use with the given context.
@@ -532,6 +545,13 @@ impl Device {
         context: &mut Context,
         surface: &mut Surface,
     ) -> Result<(), Error> {
+        // GL names belong to the supplied context, even when a peer is current.
+        // On binding failure the caller retains the surface unchanged.
+        let _previous_binding = if !context.0.lost.get() && !context.0.is_current() {
+            Some(self.temporarily_make_context_current(context)?)
+        } else {
+            None
+        };
         let egl_display = self.native_connection.egl_display;
         let window = if context.0.lost.get() {
             surface.0.destroy_after_loss(egl_display, context.0.id)?
@@ -624,3 +644,7 @@ impl Device {
 #[cfg(test)]
 #[path = "initialization_tests.rs"]
 mod initialization_tests;
+
+#[cfg(test)]
+#[path = "attachment_tests.rs"]
+mod attachment_tests;

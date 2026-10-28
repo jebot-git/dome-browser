@@ -9,6 +9,9 @@ licenses (MIT OR Apache-2.0 OR Zlib).
 - Check required query entry points and missing metadata before using results.
 - Keep implementation-defined vendor text usable without requiring UTF-8.
 - Return an empty string for unavailable ordinary string-query results.
+- Add exact native uint scalar queries using desktop double or GLES 3 int64
+  queries, preserving high stencil-mask bits and legacy desktop GL support.
+  Unsupported exact queries return None before callers change clear state.
 - Add isolated native metadata fixtures; these issue no GPU reset.
 
 The Servo workspace and standalone context-validation harnesses patch the same

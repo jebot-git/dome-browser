@@ -37,6 +37,8 @@ pub enum Error {
     GLFunctionNotFound,
     /// GL metadata could not be loaded from the current context.
     GLContextInitializationFailed(String),
+    /// A GL object or its storage could not be allocated or validated.
+    GLResourceAllocationFailed(String),
     /// This context renders to an externally-managed render target.
     ExternalRenderTarget,
     /// A surface was already attached to this context.
@@ -96,6 +98,23 @@ pub enum Error {
     IncompatibleNativeContext,
     /// The native device does not match the supplied connection.
     IncompatibleNativeDevice,
+}
+
+impl Error {
+    /// Whether a native API explicitly reported context loss. This classification
+    /// performs no GL calls and includes allocation, import and cleanup failures.
+    pub fn is_context_lost(&self) -> bool {
+        matches!(self,
+            Self::PixelFormatSelectionFailed(WindowingApiError::ContextLost) |
+            Self::ContextCreationFailed(WindowingApiError::ContextLost) |
+            Self::ContextDestructionFailed(WindowingApiError::ContextLost) |
+            Self::MakeCurrentFailed(WindowingApiError::ContextLost) |
+            Self::SurfaceCreationFailed(WindowingApiError::ContextLost) |
+            Self::SurfaceDestructionFailed(WindowingApiError::ContextLost) |
+            Self::SurfaceImportFailed(WindowingApiError::ContextLost) |
+            Self::SurfaceTextureCreationFailed(WindowingApiError::ContextLost) |
+            Self::PresentFailed(WindowingApiError::ContextLost))
+    }
 }
 
 /// Abstraction of the errors that EGL, CGL, GLX, CGL, etc. return.

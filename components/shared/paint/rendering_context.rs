@@ -59,21 +59,28 @@ pub trait RenderingContext {
     /// After calling this function, it is valid to use OpenGL rendering
     /// commands.
     fn make_current(&self) -> Result<(), Error>;
+    /// Cached native loss state, without issuing ordinary GL queries.
+    fn native_context_is_lost(&self) -> bool {
+        false
+    }
     /// Returns the `gleam` version of the OpenGL or GLES API.
     fn gleam_gl_api(&self) -> Rc<dyn gleam::gl::Gl>;
     /// Returns the OpenGL or GLES API.
     fn glow_gl_api(&self) -> Arc<glow::Context>;
     /// Creates a texture from a given surface and returns the surface texture,
-    /// the OpenGL texture object, and the size of the surface. Default to `None`.
+    /// the OpenGL texture object, and its size. Failures return the original surface.
     fn create_texture(
         &self,
-        _surface: Surface,
-    ) -> Option<(SurfaceTexture, u32, UntypedSize2D<i32>)> {
-        None
+        surface: Surface,
+    ) -> Result<(SurfaceTexture, u32, UntypedSize2D<i32>), (surfman::Error, Surface)> {
+        Err((surfman::Error::Unimplemented, surface))
     }
-    /// Destroys the texture and returns the surface. Default to `None`.
-    fn destroy_texture(&self, _surface_texture: SurfaceTexture) -> Option<Surface> {
-        None
+    /// Export the surface. Failures return the original texture for retry.
+    fn destroy_texture(
+        &self,
+        surface_texture: SurfaceTexture,
+    ) -> Result<Surface, (surfman::Error, SurfaceTexture)> {
+        Err((surfman::Error::Unimplemented, surface_texture))
     }
     /// The connection to the display server for WebGL. Default to `None`.
     fn connection(&self) -> Option<Connection> {
@@ -118,9 +125,9 @@ impl SurfmanRenderingContext {
     ) -> Result<Self, Error> {
         let device = connection.create_device(adapter)?;
 
-        let flags = ContextAttributeFlags::ALPHA |
-            ContextAttributeFlags::DEPTH |
-            ContextAttributeFlags::STENCIL;
+        let flags = ContextAttributeFlags::ALPHA
+            | ContextAttributeFlags::DEPTH
+            | ContextAttributeFlags::STENCIL;
         let gl_api = connection.gl_api();
         let version = match &gl_api {
             GLApi::GLES => surfman::GLVersion { major: 3, minor: 0 },
@@ -245,7 +252,7 @@ impl SurfmanRenderingContext {
     fn create_texture(
         &self,
         surface: Surface,
-    ) -> Option<(SurfaceTexture, u32, UntypedSize2D<i32>)> {
+    ) -> Result<(SurfaceTexture, u32, UntypedSize2D<i32>), (surfman::Error, Surface)> {
         let device = &self.device.borrow();
         let context = &mut self.context.borrow_mut();
         let SurfaceInfo {
@@ -254,21 +261,25 @@ impl SurfmanRenderingContext {
             ..
         } = device.surface_info(&surface);
         debug!("... getting texture for surface {:?}", front_buffer_id);
-        let surface_texture = device.create_surface_texture(context, surface).unwrap();
+        let surface_texture = device.create_surface_texture(context, surface)?;
         let gl_texture = device
             .surface_texture_object(&surface_texture)
             .map(|tex| tex.0.get())
             .unwrap_or(0);
-        Some((surface_texture, gl_texture, size))
+        Ok((surface_texture, gl_texture, size))
     }
 
-    fn destroy_texture(&self, surface_texture: SurfaceTexture) -> Option<Surface> {
+    fn native_context_is_lost(&self) -> bool {
+        self.device.borrow().context_is_lost(&self.context.borrow())
+    }
+
+    fn destroy_texture(
+        &self,
+        surface_texture: SurfaceTexture,
+    ) -> Result<Surface, (surfman::Error, SurfaceTexture)> {
         let device = &self.device.borrow();
         let context = &mut self.context.borrow_mut();
-        device
-            .destroy_surface_texture(context, surface_texture)
-            .map_err(|(error, _)| error)
-            .ok()
+        device.destroy_surface_texture(context, surface_texture)
     }
 
     fn connection(&self) -> Option<Connection> {
@@ -399,11 +410,18 @@ impl RenderingContext for SoftwareRenderingContext {
     fn create_texture(
         &self,
         surface: Surface,
-    ) -> Option<(SurfaceTexture, u32, UntypedSize2D<i32>)> {
+    ) -> Result<(SurfaceTexture, u32, UntypedSize2D<i32>), (surfman::Error, Surface)> {
         self.surfman_rendering_info.create_texture(surface)
     }
 
-    fn destroy_texture(&self, surface_texture: SurfaceTexture) -> Option<Surface> {
+    fn native_context_is_lost(&self) -> bool {
+        self.surfman_rendering_info.native_context_is_lost()
+    }
+
+    fn destroy_texture(
+        &self,
+        surface_texture: SurfaceTexture,
+    ) -> Result<Surface, (surfman::Error, SurfaceTexture)> {
         self.surfman_rendering_info.destroy_texture(surface_texture)
     }
 
@@ -586,11 +604,18 @@ impl RenderingContext for WindowRenderingContext {
     fn create_texture(
         &self,
         surface: Surface,
-    ) -> Option<(SurfaceTexture, u32, UntypedSize2D<i32>)> {
+    ) -> Result<(SurfaceTexture, u32, UntypedSize2D<i32>), (surfman::Error, Surface)> {
         self.surfman_context.create_texture(surface)
     }
 
-    fn destroy_texture(&self, surface_texture: SurfaceTexture) -> Option<Surface> {
+    fn native_context_is_lost(&self) -> bool {
+        self.surfman_context.native_context_is_lost()
+    }
+
+    fn destroy_texture(
+        &self,
+        surface_texture: SurfaceTexture,
+    ) -> Result<Surface, (surfman::Error, SurfaceTexture)> {
         self.surfman_context.destroy_texture(surface_texture)
     }
 
@@ -896,11 +921,18 @@ impl RenderingContext for OffscreenRenderingContext {
     fn create_texture(
         &self,
         surface: Surface,
-    ) -> Option<(SurfaceTexture, u32, UntypedSize2D<i32>)> {
+    ) -> Result<(SurfaceTexture, u32, UntypedSize2D<i32>), (surfman::Error, Surface)> {
         self.parent_context.create_texture(surface)
     }
 
-    fn destroy_texture(&self, surface_texture: SurfaceTexture) -> Option<Surface> {
+    fn native_context_is_lost(&self) -> bool {
+        self.parent_context.native_context_is_lost()
+    }
+
+    fn destroy_texture(
+        &self,
+        surface_texture: SurfaceTexture,
+    ) -> Result<Surface, (surfman::Error, SurfaceTexture)> {
         self.parent_context.destroy_texture(surface_texture)
     }
 

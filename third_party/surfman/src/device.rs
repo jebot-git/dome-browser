@@ -61,6 +61,10 @@ where
     /// The context must have been created on this device.
     fn destroy_context(&self, context: &mut Self::Context) -> Result<(), Error>;
 
+    /// Whether native context loss is already known. This reads local state;
+    /// it must not bind a context, issue GL commands, or poll/reset a device.
+    fn context_is_lost(&self, _context: &Self::Context) -> bool { false }
+
     /// Whether this backend can retire lost contexts without issuing GL commands.
     fn supports_context_loss_recovery(&self) -> bool {
         false

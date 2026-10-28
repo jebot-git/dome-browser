@@ -805,3 +805,29 @@ fn consent_preparation_wakes_the_next_iteration_for_a_deferred_live_request() {
     r.run_one_frame();
     assert!(second.recv_timeout(Duration::from_secs(1)).unwrap().is_ok());
 }
+
+#[test]
+fn deferred_cleanup_wakes_idle_registry_without_moving_native_owner() {
+    struct CleanupWaker(mpsc::Sender<()>);
+    impl EventLoopWaker for CleanupWaker {
+        fn clone_box(&self) -> Box<dyn EventLoopWaker> { Box::new(Self(self.0.clone())) }
+        fn wake(&self) { let _ = self.0.send(()); }
+    }
+    let (send,recv) = mpsc::channel();
+    let mut registry = MainThreadRegistry::new(Box::new(CleanupWaker(send)),LayerGrandManager::new(Manager)).unwrap();
+    let owner = std::rc::Rc::new(std::cell::Cell::new(0)); let count = owner.clone();
+    let thread = std::thread::current().id();
+    crate::deferred_cleanup::defer(move || {
+        assert_eq!(std::thread::current().id(),thread);
+        count.set(count.get()+1); count.get()>=2
+    });
+    let no_busy_rendering = !registry.running();
+    let first_wake = recv.recv_timeout(Duration::from_secs(2)).is_ok();
+    let not_moved = owner.get()==0;
+    registry.run_one_frame();
+    let retry_wake = recv.recv_timeout(Duration::from_secs(2)).is_ok();
+    registry.run_one_frame();
+    crate::deferred_cleanup::drain();
+    assert!(first_wake && retry_wake && not_moved && no_busy_rendering);
+    assert_eq!(owner.get(),2);
+}

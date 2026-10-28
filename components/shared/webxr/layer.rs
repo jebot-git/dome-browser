@@ -22,6 +22,9 @@ pub trait GLTypes {
 }
 
 pub trait GLContexts<GL: GLTypes> {
+    /// Native context loss permits ownership retirement, but no ordinary GL use.
+    /// Logical WebGL loss alone must not set this flag.
+    fn context_lost(&self, _context_id: ContextId) -> bool { false }
     fn device(&self, context_id: ContextId) -> Option<GL::Device>;
     fn bindings(&mut self, context_id: ContextId) -> Option<&GL::Bindings>;
     fn context(&mut self, context_id: ContextId) -> Option<&mut GL::Context>;
@@ -95,6 +98,10 @@ pub trait LayerManagerAPI<GL: GLTypes> {
         viewports: Viewports,
     ) -> Result<LayerInfo, Error>;
 
+    /// Release a layer's owned resources. Keep the layer in `layers()` while
+    /// cleanup cannot complete; callers retain its manager and context and may
+    /// retry this operation. Once released, remove it from `layers()` and make
+    /// subsequent destruction attempts harmless.
     fn destroy_layer(
         &mut self,
         contexts: &mut dyn GLContexts<GL>,

@@ -332,6 +332,9 @@ macro_rules! implement_context_loss_recovery {
         ) -> Result<Option<$crate::GraphicsResetStatus>, Error> {
             Device::graphics_reset_status(self, context)
         }
+        fn context_is_lost(&self, context: &Self::Context) -> bool {
+            Device::context_is_lost(self, context)
+        }
         fn supports_context_loss_recovery(&self) -> bool {
             Device::supports_context_loss_recovery(self)
         }

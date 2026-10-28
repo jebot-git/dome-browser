@@ -16,6 +16,7 @@ mod layer;
 mod mock;
 mod registry;
 mod session;
+mod session_device;
 mod space;
 pub mod util;
 mod view;
@@ -54,3 +55,5 @@ pub use view::{
     CubeLeft, CubeRight, CubeTop, Display, Floor, Input, LEFT_EYE, LeftEye, Native, RIGHT_EYE,
     RightEye, SomeEye, VIEWER, View, ViewDescription, ViewEye, Viewer, Viewport, Viewports, Views,
 };
+
+pub mod deferred_cleanup;

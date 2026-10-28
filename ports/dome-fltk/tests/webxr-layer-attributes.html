@@ -44,6 +44,29 @@ start.onclick=async()=>{
     const layer=new XRWebGLLayer(session,gl,options),initialSize=[layer.framebufferWidth,layer.framebufferHeight];
     post('allocation',{version,marker,texturePreserved:gl.getParameter(gl.TEXTURE_BINDING_2D)===texture,unitPreserved:gl.getParameter(gl.ACTIVE_TEXTURE)===gl.TEXTURE3,unpackPreserved:version!=='webgl2'||gl.getParameter(gl.PIXEL_UNPACK_BUFFER_BINDING)===unpack,error:gl.getError()});
     session.updateRenderState({baseLayer:layer});poison(gl);
+    // Keep the opaque framebuffer and masks across a native implicit clear.
+    // Observe actual stencil-dependent drawing: getParameter uses WebGL's
+    // shadow state and cannot by itself prove preservation of the native mask.
+    if(stencil){
+     await new Promise((resolve,reject)=>session.requestAnimationFrame(()=>{
+      try{
+       gl.bindFramebuffer(gl.FRAMEBUFFER,layer.framebuffer);
+       gl.disable(gl.SCISSOR_TEST);gl.disable(gl.DEPTH_TEST);gl.enable(gl.STENCIL_TEST);
+       gl.colorMask(true,true,true,true);gl.depthMask(false);
+       gl.stencilMask(0xa5a55a5a);gl.stencilFunc(gl.EQUAL,0x5a,255);gl.stencilOp(gl.KEEP,gl.KEEP,gl.KEEP);
+       gl.viewport(0,0,layer.framebufferWidth,layer.framebufferHeight);
+       gl.uniform4f(color,0,1,9/255,1);setTimeout(resolve,0);
+      }catch(e){reject(e)}
+     }));
+     await new Promise((resolve,reject)=>session.requestAnimationFrame(()=>{
+      try{
+       gl.clearStencil(255);gl.clear(gl.STENCIL_BUFFER_BIT);gl.drawArrays(gl.TRIANGLES,0,3);
+       const pixel=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
+       post('full-mask',{version,marker,pixel:[...pixel],error:gl.getError()});
+       gl.disable(gl.STENCIL_TEST);poison(gl);gl.bindFramebuffer(gl.FRAMEBUFFER,null);setTimeout(resolve,0);
+      }catch(e){reject(e)}
+     }));
+    }
     for(let index=0;index<3;index++){
      await new Promise((resolve,reject)=>session.requestAnimationFrame((time,frame)=>{
       try{

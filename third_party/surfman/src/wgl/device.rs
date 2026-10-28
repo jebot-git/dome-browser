@@ -896,7 +896,7 @@ impl Device {
             // Create renderbuffers as appropriate, and attach them.
             let context_descriptor = self.context_descriptor(context);
             let context_attributes = self.context_descriptor_attributes(&context_descriptor);
-            let renderbuffers = Renderbuffers::new(&context.gl, size, &context_attributes);
+            let renderbuffers = Renderbuffers::new_unchecked(&context.gl, size, &context_attributes);
             renderbuffers.bind_to_current_framebuffer(&context.gl);
 
             // FIXME(pcwalton): Do we need to acquire the keyed mutex, or does the GL driver do

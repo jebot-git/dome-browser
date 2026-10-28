@@ -12,7 +12,7 @@ use std::{
     rc::Rc,
     time::{Duration, Instant},
 };
-use surfman::chains::{SwapChainAPI, SwapChains, SwapChainsAPI};
+use surfman::chains::{SurfaceConsumer, SwapChains, SwapChainsAPI};
 use surfman::{
     Adapter, Connection, Context, ContextAttributeFlags, ContextAttributes, Device, GLApi,
     GLVersion, SurfaceAccess, SurfaceType,
@@ -524,7 +524,9 @@ struct BridgeDevice {
     device: Device,
     context: Context,
     gl: Rc<glow::Context>,
-    fbo: glow::NativeFramebuffer,
+    fbo: Option<glow::NativeFramebuffer>,
+    cleanup_phase: webxr::native_cleanup::CleanupPhase,
+    pending_consumer: Option<SurfaceConsumer<Device>>,
     chains: SwapChains<LayerId, Device>,
     grand: LayerGrandManager<SurfmanGL>,
     manager: Option<LayerManager>,
@@ -600,24 +602,26 @@ impl BridgeDevice {
                     | ContextAttributeFlags::STENCIL,
             })
             .map_err(backend)?;
-        let mut context = device.create_context(&desc, None).map_err(backend)?;
+        let context = device.create_context(&desc, None).map_err(backend)?;
+        let mut pending = webxr::pending_context::PendingContext::new(device, context);
+        let (device, context) = pending.parts();
         let surface = device
             .create_surface(
-                &context,
+                context,
                 SurfaceAccess::GPUOnly,
                 SurfaceType::Generic {
                     size: Size2D::new(1, 1),
                 },
             )
             .map_err(backend)?;
-        device
-            .bind_surface_to_context(&mut context, surface)
-            .map_err(|(e, _)| backend(e))?;
-        device.make_context_current(&context).map_err(backend)?;
+        pending.bind(surface).map_err(backend)?;
+        let (device, context) = pending.parts();
+        device.make_context_current(context).map_err(backend)?;
         let gl = Rc::new(unsafe {
-            glow::Context::from_loader_function(|symbol| device.get_proc_address(&context, symbol))
-        });
+            glow::Context::try_from_loader_function(|symbol| device.get_proc_address(context, symbol))
+        }.map_err(backend)?);
         let fbo = unsafe { gl.create_framebuffer().map_err(backend)? };
+        let (device, context) = pending.commit();
         lease.armed = false;
         eprintln!("WEBXR session started through DomeD");
         Ok(Self {
@@ -627,7 +631,9 @@ impl BridgeDevice {
             device,
             context,
             gl,
-            fbo,
+            fbo: Some(fbo),
+            cleanup_phase: Default::default(),
+            pending_consumer: None,
             chains: SwapChains::new(),
             grand,
             manager: None,
@@ -686,7 +692,15 @@ impl BridgeDevice {
             q.quit();
         }
     }
+    fn return_consumer(&mut self) -> Result<()> {
+        if let Some(consumer) = self.pending_consumer.as_mut() {
+            consumer.release(&self.device, &mut self.context).map_err(|e| format!("{e:?}"))?;
+        }
+        self.pending_consumer = None;
+        Ok(())
+    }
     fn submit(&mut self, layers: &[(ContextId, LayerId)]) -> Result<()> {
+        self.return_consumer()?;
         // A lost context removes its shared swap chain before the page has
         // installed a new base layer. Submit an empty frame in that interval.
         let active: Vec<_> = layers.iter().filter(|(_, id)| self.chains.get(*id).is_some()).copied().collect();
@@ -713,22 +727,17 @@ impl BridgeDevice {
         }
         let layer = layers[0].1;
         let chain = self.chains.get(layer).ok_or("XR layer has no swapchain")?;
-        let surface = chain
-            .take_surface()
+        let consumer = SurfaceConsumer::acquire(chain, &self.device, &mut self.context)
+            .map_err(|e| format!("{e:?}"))?
             .ok_or("XR layer has no rendered surface")?;
-        self.device
-            .make_context_current(&self.context)
-            .map_err(|e| format!("{e:?}"))?;
-        let size = self.device.surface_info(&surface).size;
-        let texture = self
-            .device
-            .create_surface_texture(&mut self.context, surface)
-            .map_err(|(e, _)| format!("{e:?}"))?;
-        let object = self.device.surface_texture_object(&texture);
+        let size = consumer.size();
+        let object = self.device.surface_texture_object(consumer.texture().unwrap());
+        // Publish ownership before rendering or any fallible export operation.
+        self.pending_consumer = Some(consumer);
         let target = self.device.surface_gl_texture_target();
         let mut pixels = vec![0u8; size.width as usize * size.height as usize * 4];
         let valid = unsafe {
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, self.fbo);
             self.gl.framebuffer_texture_2d(
                 glow::FRAMEBUFFER,
                 glow::COLOR_ATTACHMENT0,
@@ -759,11 +768,7 @@ impl BridgeDevice {
             );
             valid
         };
-        let surface = self
-            .device
-            .destroy_surface_texture(&mut self.context, texture)
-            .map_err(|(e, _)| format!("{e:?}"))?;
-        chain.recycle_surface(surface);
+        self.return_consumer()?;
         if !valid {
             return Err("XR framebuffer is incomplete".into());
         }
@@ -942,6 +947,12 @@ impl DeviceAPI for BridgeDevice {
     fn quit(&mut self) {
         self.release()
     }
+    fn poll_cleanup(&mut self) -> bool {
+        let mut phase = self.cleanup_phase;
+        let complete = webxr::native_cleanup::advance(&mut phase, self);
+        self.cleanup_phase = phase;
+        complete
+    }
     fn set_quitter(&mut self, quitter: Quitter) {
         self.quitter = Some(quitter)
     }
@@ -952,14 +963,25 @@ impl DeviceAPI for BridgeDevice {
         &self.features
     }
 }
+impl webxr::native_cleanup::CleanupOwner for BridgeDevice {
+    type Error = String;
+    fn release_resources(&mut self) -> std::result::Result<(), String> {
+        self.release();
+        self.manager.take();
+        self.return_consumer().map_err(|e| e.to_string())?;
+        if !self.device.context_is_lost(&self.context) {
+            self.device.make_context_current(&self.context).map_err(|e| format!("{e:?}"))?;
+            if let Some(fbo) = self.fbo.take() { unsafe { self.gl.delete_framebuffer(fbo); } }
+        } else { self.fbo = None; }
+        Ok(())
+    }
+    fn destroy_native(&mut self) -> std::result::Result<(), String> {
+        self.device.destroy_context(&mut self.context).map_err(|e| format!("{e:?}"))
+    }
+}
 impl Drop for BridgeDevice {
     fn drop(&mut self) {
-        self.release();
-        let _ = self.device.make_context_current(&self.context);
-        unsafe {
-            self.gl.delete_framebuffer(self.fbo);
-        }
-        let _ = self.device.destroy_context(&mut self.context);
+        self.poll_cleanup();
     }
 }
 

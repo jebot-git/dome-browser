@@ -94,6 +94,8 @@ impl servo::ServoDelegate for Services {
 }
 struct PageState {
     dirty: Cell<bool>,
+    scroll_metrics: Cell<(f32,f32,f32)>,
+    scroll_generation: Cell<u64>,
     title: RefCell<String>,
     url: RefCell<String>,
     history: Cell<(usize, usize)>,
@@ -121,6 +123,9 @@ impl WebViewDelegate for PageState {
         if self.services.active.get()!=self.tab || view.url()?.origin().ascii_serialization()!=details.origin {return None}
         self.services.wallet.borrow().manage_form(details)
     }
+    fn notify_scroll_metrics(&self, _: WebView, offset: f32, visible: f32, total: f32) {
+        self.scroll_metrics.set((offset,visible,total));
+    }
     fn notify_new_frame_ready(&self, _: WebView) {
         self.dirty.set(true)
     }
@@ -144,7 +149,9 @@ impl WebViewDelegate for PageState {
         }
     }
     fn notify_load_status_changed(&self, _: WebView, status: LoadStatus) {
-        if status==LoadStatus::Started {self.protocol_notice.borrow_mut().take();self.pdf.borrow_mut().cancel();}
+        if status==LoadStatus::Started {
+            self.scroll_generation.set(self.scroll_generation.get().wrapping_add(1));
+            self.scroll_metrics.set((0.,0.,0.));self.protocol_notice.borrow_mut().take();self.pdf.borrow_mut().cancel();}
         self.loaded.set(status == LoadStatus::Complete);
         if self.loaded.get() {ui::status(self.protocol_notice.borrow().as_deref().unwrap_or("Ready"));}
         else {ui::status("Loading…");}
@@ -440,6 +447,8 @@ fn context(software: bool) -> Result<Rc<dyn RenderingContext>, Box<dyn std::erro
 fn state(id: usize, permissions: Rc<RefCell<std::collections::HashSet<String>>>, services: Rc<Services>) -> Rc<PageState> {
     Rc::new(PageState {
         dirty: Cell::new(true),
+        scroll_metrics: Cell::new((0.,0.,0.)),
+        scroll_generation: Cell::new(0),
         title: RefCell::new("New tab".into()),
         url: RefCell::new(String::new()),
         history: Cell::new((0, 0)),
@@ -1313,6 +1322,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             last_save = Instant::now();
         }
+        let state = &tabs[active].state;
+        let (offset, visible, total) = state.scroll_metrics.get();
+        unsafe { ui::browser_ui_scroll_metrics(state.tab as u64, state.scroll_generation.get(), offset, visible, total); }
         if tabs[active].state.dirty.replace(false) {
             let tab = &tabs[active];
             tab.context.make_current().map_err(|e| format!("{e:?}"))?;

@@ -10,6 +10,12 @@ def validate_attributes(check, events, captures, wait):
         check(item['antialias'] == item['actual']['antialias'], label + ': layer reports actual default-buffer antialiasing')
         check(item['ignoreDepthValues'] and item['framebuffer'] is None and item['size'] == [80, 40], label + ': layer uses the existing canvas and has no compositor depth')
 
+    full_masks = [e['data'] for e in events if e['type'] == 'full-mask']
+    check(len(full_masks) == 16, 'Both WebGL versions exercise high stencil-mask bits across native XR frame clearing')
+    for item in full_masks:
+        check(item['pixel'] == [0, 255, 9, 255] and item['error'] == 0,
+              item['version'] + ' marker ' + str(item['marker']) + ': stencil-dependent drawing retains the requested high-bit write mask after implicit clearing')
+
     allocations = [e['data'] for e in events if e['type'] == 'allocation']
     check(len(allocations) == 32, 'All layer allocations report preserved binding state')
     for item in allocations:

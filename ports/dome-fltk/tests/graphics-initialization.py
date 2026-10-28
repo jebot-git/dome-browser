@@ -38,7 +38,7 @@ def main():
    if name=='glow':
     cargo(['test','--release','--locked','--offline','--lib'],'glow-unit-tests.log')
     log=(out/'glow-unit-tests.log').read_text();m=re.search(r'test result: ok\. (\d+) passed; 0 failed',log);assert m,'Glow unit tests did not finish'
-    added=len(re.findall(r'^test native::native_loader_tests::.* \.\.\. ok$',log,re.M));assert added==22,('Native loader coverage changed',added)
+    added=len(re.findall(r'^test native::native_loader_tests::.* \.\.\. ok$',log,re.M));assert added==26,('Native loader coverage changed',added)
     results['glow']={'passed':True,'library_unit_tests':int(m[1]),'native_loader_tests':added}
    else:
     for renderer in ['native','software']:

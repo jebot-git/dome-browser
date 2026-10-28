@@ -243,3 +243,82 @@ fn cached_version_validation_rejects_changed_metadata() {
     configure(Metadata::Legacy);
     assert!(unsafe { context.validate_current_version() }.is_err());
 }
+
+thread_local! {
+    static UNSIGNED_QUERY: Cell<f64> = const { Cell::new(0.) };
+}
+unsafe extern "system" fn get_double_scalar(_: u32, out: *mut f64) {
+    *out = UNSIGNED_QUERY.get();
+}
+unsafe extern "system" fn get_int64_scalar(_: u32, out: *mut i64) {
+    *out = UNSIGNED_QUERY.get() as i64;
+}
+fn load_unsigned(name: &str) -> *const c_void {
+    match name {
+        "glGetDoublev" => get_double_scalar as *const c_void,
+        "glGetInteger64v" => get_int64_scalar as *const c_void,
+        _ => load(name),
+    }
+}
+#[test]
+fn unsigned_queries_preserve_high_bits_on_legacy_core_and_es3() {
+    for metadata in [Metadata::Legacy, Metadata::Core, Metadata::Embedded] {
+        configure(metadata);
+        let context = unsafe { Context::try_from_loader_function(load_unsigned) }.unwrap();
+        for value in [0, 0x13579bdf, 0xa5a55a5a, 0xffffffff] {
+            UNSIGNED_QUERY.set(value as f64);
+            assert_eq!(
+                unsafe { context.get_parameter_u32(crate::STENCIL_WRITEMASK) },
+                Some(value)
+            );
+        }
+    }
+}
+#[test]
+fn unsigned_queries_do_not_call_missing_entry_points() {
+    for metadata in [Metadata::Legacy, Metadata::Core, Metadata::Embedded] {
+        configure(metadata);
+        let context = unsafe { Context::try_from_loader_function(load) }.unwrap();
+        assert_eq!(
+            unsafe { context.get_parameter_u32(crate::STENCIL_WRITEMASK) },
+            None
+        );
+    }
+}
+#[test]
+fn unsigned_queries_reject_out_of_range_and_fractional_desktop_results() {
+    configure(Metadata::Legacy);
+    let context = unsafe { Context::try_from_loader_function(load_unsigned) }.unwrap();
+    for value in [-1., u32::MAX as f64 + 1., 0.5, f64::NAN, f64::INFINITY] {
+        UNSIGNED_QUERY.set(value);
+        assert_eq!(
+            unsafe { context.get_parameter_u32(crate::STENCIL_WRITEMASK) },
+            None
+        );
+    }
+}
+#[test]
+fn unsigned_queries_do_not_issue_es3_commands_on_es2() {
+    configure(Metadata::Legacy);
+    let context = unsafe {
+        Context::try_from_loader_function(|name| {
+            if name == "glGetString" {
+                unsafe extern "system" fn es2_string(parameter: u32) -> *const u8 {
+                    if parameter == VERSION {
+                        c"OpenGL ES 2.0 Fixture".as_ptr().cast()
+                    } else {
+                        c"".as_ptr().cast()
+                    }
+                }
+                es2_string as *const c_void
+            } else {
+                load_unsigned(name)
+            }
+        })
+    }
+    .unwrap();
+    assert_eq!(
+        unsafe { context.get_parameter_u32(crate::STENCIL_WRITEMASK) },
+        None
+    );
+}

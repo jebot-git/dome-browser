@@ -1127,6 +1127,12 @@ impl WebViewTrait for ServoRendererWebView {
         }
     }
 
+    fn notify_scroll_metrics(&self, offset: f32, visible: f32, total: f32) {
+        if let Some(webview) = WebView::from_weak_handle(&self.weak_handle) {
+            webview.delegate().notify_scroll_metrics(webview.clone(), offset, visible, total);
+        }
+    }
+
     fn notify_viewport_updated(&self) {
         if let Some(webview) = WebView::from_weak_handle(&self.weak_handle) {
             webview.note_accessibility_viewport_changed();

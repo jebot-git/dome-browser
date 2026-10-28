@@ -783,6 +783,9 @@ pub trait WebViewTrait {
     /// or pinch zoom, or HiDPI scale — so it can refresh geometry, such as the accessibility root
     /// node, that the embedder derives from the viewport rather than from a pipeline update.
     fn notify_viewport_updated(&self);
+    /// Root document scroll offset, visible height and total height in CSS pixels.
+    /// Nested scrolling does not change these document-position metrics.
+    fn notify_scroll_metrics(&self, _offset: f32, _visible: f32, _total: f32) {}
 }
 
 /// What entity is reporting that a `Pipeline` has exited. Only when all have

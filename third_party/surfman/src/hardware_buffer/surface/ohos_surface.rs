@@ -109,7 +109,7 @@ impl Device {
             // Bind renderbuffers as appropriate.
             let context_descriptor = self.context_descriptor(context);
             let context_attributes = self.context_descriptor_attributes(&context_descriptor);
-            let renderbuffers = Renderbuffers::new(gl, size, &context_attributes);
+            let renderbuffers = Renderbuffers::new_unchecked(gl, size, &context_attributes);
             renderbuffers.bind_to_current_framebuffer(gl);
 
             debug_assert_eq!(
@@ -227,7 +227,7 @@ impl Device {
             egl::NONE as EGLint,
             0,
         ];
-        let egl_image = (EGL_EXTENSION_FUNCTIONS.CreateImageKHR)(
+        let egl_image = (EGL_EXTENSION_FUNCTIONS.CreateImageKHR.expect("EGL image creation unavailable"))(
             self.egl_display,
             egl::NO_CONTEXT,
             EGL_NATIVE_BUFFER_OHOS,
@@ -277,7 +277,7 @@ impl Device {
                     }
 
                     let egl_display = self.egl_display;
-                    let result = (EGL_EXTENSION_FUNCTIONS.DestroyImageKHR)(egl_display, *egl_image);
+                    let result = (EGL_EXTENSION_FUNCTIONS.DestroyImageKHR.expect("EGL image destruction unavailable"))(egl_display, *egl_image);
                     assert_ne!(result, egl::FALSE);
                     *egl_image = EGL_NO_IMAGE_KHR;
 
@@ -318,7 +318,7 @@ impl Device {
             }
 
             let egl_display = self.egl_display;
-            let result = (EGL_EXTENSION_FUNCTIONS.DestroyImageKHR)(
+            let result = (EGL_EXTENSION_FUNCTIONS.DestroyImageKHR.expect("EGL image destruction unavailable"))(
                 egl_display,
                 surface_texture.local_egl_image,
             );

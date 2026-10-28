@@ -2,8 +2,8 @@
 
 use glow::{HasContext, NativeFramebuffer};
 
-use crate::gl;
 use crate::Gl;
+use crate::gl;
 
 #[allow(dead_code)]
 pub(crate) fn create_and_bind_framebuffer(
@@ -11,9 +11,20 @@ pub(crate) fn create_and_bind_framebuffer(
     texture_target: u32,
     texture_object: Option<glow::NativeTexture>,
 ) -> NativeFramebuffer {
+    try_create_and_bind_framebuffer(gl, texture_target, texture_object)
+        .expect("Framebuffer allocation failed")
+}
+
+pub(crate) fn try_create_and_bind_framebuffer(
+    gl: &Gl,
+    texture_target: u32,
+    texture_object: Option<glow::NativeTexture>,
+) -> Result<NativeFramebuffer, crate::Error> {
     unsafe {
-        let framebuffer_object = gl.create_framebuffer().unwrap();
-        gl.bind_framebuffer(gl::FRAMEBUFFER, Some(framebuffer_object));
+        let framebuffer = gl
+            .create_framebuffer()
+            .map_err(crate::Error::GLResourceAllocationFailed)?;
+        gl.bind_framebuffer(gl::FRAMEBUFFER, Some(framebuffer));
         gl.framebuffer_texture_2d(
             gl::FRAMEBUFFER,
             gl::COLOR_ATTACHMENT0,
@@ -21,7 +32,7 @@ pub(crate) fn create_and_bind_framebuffer(
             texture_object,
             0,
         );
-        framebuffer_object
+        Ok(framebuffer)
     }
 }
 

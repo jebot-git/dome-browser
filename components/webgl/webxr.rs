@@ -6,7 +6,7 @@ use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use servo_canvas_traits::webgl::{
     GenericSender, WebGLMsg, WebXRCommand, WebXRLayerManagerId, webgl_channel,
 };
@@ -28,6 +28,8 @@ pub(crate) struct WebXRBridge {
     factory_receiver: crossbeam_channel::Receiver<WebXRLayerManagerFactory<WebXRSurfman>>,
     managers: FxHashMap<WebXRLayerManagerId, Box<dyn WebXRLayerManagerAPI<WebXRSurfman>>>,
     next_manager_id: NonZeroU32,
+    closing_managers: FxHashSet<WebXRLayerManagerId>,
+    pending_layers: FxHashSet<(WebXRLayerManagerId, WebXRContextId, WebXRLayerId)>,
 }
 
 impl WebXRBridge {
@@ -41,6 +43,8 @@ impl WebXRBridge {
             factory_receiver,
             managers,
             next_manager_id,
+            closing_managers: FxHashSet::default(),
+            pending_layers: FxHashSet::default(),
         }
     }
 }
@@ -65,7 +69,46 @@ impl WebXRBridge {
     }
 
     pub(crate) fn destroy_layer_manager(&mut self, manager_id: WebXRLayerManagerId) {
-        self.managers.remove(&manager_id);
+        let Some(manager) = self.managers.get(&manager_id) else {
+            return;
+        };
+        if manager.layers().is_empty() {
+            self.managers.remove(&manager_id);
+            return;
+        }
+        self.closing_managers.insert(manager_id);
+        self.pending_layers.extend(
+            manager
+                .layers()
+                .iter()
+                .map(|&(context, layer)| (manager_id, context, layer)),
+        );
+    }
+
+    pub(crate) fn has_pending_retirement(&self) -> bool {
+        !self.pending_layers.is_empty() || !self.closing_managers.is_empty()
+    }
+
+    pub(crate) fn has_context_layers(&self, context: WebXRContextId) -> bool {
+        self.managers
+            .values()
+            .any(|manager| manager.layers().iter().any(|ids| ids.0 == context))
+    }
+
+    pub(crate) fn retry_retirement(&mut self, contexts: &mut dyn WebXRContexts<WebXRSurfman>) {
+        for (manager, context, layer) in self.pending_layers.iter().copied().collect::<Vec<_>>() {
+            self.destroy_layer(manager, contexts, context, layer);
+        }
+        for id in self.closing_managers.iter().copied().collect::<Vec<_>>() {
+            if self
+                .managers
+                .get(&id)
+                .is_none_or(|manager| manager.layers().is_empty())
+            {
+                self.managers.remove(&id);
+                self.closing_managers.remove(&id);
+            }
+        }
     }
 
     pub(crate) fn create_layer(
@@ -76,6 +119,9 @@ impl WebXRBridge {
         layer_init: WebXRLayerInit,
         viewports: WebXRViewports,
     ) -> Result<WebXRLayerInfo, WebXRError> {
+        if self.closing_managers.contains(&manager_id) {
+            return Err(WebXRError::NoMatchingDevice);
+        }
         let manager = self
             .managers
             .get_mut(&manager_id)
@@ -90,23 +136,37 @@ impl WebXRBridge {
         context_id: WebXRContextId,
         layer_id: WebXRLayerId,
     ) {
+        let pending = (manager_id, context_id, layer_id);
         if let Some(manager) = self.managers.get_mut(&manager_id) {
             manager.destroy_layer(contexts, context_id, layer_id);
+            if manager.layers().contains(&(context_id, layer_id)) {
+                self.pending_layers.insert(pending);
+                return;
+            }
         }
+        self.pending_layers.remove(&pending);
     }
 
     pub(crate) fn destroy_all_layers(
         &mut self,
         contexts: &mut dyn WebXRContexts<WebXRSurfman>,
         context_id: WebXRContextId,
-    ) {
-        for manager in self.managers.values_mut() {
-            for (other_id, layer_id) in manager.layers().to_vec() {
-                if other_id == context_id {
-                    manager.destroy_layer(contexts, context_id, layer_id);
-                }
-            }
+    ) -> bool {
+        let pending: Vec<_> = self
+            .managers
+            .iter()
+            .flat_map(|(&manager_id, manager)| {
+                manager
+                    .layers()
+                    .iter()
+                    .filter(move |ids| ids.0 == context_id)
+                    .map(move |&(_, layer)| (manager_id, layer))
+            })
+            .collect();
+        for (manager, layer) in pending {
+            self.destroy_layer(manager, contexts, context_id, layer);
         }
+        !self.has_context_layers(context_id)
     }
 
     pub(crate) fn begin_frame(
@@ -115,6 +175,9 @@ impl WebXRBridge {
         contexts: &mut dyn WebXRContexts<WebXRSurfman>,
         layers: &[(WebXRContextId, WebXRLayerId)],
     ) -> Result<Vec<WebXRSubImages>, WebXRError> {
+        if self.closing_managers.contains(&manager_id) {
+            return Err(WebXRError::NoMatchingDevice);
+        }
         let manager = self
             .managers
             .get_mut(&manager_id)
@@ -122,7 +185,14 @@ impl WebXRBridge {
         // The script render state can still reference a layer whose context
         // was lost. Retired layers contribute no image until replaced, rather
         // than turning a recoverable GL loss into XR device removal.
-        let active: Vec<_> = layers.iter().filter(|ids| manager.layers().contains(ids)).copied().collect();
+        let active: Vec<_> = layers
+            .iter()
+            .filter(|ids| {
+                manager.layers().contains(ids)
+                    && !self.pending_layers.contains(&(manager_id, ids.0, ids.1))
+            })
+            .copied()
+            .collect();
         manager.begin_frame(contexts, &active)
     }
 
@@ -132,11 +202,21 @@ impl WebXRBridge {
         contexts: &mut dyn WebXRContexts<WebXRSurfman>,
         layers: &[(WebXRContextId, WebXRLayerId)],
     ) -> Result<(), WebXRError> {
+        if self.closing_managers.contains(&manager_id) {
+            return Err(WebXRError::NoMatchingDevice);
+        }
         let manager = self
             .managers
             .get_mut(&manager_id)
             .ok_or(WebXRError::NoMatchingDevice)?;
-        let active: Vec<_> = layers.iter().filter(|ids| manager.layers().contains(ids)).copied().collect();
+        let active: Vec<_> = layers
+            .iter()
+            .filter(|ids| {
+                manager.layers().contains(ids)
+                    && !self.pending_layers.contains(&(manager_id, ids.0, ids.1))
+            })
+            .copied()
+            .collect();
         manager.end_frame(contexts, &active)
     }
 }
@@ -323,11 +403,17 @@ impl Drop for WebXRBridgeManager {
 }
 
 impl WebXRContexts<WebXRSurfman> for WebGLThread {
+    fn context_lost(&self, context_id: WebXRContextId) -> bool {
+        self.native_context_lost(context_id.into())
+    }
     fn device(&self, context_id: WebXRContextId) -> Option<Rc<Device>> {
         self.maybe_device_for_context(context_id.into())
     }
 
     fn context(&mut self, context_id: WebXRContextId) -> Option<&mut Context> {
+        if self.native_context_lost(context_id.into()) {
+            return self.context_for_retirement(context_id.into());
+        }
         let data = self.make_current_if_needed_mut(context_id.into())?;
         Some(&mut data.ctx)
     }
@@ -458,5 +544,198 @@ mod tests {
             caller.join().unwrap();
         }
         reader.join().unwrap();
+    }
+    struct RetainedManager {
+        layers: Vec<(WebXRContextId, WebXRLayerId)>,
+        ready: Rc<std::cell::Cell<bool>>,
+        dropped: Rc<std::cell::Cell<u32>>,
+        frame_layers: Rc<std::cell::RefCell<Vec<(WebXRContextId, WebXRLayerId)>>>,
+    }
+    impl Drop for RetainedManager {
+        fn drop(&mut self) {
+            self.dropped.set(self.dropped.get() + 1);
+        }
+    }
+    impl WebXRLayerManagerAPI<WebXRSurfman> for RetainedManager {
+        fn create_layer(
+            &mut self,
+            _: &mut dyn WebXRContexts<WebXRSurfman>,
+            _: WebXRContextId,
+            _: WebXRLayerInit,
+            _: WebXRViewports,
+        ) -> Result<WebXRLayerInfo, WebXRError> {
+            Err(WebXRError::NoMatchingDevice)
+        }
+        fn destroy_layer(
+            &mut self,
+            _: &mut dyn WebXRContexts<WebXRSurfman>,
+            context: WebXRContextId,
+            layer: WebXRLayerId,
+        ) {
+            if self.ready.get() {
+                self.layers.retain(|ids| *ids != (context, layer));
+            }
+        }
+        fn layers(&self) -> &[(WebXRContextId, WebXRLayerId)] {
+            &self.layers
+        }
+        fn begin_frame(
+            &mut self,
+            _: &mut dyn WebXRContexts<WebXRSurfman>,
+            layers: &[(WebXRContextId, WebXRLayerId)],
+        ) -> Result<Vec<WebXRSubImages>, WebXRError> {
+            *self.frame_layers.borrow_mut() = layers.to_vec();
+            Ok(vec![])
+        }
+        fn end_frame(
+            &mut self,
+            _: &mut dyn WebXRContexts<WebXRSurfman>,
+            layers: &[(WebXRContextId, WebXRLayerId)],
+        ) -> Result<(), WebXRError> {
+            *self.frame_layers.borrow_mut() = layers.to_vec();
+            Ok(())
+        }
+    }
+    #[test]
+    fn retirement_keeps_a_manager_that_still_owns_layers() {
+        let (sender, _) = webgl_channel().unwrap();
+        let mut bridge = WebXRBridge::new(WebXRBridgeInit::new(sender));
+        let id = WebXRLayerManagerId::new(NonZeroU32::MIN);
+        let dropped = Rc::new(std::cell::Cell::new(0));
+        bridge.managers.insert(
+            id,
+            Box::new(RetainedManager {
+                layers: vec![(WebXRContextId(1), WebXRLayerId::default())],
+                ready: Rc::new(std::cell::Cell::new(false)),
+                dropped: dropped.clone(),
+                frame_layers: Rc::default(),
+            }),
+        );
+        bridge.destroy_layer_manager(id);
+        assert_eq!(
+            dropped.get(),
+            0,
+            "manager with an unreleased native layer was dropped"
+        );
+        assert!(bridge.managers.contains_key(&id));
+    }
+    #[test]
+    fn retirement_excludes_pending_layers_from_frame_use() {
+        let (sender, _) = webgl_channel().unwrap();
+        let mut bridge = WebXRBridge::new(WebXRBridgeInit::new(sender));
+        let id = WebXRLayerManagerId::new(NonZeroU32::MIN);
+        let ids = (WebXRContextId(1), WebXRLayerId::default());
+        let frame_layers = Rc::default();
+        bridge.managers.insert(
+            id,
+            Box::new(RetainedManager {
+                layers: vec![ids],
+                ready: Rc::new(std::cell::Cell::new(false)),
+                dropped: Rc::default(),
+                frame_layers: Rc::clone(&frame_layers),
+            }),
+        );
+        bridge.destroy_layer(id, &mut NoContexts, ids.0, ids.1);
+        bridge.begin_frame(id, &mut NoContexts, &[ids]).unwrap();
+        assert!(
+            frame_layers.borrow().is_empty(),
+            "partially retired layer was reused for a frame"
+        );
+    }
+    #[test]
+    fn retirement_retries_closing_manager_until_native_owners_are_released() {
+        let (sender, _) = webgl_channel().unwrap();
+        let mut bridge = WebXRBridge::new(WebXRBridgeInit::new(sender));
+        let id = WebXRLayerManagerId::new(NonZeroU32::MIN);
+        let ids = (WebXRContextId(1), WebXRLayerId::default());
+        let ready = Rc::new(std::cell::Cell::new(false));
+        let dropped = Rc::new(std::cell::Cell::new(0));
+        bridge.managers.insert(
+            id,
+            Box::new(RetainedManager {
+                layers: vec![ids],
+                ready: ready.clone(),
+                dropped: dropped.clone(),
+                frame_layers: Rc::default(),
+            }),
+        );
+        bridge.destroy_layer_manager(id);
+        bridge.destroy_layer_manager(id);
+        assert_eq!(bridge.pending_layers.len(), 1);
+        assert!(bridge.begin_frame(id, &mut NoContexts, &[ids]).is_err());
+        assert!(bridge.end_frame(id, &mut NoContexts, &[ids]).is_err());
+        for _ in 0..3 {
+            bridge.retry_retirement(&mut NoContexts);
+            assert!(bridge.has_pending_retirement());
+            assert!(bridge.has_context_layers(ids.0));
+            assert_eq!(dropped.get(), 0);
+        }
+        ready.set(true);
+        bridge.retry_retirement(&mut NoContexts);
+        assert!(!bridge.has_pending_retirement());
+        assert!(!bridge.has_context_layers(ids.0));
+        assert!(!bridge.managers.contains_key(&id));
+        assert_eq!(dropped.get(), 1);
+        bridge.destroy_layer_manager(id);
+        bridge.retry_retirement(&mut NoContexts);
+        assert_eq!(dropped.get(), 1);
+    }
+    #[test]
+    fn retirement_context_drain_reports_retained_layers_and_preserves_other_context() {
+        let (sender, _) = webgl_channel().unwrap();
+        let mut bridge = WebXRBridge::new(WebXRBridgeInit::new(sender));
+        let id = WebXRLayerManagerId::new(NonZeroU32::MIN);
+        let first = (WebXRContextId(1), WebXRLayerId::default());
+        let other = (WebXRContextId(2), WebXRLayerId::default());
+        let ready = Rc::new(std::cell::Cell::new(false));
+        let dropped = Rc::new(std::cell::Cell::new(0));
+        let frames = Rc::default();
+        bridge.managers.insert(
+            id,
+            Box::new(RetainedManager {
+                layers: vec![first, other],
+                ready: ready.clone(),
+                dropped: dropped.clone(),
+                frame_layers: Rc::clone(&frames),
+            }),
+        );
+        assert!(!bridge.destroy_all_layers(&mut NoContexts, first.0));
+        bridge
+            .begin_frame(id, &mut NoContexts, &[first, other])
+            .unwrap();
+        assert_eq!(*frames.borrow(), [other]);
+        bridge
+            .end_frame(id, &mut NoContexts, &[first, other])
+            .unwrap();
+        assert_eq!(*frames.borrow(), [other]);
+        ready.set(true);
+        bridge.retry_retirement(&mut NoContexts);
+        assert!(!bridge.has_context_layers(first.0));
+        assert!(bridge.has_context_layers(other.0));
+        assert_eq!(dropped.get(), 0);
+        assert!(bridge.destroy_all_layers(&mut NoContexts, other.0));
+        bridge.destroy_layer_manager(id);
+        assert_eq!(dropped.get(), 1);
+        assert!(!bridge.has_pending_retirement());
+    }
+    #[test]
+    fn retirement_empty_and_unknown_managers_need_no_retry() {
+        let (sender, _) = webgl_channel().unwrap();
+        let mut bridge = WebXRBridge::new(WebXRBridgeInit::new(sender));
+        let id = WebXRLayerManagerId::new(NonZeroU32::MIN);
+        let dropped = Rc::new(std::cell::Cell::new(0));
+        bridge.destroy_layer_manager(id);
+        bridge.managers.insert(
+            id,
+            Box::new(RetainedManager {
+                layers: vec![],
+                ready: Rc::default(),
+                dropped: dropped.clone(),
+                frame_layers: Rc::default(),
+            }),
+        );
+        bridge.destroy_layer_manager(id);
+        assert_eq!(dropped.get(), 1);
+        assert!(!bridge.has_pending_retirement());
     }
 }

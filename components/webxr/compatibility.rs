@@ -106,9 +106,9 @@ pub(crate) fn preserve_bindings<T>(
     }
     let result = operation(contexts);
     let context = contexts.context(id).ok_or(Error::NoMatchingDevice)?;
-    let restored = device.make_context_current(context).map_err(backend);
+    device.make_context_current(context).map_err(backend)?;
     saved.restore(contexts.bindings(id).ok_or(Error::NoMatchingDevice)?);
-    restored.and(result)
+    result
 }
 
 fn check_surface(

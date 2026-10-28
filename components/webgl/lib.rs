@@ -6,6 +6,11 @@
 
 pub use webgl_mode::WebGLComm;
 
+mod context_binding;
+mod resource_retirement;
+mod retirement_loop;
+mod retirement_join;
+pub use retirement_join::join_retiring_thread;
 mod webgl_limits;
 mod webgl_mode;
 pub mod webgl_thread;

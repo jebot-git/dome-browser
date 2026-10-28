@@ -277,6 +277,21 @@ impl WebViewRenderer {
         self.set_frame_tree_on_pipeline_details(frame_tree, None);
     }
 
+    pub(crate) fn notify_scroll_metrics(&self) {
+        let metrics = self.root_pipeline_id.and_then(|id| {
+            let pipeline = self.pipelines.get(&id)?;
+            pipeline.scroll_tree.nodes.iter().find_map(|node| {
+                let paint_api::display_list::SpatialTreeNodeInfo::Scroll(info) = &node.info else { return None; };
+                if info.external_id != ExternalScrollId(0, id.into()) { return None; }
+                let viewport = self.pinch_zoom.get_pinch_zoom_infos_for_script(
+                    self.device_pixels_per_page_pixel()).rect;
+                Some((info.offset.y + viewport.origin.y, viewport.size.height,
+                    info.content_rect.size().height.max(info.clip_rect.size().height)))
+            })
+        }).unwrap_or((0.,0.,0.));
+        self.webview.notify_scroll_metrics(metrics.0, metrics.1, metrics.2);
+    }
+
     pub(crate) fn send_scroll_positions_to_layout_for_pipeline(
         &self,
         pipeline_id: PipelineId,

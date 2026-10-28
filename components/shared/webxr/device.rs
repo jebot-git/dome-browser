@@ -111,6 +111,10 @@ pub trait DeviceAPI: 'static {
     /// Quit the session
     fn quit(&mut self);
 
+    /// Poll teardown on the owning thread after quit. False retains this device
+    /// and its context for retry; implementations must not start new rendering.
+    fn poll_cleanup(&mut self) -> bool { true }
+
     fn set_quitter(&mut self, quitter: Quitter);
 
     fn update_clip_planes(&mut self, near: f32, far: f32);

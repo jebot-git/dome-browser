@@ -296,6 +296,9 @@ impl EGLBackedContext {
             );
             if result == egl::FALSE {
                 let err = egl.GetError().to_windowing_api_error();
+                if matches!(err, crate::WindowingApiError::ContextLost) {
+                    self.lost.set(true);
+                }
                 return Err(Error::MakeCurrentFailed(err));
             }
             Ok(())
@@ -316,6 +319,13 @@ impl EGLBackedContext {
             return Err((Error::IncompatibleSurface, surface));
         }
 
+        if self.lost.get() {
+            return Err((
+                Error::MakeCurrentFailed(crate::WindowingApiError::ContextLost),
+                surface,
+            ));
+        }
+
         match self.framebuffer {
             Framebuffer::None => self.framebuffer = Framebuffer::Surface(surface),
             Framebuffer::External(_) => return Err((Error::ExternalRenderTarget, surface)),
@@ -324,7 +334,16 @@ impl EGLBackedContext {
 
         // If we're current, call `make_context_current()` again to switch to the new framebuffer.
         if self.is_current() {
-            drop(self.make_current(egl_display))
+            if let Err(error) = self.make_current(egl_display) {
+                // Roll back the staged attachment when native binding fails.
+                // Return its owner without committing an attachment.
+                let Framebuffer::Surface(surface) =
+                    mem::replace(&mut self.framebuffer, Framebuffer::None)
+                else {
+                    unreachable!();
+                };
+                return Err((error, surface));
+            }
         }
 
         Ok(())
@@ -335,26 +354,42 @@ impl EGLBackedContext {
         gl: &Gl,
         egl_display: EGLDisplay,
     ) -> Result<Option<EGLBackedSurface>, Error> {
-        // Flush to avoid races on Mesa/Intel and possibly other GPUs.
-        if !self.lost.get() {
-            gl.flush();
-        }
-
         match self.framebuffer {
             Framebuffer::None => return Ok(None),
             Framebuffer::Surface(_) => {},
             Framebuffer::External(_) => return Err(Error::ExternalRenderTarget),
         }
 
+        // Flush only the producer's own current context. Keep its attachment
+        // owned until both selecting it and detaching it succeed. A noncurrent
+        // producer must not flush or change framebuffer state on another context.
+        let _previous_binding = if !self.lost.get() && !self.is_current() {
+            let previous = CurrentContextGuard::new();
+            self.make_current(egl_display)?;
+            Some(previous)
+        } else {
+            None
+        };
+        if !self.lost.get() {
+            gl.flush();
+            if let Framebuffer::Surface(surface) = &self.framebuffer {
+                if let Err(error) = surface.unbind(gl, egl_display, self.egl_context, self.pbuffer)
+                {
+                    if matches!(
+                        error,
+                        Error::MakeCurrentFailed(crate::WindowingApiError::ContextLost)
+                    ) {
+                        self.lost.set(true);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+
         let surface = match mem::replace(&mut self.framebuffer, Framebuffer::None) {
             Framebuffer::Surface(surface) => surface,
             Framebuffer::None | Framebuffer::External(_) => unreachable!(),
         };
-
-        // If we're current, we stay current, but with no surface attached.
-        if !self.lost.get() {
-            surface.unbind(gl, egl_display, self.egl_context);
-        }
 
         Ok(Some(surface))
     }

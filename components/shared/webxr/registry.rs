@@ -82,6 +82,7 @@ pub struct MainThreadRegistry<GL> {
     draining_sessions: Vec<Arc<SessionActivity>>,
     pending_device_change: bool,
     device_change_serial: u64,
+    _cleanup_wakeup: crate::deferred_cleanup::WakeRegistration,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -219,6 +220,9 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
         let sessions = Vec::new();
         let mocks = Vec::new();
         let waker = MainThreadWakerImpl::new(waker)?;
+        let cleanup_waker = waker.clone();
+        let cleanup_wakeup = crate::deferred_cleanup::register_waker(move || cleanup_waker.wake())
+            .map_err(|_|Error::CommunicationError)?;
         Ok(MainThreadRegistry {
             discoveries,
             sessions,
@@ -241,6 +245,7 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
             draining_sessions: Vec::new(),
             pending_device_change: false,
             device_change_serial: 0,
+            _cleanup_wakeup: cleanup_wakeup,
         })
     }
 
@@ -411,6 +416,7 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
     }
 
     pub fn run_one_frame(&mut self) {
+        crate::deferred_cleanup::poll_scheduled();
         while let Ok(msg) = self.receiver.try_recv() {
             self.handle_msg(msg);
         }
@@ -425,8 +431,10 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
         }
     }
 
+    /// Whether XR needs continuous main-thread rendering. Pending cleanup has
+    /// its own wakeups, so it must not force busy rendering while backing off.
     pub fn running(&self) -> bool {
-        self.sessions.iter().any(|session| session.running())
+        self.sessions.iter().any(|session| session.needs_animation_frames())
     }
 
     fn handle_msg(&mut self, msg: RegistryMsg) {
