@@ -6,6 +6,7 @@
 
 use std::cell::{Cell, RefCell, RefMut};
 use std::num::NonZeroU32;
+use std::ops::Deref;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -25,6 +26,10 @@ use surfman::{
     GLVersion, NativeWidget, Surface, SurfaceAccess, SurfaceInfo, SurfaceTexture, SurfaceType,
 };
 use webrender_api::units::{DeviceIntRect, DevicePixel};
+
+#[path = "native_context_owner.rs"]
+mod native_context_owner;
+use native_context_owner::{NativeContextOwner, NativeContextState};
 
 /// The `RenderingContext` trait defines a set of methods for managing
 /// an OpenGL or GLES rendering context.
@@ -104,16 +109,14 @@ pub trait RenderingContext {
 struct SurfmanRenderingContext {
     gleam_gl: Rc<dyn Gl>,
     glow_gl: Arc<glow::Context>,
-    device: RefCell<Device>,
-    context: RefCell<Context>,
+    native: NativeContextOwner,
     refresh_driver: Option<Rc<dyn RefreshDriver>>,
 }
 
-impl Drop for SurfmanRenderingContext {
-    fn drop(&mut self) {
-        let device = &mut self.device.borrow_mut();
-        let context = &mut self.context.borrow_mut();
-        let _ = device.destroy_context(context);
+impl Deref for SurfmanRenderingContext {
+    type Target = NativeContextState;
+    fn deref(&self) -> &NativeContextState {
+        self.native.state()
     }
 }
 
@@ -122,59 +125,67 @@ impl SurfmanRenderingContext {
         connection: &Connection,
         adapter: &Adapter,
         refresh_driver: Option<Rc<dyn RefreshDriver>>,
-    ) -> Result<Self, Error> {
+    ) -> Result<Rc<Self>, Error> {
         let device = connection.create_device(adapter)?;
-
         let flags = ContextAttributeFlags::ALPHA
             | ContextAttributeFlags::DEPTH
             | ContextAttributeFlags::STENCIL;
         let gl_api = connection.gl_api();
-        let version = match &gl_api {
-            GLApi::GLES => surfman::GLVersion { major: 3, minor: 0 },
-            GLApi::GL => surfman::GLVersion { major: 3, minor: 2 },
+        let version = match gl_api {
+            GLApi::GLES => GLVersion::new(3, 0),
+            GLApi::GL => GLVersion::new(3, 2),
         };
-        let context_descriptor =
-            device.create_context_descriptor(&ContextAttributes { flags, version })?;
-
-        let mut context = device
-            .create_context(&context_descriptor, None)
-            .inspect_err(|_| {
-                print_diagnostics_information_on_context_creation_failure(&device, gl_api, version)
+        let descriptor = device.create_context_descriptor(&ContextAttributes { flags, version })?;
+        let context = device
+            .create_context(&descriptor, None)
+            .inspect_err(|error| {
+                warn!("Unable to create {gl_api:?} {version:?} rendering context: {error:?}");
             })?;
+        Self::finish_initialization(
+            NativeContextOwner::new(device, context),
+            gl_api,
+            refresh_driver,
+            |device, context| {
+                #[expect(unsafe_code)]
+                unsafe {
+                    glow::Context::try_from_loader_function(|name| {
+                        device.get_proc_address(context, name)
+                    })
+                }
+                .map_err(Error::GLContextInitializationFailed)
+            },
+        )
+    }
 
-        // `glow::Context::from_loader_function` immediately queries `GL_VERSION`, so the
-        // context must be current.
-        if let Err(error) = device.make_context_current(&context) {
-            let _ = device.destroy_context(&mut context);
-            return Err(error);
-        }
-
-        #[expect(unsafe_code)]
-        let gleam_gl = {
-            match gl_api {
+    fn finish_initialization(
+        native: NativeContextOwner,
+        gl_api: GLApi,
+        refresh_driver: Option<Rc<dyn RefreshDriver>>,
+        load: impl FnOnce(&Device, &Context) -> Result<glow::Context, Error>,
+    ) -> Result<Rc<Self>, Error> {
+        let (glow_gl, gleam_gl) = {
+            let device = native.state().device.borrow();
+            let context = native.state().context.borrow();
+            device.make_context_current(&context)?;
+            // Validate the loader before publishing either GL interface.
+            let glow_gl = load(&device, &context)?;
+            #[expect(unsafe_code)]
+            let gleam_gl = match gl_api {
                 GLApi::GL => unsafe {
-                    gl::GlFns::load_with(|func_name| device.get_proc_address(&context, func_name))
+                    gl::GlFns::load_with(|name| device.get_proc_address(&context, name))
                 },
                 GLApi::GLES => unsafe {
-                    gl::GlesFns::load_with(|func_name| device.get_proc_address(&context, func_name))
+                    gl::GlesFns::load_with(|name| device.get_proc_address(&context, name))
                 },
-            }
+            };
+            (glow_gl, gleam_gl)
         };
-
-        #[expect(unsafe_code)]
-        let glow_gl = unsafe {
-            glow::Context::from_loader_function(|function_name| {
-                device.get_proc_address(&context, function_name)
-            })
-        };
-
-        Ok(SurfmanRenderingContext {
+        Ok(Rc::new(Self {
+            native,
             gleam_gl,
             glow_gl: Arc::new(glow_gl),
-            device: RefCell::new(device),
-            context: RefCell::new(context),
             refresh_driver,
-        })
+        }))
     }
 
     fn create_surface(&self, surface_type: SurfaceType<NativeWidget>) -> Result<Surface, Error> {
@@ -183,22 +194,56 @@ impl SurfmanRenderingContext {
         device.create_surface(context, SurfaceAccess::GPUOnly, surface_type)
     }
 
-    fn bind_surface(&self, surface: Surface) -> Result<(), Error> {
-        let device = &self.device.borrow();
-        let context = &mut self.context.borrow_mut();
-        device
-            .bind_surface_to_context(context, surface)
-            .map_err(|(err, mut surface)| {
-                let _ = device.destroy_surface(context, &mut surface);
-                err
-            })?;
-        Ok(())
+    fn bind_surface(self: &Rc<Self>, surface: Surface) -> Result<(), Error> {
+        let result = self
+            .device
+            .borrow()
+            .bind_surface_to_context(&mut self.context.borrow_mut(), surface);
+        match result {
+            Ok(()) => Ok(()),
+            Err((error, surface)) => {
+                let _ = self.retire_surface(surface);
+                Err(error)
+            },
+        }
+    }
+
+    fn release_surface(&self, surface: &mut Surface) -> Result<(), Error> {
+        let device = self.device.borrow();
+        let mut context = self.context.borrow_mut();
+        if !device.context_is_lost(&context) {
+            device.make_context_current(&context)?;
+        }
+        device.destroy_surface(&mut context, surface)
+    }
+
+    fn retire_surface(self: &Rc<Self>, surface: Surface) -> Result<(), Error> {
+        self.retire_surface_with(surface, Self::release_surface)
+    }
+
+    fn retire_surface_with(
+        self: &Rc<Self>,
+        mut surface: Surface,
+        mut release: impl FnMut(&Self, &mut Surface) -> Result<(), Error> + 'static,
+    ) -> Result<(), Error> {
+        match release(self, &mut surface) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let owner = self.clone();
+                servo_base::deferred_cleanup::defer(move || release(&owner, &mut surface).is_ok());
+                Err(error)
+            },
+        }
     }
 
     fn create_attached_swap_chain(&self) -> Result<SwapChain<Device>, Error> {
-        let device = &mut self.device.borrow_mut();
-        let context = &mut self.context.borrow_mut();
-        SwapChain::create_attached(device, context, SurfaceAccess::GPUOnly)
+        let chain = SwapChain::<Device>::create_attached(
+            &self.device.borrow(),
+            &mut self.context.borrow_mut(),
+            SurfaceAccess::GPUOnly,
+        )?;
+        self.native.track_chain(&chain);
+        Ok(chain)
     }
 
     fn resize_bound_surface(&self, size: PhysicalSize<u32>) -> Result<(), Error> {
@@ -298,7 +343,7 @@ impl SurfmanRenderingContext {
 /// The results of the render can be accessed via [`RenderingContext::read_to_image`].
 pub struct SoftwareRenderingContext {
     size: Cell<PhysicalSize<u32>>,
-    surfman_rendering_info: SurfmanRenderingContext,
+    surfman_rendering_info: Rc<SurfmanRenderingContext>,
     swap_chain: SwapChain<Device>,
 }
 
@@ -347,14 +392,6 @@ impl SoftwareRenderingContext {
     }
 }
 
-impl Drop for SoftwareRenderingContext {
-    fn drop(&mut self) {
-        let device = &mut self.surfman_rendering_info.device.borrow_mut();
-        let context = &mut self.surfman_rendering_info.context.borrow_mut();
-        let _ = self.swap_chain.destroy(device, context);
-    }
-}
-
 impl RenderingContext for SoftwareRenderingContext {
     fn prepare_for_rendering(&self) {
         self.surfman_rendering_info.prepare_for_rendering();
@@ -369,21 +406,29 @@ impl RenderingContext for SoftwareRenderingContext {
     }
 
     fn resize(&self, size: PhysicalSize<u32>) {
-        assert!(
-            size.width > 0 && size.height > 0,
-            "Dimensions must be at least 1x1, got {size:?}",
-        );
-
-        if self.size.get() == size {
+        let (Ok(width), Ok(height)) = (i32::try_from(size.width), i32::try_from(size.height))
+        else {
+            warn!("Ignoring out-of-range rendering surface size: {size:?}");
+            return;
+        };
+        if width == 0 || height == 0 || self.size.get() == size {
             return;
         }
-
-        self.size.set(size);
-
-        let device = &mut self.surfman_rendering_info.device.borrow_mut();
-        let context = &mut self.surfman_rendering_info.context.borrow_mut();
-        let size = Size2D::new(size.width as i32, size.height as i32);
-        let _ = self.swap_chain.resize(device, context, size);
+        let device = self.surfman_rendering_info.device.borrow();
+        let mut context = self.surfman_rendering_info.context.borrow_mut();
+        if let Err(error) =
+            self.swap_chain
+                .resize(&device, &mut context, Size2D::new(width, height))
+        {
+            warn!("Unable to complete rendering surface resize: {error:?}");
+        }
+        // A resize can commit its new buffer before old-buffer retirement fails.
+        // The chain's committed dimensions remain authoritative in either case.
+        let committed = self.swap_chain.size();
+        self.size.set(PhysicalSize::new(
+            committed.width as u32,
+            committed.height as u32,
+        ));
     }
 
     #[servo_tracing::instrument(skip_all, name = "SoftwareRenderingContext::present")]
@@ -441,7 +486,7 @@ impl RenderingContext for SoftwareRenderingContext {
 pub struct WindowRenderingContext {
     /// The inner size of the window in physical pixels which excludes OS decorations.
     size: Cell<PhysicalSize<u32>>,
-    surfman_context: SurfmanRenderingContext,
+    surfman_context: Rc<SurfmanRenderingContext>,
 }
 
 impl WindowRenderingContext {
@@ -484,12 +529,10 @@ impl WindowRenderingContext {
         let adapter = connection.create_adapter()?;
         let surfman_context = SurfmanRenderingContext::new(&connection, &adapter, refresh_driver)?;
 
-        let native_widget = connection
-            .create_native_widget_from_window_handle(
-                window_handle,
-                Size2D::new(size.width as i32, size.height as i32),
-            )
-            .expect("Failed to create native widget");
+        let native_widget = connection.create_native_widget_from_window_handle(
+            window_handle,
+            Size2D::new(size.width as i32, size.height as i32),
+        )?;
 
         let surface = surfman_context.create_surface(SurfaceType::Widget { native_widget })?;
         surfman_context.bind_surface(surface)?;
@@ -513,10 +556,14 @@ impl WindowRenderingContext {
     ///
     /// TODO: This should be removed once `WebView`s can replace their `RenderingContext`s.
     pub fn take_window(&self) -> Result<(), Error> {
-        let device = self.surfman_context.device.borrow_mut();
-        let mut context = self.surfman_context.context.borrow_mut();
-        let mut surface = device.unbind_surface_from_context(&mut context)?.unwrap();
-        device.destroy_surface(&mut context, &mut surface)?;
+        let surface = self
+            .surfman_context
+            .device
+            .borrow()
+            .unbind_surface_from_context(&mut self.surfman_context.context.borrow_mut())?;
+        if let Some(surface) = surface {
+            self.surfman_context.retire_surface(surface)?;
+        }
         Ok(())
     }
 
@@ -529,28 +576,16 @@ impl WindowRenderingContext {
         window_handle: WindowHandle,
         size: PhysicalSize<u32>,
     ) -> Result<(), Error> {
-        let device = self.surfman_context.device.borrow_mut();
-        let mut context = self.surfman_context.context.borrow_mut();
-
-        let native_widget = device
-            .connection()
-            .create_native_widget_from_window_handle(
-                window_handle,
-                Size2D::new(size.width as i32, size.height as i32),
-            )
-            .expect("Failed to create native widget");
-
-        let surface_access = SurfaceAccess::GPUOnly;
-        let surface_type = SurfaceType::Widget { native_widget };
-        let surface = device.create_surface(&context, surface_access, surface_type)?;
-
-        device
-            .bind_surface_to_context(&mut context, surface)
-            .map_err(|(err, mut surface)| {
-                let _ = device.destroy_surface(&mut context, &mut surface);
-                err
-            })?;
-        device.make_context_current(&context)?;
+        let connection = self.surfman_context.device.borrow().connection();
+        let native_widget = connection.create_native_widget_from_window_handle(
+            window_handle,
+            Size2D::new(size.width as i32, size.height as i32),
+        )?;
+        let surface = self
+            .surfman_context
+            .create_surface(SurfaceType::Widget { native_widget })?;
+        self.surfman_context.bind_surface(surface)?;
+        self.surfman_context.make_current()?;
         Ok(())
     }
 
@@ -949,50 +984,6 @@ impl RenderingContext for OffscreenRenderingContext {
     }
 }
 
-fn print_diagnostics_information_on_context_creation_failure(
-    device: &Device,
-    desired_api: GLApi,
-    desired_version: GLVersion,
-) {
-    println!("===============================================================");
-    println!(
-        "Could not create a {desired_api:?} {:?}.{:?} context when starting Servo.",
-        desired_version.major, desired_version.minor
-    );
-
-    let version = surfman::GLVersion { major: 1, minor: 0 };
-    match device
-        .create_context_descriptor(&ContextAttributes {
-            flags: ContextAttributeFlags::empty(),
-            version,
-        })
-        .and_then(|context_descriptor| device.create_context(&context_descriptor, None))
-    {
-        Ok(mut context) => {
-            #[expect(unsafe_code)]
-            let glow_gl = unsafe {
-                glow::Context::from_loader_function(|function_name| {
-                    device.get_proc_address(&context, function_name)
-                })
-            };
-
-            println!(
-                "It's likely that your version of OpenGL ({:?}.{:?}) is too old.",
-                glow_gl.version().major,
-                glow_gl.version().minor
-            );
-            println!("If not, please file a bug at https://github.com/servo/servo/issues.");
-            let _ = device.destroy_context(&mut context);
-        },
-        Err(_) => {
-            println!("Could not create any {desired_api:?} context.");
-            println!("Ensure that OpenGL is working on your system.");
-            println!("If it is, please file a bug at https://github.com/servo/servo/issues.");
-        },
-    }
-    println!("===============================================================\n");
-}
-
 #[cfg(test)]
 mod test {
     use dpi::PhysicalSize;
@@ -1062,3 +1053,7 @@ mod test {
         }
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "native_context_owner_tests.rs"]
+mod native_context_owner_tests;
