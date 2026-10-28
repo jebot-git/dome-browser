@@ -137,15 +137,11 @@ pub(crate) struct Painter {
 
 impl Drop for Painter {
     fn drop(&mut self) {
-        if let Err(error) = self.rendering_context.make_current() {
-            error!("Failed to make the rendering context current: {error:?}");
-        }
-
         self.webrender_api.stop_render_backend();
         self.webrender_api.shut_down(true);
 
         if let Some(renderer) = self.webrender_renderer.take() {
-            renderer.deinit();
+            crate::renderer_retirement::retire_renderer(self.rendering_context.clone(), renderer);
         }
     }
 }

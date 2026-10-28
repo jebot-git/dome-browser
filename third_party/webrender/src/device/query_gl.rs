@@ -4,6 +4,7 @@
 
 use gleam::gl;
 use std::mem;
+use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::device::GpuFrameId;
@@ -67,6 +68,7 @@ impl<T> QuerySet<T> {
 }
 
 pub struct GpuFrameProfile {
+    context_lost: Rc<Cell<bool>>,
     gl: Rc<dyn gl::Gl>,
     timers: QuerySet<GpuTimer>,
     samplers: QuerySet<GpuSampler>,
@@ -76,8 +78,9 @@ pub struct GpuFrameProfile {
 }
 
 impl GpuFrameProfile {
-    fn new(gl: Rc<dyn gl::Gl>, debug_method: GpuDebugMethod) -> Self {
+    fn new(gl: Rc<dyn gl::Gl>, debug_method: GpuDebugMethod, context_lost: Rc<Cell<bool>>) -> Self {
         GpuFrameProfile {
+            context_lost,
             gl,
             timers: QuerySet::new(),
             samplers: QuerySet::new(),
@@ -141,7 +144,7 @@ impl GpuFrameProfile {
     fn start_timer(&mut self, tag: GpuProfileTag) -> GpuTimeQuery {
         self.finish_timer();
 
-        let marker = GpuMarker::new(&self.gl, tag.label, self.debug_method);
+        let marker = GpuMarker::new(&self.gl, tag.label, self.debug_method, self.context_lost.clone());
 
         if let Some(query) = self.timers.add(GpuTimer { tag, time_ns: 0 }) {
             self.gl.begin_query(gl::TIME_ELAPSED, query);
@@ -186,6 +189,7 @@ impl Drop for GpuFrameProfile {
 const NUM_PROFILE_FRAMES: usize = 4;
 
 pub struct GpuProfiler {
+    context_lost: Rc<Cell<bool>>,
     gl: Rc<dyn gl::Gl>,
     frames: [GpuFrameProfile; NUM_PROFILE_FRAMES],
     next_frame: usize,
@@ -194,14 +198,28 @@ pub struct GpuProfiler {
 
 impl GpuProfiler {
     pub fn new(gl: Rc<dyn gl::Gl>, debug_method: GpuDebugMethod) -> Self {
-        let f = || GpuFrameProfile::new(Rc::clone(&gl), debug_method);
+        let context_lost = Rc::new(Cell::new(false));
+        let f = || GpuFrameProfile::new(Rc::clone(&gl), debug_method, context_lost.clone());
 
         let frames = [f(), f(), f(), f()];
         GpuProfiler {
-            gl,
+            context_lost,            gl,
             next_frame: 0,
             frames,
             debug_method
+        }
+    }
+
+    /// Forget query names after native context loss. Drop must not attempt to
+    /// delete them through whichever different context is current now.
+    pub(crate) fn abandon_context(&mut self) {
+        self.context_lost.set(true);
+        for frame in &mut self.frames {
+            frame.timers.set.clear();
+            frame.samplers.set.clear();
+            frame.timers.reset();
+            frame.samplers.reset();
+            frame.inside_frame = false;
         }
     }
 
@@ -262,7 +280,7 @@ impl GpuProfiler {
     }
 
     pub fn start_marker(&mut self, label: &str) -> GpuMarker {
-        GpuMarker::new(&self.gl, label, self.debug_method)
+        GpuMarker::new(&self.gl, label, self.debug_method, self.context_lost.clone())
     }
 
     pub fn place_marker(&mut self, label: &str) {
@@ -272,19 +290,19 @@ impl GpuProfiler {
 
 #[must_use]
 pub struct GpuMarker {
-    gl: Option<(Rc<dyn gl::Gl>, GpuDebugMethod)>,
+    gl: Option<(Rc<dyn gl::Gl>, GpuDebugMethod, Rc<Cell<bool>>)>,
 }
 
 impl GpuMarker {
-    fn new(gl: &Rc<dyn gl::Gl>, message: &str, debug_method: GpuDebugMethod) -> Self {
+    fn new(gl: &Rc<dyn gl::Gl>, message: &str, debug_method: GpuDebugMethod, context_lost: Rc<Cell<bool>>) -> Self {
         let gl = match debug_method {
             GpuDebugMethod::KHR => {
               gl.push_debug_group_khr(gl::DEBUG_SOURCE_APPLICATION, 0, message);
-              Some((Rc::clone(gl), debug_method))
+              Some((Rc::clone(gl), debug_method, context_lost))
             },
             GpuDebugMethod::MarkerEXT => {
               gl.push_group_marker_ext(message);
-              Some((Rc::clone(gl), debug_method))
+              Some((Rc::clone(gl), debug_method, context_lost))
             },
             GpuDebugMethod::None => None,
         };
@@ -302,7 +320,8 @@ impl GpuMarker {
 
 impl Drop for GpuMarker {
     fn drop(&mut self) {
-        if let Some((ref gl, debug_method)) = self.gl {
+        if let Some((ref gl, debug_method, ref context_lost)) = self.gl {
+            if context_lost.get() { return; }
             match debug_method {
                 GpuDebugMethod::KHR => gl.pop_debug_group_khr(),
                 GpuDebugMethod::MarkerEXT => gl.pop_group_marker_ext(),

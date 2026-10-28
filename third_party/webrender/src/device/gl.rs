@@ -29,7 +29,7 @@ use std::{
     ptr,
     rc::Rc,
     slice,
-    sync::Arc,
+    sync::{Arc, atomic::{AtomicBool, Ordering}},
     thread,
     time::Duration,
 };
@@ -442,7 +442,22 @@ pub struct Stream<'a> {
     vbo: VBOId,
 }
 
+/// Shared with every owned GL name so CPU owners can outlive a renderer whose
+/// native context has been permanently lost. Empty placeholders need no state.
+#[derive(Clone, Debug, Default)]
+struct ResourceContext(Option<Arc<AtomicBool>>);
+impl ResourceContext {
+    fn new() -> Self { Self(Some(Arc::new(AtomicBool::new(false)))) }
+    fn abandon(&self) {
+        if let Some(state) = &self.0 { state.store(true, Ordering::Release); }
+    }
+    fn is_abandoned(&self) -> bool {
+        self.0.as_ref().is_some_and(|state| state.load(Ordering::Acquire))
+    }
+}
+
 pub struct VBO<V> {
+    resource_context: ResourceContext,
     id: gl::GLuint,
     target: gl::GLenum,
     allocated_count: usize,
@@ -468,7 +483,7 @@ impl<V> VBO<V> {
 
 impl<T> Drop for VBO<T> {
     fn drop(&mut self) {
-        debug_assert!(thread::panicking() || self.id == 0);
+        debug_assert!(thread::panicking() || self.id == 0 || self.resource_context.is_abandoned());
     }
 }
 
@@ -521,6 +536,7 @@ bitflags! {
 /// Our `Drop` implementation asserts that this has happened.
 #[derive(Debug)]
 pub struct Texture {
+    resource_context: ResourceContext,
     id: gl::GLuint,
     target: gl::GLuint,
     format: ImageFormat,
@@ -633,11 +649,12 @@ impl Texture {
 
 impl Drop for Texture {
     fn drop(&mut self) {
-        debug_assert!(thread::panicking() || self.id == 0);
+        debug_assert!(thread::panicking() || self.id == 0 || self.resource_context.is_abandoned());
     }
 }
 
 pub struct Program {
+    resource_context: ResourceContext,
     id: gl::GLuint,
     u_transform: gl::GLint,
     u_texture_size: gl::GLint,
@@ -654,26 +671,28 @@ impl Program {
 impl Drop for Program {
     fn drop(&mut self) {
         debug_assert!(
-            thread::panicking() || self.id == 0,
+            thread::panicking() || self.id == 0 || self.resource_context.is_abandoned(),
             "renderer::deinit not called"
         );
     }
 }
 
 pub struct CustomVAO {
+    resource_context: ResourceContext,
     id: gl::GLuint,
 }
 
 impl Drop for CustomVAO {
     fn drop(&mut self) {
         debug_assert!(
-            thread::panicking() || self.id == 0,
+            thread::panicking() || self.id == 0 || self.resource_context.is_abandoned(),
             "renderer::deinit not called"
         );
     }
 }
 
 pub struct VAO {
+    resource_context: ResourceContext,
     id: gl::GLuint,
     ibo_id: IBOId,
     main_vbo_id: VBOId,
@@ -686,7 +705,7 @@ pub struct VAO {
 impl Drop for VAO {
     fn drop(&mut self) {
         debug_assert!(
-            thread::panicking() || self.id == 0,
+            thread::panicking() || self.id == 0 || self.resource_context.is_abandoned(),
             "renderer::deinit not called"
         );
     }
@@ -694,6 +713,7 @@ impl Drop for VAO {
 
 #[derive(Debug)]
 pub struct PBO {
+    resource_context: ResourceContext,
     id: gl::GLuint,
     reserved_size: usize,
 }
@@ -707,7 +727,7 @@ impl PBO {
 impl Drop for PBO {
     fn drop(&mut self) {
         debug_assert!(
-            thread::panicking() || self.id == 0,
+            thread::panicking() || self.id == 0 || self.resource_context.is_abandoned(),
             "renderer::deinit not called or PBO not returned to pool"
         );
     }
@@ -1102,6 +1122,7 @@ pub enum ShaderError {
 /// A refcounted depth target, which may be shared by multiple textures across
 /// the device.
 struct SharedDepthTarget {
+    resource_context: ResourceContext,
     /// The Render Buffer Object representing the depth target.
     rbo_id: RBOId,
     /// Reference count. When this drops to zero, the RBO is deleted.
@@ -1111,7 +1132,7 @@ struct SharedDepthTarget {
 #[cfg(debug_assertions)]
 impl Drop for SharedDepthTarget {
     fn drop(&mut self) {
-        debug_assert!(thread::panicking() || self.refcount == 0);
+        debug_assert!(thread::panicking() || self.refcount == 0 || self.resource_context.is_abandoned());
     }
 }
 
@@ -1151,6 +1172,7 @@ impl StrideAlignment {
 const RESERVE_DEPTH_BITS: i32 = 2;
 
 pub struct Device {
+    resource_context: ResourceContext,
     gl: Rc<dyn gl::Gl>,
 
     /// If non-None, |gl| points to a profiling wrapper, and this points to the
@@ -1991,6 +2013,7 @@ impl Device {
         let requires_vao_rebind_after_orphaning = is_adreno_3xx;
 
         Device {
+            resource_context: ResourceContext::new(),
             gl,
             base_gl: None,
             crash_annotator,
@@ -2074,6 +2097,12 @@ impl Device {
 
     pub fn gl(&self) -> &dyn gl::Gl {
         &*self.gl
+    }
+
+    /// CPU-side GL handles no longer require explicit deletion once their native
+    /// context is lost. This changes no GL state and never selects a context.
+    pub(crate) fn abandon_context(&mut self) {
+        self.resource_context.abandon();
     }
 
     pub fn rc_gl(&self) -> &Rc<dyn gl::Gl> {
@@ -2706,6 +2735,7 @@ impl Device {
 
         // Set up the texture book-keeping.
         let mut texture = Texture {
+            resource_context: self.resource_context.clone(),
             id: self.gl.gen_textures(1)[0],
             target: get_gl_target(target),
             size: DeviceIntSize::new(width, height),
@@ -2985,6 +3015,7 @@ impl Device {
     fn acquire_depth_target(&mut self, dimensions: DeviceIntSize) -> RBOId {
         let gl = &self.gl;
         let depth_format = self.depth_format;
+        let resource_context = self.resource_context.clone();
         let target = self.depth_targets.entry(dimensions).or_insert_with(|| {
             let renderbuffer_ids = gl.gen_renderbuffers(1);
             let depth_rb = renderbuffer_ids[0];
@@ -2996,6 +3027,7 @@ impl Device {
                 dimensions.height as _,
             );
             SharedDepthTarget {
+                resource_context,
                 rbo_id: RBOId(depth_rb),
                 refcount: 0,
             }
@@ -3170,6 +3202,7 @@ impl Device {
 
         // Use 0 for the uniforms as they are initialized by link_program.
         let program = Program {
+            resource_context: self.resource_context.clone(),
             id: pid,
             u_transform: 0,
             u_texture_size: 0,
@@ -3250,6 +3283,7 @@ impl Device {
     pub fn create_pbo(&mut self) -> PBO {
         let id = self.gl.gen_buffers(1)[0];
         PBO {
+            resource_context: self.resource_context.clone(),
             id,
             reserved_size: 0,
         }
@@ -3506,6 +3540,7 @@ impl Device {
         ibo_id.bind(self.gl()); // force it to be a part of VAO
 
         VAO {
+            resource_context: self.resource_context.clone(),
             id: vao_id,
             ibo_id,
             main_vbo_id,
@@ -3538,6 +3573,7 @@ impl Device {
         }
 
         CustomVAO {
+            resource_context: self.resource_context.clone(),
             id: vao_id,
         }
     }
@@ -3550,6 +3586,7 @@ impl Device {
     pub fn create_vbo<T>(&mut self) -> VBO<T> {
         let ids = self.gl.gen_buffers(1);
         VBO {
+            resource_context: self.resource_context.clone(),
             id: ids[0],
             target: gl::ARRAY_BUFFER,
             allocated_count: 0,
@@ -4343,6 +4380,7 @@ impl UploadPBO {
     fn empty() -> Self {
         Self {
             pbo: PBO {
+                resource_context: ResourceContext::default(),
                 id: 0,
                 reserved_size: 0,
             },

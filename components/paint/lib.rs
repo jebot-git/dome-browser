@@ -28,6 +28,7 @@ mod pinch_zoom;
 mod pipeline_details;
 mod refresh_driver;
 mod render_notifier;
+mod renderer_retirement;
 mod screenshot;
 mod touch;
 mod web_content_animation;

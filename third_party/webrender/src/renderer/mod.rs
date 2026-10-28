@@ -4484,6 +4484,16 @@ impl Renderer {
         pixels
     }
 
+    /// Release CPU ownership after the caller has established permanent native
+    /// context loss and stopped the render backend. No GL commands are issued:
+    /// native context destruction reclaims the invalid GL names instead.
+    /// Embedder-owned image and compositor handlers retain their own cleanup
+    /// contracts; they must also handle the known loss of their native context.
+    pub fn deinit_after_context_loss(mut self) {
+        self.device.abandon_context();
+        self.gpu_profiler.abandon_context();
+    }
+
     // De-initialize the Renderer safely, assuming the GL is still alive and active.
     pub fn deinit(mut self) {
         //Note: this is a fake frame, only needed because texture deletion is require to happen inside a frame
