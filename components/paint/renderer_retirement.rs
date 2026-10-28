@@ -4,6 +4,7 @@ use std::rc::Rc;
 use paint_api::rendering_context::RenderingContext;
 
 pub(crate) fn retire_renderer(context: Rc<dyn RenderingContext>, renderer: webrender::Renderer) {
+    let scope = context.cleanup_scope();
     let mut pending = Some(renderer);
     let mut cleanup = move || {
         if !context.native_context_is_lost() && context.make_current().is_err() {
@@ -19,7 +20,11 @@ pub(crate) fn retire_renderer(context: Rc<dyn RenderingContext>, renderer: webre
         true
     };
     if !cleanup() {
-        servo_base::deferred_cleanup::defer(cleanup);
+        if let Some(scope) = scope {
+            scope.defer(cleanup);
+        } else {
+            servo_base::deferred_cleanup::defer(cleanup);
+        }
     }
 }
 

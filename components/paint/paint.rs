@@ -123,6 +123,14 @@ pub struct Paint {
     /// a single [`RenderingContext`].
     painters: Vec<Rc<RefCell<Painter>>>,
 
+    /// Owned retirement work, independent of other Servo instances on this thread.
+    pub(crate) cleanup_scope: servo_base::deferred_cleanup::CleanupScope,
+    /// Keep completion handles after a rendering context's last client is dropped.
+    native_context_scopes: Vec<(
+        std::rc::Weak<dyn RenderingContext>,
+        servo_base::deferred_cleanup::CleanupScope,
+    )>,
+
     /// A [`PaintProxy`] which can be used to allow other parts of Servo to communicate
     /// with this [`Paint`].
     pub(crate) paint_proxy: PaintProxy,
@@ -168,7 +176,6 @@ pub struct Paint {
     webgpu_image_map: std::cell::OnceCell<WebGpuExternalImageMap>,
     #[cfg(not(feature = "webxr"))]
     _cleanup_wakeup: servo_base::deferred_cleanup::WakeRegistration,
-
 }
 
 /// Why we need to be repainted. This is used for debugging.
@@ -234,10 +241,13 @@ impl Paint {
         #[cfg(not(feature = "webxr"))]
         let cleanup_waker = state.event_loop_waker.clone_box();
         #[cfg(not(feature = "webxr"))]
-        let cleanup_wakeup = servo_base::deferred_cleanup::register_waker(move || cleanup_waker.wake())
-            .expect("Failed to register native cleanup wakeup");
+        let cleanup_wakeup =
+            servo_base::deferred_cleanup::register_waker(move || cleanup_waker.wake())
+                .expect("Failed to register native cleanup wakeup");
         Rc::new(RefCell::new(Paint {
             painters: Default::default(),
+            cleanup_scope: servo_base::deferred_cleanup::CleanupScope::new(),
+            native_context_scopes: Vec::new(),
             #[cfg(not(feature = "webxr"))]
             _cleanup_wakeup: cleanup_wakeup,
             paint_proxy: state.paint_proxy,
@@ -279,6 +289,14 @@ impl Paint {
             return painter_id;
         }
 
+        // Retain a completion handle while its context lives or owns deferred
+        // work, but do not grow this list with every tab opened in a long session.
+        self.native_context_scopes
+            .retain(|(context, scope)| context.strong_count() != 0 || scope.pending());
+        if let Some(scope) = rendering_context.cleanup_scope() {
+            self.native_context_scopes
+                .push((Rc::downgrade(&rendering_context), scope));
+        }
         let painter = Painter::new(rendering_context.clone(), self);
         let painter_id = painter.painter_id;
         self.painters.push(Rc::new(RefCell::new(painter)));
@@ -321,8 +339,10 @@ impl Paint {
         }
 
         // This is called last so that the surfman `Device` is dropped on this thread.
-        self.painters
-            .retain(|painter| painter.borrow().painter_id != painter_id);
+        self.cleanup_scope.run(|| {
+            self.painters
+                .retain(|painter| painter.borrow().painter_id != painter_id);
+        });
     }
 
     pub(crate) fn maybe_painter<'a>(&'a self, painter_id: PainterId) -> Option<Ref<'a, Painter>> {
@@ -397,11 +417,18 @@ impl Paint {
             .collect()
     }
 
-    pub fn finish_shutting_down(&self) {
+    pub fn finish_shutting_down(&mut self) {
         // Drain paint port, sometimes messages contain channels that are blocking
         // another thread from finishing (i.e. SetFrameTree).
         while self.paint_receiver.try_recv().is_ok() {}
 
+        self.cleanup_scope.run(|| {
+            #[cfg(feature = "webxr")]
+            self.webxr_main_thread.borrow_mut().shutdown();
+            // Stop consumers before asking their producer thread to retire.
+            // This can enqueue native owners and release outstanding loans.
+            self.painters.clear();
+        });
         #[cfg(feature = "webgl")]
         self.webgl_paint.shutdown();
 
@@ -410,6 +437,40 @@ impl Paint {
             self.time_profiler_chan
                 .send(profile_time::ProfilerMsg::Exit(sender));
             let _ = receiver.recv();
+        }
+    }
+
+    /// Called on the owner thread after Constellation has stopped. Keep native
+    /// retirement ahead of the embedder's window destruction. A permanently
+    /// failing driver must not create an unbounded shutdown wait.
+    pub fn drain_native_cleanup(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            self.cleanup_scope.poll_scheduled();
+            for (_, scope) in &self.native_context_scopes {
+                scope.poll_scheduled();
+            }
+            #[cfg(feature = "webxr")]
+            let sessions_closed = self.webxr_main_thread.borrow().shutdown_complete();
+            #[cfg(not(feature = "webxr"))]
+            let sessions_closed = true;
+            if sessions_closed
+                && !self.cleanup_scope.pending()
+                && self
+                    .native_context_scopes
+                    .iter()
+                    .all(|(_, scope)| !scope.pending())
+            {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                self.cleanup_scope.retain_unfinished();
+                for (_, scope) in &self.native_context_scopes {
+                    scope.retain_unfinished();
+                }
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 
@@ -813,7 +874,8 @@ impl Paint {
 
         // Run the WebXR main thread
         #[cfg(feature = "webxr")]
-        self.webxr_main_thread.borrow_mut().run_one_frame();
+        self.cleanup_scope
+            .run(|| self.webxr_main_thread.borrow_mut().run_one_frame());
 
         for painter in &self.painters {
             painter.borrow_mut().perform_updates();

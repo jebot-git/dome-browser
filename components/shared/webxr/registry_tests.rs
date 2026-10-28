@@ -28,6 +28,8 @@ impl crate::LayerGrandManagerAPI<()> for Manager {
 struct Device {
     events: Option<ProfileGenericCallback<Event>>,
     frames: usize,
+    cleanup_ready: Option<Arc<std::sync::atomic::AtomicBool>>,
+    drops: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 impl DeviceAPI for Device {
     fn create_layer(&mut self, _: ContextId, _: LayerInit) -> Result<LayerInfo, Error> {
@@ -62,6 +64,11 @@ impl DeviceAPI for Device {
     fn set_event_dest(&mut self, callback: ProfileGenericCallback<Event>) {
         self.events = Some(callback);
     }
+    fn poll_cleanup(&mut self) -> bool {
+        self.cleanup_ready
+            .as_ref()
+            .is_none_or(|ready| ready.load(Ordering::Acquire))
+    }
     fn quit(&mut self) {
         if let Some(events) = &self.events {
             let _ = events.send(Event::SessionEnd);
@@ -73,12 +80,21 @@ impl DeviceAPI for Device {
         &[]
     }
 }
+impl Drop for Device {
+    fn drop(&mut self) {
+        if let Some(drops) = &self.drops {
+            drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
 struct Discovery {
     state: Arc<Mutex<Option<ImmersiveDeviceState>>>,
     queries: Arc<std::sync::atomic::AtomicUsize>,
     checks: Arc<std::sync::atomic::AtomicUsize>,
     allow_sessions: bool,
     initial_frames: usize,
+    cleanup_ready: Option<Arc<std::sync::atomic::AtomicBool>>,
+    drops: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 impl DiscoveryAPI<()> for Discovery {
     fn immersive_device_state(&self) -> Option<ImmersiveDeviceState> {
@@ -113,10 +129,14 @@ impl DiscoveryAPI<()> for Discovery {
             return Err(Error::BackendSpecific("Selected device unavailable".into()));
         }
         let frames = self.initial_frames;
+        let cleanup_ready = self.cleanup_ready.clone();
+        let drops = self.drops.clone();
         builder.run_on_main_thread(move |_| {
             Ok(Device {
                 frames,
-                ..Device::default()
+                cleanup_ready,
+                drops,
+                events: None,
             })
         })
     }
@@ -135,6 +155,8 @@ fn discovery(vr: bool, ar: bool, allow_sessions: bool) -> Discovery {
         checks: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         allow_sessions,
         initial_frames: 0,
+        cleanup_ready: None,
+        drops: None,
     }
 }
 fn init() -> SessionInit {
@@ -542,7 +564,7 @@ fn queued_request(
         mode,
         init(),
         ProfileGenericCallback::new(move |response| {
-            send.send(response.unwrap()).unwrap();
+            let _ = send.send(response.unwrap_or(Err(Error::CommunicationError)));
         })
         .unwrap(),
     );
@@ -810,24 +832,136 @@ fn consent_preparation_wakes_the_next_iteration_for_a_deferred_live_request() {
 fn deferred_cleanup_wakes_idle_registry_without_moving_native_owner() {
     struct CleanupWaker(mpsc::Sender<()>);
     impl EventLoopWaker for CleanupWaker {
-        fn clone_box(&self) -> Box<dyn EventLoopWaker> { Box::new(Self(self.0.clone())) }
-        fn wake(&self) { let _ = self.0.send(()); }
+        fn clone_box(&self) -> Box<dyn EventLoopWaker> {
+            Box::new(Self(self.0.clone()))
+        }
+        fn wake(&self) {
+            let _ = self.0.send(());
+        }
     }
-    let (send,recv) = mpsc::channel();
-    let mut registry = MainThreadRegistry::new(Box::new(CleanupWaker(send)),LayerGrandManager::new(Manager)).unwrap();
-    let owner = std::rc::Rc::new(std::cell::Cell::new(0)); let count = owner.clone();
+    let (send, recv) = mpsc::channel();
+    let mut registry = MainThreadRegistry::new(
+        Box::new(CleanupWaker(send)),
+        LayerGrandManager::new(Manager),
+    )
+    .unwrap();
+    let owner = std::rc::Rc::new(std::cell::Cell::new(0));
+    let count = owner.clone();
     let thread = std::thread::current().id();
     crate::deferred_cleanup::defer(move || {
-        assert_eq!(std::thread::current().id(),thread);
-        count.set(count.get()+1); count.get()>=2
+        assert_eq!(std::thread::current().id(), thread);
+        count.set(count.get() + 1);
+        count.get() >= 2
     });
     let no_busy_rendering = !registry.running();
     let first_wake = recv.recv_timeout(Duration::from_secs(2)).is_ok();
-    let not_moved = owner.get()==0;
+    let not_moved = owner.get() == 0;
     registry.run_one_frame();
     let retry_wake = recv.recv_timeout(Duration::from_secs(2)).is_ok();
     registry.run_one_frame();
     crate::deferred_cleanup::drain();
     assert!(first_wake && retry_wake && not_moved && no_busy_rendering);
-    assert_eq!(owner.get(),2);
+    assert_eq!(owner.get(), 2);
+}
+
+#[test]
+fn shutdown_cancels_preparation_rejects_queued_and_late_requests() {
+    let mut r = registry();
+    let device = consent_discovery();
+    let cancelled = device.cancelled.clone();
+    let starts = device.starts.clone();
+    r.register(device);
+    let preparing = queued_request(&mut r, 91, 1, SessionMode::ImmersiveVR);
+    r.run_one_frame();
+    let queued = queued_request(&mut r, 92, 1, SessionMode::Inline);
+    r.shutdown();
+    r.shutdown();
+    let prepared_rejected = preparing
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .is_err();
+    let queued_rejected = queued
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .is_err();
+    let late = queued_request(&mut r, 93, 1, SessionMode::Inline);
+    let late_rejected = late.recv_timeout(Duration::from_secs(1)).unwrap().is_err();
+    r.run_one_frame();
+    assert!(prepared_rejected && queued_rejected && late_rejected && r.shutdown_complete());
+    assert_eq!(cancelled.lock().unwrap().len(), 1);
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+}
+#[test]
+fn dropping_registry_cancels_native_preparation_and_releases_requester() {
+    let mut r = registry();
+    let device = consent_discovery();
+    let cancelled = device.cancelled.clone();
+    r.register(device);
+    let waiting = queued_request(&mut r, 94, 1, SessionMode::ImmersiveVR);
+    r.run_one_frame();
+    drop(r);
+    assert!(
+        waiting
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(cancelled.lock().unwrap().len(), 1);
+}
+#[test]
+fn shutdown_retains_main_thread_device_until_cleanup_completes() {
+    let mut r = registry();
+    let mut device = discovery(false, false, true);
+    let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    device.cleanup_ready = Some(ready.clone());
+    device.drops = Some(drops.clone());
+    r.register(device);
+    let session = r.request_session(SessionMode::Inline, init()).unwrap();
+    let scope = crate::deferred_cleanup::CleanupScope::new();
+    scope.run(|| r.shutdown());
+    let retained = !r.shutdown_complete() && scope.pending() && drops.load(Ordering::Relaxed) == 0;
+    ready.store(true, Ordering::Release);
+    let drained = crate::deferred_cleanup::poll();
+    let complete = r.shutdown_complete() && !scope.pending() && drops.load(Ordering::Relaxed) == 1;
+    drop(session);
+    drop(r);
+    assert!(retained && drained && complete);
+}
+
+#[test]
+fn shutdown_does_not_reopen_an_already_retired_session() {
+    let mut r = registry();
+    r.register(discovery(false, false, true));
+    let session = r.request_session(SessionMode::Inline, init()).unwrap();
+    let active = r.active_sessions[0].active.clone();
+    // Model a controller finishing immediately before registry shutdown reaps it.
+    r.sessions.clear();
+    let was_closed = active.is_closed();
+    r.shutdown();
+    let remains_closed = active.is_closed() && r.shutdown_complete();
+    drop(session);
+    drop(r);
+    assert!(was_closed && remains_closed);
+}
+
+#[test]
+fn final_session_completion_wakes_owner_once_even_after_repeated_close() {
+    let (send, receive) = mpsc::channel();
+    let callback = servo_base::generic_channel::GenericCallback::new(move |_| {
+        let _ = send.send(());
+    })
+    .unwrap();
+    let activity = Arc::new(SessionActivity::with_waker(callback));
+    let worker = activity.clone();
+    std::thread::spawn(move || {
+        worker.begin_closing();
+        worker.finish_closing();
+        worker.begin_closing();
+        worker.finish_closing();
+    })
+    .join()
+    .unwrap();
+    assert!(receive.recv_timeout(Duration::from_secs(1)).is_ok());
+    assert!(receive.try_recv().is_err() && activity.is_closed());
 }

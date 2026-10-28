@@ -140,6 +140,7 @@ fn producer_owner_waits_for_outstanding_surface_loan() {
     let native = handle(&owner);
     let display = display();
     let context = finish(owner);
+    let scope = context.native.cleanup_scope();
     context.bind_surface(surface(&context)).unwrap();
     let chain = context.create_attached_swap_chain().unwrap();
     chain
@@ -151,11 +152,11 @@ fn producer_owner_waits_for_outstanding_surface_loan() {
         .unwrap();
     let borrowed = chain.take_surface().unwrap();
     drop(context);
-    let retained = alive(display, native) && servo_base::deferred_cleanup::pending();
+    let retained = alive(display, native) && scope.pending();
     chain.recycle_surface(borrowed);
     let complete = servo_base::deferred_cleanup::poll();
     let destroyed = !alive(display, native);
-    assert!(retained && complete && destroyed);
+    assert!(retained && complete && destroyed && !scope.pending());
 }
 
 #[test]
@@ -164,6 +165,7 @@ fn returned_surface_keeps_context_alive_until_idle_retry() {
     let native = handle(&owner);
     let display = display();
     let context = finish(owner);
+    let scope = context.native.cleanup_scope();
     let weak = Rc::downgrade(&context);
     let failed = Rc::new(Cell::new(false));
     let once = failed.clone();
@@ -174,10 +176,11 @@ fn returned_surface_keeps_context_alive_until_idle_retry() {
         owner.release_surface(surface)
     });
     drop(context);
-    let retained = result.is_err() && weak.upgrade().is_some() && alive(display, native);
+    let retained =
+        result.is_err() && weak.upgrade().is_some() && alive(display, native) && scope.pending();
     let complete = servo_base::deferred_cleanup::poll();
     let destroyed = weak.upgrade().is_none() && !alive(display, native);
-    assert!(retained && complete && destroyed);
+    assert!(retained && complete && destroyed && !scope.pending());
 }
 
 #[test]

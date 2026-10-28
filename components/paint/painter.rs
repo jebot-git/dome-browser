@@ -81,6 +81,8 @@ pub(crate) struct Painter {
     /// The [`RenderingContext`] instance that webrender targets, which is the viewport.
     pub(crate) rendering_context: Rc<dyn RenderingContext>,
 
+    cleanup_scope: servo_base::deferred_cleanup::CleanupScope,
+
     /// The ID of this painter.
     pub(crate) painter_id: PainterId,
 
@@ -137,12 +139,17 @@ pub(crate) struct Painter {
 
 impl Drop for Painter {
     fn drop(&mut self) {
-        self.webrender_api.stop_render_backend();
-        self.webrender_api.shut_down(true);
+        self.cleanup_scope.run(|| {
+            self.webrender_api.stop_render_backend();
+            self.webrender_api.shut_down(true);
 
-        if let Some(renderer) = self.webrender_renderer.take() {
-            crate::renderer_retirement::retire_renderer(self.rendering_context.clone(), renderer);
-        }
+            if let Some(renderer) = self.webrender_renderer.take() {
+                crate::renderer_retirement::retire_renderer(
+                    self.rendering_context.clone(),
+                    renderer,
+                );
+            }
+        });
     }
 }
 
@@ -167,6 +174,7 @@ impl Painter {
                 rendering_context.clone(),
                 paint.webgl_paint.swap_chains.clone(),
                 paint.webgl_paint.busy_webgl_contexts_map.clone(),
+                paint.cleanup_scope.clone(),
             ));
             external_image_handlers.set_handler(image_handler, WebRenderImageHandlerType::WebGl);
         }
@@ -271,6 +279,7 @@ impl Painter {
         info!("Running on {gl_renderer} with OpenGL version {gl_version}");
 
         let painter = Painter {
+            cleanup_scope: paint.cleanup_scope.clone(),
             painter_id,
             embedder_to_constellation_sender,
             webview_renderers: Default::default(),
@@ -311,7 +320,9 @@ impl Painter {
             .collect();
 
         self.send_zoom_and_scroll_offset_updates(need_zoom, scroll_offset_updates);
-        for renderer in self.webview_renderers.values() { renderer.notify_scroll_metrics(); }
+        for renderer in self.webview_renderers.values() {
+            renderer.notify_scroll_metrics();
+        }
 
         if let Some(colors) = self.web_content_animator.update(&self.webview_renderers) {
             let mut transaction = Transaction::new();

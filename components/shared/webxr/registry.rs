@@ -60,12 +60,13 @@ pub struct Registry {
     waker: MainThreadWakerImpl,
 }
 
-pub struct MainThreadRegistry<GL> {
+pub struct MainThreadRegistry<GL: 'static> {
     discoveries: Vec<DiscoveryEntry<GL>>,
     sessions: Vec<Box<dyn MainThreadSession>>,
     mocks: Vec<Box<dyn MockDiscoveryAPI<GL>>>,
     sender: GenericSender<RegistryMsg>,
-    receiver: GenericReceiver<RegistryMsg>,
+    receiver: Option<GenericReceiver<RegistryMsg>>,
+    closing: bool,
     waker: MainThreadWakerImpl,
     grand_manager: LayerGrandManager<GL>,
     next_session_id: u32,
@@ -155,7 +156,14 @@ impl Registry {
         mode: SessionMode,
         dest: ProfileGenericCallback<Result<(), Error>>,
     ) {
-        let _ = self.sender.send(RegistryMsg::SupportsSession(mode, dest));
+        let failure = dest.clone();
+        if self
+            .sender
+            .send(RegistryMsg::SupportsSession(mode, dest))
+            .is_err()
+        {
+            let _ = failure.send(Err(Error::CommunicationError));
+        }
         self.waker.wake();
     }
 
@@ -165,9 +173,14 @@ impl Registry {
         init: SessionInit,
         dest: ProfileGenericCallback<Result<Session, Error>>,
     ) {
-        let _ = self
+        let failure = dest.clone();
+        if self
             .sender
-            .send(RegistryMsg::RequestSession(mode, init, None, dest));
+            .send(RegistryMsg::RequestSession(mode, init, None, dest))
+            .is_err()
+        {
+            let _ = failure.send(Err(Error::CommunicationError));
+        }
         self.waker.wake();
     }
 
@@ -183,9 +196,14 @@ impl Registry {
             pipeline,
             generation,
         };
-        let _ = self
+        let failure = dest.clone();
+        if self
             .sender
-            .send(RegistryMsg::RequestSession(mode, init, Some(owner), dest));
+            .send(RegistryMsg::RequestSession(mode, init, Some(owner), dest))
+            .is_err()
+        {
+            let _ = failure.send(Err(Error::CommunicationError));
+        }
         self.waker.wake();
     }
 
@@ -201,10 +219,105 @@ impl Registry {
         init: MockDeviceInit,
         dest: ProfileGenericCallback<Result<GenericSender<MockDeviceMsg>, Error>>,
     ) {
-        let _ = self
+        let failure = dest.clone();
+        if self
             .sender
-            .send(RegistryMsg::SimulateDeviceConnection(init, dest));
+            .send(RegistryMsg::SimulateDeviceConnection(init, dest))
+            .is_err()
+        {
+            let _ = failure.send(Err(Error::CommunicationError));
+        }
         self.waker.wake();
+    }
+}
+
+impl<GL: 'static> MainThreadRegistry<GL> {
+    /// Stop accepting work before discoveries, callbacks or the cleanup wakeup
+    /// are destroyed. Native devices may finish on the owner-thread queue.
+    pub fn shutdown(&mut self) {
+        if self.closing {
+            return;
+        }
+        self.closing = true;
+        if let Some(receiver) = self.receiver.take() {
+            // Constellation shutdown normally leaves a finite queue. Bound this
+            // pass so a stale external client cannot keep the owner here forever.
+            for _ in 0..1024 {
+                let Ok(message) = receiver.try_recv() else {
+                    break;
+                };
+                Self::reject_closing_message(message);
+            }
+        }
+        for request in std::mem::take(&mut self.pending_requests) {
+            if let Some((id, session, _)) = request.preparing {
+                if let Some(entry) = self.discoveries.iter_mut().find(|entry| entry.id == id) {
+                    entry.device.cancel_session_preparation(session);
+                }
+            }
+            let _ = request.destination.send(Err(Error::CommunicationError));
+        }
+        self.device_watchers.clear();
+        self.observing_devices = false;
+        self.pending_device_change = false;
+        self.device_watch_epoch = self.device_watch_epoch.wrapping_add(1);
+        for discovery in &mut self.discoveries {
+            discovery.device.set_device_change_callback(None);
+        }
+        for session in &self.active_sessions {
+            session.active.begin_closing();
+            session.abort.abort();
+        }
+        // SessionThread Drop releases queued replies, calls quit once and keeps
+        // !Send devices on the owning thread until native cleanup completes.
+        self.sessions.clear();
+        // Discovery destruction may release monitors or native owners. Do this
+        // while the caller still tracks cleanup and keeps its native host alive.
+        self.discoveries.clear();
+        self.mocks.clear();
+    }
+
+    pub fn shutdown_complete(&self) -> bool {
+        self.closing
+            && self
+                .active_sessions
+                .iter()
+                .all(|session| session.active.is_closed())
+            && self
+                .draining_sessions
+                .iter()
+                .all(|session| session.is_closed())
+    }
+
+    fn reject_closing_message(message: RegistryMsg) {
+        match message {
+            RegistryMsg::SupportsSession(_, destination) => {
+                let _ = destination.send(Err(Error::CommunicationError));
+            },
+            RegistryMsg::CheckContextCompatibility(_, destination) => {
+                let _ = destination.send(Err(Error::CommunicationError));
+            },
+            RegistryMsg::RequestSession(_, _, _, destination) => {
+                let _ = destination.send(Err(Error::CommunicationError));
+            },
+            RegistryMsg::SimulateDeviceConnection(_, destination) => {
+                let _ = destination.send(Err(Error::CommunicationError));
+            },
+            RegistryMsg::DisconnectMockDevice(device, destination) => {
+                if device
+                    .send(MockDeviceMsg::Disconnect(destination.clone()))
+                    .is_err()
+                {
+                    let _ = destination.send(());
+                }
+            },
+            _ => {},
+        }
+    }
+}
+impl<GL: 'static> Drop for MainThreadRegistry<GL> {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -222,13 +335,14 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
         let waker = MainThreadWakerImpl::new(waker)?;
         let cleanup_waker = waker.clone();
         let cleanup_wakeup = crate::deferred_cleanup::register_waker(move || cleanup_waker.wake())
-            .map_err(|_|Error::CommunicationError)?;
+            .map_err(|_| Error::CommunicationError)?;
         Ok(MainThreadRegistry {
             discoveries,
             sessions,
             mocks,
             sender,
-            receiver,
+            receiver: Some(receiver),
+            closing: false,
             waker,
             grand_manager,
             next_session_id: 0,
@@ -382,6 +496,9 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
     }
 
     fn register_discovery(&mut self, mut discovery: Box<dyn DiscoveryAPI<GL>>, first: bool) {
+        if self.closing {
+            return;
+        }
         if self.observing_devices {
             discovery.set_device_change_callback(self.device_change_callback());
         }
@@ -405,6 +522,9 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
     where
         D: MockDiscoveryAPI<GL>,
     {
+        if self.closing {
+            return;
+        }
         self.mocks.push(Box::new(discovery));
     }
 
@@ -412,12 +532,21 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
     where
         S: MainThreadSession,
     {
-        self.sessions.push(Box::new(session));
+        if !self.closing {
+            self.sessions.push(Box::new(session));
+        }
     }
 
     pub fn run_one_frame(&mut self) {
         crate::deferred_cleanup::poll_scheduled();
-        while let Ok(msg) = self.receiver.try_recv() {
+        if self.closing {
+            return;
+        }
+        while let Some(msg) = self
+            .receiver
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok())
+        {
             self.handle_msg(msg);
         }
         self.poll_session_requests();
@@ -434,7 +563,11 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
     /// Whether XR needs continuous main-thread rendering. Pending cleanup has
     /// its own wakeups, so it must not force busy rendering while backing off.
     pub fn running(&self) -> bool {
-        self.sessions.iter().any(|session| session.needs_animation_frames())
+        !self.closing
+            && self
+                .sessions
+                .iter()
+                .any(|session| session.needs_animation_frames())
     }
 
     fn handle_msg(&mut self, msg: RegistryMsg) {
@@ -672,6 +805,9 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
         init: SessionInit,
         owner: Option<DocumentSessionOwner>,
     ) -> Result<Session, Error> {
+        if self.closing {
+            return Err(Error::CommunicationError);
+        }
         self.request_session_prepared(mode, init, owner, None)
     }
 
@@ -709,7 +845,7 @@ impl<GL: 'static + GLTypes> MainThreadRegistry<GL> {
                 self.next_session_id += 1;
                 id
             };
-            let active = Arc::new(SessionActivity::new());
+            let active = Arc::new(SessionActivity::with_waker(self.waker.callback.clone()));
             let xr = SessionBuilder::new(
                 &mut self.sessions,
                 self.grand_manager.clone(),

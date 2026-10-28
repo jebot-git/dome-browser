@@ -44,10 +44,12 @@ impl NativeContextState {
 
 pub(super) struct NativeContextOwner {
     state: Option<NativeContextState>,
+    scope: servo_base::deferred_cleanup::CleanupScope,
 }
 impl NativeContextOwner {
     pub fn new(device: Device, context: Context) -> Self {
         Self {
+            scope: servo_base::deferred_cleanup::CleanupScope::new(),
             state: Some(NativeContextState {
                 device: RefCell::new(device),
                 context: RefCell::new(context),
@@ -55,6 +57,9 @@ impl NativeContextOwner {
                 native_only: false,
             }),
         }
+    }
+    pub fn cleanup_scope(&self) -> servo_base::deferred_cleanup::CleanupScope {
+        self.scope.clone()
     }
     pub fn state(&self) -> &NativeContextState {
         self.state.as_ref().expect("live native context owner")
@@ -73,7 +78,7 @@ impl Drop for NativeContextOwner {
             return;
         };
         if !state.retire() {
-            servo_base::deferred_cleanup::defer(move || state.retire());
+            self.scope.defer(move || state.retire());
         }
     }
 }

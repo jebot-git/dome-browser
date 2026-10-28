@@ -64,6 +64,12 @@ pub trait RenderingContext {
     /// After calling this function, it is valid to use OpenGL rendering
     /// commands.
     fn make_current(&self) -> Result<(), Error>;
+    /// Native retirement associated with this rendering context. Embedders can
+    /// keep this status after dropping their final context reference and service
+    /// owner-thread cleanup until it is complete, before releasing native windows.
+    fn cleanup_scope(&self) -> Option<servo_base::deferred_cleanup::CleanupScope> {
+        None
+    }
     /// Cached native loss state, without issuing ordinary GL queries.
     fn native_context_is_lost(&self) -> bool {
         false
@@ -230,7 +236,9 @@ impl SurfmanRenderingContext {
             Ok(()) => Ok(()),
             Err(error) => {
                 let owner = self.clone();
-                servo_base::deferred_cleanup::defer(move || release(&owner, &mut surface).is_ok());
+                self.native
+                    .cleanup_scope()
+                    .defer(move || release(&owner, &mut surface).is_ok());
                 Err(error)
             },
         }
@@ -459,6 +467,10 @@ impl RenderingContext for SoftwareRenderingContext {
         self.surfman_rendering_info.create_texture(surface)
     }
 
+    fn cleanup_scope(&self) -> Option<servo_base::deferred_cleanup::CleanupScope> {
+        Some(self.surfman_rendering_info.native.cleanup_scope())
+    }
+
     fn native_context_is_lost(&self) -> bool {
         self.surfman_rendering_info.native_context_is_lost()
     }
@@ -641,6 +653,10 @@ impl RenderingContext for WindowRenderingContext {
         surface: Surface,
     ) -> Result<(SurfaceTexture, u32, UntypedSize2D<i32>), (surfman::Error, Surface)> {
         self.surfman_context.create_texture(surface)
+    }
+
+    fn cleanup_scope(&self) -> Option<servo_base::deferred_cleanup::CleanupScope> {
+        Some(self.surfman_context.native.cleanup_scope())
     }
 
     fn native_context_is_lost(&self) -> bool {
@@ -958,6 +974,10 @@ impl RenderingContext for OffscreenRenderingContext {
         surface: Surface,
     ) -> Result<(SurfaceTexture, u32, UntypedSize2D<i32>), (surfman::Error, Surface)> {
         self.parent_context.create_texture(surface)
+    }
+
+    fn cleanup_scope(&self) -> Option<servo_base::deferred_cleanup::CleanupScope> {
+        self.parent_context.cleanup_scope()
     }
 
     fn native_context_is_lost(&self) -> bool {

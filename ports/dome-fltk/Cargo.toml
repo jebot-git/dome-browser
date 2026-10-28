@@ -37,6 +37,9 @@ base64 = { workspace = true }
 mail-parser = { version = "=1.0.0", features = ["full_encoding"] }
 webpki-roots = { workspace = true }
 
+[dev-dependencies]
+gleam = { workspace = true }
+
 [build-dependencies]
 cc = { workspace = true }
 

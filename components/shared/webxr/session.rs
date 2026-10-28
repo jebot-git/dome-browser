@@ -23,22 +23,26 @@ use crate::{
 
 /// Closing is distinct from closed: selection may move immediately, but change
 /// notification must wait until the backend has queued its session-end event.
-pub(crate) struct SessionActivity(AtomicU8);
+pub(crate) struct SessionActivity {
+    state: AtomicU8,
+    wake_on_closed: Option<servo_base::generic_channel::GenericCallback<()>>,
+}
 impl SessionActivity {
     pub(crate) fn new() -> Self {
-        Self(AtomicU8::new(0))
+        Self { state: AtomicU8::new(0), wake_on_closed: None }
     }
-    pub(crate) fn is_active(&self) -> bool {
-        self.0.load(Ordering::Acquire) == 0
+    pub(crate) fn with_waker(wake: servo_base::generic_channel::GenericCallback<()>) -> Self {
+        Self { state: AtomicU8::new(0), wake_on_closed: Some(wake) }
     }
-    pub(crate) fn is_closed(&self) -> bool {
-        self.0.load(Ordering::Acquire) == 2
-    }
+    pub(crate) fn is_active(&self) -> bool { self.state.load(Ordering::Acquire) == 0 }
+    pub(crate) fn is_closed(&self) -> bool { self.state.load(Ordering::Acquire) == 2 }
     pub(crate) fn begin_closing(&self) {
-        self.0.store(1, Ordering::Release);
+        let _ = self.state.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
     }
     pub(crate) fn finish_closing(&self) {
-        self.0.store(2, Ordering::Release);
+        if self.state.swap(2, Ordering::AcqRel) != 2 {
+            if let Some(wake) = &self.wake_on_closed { let _ = wake.send(()); }
+        }
     }
 }
 

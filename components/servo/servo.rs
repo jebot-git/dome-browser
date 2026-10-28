@@ -980,6 +980,15 @@ impl Drop for ServoInner {
         while self.spin_event_loop() {
             std::thread::sleep(Duration::from_micros(500));
         }
+        if !self
+            .paint
+            .borrow()
+            .drain_native_cleanup(Duration::from_secs(2))
+        {
+            warn!(
+                "Native cleanup did not finish within the shutdown grace period; unfinished owner-thread resources retained"
+            );
+        }
         // Media initialization runs on a detached thread. A short-lived webview
         // can finish before GStreamer has loaded its plugins. Wait for the backend
         // to be ready before returning to the embedder, which may exit and unload

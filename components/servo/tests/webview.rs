@@ -131,6 +131,7 @@ impl RenderingContext for ConnectionlessRenderingContext {
         self.0.create_texture(surface)
     }
 
+    fn cleanup_scope(&self) -> Option<servo_base::deferred_cleanup::CleanupScope> { self.0.cleanup_scope() }
     fn native_context_is_lost(&self) -> bool { self.0.native_context_is_lost() }
 
     fn destroy_texture(&self, surface_texture: SurfaceTexture) -> Result<Surface, (surfman::Error, SurfaceTexture)> {

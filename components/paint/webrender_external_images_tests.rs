@@ -170,6 +170,7 @@ impl Fixture {
             consumer.clone(),
             chains.clone(),
             busy.clone(),
+            servo_base::deferred_cleanup::CleanupScope::new(),
         );
         Self {
             device,
@@ -195,6 +196,10 @@ fn retirement(drop_locked: bool, fail_current: bool, lost: bool) {
         receiver,
         mut handler,
     } = Fixture::new();
+    // Consumer deliberately uses the default RenderingContext with no scope.
+    // The handler must retain its Paint scope even when unlocked before Drop.
+    assert!(consumer.cleanup_scope().is_none());
+    let owner_scope = handler.cleanup_scope.clone();
     let imported = handler.lock_swap_chain(ID).is_some();
     let nested = handler.lock_swap_chain(ID).is_some();
     handler.unlock_swap_chain(ID);
@@ -210,23 +215,29 @@ fn retirement(drop_locked: bool, fail_current: bool, lost: bool) {
     }
     consumer.fail_exports.set(1);
     consumer.fail_current.set(fail_current);
-    if !drop_locked {
+    let tracked_before_drop = if !drop_locked {
         handler.unlock_swap_chain(ID);
-    }
+        owner_scope.pending()
+    } else {
+        true
+    };
     drop(handler);
     drop(consumer);
-    let owner_retained = weak.upgrade().is_some() && !destroyed.get();
+    let owner_retained = weak.upgrade().is_some() && !destroyed.get() && owner_scope.pending();
     let busy_retained = busy.read().get(&ID).copied() == Some(1);
     let no_early_notification = receiver.try_recv().is_err();
     let producer_waits =
         chains.destroy(ID, &device, &mut producer).is_err() && chains.get(ID).is_some();
     // A failed make-current attempt precedes the deliberate export failure.
     let mut attempts = 0;
-    while servo_base::deferred_cleanup::pending() && attempts < 4 {
-        servo_base::deferred_cleanup::poll();
+    while owner_scope.pending() && attempts < 8 {
+        owner_scope.poll_scheduled();
         attempts += 1;
+        if owner_scope.pending() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
-    let drained = !servo_base::deferred_cleanup::pending();
+    let drained = !owner_scope.pending() && !servo_base::deferred_cleanup::pending();
     let released = weak.upgrade().is_none() && destroyed.get();
     let busy_released = busy.read().get(&ID).copied() == Some(0);
     let notified_once = matches!(
@@ -237,7 +248,13 @@ fn retirement(drop_locked: bool, fail_current: bool, lost: bool) {
     chains.destroy(ID, &device, &mut producer).unwrap();
     device.destroy_context(&mut producer).unwrap();
     assert!(imported && nested && nested_retained);
-    assert!(owner_retained && busy_retained && no_early_notification && producer_waits);
+    assert!(
+        tracked_before_drop
+            && owner_retained
+            && busy_retained
+            && no_early_notification
+            && producer_waits
+    );
     assert!(drained && released && busy_released && notified_once);
     assert_eq!(gl_count, u32::from(drop_locked && !lost));
     assert_eq!(attempts, if fail_current { 2 } else { 1 });

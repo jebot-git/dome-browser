@@ -70,6 +70,7 @@ fn finish_busy(busy: &WebGLContextBusyMap, threads: &WebGLThreads, id: WebGLCont
 
 /// Bridge between the webrender::ExternalImage callbacks and the WebGLThreads.
 pub struct WebGLExternalImages {
+    cleanup_scope: servo_base::deferred_cleanup::CleanupScope,
     webgl_threads: WebGLThreads,
     rendering_context: Rc<dyn RenderingContext>,
     swap_chains: SwapChains<WebGLContextId, Device>,
@@ -83,8 +84,10 @@ impl WebGLExternalImages {
         rendering_context: Rc<dyn RenderingContext>,
         swap_chains: SwapChains<WebGLContextId, Device>,
         busy_webgl_context_map: WebGLContextBusyMap,
+        cleanup_scope: servo_base::deferred_cleanup::CleanupScope,
     ) -> Self {
         Self {
+            cleanup_scope,
             webgl_threads,
             rendering_context,
             swap_chains,
@@ -97,17 +100,23 @@ impl WebGLExternalImages {
         finish_busy(&self.busy_webgl_context_map, &self.webgl_threads, id);
     }
     fn retire_record(&self, id: WebGLContextId, record: LockedFrontBuffer, finish_reads: bool) {
-        let mut task = RetiringImage {
-            id,
-            record,
-            context: self.rendering_context.clone(),
-            threads: self.webgl_threads.clone(),
-            busy: self.busy_webgl_context_map.clone(),
-            finish_reads,
-        };
-        if !task.poll() {
-            servo_base::deferred_cleanup::defer(move || task.poll());
-        }
+        self.cleanup_scope.run(|| {
+            let mut task = RetiringImage {
+                id,
+                record,
+                context: self.rendering_context.clone(),
+                threads: self.webgl_threads.clone(),
+                busy: self.busy_webgl_context_map.clone(),
+                finish_reads,
+            };
+            if !task.poll() {
+                if let Some(scope) = self.rendering_context.cleanup_scope() {
+                    scope.defer(move || task.poll());
+                } else {
+                    servo_base::deferred_cleanup::defer(move || task.poll());
+                }
+            }
+        });
     }
 
     fn lock_swap_chain(&mut self, id: WebGLContextId) -> Option<(u32, Size2D<i32>)> {
