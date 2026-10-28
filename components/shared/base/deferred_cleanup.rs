@@ -147,23 +147,42 @@ fn schedule_next() {
         timer.schedule(due);
     }
 }
+/// Run retirement only while its native host is still available. A retained
+/// scope must also suppress the initial attempt, not merely later retries.
+pub fn retire(cleanup: impl FnMut() -> bool + 'static) {
+    let mut owner = new_owner(cleanup, current_scopes());
+    if !owner.scopes.iter().any(|scope| scope.0.retained.get()) {
+        owner.complete = in_scopes(owner.scopes.clone(), || owner.cleanup.as_mut().unwrap()());
+    }
+    if !owner.complete {
+        queue_owner(owner);
+    }
+}
+pub fn retention_active() -> bool {
+    current_scopes().iter().any(|scope| scope.0.retained.get())
+}
 pub fn defer(cleanup: impl FnMut() -> bool + 'static) {
     enqueue(cleanup, current_scopes());
 }
 fn enqueue(cleanup: impl FnMut() -> bool + 'static, scopes: Vec<CleanupScope>) {
+    queue_owner(new_owner(cleanup, scopes));
+}
+fn new_owner(cleanup: impl FnMut() -> bool + 'static, scopes: Vec<CleanupScope>) -> Owner {
     for scope in &scopes {
         scope.0.pending.set(scope.0.pending.get() + 1);
     }
-    let mut owner = Some(Owner {
+    Owner {
         complete: false,
         cleanup: Some(Box::new(cleanup)),
         scopes,
         due: Instant::now(),
         delay: Duration::from_millis(10),
-    });
-    // Another TLS destructor can retire a native owner after this queue has
-    // already been destroyed. Retain it through Owner's incomplete-drop path;
-    // never destroy !Send native handles or panic during TLS teardown.
+    }
+}
+fn queue_owner(owner: Owner) {
+    let mut owner = Some(owner);
+    // Queue teardown and final retention leave native owners inert, including
+    // any late work created by another TLS destructor.
     if !owner
         .as_ref()
         .unwrap()
@@ -502,5 +521,53 @@ mod final_drain_tests {
         assert!(poll());
         assert!(stopped.pending());
         assert_eq!(attempts.get(), 0);
+    }
+}
+
+#[cfg(test)]
+mod late_retirement_tests {
+    use super::*;
+    #[test]
+    fn retained_scope_never_runs_an_initial_native_retirement_attempt() {
+        let scope = CleanupScope::new();
+        scope.retain_unfinished();
+        let called = Rc::new(Cell::new(false));
+        let probe = called.clone();
+        scope.run(|| {
+            retire(move || {
+                probe.set(true);
+                true
+            })
+        });
+        assert!(!called.get());
+        assert!(scope.pending());
+        assert!(poll());
+    }
+}
+
+#[cfg(test)]
+mod initial_attempt_tests {
+    use super::*;
+    #[test]
+    fn initial_retirement_unwind_retains_native_payload_and_completion_state() {
+        struct Resource(Rc<Cell<bool>>);
+        impl Drop for Resource {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+        let dropped = Rc::new(Cell::new(false));
+        let resource = Resource(dropped.clone());
+        let scope = CleanupScope::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            scope.run(|| {
+                retire(move || {
+                    let _ = &resource;
+                    panic!("initial retirement probe");
+                })
+            });
+        }));
+        assert!(result.is_err() && !dropped.get() && scope.pending());
+        assert!(poll());
     }
 }

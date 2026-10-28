@@ -32,6 +32,11 @@ struct Context {
     expose_scope: bool,
 }
 impl RenderingContext for Context {
+    fn prepare_for_rendering(&self) {
+        if !self.fail.load(Ordering::Acquire) {
+            self.inner.prepare_for_rendering();
+        }
+    }
     fn read_to_image(&self, rect: servo::DeviceIntRect) -> Option<image::RgbaImage> {
         self.inner.read_to_image(rect)
     }
@@ -81,8 +86,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
     let scenario = std::env::args()
         .nth(1)
-        .ok_or("recover, retain or fallback required")?;
-    assert!(["recover", "retain", "fallback"].contains(&scenario.as_str()));
+        .ok_or("recover, retain, fallback or render required")?;
+    assert!(["recover", "retain", "fallback", "render"].contains(&scenario.as_str()));
     let size = dpi::PhysicalSize::new(64, 64);
     let inner = if std::env::var_os("DOME_CREATION_SOFTWARE").is_some() {
         SoftwareRenderingContext::new(size)
@@ -109,11 +114,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "DOME_SHUTDOWN_PROFILE",
     )?));
     std::fs::create_dir_all(opts.config_dir.as_ref().unwrap())?;
+    let mut prefs = servo::Preferences::default();
+    prefs.shell_background_color_rgba = [1., 0., 0., 1.];
     let servo = ServoBuilder::default()
         .opts(opts)
+        .preferences(prefs)
         .event_loop_waker(Box::new(Waker))
         .build();
     let view = WebViewBuilder::new(&servo, context.clone()).build();
+    if scenario == "render" {
+        let peer = if std::env::var_os("DOME_CREATION_SOFTWARE").is_some() {
+            SoftwareRenderingContext::new(size)
+        } else {
+            SoftwareRenderingContext::new_accelerated(size)
+        }
+        .map_err(|error| format!("{error:?}"))?;
+        peer.make_current().map_err(|error| format!("{error:?}"))?;
+        peer.prepare_for_rendering();
+        let gl = peer.gleam_gl_api();
+        gl.clear_color(0., 0., 1., 1.);
+        gl.clear(gleam::gl::COLOR_BUFFER_BIT);
+        let rect = servo::DeviceIntRect::new(
+            servo::DeviceIntPoint::new(0, 0),
+            servo::DeviceIntPoint::new(64, 64),
+        );
+        fail.store(true, Ordering::Release);
+        view.paint();
+        assert!(
+            peer.read_to_image(rect)
+                .unwrap()
+                .pixels()
+                .all(|pixel| pixel.0 == [0, 0, 255, 255]),
+            "unavailable frame must preserve the peer target"
+        );
+        fail.store(false, Ordering::Release);
+        view.paint();
+        assert!(
+            context
+                .read_to_image(rect)
+                .unwrap()
+                .pixels()
+                .all(|pixel| pixel.0 == [255, 0, 0, 255]),
+            "a later available frame must render normally"
+        );
+        drop(view);
+        drop(context);
+        drop(servo);
+        assert!(
+            peer.read_to_image(rect)
+                .unwrap()
+                .pixels()
+                .all(|pixel| pixel.0 == [0, 0, 255, 255])
+        );
+        assert!(!scope.pending());
+        host_alive.set(false);
+        println!(
+            "NATIVE_RENDER {}",
+            serde_json::json!({"passed":true,"failed_frame_skipped":true,"recovered":true})
+        );
+        return Ok(());
+    }
     fail.store(true, Ordering::Release);
     drop(view);
     assert!(weak.upgrade().is_some());

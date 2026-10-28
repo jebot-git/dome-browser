@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 //! Keep native context ownership together through initialization and retirement.
-use std::cell::RefCell;
+use std::{any::Any, cell::RefCell, rc::Rc};
 
 use surfman::chains::SwapChain;
 use surfman::{Context, Device, Error};
@@ -10,6 +10,10 @@ pub(super) struct NativeContextState {
     pub context: RefCell<Context>,
     chains: RefCell<Vec<SwapChain<Device>>>,
     native_only: bool,
+    // Raw window/display handles can be borrowed by the native context and its
+    // surface. Release their owners after Device/Context retirement, including
+    // deferred retries and failed initialization.
+    keep_alive: RefCell<Vec<Rc<dyn Any>>>,
 }
 
 impl NativeContextState {
@@ -55,8 +59,12 @@ impl NativeContextOwner {
                 context: RefCell::new(context),
                 chains: RefCell::new(Vec::new()),
                 native_only: false,
+                keep_alive: RefCell::new(Vec::new()),
             }),
         }
+    }
+    pub fn keep_alive(&self, owner: Rc<dyn Any>) {
+        self.state().keep_alive.borrow_mut().push(owner);
     }
     pub fn cleanup_scope(&self) -> servo_base::deferred_cleanup::CleanupScope {
         self.scope.clone()
@@ -77,8 +85,8 @@ impl Drop for NativeContextOwner {
         let Some(mut state) = self.state.take() else {
             return;
         };
-        if !state.retire() {
-            self.scope.defer(move || state.retire());
-        }
+        self.scope.run(|| {
+            servo_base::deferred_cleanup::retire(move || state.retire());
+        });
     }
 }

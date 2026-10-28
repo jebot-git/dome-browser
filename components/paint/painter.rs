@@ -82,6 +82,7 @@ pub(crate) struct Painter {
     pub(crate) rendering_context: Rc<dyn RenderingContext>,
 
     cleanup_scope: servo_base::deferred_cleanup::CleanupScope,
+    render_context_error_reported: bool,
 
     /// The ID of this painter.
     pub(crate) painter_id: PainterId,
@@ -280,6 +281,7 @@ impl Painter {
 
         let painter = Painter {
             cleanup_scope: paint.cleanup_scope.clone(),
+            render_context_error_reported: false,
             painter_id,
             embedder_to_constellation_sender,
             webview_renderers: Default::default(),
@@ -415,12 +417,25 @@ impl Painter {
 
     #[servo_tracing::instrument(skip_all)]
     pub(crate) fn render(&mut self, time_profiler_channel: &ProfilerChan) {
+        let current = if self.rendering_context.native_context_is_lost() {
+            Err(surfman::Error::Failed)
+        } else {
+            self.rendering_context.make_current()
+        };
+        if current.is_err() || self.rendering_context.native_context_is_lost() {
+            if !self.render_context_error_reported {
+                error!(
+                    "Rendering context unavailable; frame deferred: {:?}",
+                    current.err()
+                );
+            }
+            self.render_context_error_reported = true;
+            return;
+        }
+        self.render_context_error_reported = false;
         let refresh_driver = self.refresh_driver.clone();
         refresh_driver.notify_will_paint(self);
 
-        if let Err(error) = self.rendering_context.make_current() {
-            error!("Failed to make the rendering context current: {error:?}");
-        }
         self.assert_no_gl_error();
 
         self.rendering_context.prepare_for_rendering();

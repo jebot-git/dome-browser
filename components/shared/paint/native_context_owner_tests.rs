@@ -6,6 +6,7 @@ use std::ffi::c_void;
 use std::rc::Rc;
 
 use super::*;
+use glow::HasContext;
 use surfman::chains::{PreserveBuffer, SwapChainAPI};
 
 #[link(name = "EGL")]
@@ -306,4 +307,74 @@ fn closing_context_preserves_current_peers_native_framebuffer() {
     let survived = unsafe { peer.glow_gl.is_framebuffer(framebuffer) };
     drop(peer);
     assert!(existed && retired && survived && !servo_base::deferred_cleanup::pending());
+}
+
+struct HostLease {
+    display: *mut c_void,
+    context: *mut c_void,
+    dropped: Rc<Cell<bool>>,
+}
+impl Drop for HostLease {
+    fn drop(&mut self) {
+        assert!(
+            !alive(self.display, self.context),
+            "native context must retire before its host"
+        );
+        self.dropped.set(true);
+    }
+}
+fn host_lease(owner: &NativeContextOwner) -> (Rc<HostLease>, Rc<Cell<bool>>) {
+    let dropped = Rc::new(Cell::new(false));
+    (
+        Rc::new(HostLease {
+            display: display(),
+            context: handle(owner),
+            dropped: dropped.clone(),
+        }),
+        dropped,
+    )
+}
+#[test]
+fn native_host_lease_outlives_failed_context_retirement() {
+    let (mut owner, _connection) = raw_owner();
+    let native = handle(&owner);
+    let display = display();
+    let (lease, dropped) = host_lease(&owner);
+    owner.keep_alive(lease.clone());
+    drop(lease);
+    assert!(!owner.state_mut().retire_with(|_, _| Err(Error::Failed)));
+    assert!(alive(display, native) && !dropped.get());
+    drop(owner);
+    assert!(dropped.get() && !alive(display, native));
+}
+#[test]
+fn native_host_lease_survives_initial_binding_failure_until_native_release() {
+    let (owner, _connection) = raw_owner();
+    let (lease, dropped) = host_lease(&owner);
+    owner.keep_alive(lease.clone());
+    drop(lease);
+    owner
+        .state()
+        .device
+        .borrow()
+        .mark_context_lost(&mut owner.state().context.borrow_mut())
+        .unwrap();
+    let result = SurfmanRenderingContext::finish_initialization(owner, GLApi::GL, None, |_, _| {
+        panic!("loader cannot run after failed native binding")
+    });
+    assert!(result.is_err() && dropped.get());
+}
+#[test]
+fn retained_native_context_keeps_its_host_inert_until_process_exit() {
+    let (owner, _connection) = raw_owner();
+    let native = handle(&owner);
+    let display = display();
+    let (lease, dropped) = host_lease(&owner);
+    owner.keep_alive(lease.clone());
+    drop(lease);
+    let scope = owner.cleanup_scope();
+    scope.retain_unfinished();
+    drop(owner);
+    assert!(scope.pending() && alive(display, native) && !dropped.get());
+    assert!(servo_base::deferred_cleanup::poll());
 }

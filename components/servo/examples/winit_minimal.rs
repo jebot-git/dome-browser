@@ -18,7 +18,6 @@ use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{MouseScrollDelta, WindowEvent};
 use winit::event_loop::EventLoop;
-use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::Window;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -34,10 +33,16 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 struct AppState {
-    window: Window,
+    window: Rc<Window>,
     servo: Servo,
     rendering_context: Rc<WindowRenderingContext>,
     webviews: RefCell<Vec<WebView>>,
+}
+
+impl Drop for AppState {
+    fn drop(&mut self) {
+        self.window.set_visible(false);
+    }
 }
 
 impl ::servo::WebViewDelegate for AppState {
@@ -60,16 +65,14 @@ impl App {
 impl ApplicationHandler<WakerEvent> for App {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         if let Self::Initial(waker) = self {
-            let display_handle = event_loop
-                .display_handle()
-                .expect("Failed to get display handle");
-            let window = event_loop
-                .create_window(Window::default_attributes())
-                .expect("Failed to create winit Window");
-            let window_handle = window.window_handle().expect("Failed to get window handle");
+            let window = Rc::new(
+                event_loop
+                    .create_window(Window::default_attributes())
+                    .expect("Failed to create winit Window"),
+            );
 
             let rendering_context = Rc::new(
-                WindowRenderingContext::new(display_handle, window_handle, window.inner_size())
+                WindowRenderingContext::new_owned(window.clone(), window.inner_size())
                     .expect("Could not create RenderingContext for window."),
             );
 

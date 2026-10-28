@@ -87,10 +87,8 @@ pub struct HeadedWindow {
     /// When these are handled, they will optionally be used to trigger keybindings that
     /// are overridable by web content.
     pending_keyboard_events: RefCell<HashMap<InputEventId, KeyboardEvent>>,
-    // Keep this as the last field of the struct to ensure that the rendering context is
-    // dropped first.
-    // (https://github.com/servo/servo/issues/36711)
-    winit_window: winit::window::Window,
+    // The rendering context also retains this owner through native retirement.
+    winit_window: Rc<winit::window::Window>,
     /// The last title set on this window. We need to store this value here, as `winit::Window::title`
     /// is not supported very many platforms.
     last_title: RefCell<String>,
@@ -101,6 +99,13 @@ pub struct HeadedWindow {
     visible_input_method: Cell<Option<EmbedderControlId>>,
     /// The position of the mouse cursor after the most recent `MouseMove` event.
     last_mouse_position: Cell<Option<Point2D<f32, DeviceIndependentPixel>>>,
+}
+
+impl Drop for HeadedWindow {
+    fn drop(&mut self) {
+        // Native retirement may retain the actual window briefly after close.
+        self.winit_window.set_visible(false);
+    }
 }
 
 impl HeadedWindow {
@@ -131,9 +136,11 @@ impl HeadedWindow {
         let window_attr = window_attr.with_name("org.servo.Servo", "Servo");
 
         #[allow(deprecated)]
-        let winit_window = event_loop
-            .create_window(window_attr)
-            .expect("Failed to create window.");
+        let winit_window = Rc::new(
+            event_loop
+                .create_window(window_attr)
+                .expect("Failed to create window."),
+        );
 
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
@@ -160,14 +167,8 @@ impl HeadedWindow {
         let screen_size = (winit_size_to_euclid_size(screen_size).to_f64() / screen_scale).to_u32();
         let inner_size = winit_window.inner_size();
 
-        let display_handle = event_loop
-            .display_handle()
-            .expect("could not get display handle from window");
-        let window_handle = winit_window
-            .window_handle()
-            .expect("could not get window handle from window");
         let window_rendering_context = Rc::new(
-            WindowRenderingContext::new(display_handle, window_handle, inner_size)
+            WindowRenderingContext::new_owned(winit_window.clone(), inner_size)
                 .expect("Could not create RenderingContext for Window"),
         );
 
@@ -183,7 +184,11 @@ impl HeadedWindow {
             .make_current()
             .expect("Could not make window RenderingContext current");
 
-        let rendering_context = Rc::new(window_rendering_context.offscreen_context(inner_size));
+        let rendering_context = Rc::new(
+            window_rendering_context
+                .offscreen_context(inner_size)
+                .expect("Could not allocate offscreen rendering target"),
+        );
         let gui = RefCell::new(Gui::new(
             &winit_window,
             event_loop,
@@ -514,8 +519,8 @@ impl HeadedWindow {
         // Handle resize events first, so that any subsequent redrawing draws onto a buffer of the
         // correct size.
         let mut resized = false;
-        if let WindowEvent::Resized(new_inner_size) = event &&
-            self.inner_size.get() != new_inner_size
+        if let WindowEvent::Resized(new_inner_size) = event
+            && self.inner_size.get() != new_inner_size
         {
             self.inner_size.set(new_inner_size);
             self.window_rendering_context.resize(new_inner_size);
@@ -617,8 +622,8 @@ impl HeadedWindow {
                 // forwarded to Gui (above). This is because egui needs to know when
                 // the mouse is moving in other parts of the view in order to properly
                 // hide tooltips.
-                if let WindowEvent::CursorMoved { .. } = event &&
-                    !should_forward_mouse_event_to_egui()
+                if let WindowEvent::CursorMoved { .. } = event
+                    && !should_forward_mouse_event_to_egui()
                 {
                     consumed = false;
                 } else {
@@ -869,8 +874,8 @@ impl PlatformWindow for HeadedWindow {
         let new_outer_size =
             new_outer_size.clamp(MIN_WINDOW_INNER_SIZE + decoration_size, screen_size * 2);
 
-        if outer_size.width == new_outer_size.width as u32 &&
-            outer_size.height == new_outer_size.height as u32
+        if outer_size.width == new_outer_size.width as u32
+            && outer_size.height == new_outer_size.height as u32
         {
             return Some(new_outer_size);
         }
@@ -1209,7 +1214,9 @@ impl servo::webxr::GlWindow for XRWindow {
             .connection()
             .create_native_widget_from_window_handle(window_handle, size)
             .map_err(|e| format!("Could not create XR native widget: {e:?}"))?;
-        Ok(servo::webxr::GlWindowRenderTarget::NativeWidget(native_widget))
+        Ok(servo::webxr::GlWindowRenderTarget::NativeWidget(
+            native_widget,
+        ))
     }
 
     fn get_rotation(&self) -> Rotation3D<f32, UnknownUnit, UnknownUnit> {

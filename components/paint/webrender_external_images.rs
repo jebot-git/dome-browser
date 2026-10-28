@@ -109,12 +109,11 @@ impl WebGLExternalImages {
                 busy: self.busy_webgl_context_map.clone(),
                 finish_reads,
             };
-            if !task.poll() {
-                if let Some(scope) = self.rendering_context.cleanup_scope() {
-                    scope.defer(move || task.poll());
-                } else {
-                    servo_base::deferred_cleanup::defer(move || task.poll());
-                }
+            let cleanup = move || task.poll();
+            if let Some(scope) = self.rendering_context.cleanup_scope() {
+                scope.run(|| servo_base::deferred_cleanup::retire(cleanup));
+            } else {
+                servo_base::deferred_cleanup::retire(cleanup);
             }
         });
     }

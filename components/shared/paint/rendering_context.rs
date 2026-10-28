@@ -4,21 +4,25 @@
 
 #![deny(unsafe_code)]
 
+use std::any::Any;
 use std::cell::{Cell, RefCell, RefMut};
 use std::num::NonZeroU32;
 use std::ops::Deref;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use dpi::PhysicalSize;
 use embedder_traits::RefreshDriver;
 use euclid::default::{Rect, Size2D as UntypedSize2D};
 use euclid::{Point2D, Size2D};
 use gleam::gl::{self, Gl};
-use glow::{HasContext, NativeFramebuffer};
+use glow::NativeFramebuffer;
 use image::RgbaImage;
 use log::{debug, trace, warn};
-use raw_window_handle::{DisplayHandle, WindowHandle};
+use raw_window_handle::{DisplayHandle, HasDisplayHandle, HasWindowHandle, WindowHandle};
 pub use surfman::Error;
 use surfman::chains::{PreserveBuffer, SwapChain};
 use surfman::{
@@ -132,6 +136,15 @@ impl SurfmanRenderingContext {
         adapter: &Adapter,
         refresh_driver: Option<Rc<dyn RefreshDriver>>,
     ) -> Result<Rc<Self>, Error> {
+        Self::new_with_owner(connection, adapter, refresh_driver, None)
+    }
+
+    fn new_with_owner(
+        connection: &Connection,
+        adapter: &Adapter,
+        refresh_driver: Option<Rc<dyn RefreshDriver>>,
+        keep_alive: Option<Rc<dyn Any>>,
+    ) -> Result<Rc<Self>, Error> {
         let device = connection.create_device(adapter)?;
         let flags = ContextAttributeFlags::ALPHA
             | ContextAttributeFlags::DEPTH
@@ -147,20 +160,19 @@ impl SurfmanRenderingContext {
             .inspect_err(|error| {
                 warn!("Unable to create {gl_api:?} {version:?} rendering context: {error:?}");
             })?;
-        Self::finish_initialization(
-            NativeContextOwner::new(device, context),
-            gl_api,
-            refresh_driver,
-            |device, context| {
-                #[expect(unsafe_code)]
-                unsafe {
-                    glow::Context::try_from_loader_function(|name| {
-                        device.get_proc_address(context, name)
-                    })
-                }
-                .map_err(Error::GLContextInitializationFailed)
-            },
-        )
+        let native = NativeContextOwner::new(device, context);
+        if let Some(owner) = keep_alive {
+            native.keep_alive(owner);
+        }
+        Self::finish_initialization(native, gl_api, refresh_driver, |device, context| {
+            #[expect(unsafe_code)]
+            unsafe {
+                glow::Context::try_from_loader_function(|name| {
+                    device.get_proc_address(context, name)
+                })
+            }
+            .map_err(Error::GLContextInitializationFailed)
+        })
     }
 
     fn finish_initialization(
@@ -232,16 +244,23 @@ impl SurfmanRenderingContext {
         mut surface: Surface,
         mut release: impl FnMut(&Self, &mut Surface) -> Result<(), Error> + 'static,
     ) -> Result<(), Error> {
-        match release(self, &mut surface) {
-            Ok(()) => Ok(()),
-            Err(error) => {
+        self.native.cleanup_scope().run(|| {
+            if servo_base::deferred_cleanup::retention_active() {
                 let owner = self.clone();
-                self.native
-                    .cleanup_scope()
-                    .defer(move || release(&owner, &mut surface).is_ok());
-                Err(error)
-            },
-        }
+                servo_base::deferred_cleanup::defer(move || release(&owner, &mut surface).is_ok());
+                return Err(Error::Failed);
+            }
+            match release(self, &mut surface) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let owner = self.clone();
+                    servo_base::deferred_cleanup::defer(move || {
+                        release(&owner, &mut surface).is_ok()
+                    });
+                    Err(error)
+                },
+            }
+        })
     }
 
     fn create_attached_swap_chain(&self) -> Result<SwapChain<Device>, Error> {
@@ -255,7 +274,11 @@ impl SurfmanRenderingContext {
     }
 
     fn resize_bound_surface(&self, size: PhysicalSize<u32>) -> Result<(), Error> {
-        if size.width == 0 || size.height == 0 {
+        if size.width == 0
+            || size.height == 0
+            || size.width > i32::MAX as u32
+            || size.height > i32::MAX as u32
+        {
             log::error!("Unable to resize to size under 1x1 ({size:?} provided)");
             return Err(Error::Failed);
         }
@@ -282,6 +305,9 @@ impl SurfmanRenderingContext {
     }
 
     fn prepare_for_rendering(&self) {
+        if self.native_context_is_lost() || self.make_current().is_err() {
+            return;
+        }
         let framebuffer_id = self
             .framebuffer()
             .map_or(0, |framebuffer| framebuffer.0.into());
@@ -290,6 +316,12 @@ impl SurfmanRenderingContext {
     }
 
     fn read_to_image(&self, source_rectangle: DeviceIntRect) -> Option<RgbaImage> {
+        if self.native_context_is_lost()
+            || self.make_current().is_err()
+            || self.native_context_is_lost()
+        {
+            return None;
+        }
         let framebuffer_id = self
             .framebuffer()
             .map_or(0, |framebuffer| framebuffer.0.into());
@@ -297,9 +329,14 @@ impl SurfmanRenderingContext {
     }
 
     fn make_current(&self) -> Result<(), Error> {
-        let device = &self.device.borrow();
-        let context = &mut self.context.borrow();
-        device.make_context_current(context)
+        self.native.cleanup_scope().run(|| {
+            if servo_base::deferred_cleanup::retention_active() {
+                return Err(Error::Failed);
+            }
+            let device = &self.device.borrow();
+            let context = &mut self.context.borrow();
+            device.make_context_current(context)
+        })
     }
 
     fn create_texture(
@@ -499,15 +536,18 @@ pub struct WindowRenderingContext {
     /// The inner size of the window in physical pixels which excludes OS decorations.
     size: Cell<PhysicalSize<u32>>,
     surfman_context: Rc<SurfmanRenderingContext>,
+    presentation_epoch: Arc<AtomicU64>,
 }
 
 impl WindowRenderingContext {
+    /// Construct using borrowed handles. The embedder must retain their owners
+    /// through all deferred cleanup; prefer `new_owned` for an owned window.
     pub fn new(
         display_handle: DisplayHandle,
         window_handle: WindowHandle,
         size: PhysicalSize<u32>,
     ) -> Result<Self, Error> {
-        Self::new_with_optional_refresh_driver(display_handle, window_handle, size, None)
+        Self::new_with_optional_refresh_driver(display_handle, window_handle, size, None, None)
     }
 
     pub fn new_with_refresh_driver(
@@ -521,6 +561,44 @@ impl WindowRenderingContext {
             window_handle,
             size,
             Some(refresh_driver),
+            None,
+        )
+    }
+
+    /// Keep the native window (and its display connection) alive until its
+    /// native context has retired, including initialization failure and retry.
+    pub fn new_owned<W: HasDisplayHandle + HasWindowHandle + 'static>(
+        window: Rc<W>,
+        size: PhysicalSize<u32>,
+    ) -> Result<Self, Error> {
+        let owner: Rc<dyn Any> = window.clone();
+        let display_handle = window
+            .display_handle()
+            .map_err(|_| Error::ConnectionRequired)?;
+        let handle = window
+            .window_handle()
+            .map_err(|_| Error::InvalidNativeWidget)?;
+        Self::new_with_optional_refresh_driver(display_handle, handle, size, None, Some(owner))
+    }
+
+    pub fn new_owned_with_refresh_driver<W: HasDisplayHandle + HasWindowHandle + 'static>(
+        window: Rc<W>,
+        size: PhysicalSize<u32>,
+        refresh_driver: Rc<dyn RefreshDriver>,
+    ) -> Result<Self, Error> {
+        let owner: Rc<dyn Any> = window.clone();
+        let display_handle = window
+            .display_handle()
+            .map_err(|_| Error::ConnectionRequired)?;
+        let handle = window
+            .window_handle()
+            .map_err(|_| Error::InvalidNativeWidget)?;
+        Self::new_with_optional_refresh_driver(
+            display_handle,
+            handle,
+            size,
+            Some(refresh_driver),
+            Some(owner),
         )
     }
 
@@ -529,17 +607,25 @@ impl WindowRenderingContext {
         window_handle: WindowHandle,
         size: PhysicalSize<u32>,
         refresh_driver: Option<Rc<dyn RefreshDriver>>,
+        keep_alive: Option<Rc<dyn Any>>,
     ) -> Result<Self, Error> {
-        if size.width == 0 || size.height == 0 {
-            log::error!(
-                "Unable to create WindowRenderingContext with size under 1x1 ({size:?} provided)"
-            );
+        if size.width == 0
+            || size.height == 0
+            || size.width > i32::MAX as u32
+            || size.height > i32::MAX as u32
+        {
+            log::error!("Invalid WindowRenderingContext dimensions ({size:?} provided)");
             return Err(Error::Failed);
         }
 
         let connection = Connection::from_display_handle(display_handle)?;
         let adapter = connection.create_adapter()?;
-        let surfman_context = SurfmanRenderingContext::new(&connection, &adapter, refresh_driver)?;
+        let surfman_context = SurfmanRenderingContext::new_with_owner(
+            &connection,
+            &adapter,
+            refresh_driver,
+            keep_alive,
+        )?;
 
         let native_widget = connection.create_native_widget_from_window_handle(
             window_handle,
@@ -553,13 +639,15 @@ impl WindowRenderingContext {
         Ok(Self {
             size: Cell::new(size),
             surfman_context,
+            presentation_epoch: Arc::new(AtomicU64::new(0)),
         })
     }
 
+    /// Allocate a child target. Errors leave the parent target intact.
     pub fn offscreen_context(
         self: &Rc<Self>,
         size: PhysicalSize<u32>,
-    ) -> OffscreenRenderingContext {
+    ) -> Result<OffscreenRenderingContext, Error> {
         OffscreenRenderingContext::new(self.clone(), size)
     }
 
@@ -568,6 +656,7 @@ impl WindowRenderingContext {
     ///
     /// TODO: This should be removed once `WebView`s can replace their `RenderingContext`s.
     pub fn take_window(&self) -> Result<(), Error> {
+        self.presentation_epoch.fetch_add(1, Ordering::AcqRel);
         let surface = self
             .surfman_context
             .device
@@ -588,6 +677,7 @@ impl WindowRenderingContext {
         window_handle: WindowHandle,
         size: PhysicalSize<u32>,
     ) -> Result<(), Error> {
+        self.presentation_epoch.fetch_add(1, Ordering::AcqRel);
         let connection = self.surfman_context.device.borrow().connection();
         let native_widget = connection.create_native_widget_from_window_handle(
             window_handle,
@@ -623,6 +713,7 @@ impl RenderingContext for WindowRenderingContext {
     }
 
     fn resize(&self, size: PhysicalSize<u32>) {
+        self.presentation_epoch.fetch_add(1, Ordering::AcqRel);
         match self.surfman_context.resize_bound_surface(size) {
             Ok(..) => self.size.set(size),
             Err(error) => warn!("Error resizing surface: {error:?}"),
@@ -679,145 +770,9 @@ impl RenderingContext for WindowRenderingContext {
     }
 }
 
-struct Framebuffer {
-    gl: Rc<dyn Gl>,
-    framebuffer_id: gl::GLuint,
-    renderbuffer_id: gl::GLuint,
-    texture_id: gl::GLuint,
-}
-
-impl Framebuffer {
-    fn bind(&self) {
-        trace!("Binding FBO {}", self.framebuffer_id);
-        self.gl
-            .bind_framebuffer(gl::FRAMEBUFFER, self.framebuffer_id)
-    }
-}
-
-impl Drop for Framebuffer {
-    fn drop(&mut self) {
-        self.gl.bind_framebuffer(gl::FRAMEBUFFER, 0);
-        self.gl.delete_textures(&[self.texture_id]);
-        self.gl.delete_renderbuffers(&[self.renderbuffer_id]);
-        self.gl.delete_framebuffers(&[self.framebuffer_id]);
-    }
-}
-
-impl Framebuffer {
-    fn new(gl: Rc<dyn Gl>, size: PhysicalSize<u32>) -> Self {
-        let framebuffer_ids = gl.gen_framebuffers(1);
-        gl.bind_framebuffer(gl::FRAMEBUFFER, framebuffer_ids[0]);
-
-        let texture_ids = gl.gen_textures(1);
-        gl.bind_texture(gl::TEXTURE_2D, texture_ids[0]);
-        gl.tex_image_2d(
-            gl::TEXTURE_2D,
-            0,
-            gl::RGBA as gl::GLint,
-            size.width as gl::GLsizei,
-            size.height as gl::GLsizei,
-            0,
-            gl::RGBA,
-            gl::UNSIGNED_BYTE,
-            None,
-        );
-        gl.tex_parameter_i(
-            gl::TEXTURE_2D,
-            gl::TEXTURE_MAG_FILTER,
-            gl::NEAREST as gl::GLint,
-        );
-        gl.tex_parameter_i(
-            gl::TEXTURE_2D,
-            gl::TEXTURE_MIN_FILTER,
-            gl::NEAREST as gl::GLint,
-        );
-
-        gl.framebuffer_texture_2d(
-            gl::FRAMEBUFFER,
-            gl::COLOR_ATTACHMENT0,
-            gl::TEXTURE_2D,
-            texture_ids[0],
-            0,
-        );
-
-        gl.bind_texture(gl::TEXTURE_2D, 0);
-
-        let renderbuffer_ids = gl.gen_renderbuffers(1);
-        let depth_rb = renderbuffer_ids[0];
-        gl.bind_renderbuffer(gl::RENDERBUFFER, depth_rb);
-        gl.renderbuffer_storage(
-            gl::RENDERBUFFER,
-            gl::DEPTH_COMPONENT24,
-            size.width as gl::GLsizei,
-            size.height as gl::GLsizei,
-        );
-        gl.framebuffer_renderbuffer(
-            gl::FRAMEBUFFER,
-            gl::DEPTH_ATTACHMENT,
-            gl::RENDERBUFFER,
-            depth_rb,
-        );
-
-        Self {
-            gl,
-            framebuffer_id: *framebuffer_ids
-                .first()
-                .expect("Guaranteed by GL operations"),
-            renderbuffer_id: *renderbuffer_ids
-                .first()
-                .expect("Guaranteed by GL operations"),
-            texture_id: *texture_ids.first().expect("Guaranteed by GL operations"),
-        }
-    }
-
-    fn read_to_image(&self, source_rectangle: DeviceIntRect) -> Option<RgbaImage> {
-        Self::read_framebuffer_to_image(&self.gl, self.framebuffer_id, source_rectangle)
-    }
-
-    fn read_framebuffer_to_image(
-        gl: &Rc<dyn Gl>,
-        framebuffer_id: u32,
-        source_rectangle: DeviceIntRect,
-    ) -> Option<RgbaImage> {
-        gl.bind_framebuffer(gl::FRAMEBUFFER, framebuffer_id);
-
-        // For some reason, OSMesa fails to render on the 3rd
-        // attempt in headless mode, under some conditions.
-        // I think this can only be some kind of synchronization
-        // bug in OSMesa, but explicitly un-binding any vertex
-        // array here seems to work around that bug.
-        // See https://github.com/servo/servo/issues/18606.
-        gl.bind_vertex_array(0);
-
-        let mut pixels = gl.read_pixels(
-            source_rectangle.min.x,
-            source_rectangle.min.y,
-            source_rectangle.width(),
-            source_rectangle.height(),
-            gl::RGBA,
-            gl::UNSIGNED_BYTE,
-        );
-        let gl_error = gl.get_error();
-        if gl_error != gl::NO_ERROR {
-            warn!("GL error code 0x{gl_error:x} set after read_pixels");
-        }
-
-        // flip image vertically (texture is upside down)
-        let source_rectangle = source_rectangle.to_usize();
-        let stride = source_rectangle.width() * 4;
-        let height = source_rectangle.height();
-        for y in 0..height / 2 {
-            let (top, bottom) = pixels.split_at_mut((height - y - 1) * stride);
-            top[y * stride..(y + 1) * stride].swap_with_slice(&mut bottom[..stride]);
-        }
-
-        RgbaImage::from_raw(
-            source_rectangle.width() as u32,
-            source_rectangle.height() as u32,
-            pixels,
-        )
-    }
-}
+#[path = "offscreen_framebuffer.rs"]
+mod offscreen_framebuffer;
+use offscreen_framebuffer::Framebuffer;
 
 pub struct OffscreenRenderingContext {
     parent_context: Rc<WindowRenderingContext>,
@@ -828,18 +783,16 @@ pub struct OffscreenRenderingContext {
 type RenderToParentCallback = Box<dyn Fn(&glow::Context, Rect<i32>) + Send + Sync>;
 
 impl OffscreenRenderingContext {
-    fn new(parent_context: Rc<WindowRenderingContext>, size: PhysicalSize<u32>) -> Self {
-        assert!(
-            size.width != 0 && size.height != 0,
-            "Dimensions must be at least 1x1, got {size:?}",
-        );
-
-        let framebuffer = RefCell::new(Framebuffer::new(parent_context.gleam_gl_api(), size));
-        Self {
+    fn new(
+        parent_context: Rc<WindowRenderingContext>,
+        size: PhysicalSize<u32>,
+    ) -> Result<Self, Error> {
+        let framebuffer = RefCell::new(Framebuffer::new(parent_context.clone(), size)?);
+        Ok(Self {
             parent_context,
             size: Cell::new(size),
             framebuffer,
-        }
+        })
     }
 
     pub fn parent_context(&self) -> &WindowRenderingContext {
@@ -847,19 +800,33 @@ impl OffscreenRenderingContext {
     }
 
     pub fn render_to_parent_callback(&self) -> Option<RenderToParentCallback> {
-        // Don't accept a `None` context for the source framebuffer.
-        let front_framebuffer_id =
-            NonZeroU32::new(self.framebuffer.borrow().framebuffer_id).map(NativeFramebuffer)?;
-        let parent_context_framebuffer_id = self.parent_context.surfman_context.framebuffer();
+        let framebuffer = self.framebuffer.borrow();
+        let source = NonZeroU32::new(framebuffer.framebuffer_id).map(NativeFramebuffer)?;
+        let target = self.parent_context.surfman_context.framebuffer();
+        let lease = framebuffer.lease.clone();
+        let epoch = self.parent_context.presentation_epoch.clone();
+        let expected_epoch = epoch.load(Ordering::Acquire);
         let size = self.size.get();
-        let size = Size2D::new(size.width as i32, size.height as i32);
-        Some(Box::new(move |gl, target_rect| {
+        Some(Box::new(move |_gl, target_rect| {
+            let active = lease
+                .active
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if !*active || epoch.load(Ordering::Acquire) != expected_epoch {
+                return;
+            }
+            let Some(owner) = lease.context() else {
+                return;
+            };
             Self::blit_framebuffer(
-                gl,
-                Rect::new(Point2D::origin(), size.to_i32()),
-                front_framebuffer_id,
+                &owner.glow_gl_api(),
+                Rect::new(
+                    Point2D::origin(),
+                    Size2D::new(size.width as i32, size.height as i32),
+                ),
+                source,
                 target_rect,
-                parent_context_framebuffer_id,
+                target,
             );
         }))
     }
@@ -873,7 +840,35 @@ impl OffscreenRenderingContext {
         target_framebuffer_id: Option<NativeFramebuffer>,
     ) {
         use glow::HasContext as _;
+        if source_rect.width() <= 0
+            || source_rect.height() <= 0
+            || target_rect.width() <= 0
+            || target_rect.height() <= 0
+            || target_rect
+                .origin
+                .x
+                .checked_add(target_rect.width())
+                .is_none()
+            || target_rect
+                .origin
+                .y
+                .checked_add(target_rect.height())
+                .is_none()
+        {
+            return;
+        }
         unsafe {
+            let draw = gl.get_parameter_i32(gl::DRAW_FRAMEBUFFER_BINDING) as u32;
+            let read = gl.get_parameter_i32(gl::READ_FRAMEBUFFER_BINDING) as u32;
+            let scissor_enabled = gl.is_enabled(gl::SCISSOR_TEST);
+            let mut scissor = [0; 4];
+            gl.get_parameter_i32_slice(gl::SCISSOR_BOX, &mut scissor);
+            let mut clear = [0.; 4];
+            gl.get_parameter_f32_slice(gl::COLOR_CLEAR_VALUE, &mut clear);
+            let mut mask = [0; 4];
+            gl.get_parameter_i32_slice(gl::COLOR_WRITEMASK, &mut mask);
+            gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, target_framebuffer_id);
+            gl.color_mask(true, true, true, true);
             gl.clear_color(0.0, 0.0, 0.0, 0.0);
             gl.scissor(
                 target_rect.origin.x,
@@ -900,7 +895,22 @@ impl OffscreenRenderingContext {
                 gl::COLOR_BUFFER_BIT,
                 gl::NEAREST,
             );
-            gl.bind_framebuffer(gl::FRAMEBUFFER, target_framebuffer_id);
+            gl.bind_framebuffer(
+                gl::READ_FRAMEBUFFER,
+                NonZeroU32::new(read).map(NativeFramebuffer),
+            );
+            gl.bind_framebuffer(
+                gl::DRAW_FRAMEBUFFER,
+                NonZeroU32::new(draw).map(NativeFramebuffer),
+            );
+            gl.scissor(scissor[0], scissor[1], scissor[2], scissor[3]);
+            if scissor_enabled {
+                gl.enable(gl::SCISSOR_TEST);
+            } else {
+                gl.disable(gl::SCISSOR_TEST);
+            }
+            gl.clear_color(clear[0], clear[1], clear[2], clear[3]);
+            gl.color_mask(mask[0] != 0, mask[1] != 0, mask[2] != 0, mask[3] != 0);
         }
     }
 }
@@ -911,48 +921,41 @@ impl RenderingContext for OffscreenRenderingContext {
     }
 
     fn resize(&self, new_size: PhysicalSize<u32>) {
-        assert!(
-            new_size.width != 0 && new_size.height != 0,
-            "Dimensions must be at least 1x1, got {new_size:?}",
-        );
-
         let old_size = self.size.get();
         if old_size == new_size {
             return;
         }
-
-        let gl = self.parent_context.gleam_gl_api();
-        let new_framebuffer = Framebuffer::new(gl.clone(), new_size);
-
-        let old_framebuffer =
-            std::mem::replace(&mut *self.framebuffer.borrow_mut(), new_framebuffer);
-        self.size.set(new_size);
-
-        let blit_size = new_size.min(old_size);
+        let new_framebuffer = match Framebuffer::new(self.parent_context.clone(), new_size) {
+            Ok(framebuffer) => framebuffer,
+            Err(error) => {
+                warn!("Unable to resize offscreen target: {error:?}");
+                return;
+            },
+        };
+        let old_framebuffer = self.framebuffer.borrow();
+        let copy = new_size.min(old_size);
         let rect = Rect::new(
             Point2D::origin(),
-            Size2D::new(blit_size.width, blit_size.height),
-        )
-        .to_i32();
-
-        let Some(old_framebuffer_id) =
-            NonZeroU32::new(old_framebuffer.framebuffer_id).map(NativeFramebuffer)
-        else {
-            return;
-        };
-        let new_framebuffer_id =
-            NonZeroU32::new(self.framebuffer.borrow().framebuffer_id).map(NativeFramebuffer);
+            Size2D::new(copy.width as i32, copy.height as i32),
+        );
         Self::blit_framebuffer(
             &self.glow_gl_api(),
             rect,
-            old_framebuffer_id,
+            NativeFramebuffer(
+                NonZeroU32::new(old_framebuffer.framebuffer_id).expect("validated framebuffer"),
+            ),
             rect,
-            new_framebuffer_id,
+            NonZeroU32::new(new_framebuffer.framebuffer_id).map(NativeFramebuffer),
         );
+        drop(old_framebuffer);
+        *self.framebuffer.borrow_mut() = new_framebuffer;
+        self.size.set(new_size);
     }
 
     fn prepare_for_rendering(&self) {
-        self.framebuffer.borrow().bind();
+        if let Err(error) = self.framebuffer.borrow().bind() {
+            warn!("Unable to bind offscreen target: {error:?}");
+        }
     }
 
     fn present(&self) {}
@@ -1010,54 +1013,30 @@ mod test {
     use euclid::{Box2D, Point2D, Size2D};
     use gleam::gl;
     use image::Rgba;
-    use surfman::{Connection, ContextAttributeFlags, ContextAttributes, Error, GLApi, GLVersion};
+    use surfman::Error;
 
     use super::Framebuffer;
     use crate::rendering_context::SoftwareRenderingContext;
 
     #[test]
-    #[expect(unsafe_code)]
     fn test_read_pixels() -> Result<(), Error> {
-        let connection = Connection::new()?;
-        let adapter = connection.create_software_adapter()?;
-        let device = connection.create_device(&adapter)?;
-        let context_descriptor = device.create_context_descriptor(&ContextAttributes {
-            version: GLVersion::new(3, 0),
-            flags: ContextAttributeFlags::empty(),
-        })?;
-        let mut context = device.create_context(&context_descriptor, None)?;
-
-        let gl = match connection.gl_api() {
-            GLApi::GL => unsafe { gl::GlFns::load_with(|s| device.get_proc_address(&context, s)) },
-            GLApi::GLES => unsafe {
-                gl::GlesFns::load_with(|s| device.get_proc_address(&context, s))
-            },
-        };
-
-        device.make_context_current(&context)?;
-
-        {
-            const SIZE: u32 = 16;
-            let framebuffer = Framebuffer::new(gl, PhysicalSize::new(SIZE, SIZE));
-            framebuffer.bind();
-            framebuffer
-                .gl
-                .clear_color(12.0 / 255.0, 34.0 / 255.0, 56.0 / 255.0, 78.0 / 255.0);
-            framebuffer.gl.clear(gl::COLOR_BUFFER_BIT);
-
-            let rect = Box2D::from_origin_and_size(Point2D::zero(), Size2D::new(SIZE, SIZE));
-            let img = framebuffer
-                .read_to_image(rect.to_i32())
-                .expect("Should have been able to read back image.");
-            assert_eq!(img.width(), SIZE);
-            assert_eq!(img.height(), SIZE);
-
-            let expected_pixel: Rgba<u8> = Rgba([12, 34, 56, 78]);
-            assert!(img.pixels().all(|&p| p == expected_pixel));
-        }
-
-        device.destroy_context(&mut context)?;
-
+        use std::rc::Rc;
+        const SIZE: u32 = 16;
+        let context = Rc::new(SoftwareRenderingContext::new(PhysicalSize::new(
+            SIZE, SIZE,
+        ))?);
+        let framebuffer = Framebuffer::new(context, PhysicalSize::new(SIZE, SIZE))?;
+        framebuffer.bind()?;
+        framebuffer
+            .gl
+            .clear_color(12.0 / 255.0, 34.0 / 255.0, 56.0 / 255.0, 78.0 / 255.0);
+        framebuffer.gl.clear(gl::COLOR_BUFFER_BIT);
+        let rect = Box2D::from_origin_and_size(Point2D::zero(), Size2D::new(SIZE, SIZE));
+        let img = framebuffer
+            .read_to_image(rect.to_i32())
+            .expect("Should read back image");
+        assert_eq!((img.width(), img.height()), (SIZE, SIZE));
+        assert!(img.pixels().all(|pixel| *pixel == Rgba([12, 34, 56, 78])));
         Ok(())
     }
 

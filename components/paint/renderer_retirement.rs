@@ -6,7 +6,7 @@ use paint_api::rendering_context::RenderingContext;
 pub(crate) fn retire_renderer(context: Rc<dyn RenderingContext>, renderer: webrender::Renderer) {
     let scope = context.cleanup_scope();
     let mut pending = Some(renderer);
-    let mut cleanup = move || {
+    let cleanup = move || {
         if !context.native_context_is_lost() && context.make_current().is_err() {
             return false;
         }
@@ -19,12 +19,10 @@ pub(crate) fn retire_renderer(context: Rc<dyn RenderingContext>, renderer: webre
         }
         true
     };
-    if !cleanup() {
-        if let Some(scope) = scope {
-            scope.defer(cleanup);
-        } else {
-            servo_base::deferred_cleanup::defer(cleanup);
-        }
+    if let Some(scope) = scope {
+        scope.run(|| servo_base::deferred_cleanup::retire(cleanup));
+    } else {
+        servo_base::deferred_cleanup::retire(cleanup);
     }
 }
 
