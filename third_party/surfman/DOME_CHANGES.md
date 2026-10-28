@@ -27,8 +27,8 @@ This runs the production attribute unit-test module and an offscreen Surfman
 example on default/native and software renderers. It checks actual attributes,
 descriptor lookup with another/no current context, borrowed native imports,
 compatible/incompatible sharing, and clear/readback pixels. It does not reset
-the GPU. GLES attribute selection is unit-tested; native GLES/CGL/WGL runtime
-coverage has not been performed on the local Linux machine.
+the GPU. GLES robustness attribute selection is unit-tested; complete native
+GLES robustness/CGL/WGL runtime coverage has not been performed locally.
 
 Browser loss notification, pending-command completion, automatic restoration,
 frontend renderer/adapter recovery and native XR recovery remain separate work.
@@ -39,3 +39,24 @@ https://registry.khronos.org/EGL/specs/eglspec.1.5.pdf
 https://registry.khronos.org/EGL/extensions/KHR/EGL_KHR_create_context.txt
 https://registry.khronos.org/EGL/extensions/EXT/EGL_EXT_create_context_robustness.txt
 https://registry.khronos.org/OpenGL/extensions/KHR/KHR_robustness.txt
+
+Native initialization development now uses the workspace's glow 0.17.0 patch.
+Linux EGL loaders and descriptor queries return initialization errors, retain
+failed native ownership for cleanup, restore prior bindings on failure and
+preserve borrowed native handles. Standalone consumers of this fork must apply
+the matching glow patch. Test-only private loader closures exercise rollback;
+there is no environment-controlled loader hook in the shipped API.
+
+The EGL guard also restores the selected client API across GL/GLES transitions.
+Valid `EGL_KHR_no_config_context` imports retain their zero configuration ID;
+pixel format flags are captured from the current default draw surface when
+present, or left empty for surfaceless contexts. Descriptor reuse preserves
+configless creation and does not invent a dummy pbuffer configuration.
+
+`graphics-initialization.py` validates the native loader plus owned/borrowed
+rollback on native and software EGL. It includes a live GLES context as the
+previous binding, configless import/descriptor reuse, default-surface format
+capture and external owner survival. This is not complete GLES backend coverage.
+References:
+https://registry.khronos.org/EGL/extensions/KHR/EGL_KHR_no_config_context.txt
+https://registry.khronos.org/EGL/sdk/docs/man/html/eglBindAPI.xhtml

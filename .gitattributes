@@ -9,3 +9,8 @@ support/openharmony/**/*.ets linguist-language=ts
 
 # Preserve the vendored upstream Windows launcher byte for byte.
 third_party/surfman/android-example/gradlew.bat -text
+
+# Keep the vendored glow package byte-identical except for recorded patches.
+third_party/glow/** -text whitespace=cr-at-eol
+# Preserve the unmodified upstream workflow's original whitespace.
+third_party/glow/.github/workflows/ci.yml -whitespace

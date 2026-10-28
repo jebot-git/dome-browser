@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise native WebGL context loss, restoration and upstream Khronos pages."""
 from pathlib import Path
-import argparse,contextlib,hashlib,http.server,json,mimetypes,os,resource,signal,subprocess,sys,tempfile,threading,time
+import argparse,contextlib,hashlib,http.server,json,mimetypes,os,re,resource,signal,subprocess,sys,tempfile,threading,time
 from urllib.parse import urlsplit
 from Xlib import X,display
 from PIL import Image
@@ -10,7 +10,10 @@ signal.pthread_sigmask(signal.SIG_SETMASK,[])
 resource.setrlimit(resource.RLIMIT_CORE,(0,0))
 if os.environ.get('DOME_GL_LIFECYCLE_BUS')!='1':
  os.execvpe('dbus-run-session',['dbus-run-session','--',sys.executable,*sys.argv],{**os.environ,'DOME_GL_LIFECYCLE_BUS':'1'})
-p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True);a=p.parse_args()
+p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
+p.add_argument('--hardware',action='store_true',help='Exercise the default accelerated offscreen renderer instead of forced software rendering')
+p.add_argument('--expected-renderer',help='Require this substring in the actual WebRender renderer name')
+a=p.parse_args()
 here=Path(__file__).resolve().parent;source=here.parents[2];out=a.output.resolve();out.mkdir(parents=True,mode=0o700,exist_ok=False)
 reports=[];hashes={};child=None;failure=None;record={};page=Path(__file__).with_suffix('.html').read_bytes();(out/'fixture.html').write_bytes(page)
 def sha(data):return hashlib.sha256(data).hexdigest()
@@ -46,10 +49,12 @@ try:
   root=Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='dome-gl-lifecycle-')));root.chmod(0o700)
   server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Server);threading.Thread(target=server.serve_forever,daemon=True).start();stack.callback(server.server_close);stack.callback(server.shutdown)
   rd,wr=os.pipe();xvfb=subprocess.Popen(['Xvfb','-displayfd',str(wr),'-screen','0','1400x1000x24','-nolisten','tcp'],pass_fds=(wr,),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);stack.callback(stop,xvfb);os.close(wr);screen=':'+os.read(rd,64).decode().strip();os.close(rd)
-  connection=display.Display(screen);stack.callback(connection.close);wayland=PrivateWayland(connection,screen,root,out);stack.callback(wayland.close)
-  env={k:v for k,v in os.environ.items() if not k.startswith('DOME_')};env.update(HOME=str(root),XDG_RUNTIME_DIR=str(root),XDG_CONFIG_HOME=str(root/'config'),XDG_DATA_HOME=str(root/'data'),XDG_STATE_HOME=str(root/'state'),XDG_CACHE_HOME=str(root/'cache'),FLTK_BACKEND='wayland',WAYLAND_DISPLAY=wayland.socket,LIBGL_ALWAYS_SOFTWARE='1',RUST_LOG='warn')
+  connection=display.Display(screen);stack.callback(connection.close);wayland=PrivateWayland(connection,screen,root,out,hardware=a.hardware);stack.callback(wayland.close)
+  env={k:v for k,v in os.environ.items() if not k.startswith('DOME_')};env.update(HOME=str(root),XDG_RUNTIME_DIR=str(root),XDG_CONFIG_HOME=str(root/'config'),XDG_DATA_HOME=str(root/'data'),XDG_STATE_HOME=str(root/'state'),XDG_CACHE_HOME=str(root/'cache'),FLTK_BACKEND='wayland',WAYLAND_DISPLAY=wayland.socket,RUST_LOG='warn,webrender::device::gl=info')
+  if a.hardware:env.pop('LIBGL_ALWAYS_SOFTWARE',None)
+  else:env['LIBGL_ALWAYS_SOFTWARE']='1'
   for name in ['DISPLAY','WAYLAND_SOCKET']:env.pop(name,None)
-  log=stack.enter_context((out/'browser.log').open('w'));child=subprocess.Popen([str(a.binary.resolve()),'--software','--no-restore','--profile',str(root/'profile'),f'http://127.0.0.1:{server.server_port}/'],env=env,stdout=log,stderr=log);stack.callback(stop,child)
+  log=stack.enter_context((out/'browser.log').open('w'));child=subprocess.Popen([str(a.binary.resolve()),*([] if a.hardware else ['--software']),'--no-restore','--profile',str(root/'profile'),f'http://127.0.0.1:{server.server_port}/'],env=env,stdout=log,stderr=log);stack.callback(stop,child)
   deadline=time.monotonic()+100
   while not reports and child.poll() is None and time.monotonic()<deadline:time.sleep(.03)
   assert reports,'No completed fixture report; browser exit '+str(child.poll())
@@ -61,12 +66,16 @@ try:
    record['native_green_pixels']=green;record['checks'].append(dict(name='Native Wayland surface displays restored green GPU canvas pixels',passed=green>7000))
   for w in windows:wayland.api('/api/action',{'op':'close','id':w.id})
   record['exit_code']=child.wait(timeout=10);record['clean_close']=child.returncode==0
+  record['renderers']=re.findall(r'Renderer: ([^\r\n]+)',(out/'browser.log').read_text(errors='replace'))
+  assert record['renderers'],'Missing actual WebRender renderer evidence'
+  if a.hardware:assert all(not any(sw in renderer.lower() for sw in ['llvmpipe','softpipe','software rasterizer'])for renderer in record['renderers']),'Accelerated test used a software renderer'
+  if a.expected_renderer:assert all(a.expected_renderer in renderer for renderer in record['renderers']),'Unexpected actual WebRender renderer'
   checks=record['checks'];assert checks and all(c['passed'] for c in checks),'Lifecycle assertion failed'
   assert len(record['suites'])==4 and all(s['status']==0 and any(t['name']=='Overall test' for t in s['results']) and s['contextLost'] and s['restored']==s['tag'].startswith('context-lost-restored') and all(t['status']==0 for t in s['results']) for s in record['suites']),'Original Khronos assertions failed or missing'
   assert record['clean_close'],'Browser did not close cleanly'
 except BaseException as error:failure=str(error);raise
 finally:
- record.update(passed=failure is None,failure=failure,binary_sha256=sha(a.binary.read_bytes()),fixture_sha256=sha(page),source_sha256=hashes,upstream_assertions_changed=False,physical_device_validation=False,adapter_migration=False)
+ record.update(passed=failure is None,failure=failure,binary_sha256=sha(a.binary.read_bytes()),fixture_sha256=sha(page),script_sha256=sha(Path(__file__).read_bytes()),source_sha256=hashes,rendering_mode='default-accelerated' if a.hardware else 'forced-software',upstream_assertions_changed=False,physical_device_validation=False,hardware_reset_requested=False,adapter_migration=False)
  (out/'report.json').write_text(json.dumps(record,indent=2)+'\n')
  for check in record.get('checks',[]):print(('PASS ' if check['passed'] else 'FAIL ')+check['name']+(' '+check['error'] if 'error' in check else ''),flush=True)
  for suite in record.get('suites',[]):print(suite['tag'],len(suite['results']),'cases;',sum(t['status']!=0 for t in suite['results']),'failed',flush=True)

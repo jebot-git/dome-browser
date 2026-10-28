@@ -1,0 +1,206 @@
+{
+  "verified_utc": "2026-10-28T03:55:28.736597+00:00",
+  "scope": "Fallible native GL metadata and Linux EGL context initialization; whole-browser driver reset recovery remains incomplete",
+  "base_commit": "c4c18a2001be77226651cd6998be2c3206cbaafc",
+  "optimized_build_exit_code": 0,
+  "browser_binary_sha256": "ca36ae374bb878ec4ff3778a04d1a7332aab2e951ee3ab988aa2aa57ba98eb7f",
+  "test_embedder_sha256": "70b23f018d566afa10559e61597ffecdf8f2488c28708750f9c78d482cad2eab",
+  "source_sha256": {
+    ".gitattributes": "84661e2abf9ba27936f7b2cecba9b69d6e3a42a4544048c1d00e216b77aedced",
+    "Cargo.lock": "bac168b804e0d8f890292062847b58331954a3404e8498dd75ec55ef8b2c7961",
+    "Cargo.toml": "e9260f5e43822d8992eb6354549764ed9e8f68970424cf8e3d4451d91f707eb4",
+    "ports/dome-fltk/tests/graphics-context-creation.py": "c2294257d75eb3ed775f0eb4a64049b9fdd06fb51c99a7161c9dd2b970154f21",
+    "ports/dome-fltk/tests/graphics-initialization.py": "e6504b93694626e960c37e144d02b3e8e9598008555b1277c42e30cedf335038",
+    "ports/dome-fltk/tests/graphics-reset-retirement.py": "2e666105b78fa5aa64f64d1b56d14605b7ef65834296e2f6a9740b5ffa1170fd",
+    "ports/dome-fltk/tests/private_wayland.py": "ad7aa65bd7c36a55ba33bdb62b87260e870446b57559ff8bf8622e128528ff38",
+    "ports/dome-fltk/tests/webgl-context-loss.py": "dc1d2fe17d6cd5d3f12cccffebe3cf7fc627ec9a8ddec5d2d5c2fff657f860ab",
+    "third_party/glow/.cargo_vcs_info.json": "3fb6bce7526178deb1a41e926bb7e2b15ac6570bdb5274ea6829694272c33d46",
+    "third_party/glow/.github/FUNDING.yml": "dbcfa150f64fa2d22bf75871a5c047a465b67a8f8dec78a5aa6cc6b2d5604d61",
+    "third_party/glow/.github/workflows/ci.yml": "800de741f04bdcca98046d1e05b558092b669baccd9a1461465b8d2647b00377",
+    "third_party/glow/.gitignore": "2992be9dd99828dc4bda8015159bbd9383e3e6b6bc717c7bbf02648075784119",
+    "third_party/glow/Cargo.lock": "f06fbbd241cb238dcf96e1131f112eb676a7c6e55b84c91e3d56d690f07954be",
+    "third_party/glow/Cargo.toml": "757204d28880317814ab679c91fdda4d245b95082a2d59fcd3e0fa6fe26e2c11",
+    "third_party/glow/Cargo.toml.orig": "9f9ddd48e9dfd06f32287bc1130f91113e2985d899ec0e79339e4708e8652670",
+    "third_party/glow/DOME_CHANGES.md": "e601a1c3aff2be306df5e9f654a70be2ebc0a3d41344078d8589216f981a341e",
+    "third_party/glow/LICENSE-APACHE": "b8601fc79bdf8d8088f0938bea861ffc63ed0eebbedf25f44ab2cf2e85bd7edc",
+    "third_party/glow/LICENSE-MIT": "cdbd06e25b8c9c5d6019949d2de8123f56d29cee4166396423d2ba8c81700845",
+    "third_party/glow/LICENSE-ZLIB": "636f644f1e149eb62961657c0e34953681eff64435653912e7bd19992666faa5",
+    "third_party/glow/README.md": "67c7eea8315f30ac9ca70e955b12f570e4810878d33e9e2cd6bb752878ae6b7b",
+    "third_party/glow/bors.toml": "1a13121a179fff004a1b8b9b507eee1834c7a0c6ffdd99d94e9fc74defd8fa02",
+    "third_party/glow/clippy.toml": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "third_party/glow/generate-native.sh": "d961bbaa3b0e058f9c07447a2e13ce3f46268082ad2d261f0ebe20babd303699",
+    "third_party/glow/rustfmt.toml": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "third_party/glow/src/gl46.rs": "e2af6da5fab32dfba5acc7c4b24b0f3b62e107695baed5b7ae0a103247187ae8",
+    "third_party/glow/src/lib.rs": "5ccfa4e62fc01bb10a2896ff8a7403d8c1250fb48beb84c02e5c9888728c0844",
+    "third_party/glow/src/native.rs": "c8c7924779f24e60eb4b20c5c912ec04415c187d1cd17955f1e07b6a2052c545",
+    "third_party/glow/src/native_loader_tests.rs": "267fa6c8955f5184d22617a79d1eac13d85681f431a8d63fc02ab961d3e1b324",
+    "third_party/glow/src/version.rs": "44801fc74611c23ab4beed9c2733f0062c9cb33ea7dedee90eaf4d98d992a685",
+    "third_party/glow/src/web_sys.rs": "93ac036abe8934f53f2ca6f05f2a33bb8e3834684b84ac90593c1996030972fb",
+    "third_party/surfman/DOME_CHANGES.md": "d8fe7e16fad8fed22538828ac1999861d7c17b72e07fb86811221d8af0cb9e88",
+    "third_party/surfman/src/base/egl/context.rs": "d378df4d1b7af24044b3876fd882f9e8620a8913d0f6e9e5ed77037ce2ffb2ca",
+    "third_party/surfman/src/error.rs": "45cde68a9206aa8bbf2c1fa0e6636e01237464e0b8d3baa5f458b73e870e7376",
+    "third_party/surfman/src/mesa_surfaceless/device.rs": "46c241f35ee0110aacb314ee24eff2fef90b13e9da1637cb9a68471e1759a8a4",
+    "third_party/surfman/src/mesa_surfaceless/initialization_tests.rs": "6f13b6b9b3f5ad79f2de654dc2ee3c96fdf5e1e6f2fc20a719d1a36ccebec206",
+    "third_party/surfman/src/wayland/device.rs": "ac0e08eef7bcd1cec63fbaaced5e07eca55894805d8447271eb852e1dadac774",
+    "third_party/surfman/src/x11/device.rs": "be28572de8b2ee223cdfec705c7f389be6df8c3b9f14924e2facb8a7133cdec8"
+  },
+  "component_validation": {
+    "glow_library_tests": 25,
+    "new_glow_loader_tests": 22,
+    "initialization_rollback_tests_per_renderer": 11,
+    "original_surface_tests_passed_per_renderer": 13,
+    "original_surface_tests_ignored_per_renderer": 1,
+    "renderers": {
+      "native": [
+        "Mesa Intel(R) Arc(tm) A770 Graphics (DG2)"
+      ],
+      "software": [
+        "llvmpipe (LLVM 22.1.8, 256 bits)"
+      ]
+    },
+    "reset_policy_units": 16,
+    "reset_creation_query_configurations": 8,
+    "retirement_configurations": 10
+  },
+  "integration": {
+    "reports": {
+      "stream-terminal": {
+        "report": "webgl-driver-reset-v1/fallible-initialization-v1/browser-regressions-r3/stream-terminal/report.json",
+        "checks": 57
+      },
+      "webgl-software": {
+        "report": "webgl-driver-reset-v1/fallible-initialization-v1/browser-regressions-r3/webgl-software/report.json",
+        "checks": 280,
+        "actual_renderers": [
+          "llvmpipe (LLVM 22.1.8, 256 bits)"
+        ],
+        "original_khronos_cases": 489,
+        "native_green_pixels": 12288
+      },
+      "webgl-accelerated": {
+        "report": "webgl-driver-reset-v1/fallible-initialization-v1/browser-regressions-r3/webgl-accelerated/report.json",
+        "checks": 280,
+        "actual_renderers": [
+          "Mesa Intel(R) Arc(tm) A770 Graphics (DG2)"
+        ],
+        "original_khronos_cases": 489,
+        "native_green_pixels": 12288
+      },
+      "history-desktop": {
+        "report": "webgl-driver-reset-v1/fallible-initialization-v1/browser-regressions-r3/history-desktop/report.json",
+        "checks": 14
+      },
+      "xr-context-loss": {
+        "report": "webgl-driver-reset-v1/fallible-initialization-v1/browser-regressions-r3/xr-context-loss/report.json",
+        "checks": 68
+      },
+      "adblock-enabled": {
+        "report": "webgl-driver-reset-v1/fallible-initialization-v1/browser-regressions-r3/adblock-enabled/report.json",
+        "checks": 26
+      },
+      "adblock-disabled": {
+        "report": "webgl-driver-reset-v1/fallible-initialization-v1/browser-regressions-r3/adblock-disabled/report.json",
+        "checks": 17
+      },
+      "cookies": {
+        "report": "webgl-driver-reset-v1/fallible-initialization-v1/browser-regressions-r3/cookies/report.json",
+        "checks": 11
+      },
+      "cookie-policy": {
+        "report": "webgl-driver-reset-v1/fallible-initialization-v1/browser-regressions-r3/cookie-policy/report.json",
+        "checks": 149
+      },
+      "controlled-backend-loss": {
+        "report": "webgl-driver-reset-v1/fallible-initialization-v1/backend-loss-r2/report.json",
+        "checks": 726,
+        "operations": 64
+      }
+    },
+    "runtime_check_executions": 1628,
+    "original_khronos_cases_per_renderer": 489,
+    "original_khronos_case_executions": 978,
+    "original_stream_wpt_cases": 402,
+    "original_stream_wpt_suites": 10,
+    "scope_note": "Software and accelerated lifecycle runs exercise the same Khronos assertions on different renderers; execution counts are not counts of unique assertions. Stream coverage uses the existing focused window/worker adapter, not the full WPT runner."
+  },
+  "baseline_interop": {
+    "original_tests_passed": 5,
+    "new_failures_reproduced": 4,
+    "failure_assertions_retained": true,
+    "test_file_formatted_after_baseline": true
+  },
+  "glow_provenance": {
+    "version": "0.17.0",
+    "archive_sha256": "29038e1c483364cc6bb3cf78feee1816002e127c331a1eec55a4d202b9e1adb5",
+    "original_files_retained": 20,
+    "modified_original_files": [
+      "src/native.rs"
+    ],
+    "new_files": [
+      "DOME_CHANGES.md",
+      "src/native_loader_tests.rs"
+    ],
+    "dependency_versions_changed": false
+  },
+  "driver_reset_requested": false,
+  "physical_headset_validation": false,
+  "desktop_sessions_restarted": false,
+  "remaining": [
+    "Ownership-safe fallible surface/framebuffer/renderbuffer allocation and higher-level creation transactions",
+    "Capability-gated actual driver reset polling and cleanup readiness",
+    "Permitted DOM restoration retry, frontend renderer and adapter recovery",
+    "Broader backend/physical device coverage and remaining WebXR compatibility",
+    "Final standards-focused Discord and x.com rendering assessment"
+  ],
+  "post_validation_metadata_only_change": {
+    ".gitattributes": {
+      "validated_sha256": "84661e2abf9ba27936f7b2cecba9b69d6e3a42a4544048c1d00e216b77aedced",
+      "publication_sha256": "7bd8817d3508a728524be54448099faee08e58cc038e7d34bf22aa143049ab00",
+      "reason": "Preserve upstream CRLF and original workflow whitespace in Git checks. The workflow remains byte-identical to the original archive; no compiled or fixture source changed."
+    }
+  },
+  "publication_source_sha256": {
+    ".gitattributes": "7bd8817d3508a728524be54448099faee08e58cc038e7d34bf22aa143049ab00",
+    "Cargo.lock": "bac168b804e0d8f890292062847b58331954a3404e8498dd75ec55ef8b2c7961",
+    "Cargo.toml": "e9260f5e43822d8992eb6354549764ed9e8f68970424cf8e3d4451d91f707eb4",
+    "ports/dome-fltk/tests/graphics-context-creation.py": "c2294257d75eb3ed775f0eb4a64049b9fdd06fb51c99a7161c9dd2b970154f21",
+    "ports/dome-fltk/tests/graphics-initialization.py": "e6504b93694626e960c37e144d02b3e8e9598008555b1277c42e30cedf335038",
+    "ports/dome-fltk/tests/graphics-reset-retirement.py": "2e666105b78fa5aa64f64d1b56d14605b7ef65834296e2f6a9740b5ffa1170fd",
+    "ports/dome-fltk/tests/private_wayland.py": "ad7aa65bd7c36a55ba33bdb62b87260e870446b57559ff8bf8622e128528ff38",
+    "ports/dome-fltk/tests/webgl-context-loss.py": "dc1d2fe17d6cd5d3f12cccffebe3cf7fc627ec9a8ddec5d2d5c2fff657f860ab",
+    "third_party/glow/.cargo_vcs_info.json": "3fb6bce7526178deb1a41e926bb7e2b15ac6570bdb5274ea6829694272c33d46",
+    "third_party/glow/.github/FUNDING.yml": "dbcfa150f64fa2d22bf75871a5c047a465b67a8f8dec78a5aa6cc6b2d5604d61",
+    "third_party/glow/.github/workflows/ci.yml": "800de741f04bdcca98046d1e05b558092b669baccd9a1461465b8d2647b00377",
+    "third_party/glow/.gitignore": "2992be9dd99828dc4bda8015159bbd9383e3e6b6bc717c7bbf02648075784119",
+    "third_party/glow/Cargo.lock": "f06fbbd241cb238dcf96e1131f112eb676a7c6e55b84c91e3d56d690f07954be",
+    "third_party/glow/Cargo.toml": "757204d28880317814ab679c91fdda4d245b95082a2d59fcd3e0fa6fe26e2c11",
+    "third_party/glow/Cargo.toml.orig": "9f9ddd48e9dfd06f32287bc1130f91113e2985d899ec0e79339e4708e8652670",
+    "third_party/glow/DOME_CHANGES.md": "e601a1c3aff2be306df5e9f654a70be2ebc0a3d41344078d8589216f981a341e",
+    "third_party/glow/LICENSE-APACHE": "b8601fc79bdf8d8088f0938bea861ffc63ed0eebbedf25f44ab2cf2e85bd7edc",
+    "third_party/glow/LICENSE-MIT": "cdbd06e25b8c9c5d6019949d2de8123f56d29cee4166396423d2ba8c81700845",
+    "third_party/glow/LICENSE-ZLIB": "636f644f1e149eb62961657c0e34953681eff64435653912e7bd19992666faa5",
+    "third_party/glow/README.md": "67c7eea8315f30ac9ca70e955b12f570e4810878d33e9e2cd6bb752878ae6b7b",
+    "third_party/glow/bors.toml": "1a13121a179fff004a1b8b9b507eee1834c7a0c6ffdd99d94e9fc74defd8fa02",
+    "third_party/glow/clippy.toml": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "third_party/glow/generate-native.sh": "d961bbaa3b0e058f9c07447a2e13ce3f46268082ad2d261f0ebe20babd303699",
+    "third_party/glow/rustfmt.toml": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "third_party/glow/src/gl46.rs": "e2af6da5fab32dfba5acc7c4b24b0f3b62e107695baed5b7ae0a103247187ae8",
+    "third_party/glow/src/lib.rs": "5ccfa4e62fc01bb10a2896ff8a7403d8c1250fb48beb84c02e5c9888728c0844",
+    "third_party/glow/src/native.rs": "c8c7924779f24e60eb4b20c5c912ec04415c187d1cd17955f1e07b6a2052c545",
+    "third_party/glow/src/native_loader_tests.rs": "267fa6c8955f5184d22617a79d1eac13d85681f431a8d63fc02ab961d3e1b324",
+    "third_party/glow/src/version.rs": "44801fc74611c23ab4beed9c2733f0062c9cb33ea7dedee90eaf4d98d992a685",
+    "third_party/glow/src/web_sys.rs": "93ac036abe8934f53f2ca6f05f2a33bb8e3834684b84ac90593c1996030972fb",
+    "third_party/surfman/DOME_CHANGES.md": "d8fe7e16fad8fed22538828ac1999861d7c17b72e07fb86811221d8af0cb9e88",
+    "third_party/surfman/src/base/egl/context.rs": "d378df4d1b7af24044b3876fd882f9e8620a8913d0f6e9e5ed77037ce2ffb2ca",
+    "third_party/surfman/src/error.rs": "45cde68a9206aa8bbf2c1fa0e6636e01237464e0b8d3baa5f458b73e870e7376",
+    "third_party/surfman/src/mesa_surfaceless/device.rs": "46c241f35ee0110aacb314ee24eff2fef90b13e9da1637cb9a68471e1759a8a4",
+    "third_party/surfman/src/mesa_surfaceless/initialization_tests.rs": "6f13b6b9b3f5ad79f2de654dc2ee3c96fdf5e1e6f2fc20a719d1a36ccebec206",
+    "third_party/surfman/src/wayland/device.rs": "ac0e08eef7bcd1cec63fbaaced5e07eca55894805d8447271eb852e1dadac774",
+    "third_party/surfman/src/x11/device.rs": "be28572de8b2ee223cdfec705c7f389be6df8c3b9f14924e2facb8a7133cdec8"
+  },
+  "validation_artifact_directory": "artifacts/servo-rendering-goal/webgl-driver-reset-v1/fallible-initialization-v1",
+  "visual_review": {
+    "accelerated_restored_canvas": "Green restored canvas verified in private Wayland capture",
+    "native_xr_stereo": "Separate red and green eyes verified in private native bridge capture; no physical headset claim"
+  }
+}

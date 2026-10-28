@@ -14,6 +14,7 @@ def main():
  vendor=ROOT/'third_party/surfman'
  paths=[ROOT/'Cargo.toml',ROOT/'Cargo.lock',Path(__file__).resolve(),*(ROOT/'ports/dome-fltk/examples'/name for name in ['graphics-reset-probe.rs','graphics-retirement-probe.rs'])]
  paths+=sorted(p for p in vendor.rglob('*')if p.is_file())
+ paths+=sorted(p for p in(ROOT/'third_party/glow').rglob('*')if p.is_file())
  manifest={str(p.relative_to(ROOT)):sha(p)for p in paths};(out/'source-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
  env={**os.environ,'CARGO_BUILD_JOBS':'1','CARGO_INCREMENTAL':'0'};env.pop('CARGO_TARGET_DIR',None)
  with tempfile.TemporaryDirectory(prefix='dome-reset-retirement-')as temporary:
@@ -27,6 +28,8 @@ surfman = {{ path = {json.dumps(str(vendor))} }}
 glow = "=0.17.0"
 euclid = "0.22"
 serde_json = "1"
+[patch.crates-io]
+glow = {{ path = {json.dumps(str(ROOT/"third_party/glow"))} }}
 [[test]]
 name = "reset-retirement-policy"
 path = "policy.rs"

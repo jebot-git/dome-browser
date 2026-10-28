@@ -8,7 +8,7 @@ use super::robustness;
 use super::surface::{EGLBackedSurface, ExternalEGLSurfaces};
 use crate::context::{self, CREATE_CONTEXT_MUTEX};
 use crate::egl;
-use crate::egl::types::{EGLConfig, EGLContext, EGLDisplay, EGLSurface, EGLint};
+use crate::egl::types::{EGLConfig, EGLContext, EGLDisplay, EGLSurface, EGLenum, EGLint};
 use crate::surface::Framebuffer;
 use crate::{ContextAttributeFlags, ContextAttributes, ContextID, Error, GLApi, GLVersion};
 use crate::{Gl, SurfaceInfo};
@@ -56,10 +56,13 @@ pub struct ContextDescriptor {
     pub(crate) gl_version: GLVersion,
     pub(crate) compatibility_profile: bool,
     pub(crate) robustness_flags: ContextAttributeFlags,
+    pixel_format_flags: ContextAttributeFlags,
 }
 
 #[must_use]
 pub(crate) struct CurrentContextGuard {
+    active: bool,
+    old_client_api: EGLenum,
     egl_display: EGLDisplay,
     old_egl_draw_surface: EGLSurface,
     old_egl_read_surface: EGLSurface,
@@ -70,6 +73,8 @@ impl CurrentContextGuard {
     pub(crate) fn new() -> CurrentContextGuard {
         EGL_FUNCTIONS.with(|egl| unsafe {
             CurrentContextGuard {
+                active: true,
+                old_client_api: egl.QueryAPI(),
                 egl_display: egl.GetCurrentDisplay(),
                 old_egl_draw_surface: egl.GetCurrentSurface(egl::DRAW as EGLint),
                 old_egl_read_surface: egl.GetCurrentSurface(egl::READ as EGLint),
@@ -79,9 +84,26 @@ impl CurrentContextGuard {
     }
 }
 
+impl CurrentContextGuard {
+    pub(crate) fn keep_current(mut self) {
+        self.active = false;
+    }
+}
+
 impl Drop for CurrentContextGuard {
     fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
         EGL_FUNCTIONS.with(|egl| unsafe {
+            // EGL binding queries and releasing a context depend on the selected
+            // client API. Context creation may have switched GL/GLES meanwhile.
+            if egl.QueryAPI() != self.old_client_api
+                && self.old_client_api != egl::NONE
+                && egl.BindAPI(self.old_client_api) == egl::FALSE
+            {
+                return;
+            }
             if self.egl_display == egl::NO_DISPLAY {
                 // A temporary binding may have started with no current context.
                 // Restore that absence using the display bound in the meantime.
@@ -131,6 +153,7 @@ impl EGLBackedContext {
         descriptor: &ContextDescriptor,
         share_with: Option<&EGLBackedContext>,
         gl_api: GLApi,
+        connection_owner: Box<dyn std::any::Any + Send>,
     ) -> Result<EGLBackedContext, Error> {
         collect_failed_creations();
         if share_with.is_some_and(|context| context.lost.get()) {
@@ -148,11 +171,8 @@ impl EGLBackedContext {
             gl_api,
         )?;
 
-        // Create a dummy pbuffer.
-        let pbuffer = create_dummy_pbuffer(egl_display, egl_context).unwrap_or(egl::NO_SURFACE);
-
-        // Wrap and return it.
-        let context = EGLBackedContext {
+        // Establish native ownership before any further fallible EGL query.
+        let mut context = EGLBackedContext {
             egl_context,
             id: *next_context_id,
             framebuffer: Framebuffer::None,
@@ -160,8 +180,21 @@ impl EGLBackedContext {
             lost: share_with
                 .map(|context| context.lost.clone())
                 .unwrap_or_else(|| Rc::new(Cell::new(false))),
-            pbuffer,
+            pbuffer: egl::NO_SURFACE,
         };
+        match try_create_dummy_pbuffer(egl_display, descriptor.egl_config_id) {
+            Ok(pbuffer) => context.pbuffer = pbuffer.unwrap_or(egl::NO_SURFACE),
+            Err(error) => {
+                if matches!(
+                    error,
+                    Error::SurfaceCreationFailed(crate::WindowingApiError::ContextLost)
+                ) {
+                    context.lost.set(true);
+                }
+                context.retire_failed_creation(egl_display, connection_owner);
+                return Err(error);
+            },
+        }
         next_context_id.0 += 1;
         Ok(context)
     }
@@ -550,7 +583,7 @@ impl ContextDescriptor {
                 let err = egl.GetError().to_windowing_api_error();
                 return Err(Error::PixelFormatSelectionFailed(err));
             }
-            if config_count == 0 {
+            if config_count <= 0 {
                 return Err(Error::NoPixelFormatFound);
             }
 
@@ -569,28 +602,35 @@ impl ContextDescriptor {
                 return Err(Error::PixelFormatSelectionFailed(err));
             }
 
-            // Sanitize configs.
-            let egl_config = configs.into_iter().find(|&egl_config| {
-                required_config_attributes
-                    .chunks(2)
-                    .all(|pair| get_config_attr(egl_display, egl_config, pair[0]) == pair[1])
-            });
-            let egl_config = match egl_config {
-                None => return Err(Error::NoPixelFormatFound),
-                Some(egl_config) => egl_config,
-            };
-
-            // Get the config ID and version.
-            let egl_config_id = get_config_attr(egl_display, egl_config, egl::CONFIG_ID as EGLint);
-            let gl_version = attributes.version;
-
+            if real_config_count <= 0 || real_config_count > config_count {
+                return Err(Error::NoPixelFormatFound);
+            }
+            let mut selected = None;
+            for config in configs.into_iter().take(real_config_count as usize) {
+                if config.is_null() {
+                    continue;
+                }
+                let mut matches = true;
+                for pair in required_config_attributes.chunks(2) {
+                    if try_get_config_attr(egl_display, config, pair[0])? != pair[1] {
+                        matches = false;
+                        break;
+                    }
+                }
+                if matches {
+                    selected = Some(config);
+                    break;
+                }
+            }
+            let config = selected.ok_or(Error::NoPixelFormatFound)?;
             Ok(ContextDescriptor {
-                egl_config_id,
-                gl_version,
+                egl_config_id: try_get_config_attr(egl_display, config, egl::CONFIG_ID as EGLint)?,
+                gl_version: attributes.version,
                 compatibility_profile,
                 robustness_flags: flags
                     & (ContextAttributeFlags::RESET_NOTIFICATION
                         | ContextAttributeFlags::ROBUST_ACCESS),
+                pixel_format_flags: capture_pixel_format_flags(egl_display, config)?,
             })
         })
     }
@@ -600,16 +640,59 @@ impl ContextDescriptor {
         egl_display: EGLDisplay,
         egl_context: EGLContext,
     ) -> ContextDescriptor {
-        let egl_config_id = get_context_attr(egl_display, egl_context, egl::CONFIG_ID as EGLint);
-        let gl_version = GLVersion::current(gl);
-        let compatibility_profile = context::current_context_uses_compatibility_profile(gl);
+        Self::try_from_egl_context(gl, egl_display, egl_context)
+            .expect("Could not describe the current EGL context")
+    }
 
-        ContextDescriptor {
+    pub(crate) unsafe fn try_from_egl_context(
+        gl: &Gl,
+        egl_display: EGLDisplay,
+        egl_context: EGLContext,
+    ) -> Result<ContextDescriptor, Error> {
+        let egl_config_id =
+            try_get_context_attr(egl_display, egl_context, egl::CONFIG_ID as EGLint)?;
+        let pixel_format_flags = if egl_config_id == 0 {
+            // EGL_KHR_no_config_context specifies zero for a valid context
+            // without an EGLConfig. Its format belongs to the current draw
+            // surface, if any; a surfaceless context has no default framebuffer.
+            let surface_config_id = EGL_FUNCTIONS.with(|egl| {
+                let draw = egl.GetCurrentSurface(egl::DRAW as EGLint);
+                if draw == egl::NO_SURFACE {
+                    return Ok(None);
+                }
+                let mut id = 0;
+                if egl.QuerySurface(egl_display, draw, egl::CONFIG_ID as EGLint, &mut id)
+                    == egl::FALSE
+                {
+                    return Err(Error::PixelFormatSelectionFailed(
+                        egl.GetError().to_windowing_api_error(),
+                    ));
+                }
+                Ok(Some(id))
+            })?;
+            match surface_config_id {
+                Some(id) => capture_pixel_format_flags(
+                    egl_display,
+                    try_egl_config_from_id(egl_display, id)?,
+                )?,
+                None => ContextAttributeFlags::empty(),
+            }
+        } else {
+            capture_pixel_format_flags(
+                egl_display,
+                try_egl_config_from_id(egl_display, egl_config_id)?,
+            )?
+        };
+        let descriptor = ContextDescriptor {
             egl_config_id,
-            gl_version,
-            compatibility_profile,
+            gl_version: GLVersion::current(gl),
+            compatibility_profile: context::current_context_uses_compatibility_profile(gl),
             robustness_flags: robustness::current_flags(gl),
-        }
+            pixel_format_flags,
+        };
+        gl.validate_current_version()
+            .map_err(Error::GLContextInitializationFailed)?;
+        Ok(descriptor)
     }
 
     #[allow(dead_code)]
@@ -638,27 +721,16 @@ impl ContextDescriptor {
         })
     }
 
-    pub(crate) unsafe fn attributes(&self, egl_display: EGLDisplay) -> ContextAttributes {
-        let egl_config = egl_config_from_id(egl_display, self.egl_config_id);
-
-        let alpha_size = get_config_attr(egl_display, egl_config, egl::ALPHA_SIZE as EGLint);
-        let depth_size = get_config_attr(egl_display, egl_config, egl::DEPTH_SIZE as EGLint);
-        let stencil_size = get_config_attr(egl_display, egl_config, egl::STENCIL_SIZE as EGLint);
-
-        // Convert to `surfman` context attribute flags.
-        let mut attribute_flags = self.robustness_flags;
-        attribute_flags.set(ContextAttributeFlags::ALPHA, alpha_size != 0);
-        attribute_flags.set(ContextAttributeFlags::DEPTH, depth_size != 0);
-        attribute_flags.set(ContextAttributeFlags::STENCIL, stencil_size != 0);
-
-        attribute_flags.set(
+    pub(crate) unsafe fn attributes(&self, _egl_display: EGLDisplay) -> ContextAttributes {
+        // Actual format attributes are captured during fallible initialization,
+        // so describing an existing context never queries an unavailable display.
+        let mut flags = self.pixel_format_flags | self.robustness_flags;
+        flags.set(
             ContextAttributeFlags::COMPATIBILITY_PROFILE,
             self.compatibility_profile,
         );
-
-        // Create appropriate context attributes.
         ContextAttributes {
-            flags: attribute_flags,
+            flags,
             version: self.gl_version,
         }
     }
@@ -683,7 +755,13 @@ pub(crate) unsafe fn create_context(
         Ok(())
     })?;
 
-    let egl_config = egl_config_from_id(egl_display, descriptor.egl_config_id);
+    let egl_config = if descriptor.egl_config_id == 0 {
+        // Preserve a configless native descriptor when creating a compatible
+        // context. EGL reports unsupported no-config requests as normal errors.
+        ptr::null()
+    } else {
+        try_egl_config_from_id(egl_display, descriptor.egl_config_id)?
+    };
 
     let mut egl_context_attributes = vec![
         egl::CONTEXT_CLIENT_VERSION as EGLint,
@@ -789,12 +867,43 @@ pub(crate) unsafe fn get_config_attr(
     egl_config: EGLConfig,
     attr: EGLint,
 ) -> EGLint {
+    try_get_config_attr(egl_display, egl_config, attr).expect("Could not query EGL configuration")
+}
+
+pub(crate) unsafe fn try_get_config_attr(
+    egl_display: EGLDisplay,
+    egl_config: EGLConfig,
+    attr: EGLint,
+) -> Result<EGLint, Error> {
     EGL_FUNCTIONS.with(|egl| {
         let mut value = 0;
-        let result = egl.GetConfigAttrib(egl_display, egl_config, attr, &mut value);
-        assert_ne!(result, egl::FALSE);
-        value
+        if egl.GetConfigAttrib(egl_display, egl_config, attr, &mut value) == egl::FALSE {
+            return Err(Error::PixelFormatSelectionFailed(
+                egl.GetError().to_windowing_api_error(),
+            ));
+        }
+        Ok(value)
     })
+}
+
+unsafe fn capture_pixel_format_flags(
+    egl_display: EGLDisplay,
+    config: EGLConfig,
+) -> Result<ContextAttributeFlags, Error> {
+    let mut flags = ContextAttributeFlags::empty();
+    flags.set(
+        ContextAttributeFlags::ALPHA,
+        try_get_config_attr(egl_display, config, egl::ALPHA_SIZE as EGLint)? != 0,
+    );
+    flags.set(
+        ContextAttributeFlags::DEPTH,
+        try_get_config_attr(egl_display, config, egl::DEPTH_SIZE as EGLint)? != 0,
+    );
+    flags.set(
+        ContextAttributeFlags::STENCIL,
+        try_get_config_attr(egl_display, config, egl::STENCIL_SIZE as EGLint)? != 0,
+    );
+    Ok(flags)
 }
 
 pub(crate) unsafe fn get_context_attr(
@@ -802,11 +911,22 @@ pub(crate) unsafe fn get_context_attr(
     egl_context: EGLContext,
     attr: EGLint,
 ) -> EGLint {
+    try_get_context_attr(egl_display, egl_context, attr).expect("Could not query EGL context")
+}
+
+pub(crate) unsafe fn try_get_context_attr(
+    egl_display: EGLDisplay,
+    egl_context: EGLContext,
+    attr: EGLint,
+) -> Result<EGLint, Error> {
     EGL_FUNCTIONS.with(|egl| {
         let mut value = 0;
-        let result = egl.QueryContext(egl_display, egl_context, attr, &mut value);
-        assert_ne!(result, egl::FALSE);
-        value
+        if egl.QueryContext(egl_display, egl_context, attr, &mut value) == egl::FALSE {
+            return Err(Error::ContextCreationFailed(
+                egl.GetError().to_windowing_api_error(),
+            ));
+        }
+        Ok(value)
     })
 }
 
@@ -814,6 +934,13 @@ pub(crate) unsafe fn egl_config_from_id(
     egl_display: EGLDisplay,
     egl_config_id: EGLint,
 ) -> EGLConfig {
+    try_egl_config_from_id(egl_display, egl_config_id).expect("Could not find EGL configuration")
+}
+
+pub(crate) unsafe fn try_egl_config_from_id(
+    egl_display: EGLDisplay,
+    egl_config_id: EGLint,
+) -> Result<EGLConfig, Error> {
     let config_attributes = [
         egl::CONFIG_ID as EGLint,
         egl_config_id,
@@ -822,19 +949,24 @@ pub(crate) unsafe fn egl_config_from_id(
         0,
         0,
     ];
-
     EGL_FUNCTIONS.with(|egl| {
-        let (mut config, mut config_count) = (ptr::null(), 0);
-        let result = egl.ChooseConfig(
+        let (mut config, mut count) = (ptr::null(), 0);
+        if egl.ChooseConfig(
             egl_display,
             config_attributes.as_ptr(),
             &mut config,
             1,
-            &mut config_count,
-        );
-        assert_ne!(result, egl::FALSE);
-        assert!(config_count > 0);
-        config
+            &mut count,
+        ) == egl::FALSE
+        {
+            return Err(Error::PixelFormatSelectionFailed(
+                egl.GetError().to_windowing_api_error(),
+            ));
+        }
+        if count == 0 || config.is_null() {
+            return Err(Error::NoPixelFormatFound);
+        }
+        Ok(config)
     })
 }
 
@@ -852,10 +984,19 @@ pub(crate) unsafe fn create_dummy_pbuffer(
     egl_display: EGLDisplay,
     egl_context: EGLContext,
 ) -> Option<EGLSurface> {
-    let egl_config_id = get_context_attr(egl_display, egl_context, egl::CONFIG_ID as EGLint);
-    let egl_config = egl_config_from_id(egl_display, egl_config_id);
+    let id = try_get_context_attr(egl_display, egl_context, egl::CONFIG_ID as EGLint).ok()?;
+    try_create_dummy_pbuffer(egl_display, id).ok().flatten()
+}
 
-    let pbuffer_attributes = [
+unsafe fn try_create_dummy_pbuffer(
+    egl_display: EGLDisplay,
+    config_id: EGLint,
+) -> Result<Option<EGLSurface>, Error> {
+    if config_id == 0 {
+        return Ok(None);
+    }
+    let config = try_egl_config_from_id(egl_display, config_id)?;
+    let attributes = [
         egl::WIDTH as EGLint,
         DUMMY_PBUFFER_SIZE,
         egl::HEIGHT as EGLint,
@@ -865,14 +1006,18 @@ pub(crate) unsafe fn create_dummy_pbuffer(
         0,
         0,
     ];
-
     EGL_FUNCTIONS.with(|egl| {
-        let pbuffer =
-            egl.CreatePbufferSurface(egl_display, egl_config, pbuffer_attributes.as_ptr());
-        if pbuffer == egl::NO_SURFACE {
-            None
+        let pbuffer = egl.CreatePbufferSurface(egl_display, config, attributes.as_ptr());
+        if pbuffer != egl::NO_SURFACE {
+            return Ok(Some(pbuffer));
+        }
+        let error = egl.GetError();
+        // A window-only config may legitimately need a surfaceless binding.
+        // Do not silently use that fallback for loss, display failure or OOM.
+        if matches!(error as u32, egl::BAD_MATCH | egl::BAD_CONFIG) {
+            Ok(None)
         } else {
-            Some(pbuffer)
+            Err(Error::SurfaceCreationFailed(error.to_windowing_api_error()))
         }
     })
 }

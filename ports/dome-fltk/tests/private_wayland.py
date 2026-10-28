@@ -6,13 +6,18 @@ from types import SimpleNamespace
 from Xlib import X
 
 class PrivateWayland:
-    def __init__(self,connection,screen,runtime,out):
+    def __init__(self,connection,screen,runtime,out,*,hardware=False):
         self.connection=connection;self.out=out
         self.http=urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with socket.socket() as s:s.bind(('127.0.0.1',0));port=s.getsockname()[1]
         self.base=f'http://127.0.0.1:{port}'
         env={key:value for key,value in os.environ.items() if not key.startswith('DOME_')}
         env.update(HOME=str(runtime),DISPLAY=screen,XDG_RUNTIME_DIR=str(runtime),XDG_CONFIG_HOME=str(runtime/'compositor-config'),XDG_DATA_HOME=str(runtime/'compositor-data'),XDG_STATE_HOME=str(runtime/'compositor-state'),XDG_CACHE_HOME=str(runtime/'compositor-cache'),LIBGL_ALWAYS_SOFTWARE='1',DOME_LOGIN_SESSION='0',DOME_SESSION_RESTORE='0',DOME_START_XR='0',DOME_RENDERER='gles',DOME_PREVIEW_PORT=str(port),DOME_APPEARANCE_SERVICE='0',RUST_LOG='warn')
+        if hardware:
+            # Offscreen Vulkan composition advertises a real render device to
+            # EGL clients even when Xvfb presents the private host window.
+            env.pop('LIBGL_ALWAYS_SOFTWARE',None)
+            env['DOME_RENDERER']='vulkan'
         for name in ['TRAY','KDECONNECT','KWALLET','POLKIT','IME','XWAYLAND']:env['DOME_START_'+name]='0'
         for name in ['WAYLAND_DISPLAY','WAYLAND_SOCKET']:env.pop(name,None)
         self.log=(out/'compositor.log').open('w')

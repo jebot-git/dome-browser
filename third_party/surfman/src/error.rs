@@ -35,6 +35,8 @@ pub enum Error {
     RequiredExtensionUnavailable,
     /// Looking up an OpenGL function address failed.
     GLFunctionNotFound,
+    /// GL metadata could not be loaded from the current context.
+    GLContextInitializationFailed(String),
     /// This context renders to an externally-managed render target.
     ExternalRenderTarget,
     /// A surface was already attached to this context.

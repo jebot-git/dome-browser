@@ -40,6 +40,7 @@ def main():
     source_paths = [ROOT / "Cargo.lock", ROOT / "Cargo.toml", Path(__file__).resolve(),
                     ROOT / "ports/dome-fltk/examples/graphics-reset-probe.rs"]
     source_paths += sorted(p for p in (ROOT / "third_party/surfman").rglob("*") if p.is_file())
+    source_paths += sorted(p for p in (ROOT / "third_party/glow").rglob("*") if p.is_file())
     manifest = {str(p.relative_to(ROOT)): sha(p) for p in source_paths}
     (output / "source-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     env = os.environ.copy()
@@ -60,6 +61,8 @@ surfman = {{ path = {json.dumps(str(vendor))} }}
 glow = "=0.17.0"
 euclid = "0.22"
 serde_json = "1"
+[patch.crates-io]
+glow = {{ path = {json.dumps(str(ROOT / "third_party/glow"))} }}
 [[bin]]
 name = "graphics-reset-probe"
 path = {json.dumps(str(source))}

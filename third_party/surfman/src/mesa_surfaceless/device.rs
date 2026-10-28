@@ -169,33 +169,55 @@ impl Device {
         descriptor: &ContextDescriptor,
         share_with: Option<&Context>,
     ) -> Result<Context, Error> {
+        self.create_context_with_loader(descriptor, share_with, || unsafe {
+            Gl::try_from_loader_function(context::get_proc_address)
+        })
+    }
+
+    fn create_context_with_loader(
+        &self,
+        descriptor: &ContextDescriptor,
+        share_with: Option<&Context>,
+        loader: impl FnOnce() -> Result<Gl, String>,
+    ) -> Result<Context, Error> {
         unsafe {
+            let previous_binding = CurrentContextGuard::new();
             let context = EGLBackedContext::new(
                 self.native_connection.egl_display,
                 descriptor,
                 share_with.map(|ctx| &ctx.0),
                 self.gl_api(),
+                Box::new(self.connection()),
             )?;
-            if let Err(error) = context.make_current(self.native_connection.egl_display) {
-                if matches!(
-                    error,
-                    Error::MakeCurrentFailed(crate::WindowingApiError::ContextLost)
-                ) {
-                    context.lost.set(true);
-                }
-                context.retire_failed_creation(
+            let initialized = (|| {
+                context.make_current(self.native_connection.egl_display)?;
+                let gl = loader().map_err(Error::GLContextInitializationFailed)?;
+                let actual = ContextDescriptor::try_from_egl_context(
+                    &gl,
                     self.native_connection.egl_display,
-                    Box::new(self.connection()),
-                );
-                return Err(error);
+                    context.egl_context,
+                )?;
+                Ok((gl, actual))
+            })();
+            match initialized {
+                Ok((gl, actual)) => {
+                    previous_binding.keep_current();
+                    Ok(Context(context, gl, actual))
+                },
+                Err(error) => {
+                    if matches!(
+                        error,
+                        Error::MakeCurrentFailed(crate::WindowingApiError::ContextLost)
+                    ) {
+                        context.lost.set(true);
+                    }
+                    context.retire_failed_creation(
+                        self.native_connection.egl_display,
+                        Box::new(self.connection()),
+                    );
+                    Err(error)
+                },
             }
-            let gl = Gl::from_loader_function(context::get_proc_address);
-            let actual = ContextDescriptor::from_egl_context(
-                &gl,
-                self.native_connection.egl_display,
-                context.egl_context,
-            );
-            Ok(Context(context, gl, actual))
         }
     }
 
@@ -212,14 +234,25 @@ impl Device {
         &self,
         native_context: NativeContext,
     ) -> Result<Context, Error> {
+        self.create_context_from_native_context_with_loader(native_context, || {
+            Gl::try_from_loader_function(context::get_proc_address)
+        })
+    }
+
+    unsafe fn create_context_from_native_context_with_loader(
+        &self,
+        native_context: NativeContext,
+        loader: impl FnOnce() -> Result<Gl, String>,
+    ) -> Result<Context, Error> {
         let _guard = CurrentContextGuard::new();
         context::make_native_context_current(self.native_connection.egl_display, &native_context)?;
-        let gl = Gl::from_loader_function(context::get_proc_address);
-        let actual = ContextDescriptor::from_egl_context(
+        let gl = loader().map_err(Error::GLContextInitializationFailed)?;
+        let actual = ContextDescriptor::try_from_egl_context(
             &gl,
             self.native_connection.egl_display,
             native_context.egl_context,
-        );
+        )?;
+        // A failed import never acquires ownership of the caller's EGL handles.
         Ok(Context(
             EGLBackedContext::from_native_context(native_context),
             gl,
@@ -587,3 +620,7 @@ impl Device {
         surface_texture.0.texture_object
     }
 }
+
+#[cfg(test)]
+#[path = "initialization_tests.rs"]
+mod initialization_tests;
