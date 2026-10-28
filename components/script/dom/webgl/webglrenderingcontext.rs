@@ -337,15 +337,6 @@ impl WebGLRenderingContext {
                     xr_cleanup: (window.pipeline_id(), window.task_manager().dom_manipulation_task_source().to_sendable()),
                 },
             };
-            #[cfg(feature = "webxr")]
-            if attrs.xr_compatible && pref!(dom_webxr_enabled) && window.Document()
-                .allowed_to_use_policy_feature(net_traits::permissions_policy::PolicyFeature::XrSpatialTracking)
-            {
-                if let Ok(generation) = context.check_xr_compatible_sync(window) {
-                    context.xr_compatible.set(true);
-                    context.xr_compatibility_generation.set(Some(generation));
-                }
-            }
             context
         })
     }
@@ -368,6 +359,20 @@ impl WebGLRenderingContext {
         ) {
             Ok(ctx) => {
                 let context = reflect_weak_referenceable_dom_object(cx, Rc::new(ctx), window);
+                // An explicit compatibility request is API use, unlike policy
+                // introspection or background device-observation checks. The
+                // context is rooted before reporting can queue observer work.
+                #[cfg(feature = "webxr")]
+                if attrs.xr_compatible && pref!(dom_webxr_enabled) && window.Document()
+                    .allowed_to_use_policy_feature_with_reporting(
+                        cx, net_traits::permissions_policy::PolicyFeature::XrSpatialTracking,
+                    )
+                {
+                    if let Ok(generation) = context.check_xr_compatible_sync(window) {
+                        context.xr_compatible.set(true);
+                        context.xr_compatibility_generation.set(Some(generation));
+                    }
+                }
                 window.track_webgl_context(&context);
                 context.observe_backend_loss();
                 #[cfg(feature = "webxr")]
@@ -5648,7 +5653,8 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             promise.reject_error(cx, Error::InvalidState(None));
             return promise;
         };
-        if !window.Document().allowed_to_use_policy_feature(
+        if !window.Document().allowed_to_use_policy_feature_with_reporting(
+            cx,
             net_traits::permissions_policy::PolicyFeature::XrSpatialTracking,
         ) {
             promise.resolve_native(cx, &());

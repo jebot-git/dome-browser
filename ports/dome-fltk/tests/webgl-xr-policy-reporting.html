@@ -1,0 +1,94 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Local WebGL XR policy diagnostics</title>
+<p>Checking WebGL compatibility calls and policy reports.</p>
+<script id="configuration" type="application/json">CONFIGURATION</script>
+<script src="/webgl-xr-policy-caller.js"></script>
+<script>
+const cfg = JSON.parse(document.getElementById('configuration').textContent);
+const checks = [], reports = [], potential = [];
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+function check(passed, name) {
+  checks.push({name, passed:!!passed});
+  if (!passed) throw new Error(name);
+}
+async function until(predicate) {
+  const deadline = performance.now() + 7000;
+  while (!predicate()) {
+    if (performance.now() > deadline) throw new Error('Timed out waiting for compatibility diagnostics');
+    await delay(10);
+  }
+}
+const observer = new ReportingObserver(batch => reports.push(...batch),
+  {types:['permissions-policy-violation']});
+observer.observe();
+const potentialObserver = new ReportingObserver(batch => potential.push(...batch),
+  {types:['potential-permissions-policy-violation']});
+potentialObserver.observe();
+function reportShape(report) {
+  check(Object.keys(report).sort().join(',') === 'body,type,url' &&
+        report.type === 'permissions-policy-violation' && report.url === location.href,
+        'Compatibility report belongs to the API caller document');
+  check(report.body.featureId === 'xr-spatial-tracking' && report.body.disposition === cfg.disposition,
+        'Feature and enforcement/report-only disposition are correct');
+  check(report.body.sourceFile === new URL('/webgl-xr-policy-caller.js', location.href).href &&
+        report.body.lineNumber === 1 && Number.isInteger(report.body.columnNumber) && report.body.columnNumber > 0,
+        'Compatibility report captures the script call site');
+  check(!('allowAttribute' in report.body) && !('srcAttribute' in report.body),
+        'Actual compatibility use omits potential-violation attributes');
+}
+async function main() {
+  check(!!navigator.xr && typeof ReportingObserver === 'function', 'WebXR and reporting are exposed');
+  const before = document.permissionsPolicy.allowsFeature('xr-spatial-tracking');
+  check(before === cfg.allowed, 'Introspection agrees with enforced policy');
+  const canvas = document.createElement('canvas');
+  const withCompatibility = cfg.operation === 'creation' || cfg.operation === 'combined';
+  const gl = createCompatibilityContext(canvas, cfg.api, {xrCompatible:withCompatibility});
+  check(gl !== null, 'WebGL context is created under either policy disposition');
+  check(gl.getContextAttributes().xrCompatible === false, 'Inline-only registry does not claim immersive compatibility');
+  check(gl.getError() === gl.NO_ERROR, 'Compatibility policy does not add a WebGL error');
+  if (cfg.cached) {
+    check(createCompatibilityContext(canvas, cfg.api, {xrCompatible:true}) === gl,
+          'Repeated getContext returns the existing context without reapplying attributes');
+  }
+  if (cfg.lost) {
+    const extension = gl.getExtension('WEBGL_lose_context');
+    check(extension !== null, 'Controlled context loss is available');
+    const lost = new Promise(resolve => canvas.addEventListener('webglcontextlost', resolve, {once:true}));
+    extension.loseContext();
+    await lost;
+    check(gl.isContextLost(), 'Context loss completes before the compatibility call');
+  }
+  if (cfg.operation === 'async' || cfg.operation === 'combined') {
+    for (let i = 0; i < cfg.calls; ++i) {
+      const promise = requestCompatibility(gl);
+      check(promise instanceof Promise, 'makeXRCompatible returns a promise');
+      try {
+        const value = await promise;
+        check(!cfg.allowed && value === undefined, 'Enforced restriction resolves compatibility as unavailable');
+      } catch (error) {
+        check(cfg.allowed && error.name === 'InvalidStateError',
+              'Allowed/report-only call follows the no-immersive-device path');
+      }
+    }
+  }
+  if (cfg.expected_reports) await until(() => reports.length >= cfg.expected_reports);
+  await delay(100);
+  check(reports.length === cfg.expected_reports, 'Only actual compatibility attempts generate exact report counts');
+  for (const report of reports) reportShape(report);
+  check(potential.length === 0, 'Compatibility attempts do not generate iframe potential reports');
+  check(document.permissionsPolicy.allowsFeature('xr-spatial-tracking') === before,
+        'Reporting preserves introspection and the enforced access decision');
+  const buffered = [];
+  const later = new ReportingObserver(batch => buffered.push(...batch),
+    {types:['permissions-policy-violation'], buffered:true});
+  later.observe();
+  if (cfg.expected_reports) await until(() => buffered.length === cfg.expected_reports);
+  else await delay(100);
+  check(JSON.stringify(buffered) === JSON.stringify(reports), 'Compatibility reports retain independent buffered history');
+  later.disconnect(); observer.disconnect(); potentialObserver.disconnect();
+  return {checks, reports};
+}
+main().then(result => fetch('/__result?case=' + cfg.case, {method:'POST',body:JSON.stringify(result)}))
+ .catch(error => fetch('/__result?case=' + cfg.case, {method:'POST',body:JSON.stringify({checks,reports,error:String(error)})}));
+</script>

@@ -1,0 +1,64 @@
+{
+  "milestone": "WebGL XR compatibility policy diagnostics",
+  "validated_utc": "2026-10-28T22:00:51.437328+00:00",
+  "specifications": [
+    "https://www.w3.org/TR/2026/WD-permissions-policy-1-20261026/#is-feature-enabled",
+    "https://immersive-web.github.io/webxr/#dom-webglrenderingcontextbase-makexrcompatible"
+  ],
+  "implemented": [
+    "Emit actual-use policy diagnostics for initial xrCompatible requests and makeXRCompatible calls in WebGL1/2",
+    "Initialize creation-time compatibility only after rooting the context",
+    "Preserve enforced/report-only access behavior, ordinary WebGL and cached context lookup",
+    "Keep policy introspection, permission-state queries and background device filtering free of reporting side effects"
+  ],
+  "optimized_release": true,
+  "new_dependencies": false,
+  "runtime_checks": 3725,
+  "runtime_breakdown": {
+    "webgl-xr-policy": 712,
+    "webgl-software": 280,
+    "webgl-accelerated": 280,
+    "backend-loss": 726,
+    "iframe-potentials": 1213,
+    "policy-reporting": 248,
+    "csp-observers": 69,
+    "history": 14,
+    "xr-enforced": 23,
+    "xr-report-only": 47,
+    "xr-pending": 14,
+    "xr-report-only-loss": 69,
+    "xr-devicechange": 30
+  },
+  "local_webgl_policy_scenarios": 38,
+  "local_iframe_scenarios": 23,
+  "existing_policy_scenarios": 21,
+  "selected_original_compatibility_wpt_cases": 6,
+  "original_reporting_wpt_cases": 2,
+  "original_assertions_and_headers_unchanged": true,
+  "khronos_executions": 978,
+  "khronos_breakdown": {
+    "webgl-software": 489,
+    "webgl-accelerated": 489
+  },
+  "net_unit_tests_retained": 42,
+  "net_units_rerun_this_checkpoint": false,
+  "retained_unit_source_proof": "Policy, endpoint and UTF-16 implementation/test sources match the preceding validated checkpoint.",
+  "shared_worker_shutdown_scenarios": 3,
+  "anonymous_discord_x_samples": 2,
+  "visual_review": {
+    "discord": "Login form visibly rendered at 30 seconds; process survived and closed cleanly",
+    "x": "Landing/login page visibly rendered at 30 seconds; process survived and closed cleanly; accepted QR overlap remains a non-bug"
+  },
+  "browser_sha256": "d377d02614703251e7de1a4276e91fb45b1857374ab5e63dfd3013319f50e9cc",
+  "test_embedder_sha256": "66ed1e53dde1b6a2eaf76a70815649b7308c94f9b3db9711c8722b9b8f4fb1b3",
+  "engine_source_sha256": {
+    "components/script/dom/webgl/webglrenderingcontext.rs": "51b983f29bd9ae2eb0f7e6f68d2fc12cabc001524f3f8bff7e829a488f455ecf"
+  },
+  "remaining": [
+    "Geolocation/gamepad actual-use reporting review, with permission queries and event filtering kept pure",
+    "Broader reporting retry/document/endpoint lifecycle and legacy interface interoperability",
+    "Broader WebXR backend/device and physical-device coverage",
+    "Later standards-focused rendering and scroll-indicator validation"
+  ],
+  "scope": "Scoped policy/observer/network, native/software WebGL and private native DomeD tests, plus anonymous live-page survival/closure. No full Reporting API, WebXR, WPT or site conformance. Six selected original compatibility cases; OffscreenCanvas creation cases not covered. No physical headset, GPU reset or adapter migration tested."
+}

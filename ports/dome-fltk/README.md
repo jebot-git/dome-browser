@@ -12,6 +12,8 @@ Typed permissions-policy bodies and WebXR diagnostics are covered by
 [the policy reporting validation record](docs/validation-policy-reporting-2026-10-28.json).
 Iframe potential diagnostics and load lifecycle checks are recorded in
 [the iframe policy validation record](docs/validation-iframe-policy-2026-10-28.json).
+WebGL XR compatibility requests are covered by
+[the compatibility reporting record](docs/validation-webgl-xr-policy-2026-10-28.json).
 
 Supported contexts prefer robust access and reset notifications. The FLTK
 frontend retries renderer reconstruction after permanent native loss. It replays
@@ -2171,3 +2173,35 @@ load-handler changes, removal/adoption, declared versus redirected origins,
 sandboxed origins, observer isolation and bounded history. The fixture acquires
 no immersive device. Its XR feature cases are local regressions, not substituted
 upstream camera tests or a complete Permissions Policy conformance suite.
+
+## WebGL XR compatibility policy reports
+
+Explicit WebGL 1 and WebGL 2 compatibility requests emit ordinary
+`permissions-policy-violation` reports when restricted by enforced or report-only
+`xr-spatial-tracking` policy. This covers initial context creation with
+`xrCompatible: true` and each `makeXRCompatible()` call. Creation-time handling
+runs after the context is rooted. Report-only policy retains the normal device
+and compatibility checks; enforced restrictions keep their existing unavailable
+behavior. Background device checks and policy introspection do not emit these
+reports. Returning an existing context does not reapply creation attributes.
+
+```sh
+DOME_COMPOSITOR=/path/to/private-compositor \
+uv run --no-project --with python-xlib --with pillow --with dbus-next python \
+  ports/dome-fltk/tests/webgl-xr-policy-reporting.py \
+  --binary /path/to/xr-native-input --output /tmp/webgl-xr-policy-reporting
+
+DOME_COMPOSITOR=/path/to/private-compositor \
+uv run --no-project --with python-xlib --with pillow --with dbus-next python \
+  ports/dome-fltk/tests/webgl-xr-compatibility-wpt.py \
+  --binary /path/to/xr-native-input --output /tmp/webgl-xr-compatibility-wpt
+```
+
+The 38 local policy scenarios cover both WebGL versions, enforced/report-only
+precedence, observer-only and unknown endpoints, repeated context lookup,
+ordinary creation controls, controlled context loss, source locations and exact
+observer/network delivery. They use an inline-only registry with no immersive
+device. The separate mock adapter runs six unchanged upstream cases for repeated,
+concurrent and lost-context compatibility calls. This is selected regression
+coverage; it does not include the upstream OffscreenCanvas creation cases or
+claim full WebXR/WPT conformance.
