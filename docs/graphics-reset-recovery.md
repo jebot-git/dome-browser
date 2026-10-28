@@ -26,7 +26,37 @@ imports with binding restoration, compatible/incompatible context sharing and
 rendered-pixel readback. Original failed descriptor/binding regressions are
 retained with the development artifacts. No GPU reset is requested.
 
-This prerequisite does not complete browser graphics recovery. The remaining
+The development branch also routes backend-originated context loss through a
+weak document/context-generation observer. Synchronous query failures mark loss
+without requiring an additional JS context, return the operation's lost-context
+result and invalidate the previous resource generation. Non-nullable resource
+creators preserve the existing invalidated script-object behavior. Input
+payloads and native reply sends tolerate cancellation, and native creation
+releases resources if its requester disappears.
+
+Loss events remain asynchronous. Driver-originated loss restores automatically
+only after the event is canceled; explicit `WEBGL_lose_context` restoration keeps
+its existing behavior. A notification for a retired generation cannot affect a
+restored context. Persistent backend callbacks retain only a pipeline identifier,
+context identifier and task route; event tasks retain their target for delivery.
+
+The controlled regression uses the separate, non-installed testing embedder:
+
+```sh
+python3 ports/dome-fltk/tests/webgl-backend-loss.py \
+  --binary /absolute/path/to/optimized/xr-native-input \
+  --output /absolute/path/to/new-report-directory
+```
+
+The runner enables internal preference access only in that testing embedder.
+The shipping browser does not enable that interface. Its default-off testing
+preference requests a context-local backend state transition without resetting
+the GPU. The fixture covers 64 interrupted query/creation operations, upload
+cancellation, overlapping notifications, event permissions, restored pixels,
+resource generations and departing frames. All run under software rendering.
+The existing browser/Khronos and native XR lifecycle suites remain separate.
+
+This routing layer does not complete browser graphics recovery. The remaining
 requirements are:
 
 - Enable supported creation flags with an explicit compatible legacy fallback,

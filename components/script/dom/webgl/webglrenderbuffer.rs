@@ -115,10 +115,7 @@ impl WebGLRenderbuffer {
     ) -> Option<DomRoot<Self>> {
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::CreateRenderbuffer(sender));
-        receiver
-            .recv()
-            .unwrap()
-            .map(|id| WebGLRenderbuffer::new(cx, context, id))
+        context.receive_reply(&receiver).flatten().map(|id| WebGLRenderbuffer::new(cx, context, id))
     }
 
     pub(crate) fn new(
@@ -199,7 +196,7 @@ impl WebGLRenderbuffer {
                     InternalFormatIntVec::Samples,
                     sender,
                 ));
-            let samples = receiver.recv().unwrap();
+            let samples = webgl_reply!(context, receiver, Err(WebGLError::ContextLost));
             if sample_count < 0 || sample_count > samples.first().cloned().unwrap_or(0) {
                 return Err(WebGLError::InvalidOperation);
             }

@@ -31,7 +31,7 @@ use pixels::{self, PixelFormat, SnapshotAlphaMode, unmultiply_inplace};
 use rustc_hash::FxHashMap;
 use servo_base::Epoch;
 use servo_base::generic_channel::{
-    GenericReceiver, GenericSender, GenericSharedMemory, RoutedReceiver,
+    GenericReceiver, GenericSend, GenericSender, GenericSharedMemory, RoutedReceiver,
 };
 use servo_base::id::PainterId;
 use servo_canvas_traits::webgl;
@@ -82,6 +82,8 @@ pub(crate) struct GLContextData {
     /// The context should be removed, but the [`WebGLThread`] is currently waiting on
     /// WebRender to finish rendering to the context in order to delete it.
     marked_for_deletion: bool,
+    lost: bool,
+    loss_observer: Option<servo_base::generic_channel::GenericCallback<WebGLContextId>>,
 }
 
 #[derive(Debug)]
@@ -360,8 +362,7 @@ impl WebGLThread {
             WebGLMsg::CreateContext(painter_id, version, size, attributes, result_sender) => {
                 let result = self.create_webgl_context(painter_id, version, size, attributes);
 
-                result_sender
-                    .send(result.map(|(id, limits)| {
+                let result = result.map(|(id, limits)| {
                         let data = self
                             .make_current_if_needed(id)
                             .expect("WebGLContext not found");
@@ -381,8 +382,20 @@ impl WebGLThread {
                             glsl_version,
                             api_type,
                         }
-                    }))
-                    .unwrap();
+                    });
+                let created_id = result.as_ref().ok().map(|result| result.sender.context_id());
+                if result_sender.send(result).is_err() {
+                    if let Some(id) = created_id { self.remove_webgl_context(id); }
+                }
+            },
+            WebGLMsg::ObserveContextLoss(id, callback) => {
+                if let Some(data) = self.contexts.get_mut(&id) {
+                    if data.lost { let _ = callback.send(id); }
+                    else { data.loss_observer = Some(callback); }
+                }
+            },
+            WebGLMsg::LoseContextForTesting(id) => {
+                self.notify_context_loss(id);
             },
             WebGLMsg::SetImageKey(ctx_id, image_key) => {
                 self.handle_set_image_key(ctx_id, image_key);
@@ -504,6 +517,13 @@ impl WebGLThread {
             .map(|context| context.device.clone())
     }
 
+    fn notify_context_loss(&mut self, id: WebGLContextId) {
+        let Some(data) = self.contexts.get_mut(&id) else { return; };
+        if data.lost { return; }
+        data.lost = true;
+        if let Some(observer) = data.loss_observer.take() { let _ = observer.send(id); }
+    }
+
     /// Handles a WebGLCommand for a specific WebGLContext
     fn handle_webgl_command(
         &mut self,
@@ -511,12 +531,13 @@ impl WebGLThread {
         command: WebGLCommand,
         backtrace: WebGLCommandBacktrace,
     ) {
+        if self.contexts.get(&context_id).is_some_and(|data| data.lost) { return; }
         if self.cached_context_info.get_mut(&context_id).is_none() {
             return;
         }
         let data = self.make_current_if_needed_mut(context_id);
         if let Some(data) = data {
-            WebGLImpl::apply(
+            let completed = WebGLImpl::apply(
                 &data.device,
                 &data.ctx,
                 &data.gl,
@@ -525,6 +546,7 @@ impl WebGLThread {
                 command,
                 backtrace,
             );
+            if !completed { self.notify_context_loss(context_id); }
         }
     }
 
@@ -698,6 +720,8 @@ impl WebGLThread {
                 state,
                 attributes,
                 marked_for_deletion: false,
+                lost: false,
+                loss_observer: None,
             },
         );
 
@@ -719,6 +743,9 @@ impl WebGLThread {
         context_id: WebGLContextId,
         requested_size: Size2D<u32>,
     ) -> Result<(), String> {
+        if self.contexts.get(&context_id).is_some_and(|data| data.lost) {
+            return Err("WebGL context lost".into());
+        }
         self.make_current_if_needed(context_id);
 
         let Some(data) = self.contexts.get_mut(&context_id) else {
@@ -849,6 +876,7 @@ impl WebGLThread {
     ) {
         debug!("handle_swap_buffers()");
         for context_id in context_ids {
+            if self.contexts.get(&context_id).is_none_or(|data| data.lost) { continue; }
             self.make_current_if_needed(context_id)
                 .expect("Where's the GL data?");
 
@@ -1083,12 +1111,12 @@ impl WebGLImpl {
         attributes: &GLContextAttributes,
         command: WebGLCommand,
         _backtrace: WebGLCommandBacktrace,
-    ) {
+    ) -> bool {
         // Ensure there are no pending GL errors from other parts of the pipeline.
         debug_assert_eq!(unsafe { gl.get_error() }, gl::NO_ERROR);
 
         match command {
-            WebGLCommand::GetContextAttributes(ref sender) => sender.send(*attributes).unwrap(),
+            WebGLCommand::GetContextAttributes(ref sender) => sender.send_or_ignore(*attributes),
             WebGLCommand::ActiveTexture(target) => unsafe { gl.active_texture(target) },
             WebGLCommand::AttachShader(program_id, shader_id) => unsafe {
                 gl.attach_shader(program_id.glow(), shader_id.glow())
@@ -1108,11 +1136,13 @@ impl WebGLImpl {
             WebGLCommand::BlendFuncSeparate(src_rgb, dest_rgb, src_alpha, dest_alpha) => unsafe {
                 gl.blend_func_separate(src_rgb, dest_rgb, src_alpha, dest_alpha)
             },
-            WebGLCommand::BufferData(buffer_type, ref receiver, usage) => unsafe {
-                gl.buffer_data_u8_slice(buffer_type, &receiver.recv().unwrap(), usage)
+            WebGLCommand::BufferData(buffer_type, ref receiver, usage) => {
+                let Ok(data) = receiver.recv() else { return false; };
+                unsafe { gl.buffer_data_u8_slice(buffer_type, &data, usage) }
             },
-            WebGLCommand::BufferSubData(buffer_type, offset, ref receiver) => unsafe {
-                gl.buffer_sub_data_u8_slice(buffer_type, offset as i32, &receiver.recv().unwrap())
+            WebGLCommand::BufferSubData(buffer_type, offset, ref receiver) => {
+                let Ok(data) = receiver.recv() else { return false; };
+                unsafe { gl.buffer_sub_data_u8_slice(buffer_type, offset as i32, &data) }
             },
             WebGLCommand::CopyBufferSubData(src, dst, src_offset, dst_offset, size) => {
                 unsafe {
@@ -1134,7 +1164,7 @@ impl WebGLImpl {
                 );
                 let data: &[u8] = slice::from_raw_parts(ptr as _, length);
                 let buffer = GenericSharedMemory::from_bytes(data);
-                sender.send(buffer).unwrap();
+                sender.send_or_ignore(buffer);
                 gl.unmap_buffer(buffer_type);
             },
             WebGLCommand::Clear(mask) => {
@@ -1295,8 +1325,7 @@ impl WebGLImpl {
                     (false, _) => SnapshotAlphaMode::Opaque,
                 };
                 sender
-                    .send((GenericSharedMemory::from_vec(pixels), alpha_mode))
-                    .unwrap();
+                    .send_or_ignore((GenericSharedMemory::from_vec(pixels), alpha_mode));
             },
             WebGLCommand::ReadPixelsPP(rect, format, pixel_type, offset) => unsafe {
                 gl.read_pixels(
@@ -1371,8 +1400,7 @@ impl WebGLImpl {
             WebGLCommand::CreateTransformFeedback(ref sender) => {
                 let value = unsafe { gl.create_transform_feedback() }.ok();
                 sender
-                    .send(value.map(|ntf| ntf.0.get()).unwrap_or_default())
-                    .unwrap()
+                    .send_or_ignore(value.map(|ntf| ntf.0.get()).unwrap_or_default())
             },
             WebGLCommand::DeleteTransformFeedback(id) => {
                 if let Some(tf) = NonZeroU32::new(id) {
@@ -1383,7 +1411,7 @@ impl WebGLImpl {
                 let value = NonZeroU32::new(id)
                     .map(|id| unsafe { gl.is_transform_feedback(NativeTransformFeedback(id)) })
                     .unwrap_or_default();
-                sender.send(value).unwrap()
+                sender.send_or_ignore(value)
             },
             WebGLCommand::BindTransformFeedback(target, id) => {
                 unsafe {
@@ -1410,7 +1438,7 @@ impl WebGLImpl {
                     unsafe { gl.get_transform_feedback_varying(program.glow(), index) }.unwrap();
                 // We need to split, because the name starts with '_u' prefix.
                 let name = from_name_in_compiled_shader(&name);
-                sender.send((size, tftype, name)).unwrap();
+                sender.send_or_ignore((size, tftype, name));
             },
             WebGLCommand::TransformFeedbackVaryings(program, ref varyings, buffer_mode) => {
                 let varyings: Vec<String> = varyings
@@ -1440,7 +1468,7 @@ impl WebGLImpl {
                 let location = unsafe {
                     gl.get_frag_data_location(program_id.glow(), &to_name_in_compiled_shader(name))
                 };
-                sender.send(location).unwrap();
+                sender.send_or_ignore(location);
             },
             WebGLCommand::GetUniformLocation(program_id, ref name, ref chan) => {
                 Self::uniform_location(gl, program_id, name, chan)
@@ -1888,7 +1916,7 @@ impl WebGLImpl {
                     .unwrap()
                     .expect("Where's the front buffer?")
                     .size;
-                sender.send(size.width).unwrap()
+                sender.send_or_ignore(size.width)
             },
             WebGLCommand::DrawingBufferHeight(ref sender) => {
                 let size = device
@@ -1896,7 +1924,7 @@ impl WebGLImpl {
                     .unwrap()
                     .expect("Where's the front buffer?")
                     .size;
-                sender.send(size.height).unwrap()
+                sender.send_or_ignore(size.height)
             },
             WebGLCommand::Finish(ref sender) => Self::finish(gl, sender),
             WebGLCommand::Flush => unsafe { gl.flush() },
@@ -1917,26 +1945,26 @@ impl WebGLImpl {
                     webgl::ParameterBool::DepthWritemask => state.depth_write_mask,
                     _ => unsafe { gl.get_parameter_bool(param as u32) },
                 };
-                sender.send(value).unwrap()
+                sender.send_or_ignore(value)
             },
             WebGLCommand::FenceSync(ref sender) => {
                 let value = unsafe { gl.fence_sync(gl::SYNC_GPU_COMMANDS_COMPLETE, 0).unwrap() };
-                sender.send(WebGLSyncId::from_glow(value)).unwrap();
+                sender.send_or_ignore(WebGLSyncId::from_glow(value));
             },
             WebGLCommand::IsSync(sync_id, ref sender) => {
                 let value = unsafe { gl.is_sync(sync_id.glow()) };
-                sender.send(value).unwrap();
+                sender.send_or_ignore(value);
             },
             WebGLCommand::ClientWaitSync(sync_id, flags, timeout, ref sender) => {
                 let value = unsafe { gl.client_wait_sync(sync_id.glow(), flags, timeout as _) };
-                sender.send(value).unwrap();
+                sender.send_or_ignore(value);
             },
             WebGLCommand::WaitSync(sync_id, flags, timeout) => {
                 unsafe { gl.wait_sync(sync_id.glow(), flags, timeout as u64) };
             },
             WebGLCommand::GetSyncParameter(sync_id, param, ref sender) => {
                 let value = unsafe { gl.get_sync_parameter_i32(sync_id.glow(), param) };
-                sender.send(value as u32).unwrap();
+                sender.send_or_ignore(value as u32);
             },
             WebGLCommand::DeleteSync(sync_id) => {
                 unsafe { gl.delete_sync(sync_id.glow()) };
@@ -1945,7 +1973,7 @@ impl WebGLImpl {
                 let value = match param {
                     webgl::ParameterBool4::ColorWritemask => state.color_write_mask,
                 };
-                sender.send(value).unwrap()
+                sender.send_or_ignore(value)
             },
             WebGLCommand::GetParameterInt(param, ref sender) => {
                 // The core profiles used for WebGL 2 dropped the `*_BITS` queries.
@@ -1986,7 +2014,7 @@ impl WebGLImpl {
                     ),
                     _ => unsafe { gl.get_parameter_i32(param as u32) },
                 };
-                sender.send(value).unwrap()
+                sender.send_or_ignore(value)
             },
             WebGLCommand::GetParameterUInt(param, ref sender) => {
                 let value = match param {
@@ -1995,49 +2023,47 @@ impl WebGLImpl {
                     webgl::ParameterUInt::StencilValueMask => state.stencil_value_mask.0,
                     webgl::ParameterUInt::StencilBackValueMask => state.stencil_value_mask.1,
                 };
-                sender.send(value).unwrap()
+                sender.send_or_ignore(value)
             },
             WebGLCommand::GetParameterInt2(param, ref sender) => {
                 let mut value = [0; 2];
                 unsafe {
                     gl.get_parameter_i32_slice(param as u32, &mut value);
                 }
-                sender.send(value).unwrap()
+                sender.send_or_ignore(value)
             },
             WebGLCommand::GetParameterInt4(param, ref sender) => {
                 let mut value = [0; 4];
                 unsafe {
                     gl.get_parameter_i32_slice(param as u32, &mut value);
                 }
-                sender.send(value).unwrap()
+                sender.send_or_ignore(value)
             },
             WebGLCommand::GetParameterFloat(param, ref sender) => {
                 let mut value = [0.];
                 unsafe {
                     gl.get_parameter_f32_slice(param as u32, &mut value);
                 }
-                sender.send(value[0]).unwrap()
+                sender.send_or_ignore(value[0])
             },
             WebGLCommand::GetParameterFloat2(param, ref sender) => {
                 let mut value = [0.; 2];
                 unsafe {
                     gl.get_parameter_f32_slice(param as u32, &mut value);
                 }
-                sender.send(value).unwrap()
+                sender.send_or_ignore(value)
             },
             WebGLCommand::GetParameterFloat4(param, ref sender) => {
                 let mut value = [0.; 4];
                 unsafe {
                     gl.get_parameter_f32_slice(param as u32, &mut value);
                 }
-                sender.send(value).unwrap()
+                sender.send_or_ignore(value)
             },
             WebGLCommand::GetProgramValidateStatus(program, ref sender) => sender
-                .send(unsafe { gl.get_program_validate_status(program.glow()) })
-                .unwrap(),
+                .send_or_ignore(unsafe { gl.get_program_validate_status(program.glow()) }),
             WebGLCommand::GetProgramActiveUniforms(program, ref sender) => sender
-                .send(unsafe { gl.get_program_parameter_i32(program.glow(), gl::ACTIVE_UNIFORMS) })
-                .unwrap(),
+                .send_or_ignore(unsafe { gl.get_program_parameter_i32(program.glow(), gl::ACTIVE_UNIFORMS) }),
             WebGLCommand::GetCurrentVertexAttrib(index, ref sender) => {
                 let mut value = [0.; 4];
                 unsafe {
@@ -2047,22 +2073,19 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value).unwrap();
+                sender.send_or_ignore(value);
             },
             WebGLCommand::GetTexParameterFloat(target, param, ref sender) => {
                 sender
-                    .send(unsafe { gl.get_tex_parameter_f32(target, param as u32) })
-                    .unwrap();
+                    .send_or_ignore(unsafe { gl.get_tex_parameter_f32(target, param as u32) });
             },
             WebGLCommand::GetTexParameterInt(target, param, ref sender) => {
                 sender
-                    .send(unsafe { gl.get_tex_parameter_i32(target, param as u32) })
-                    .unwrap();
+                    .send_or_ignore(unsafe { gl.get_tex_parameter_i32(target, param as u32) });
             },
             WebGLCommand::GetTexParameterBool(target, param, ref sender) => {
                 sender
-                    .send(unsafe { gl.get_tex_parameter_i32(target, param as u32) } != 0)
-                    .unwrap();
+                    .send_or_ignore(unsafe { gl.get_tex_parameter_i32(target, param as u32) } != 0);
             },
             WebGLCommand::GetInternalFormatIntVec(target, internal_format, param, ref sender) => {
                 match param {
@@ -2087,7 +2110,7 @@ impl WebGLImpl {
                                 &mut values,
                             )
                         };
-                        sender.send(values).unwrap()
+                        sender.send_or_ignore(values)
                     },
                 }
             },
@@ -2098,7 +2121,7 @@ impl WebGLImpl {
                 gl.tex_parameter_f32(target, param, value)
             },
             WebGLCommand::LinkProgram(program_id, ref sender) => {
-                sender.send(Self::link_program(gl, program_id)).unwrap()
+                sender.send_or_ignore(Self::link_program(gl, program_id))
             },
             WebGLCommand::UseProgram(program_id) => unsafe {
                 gl.use_program(program_id.map(|p| p.glow()))
@@ -2139,7 +2162,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value[0] != 0).unwrap();
+                sender.send_or_ignore(value[0] != 0);
             },
             WebGLCommand::GetUniformBool2(program_id, loc, ref sender) => {
                 let mut value = [0; 2];
@@ -2151,7 +2174,7 @@ impl WebGLImpl {
                     );
                 }
                 let value = [value[0] != 0, value[1] != 0];
-                sender.send(value).unwrap();
+                sender.send_or_ignore(value);
             },
             WebGLCommand::GetUniformBool3(program_id, loc, ref sender) => {
                 let mut value = [0; 3];
@@ -2163,7 +2186,7 @@ impl WebGLImpl {
                     );
                 }
                 let value = [value[0] != 0, value[1] != 0, value[2] != 0];
-                sender.send(value).unwrap();
+                sender.send_or_ignore(value);
             },
             WebGLCommand::GetUniformBool4(program_id, loc, ref sender) => {
                 let mut value = [0; 4];
@@ -2175,7 +2198,7 @@ impl WebGLImpl {
                     );
                 }
                 let value = [value[0] != 0, value[1] != 0, value[2] != 0, value[3] != 0];
-                sender.send(value).unwrap();
+                sender.send_or_ignore(value);
             },
             WebGLCommand::GetUniformInt(program_id, loc, ref sender) => {
                 let mut value = [0];
@@ -2186,7 +2209,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value[0]).unwrap();
+                sender.send_or_ignore(value[0]);
             },
             WebGLCommand::GetUniformInt2(program_id, loc, ref sender) => {
                 let mut value = [0; 2];
@@ -2197,7 +2220,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value).unwrap();
+                sender.send_or_ignore(value);
             },
             WebGLCommand::GetUniformInt3(program_id, loc, ref sender) => {
                 let mut value = [0; 3];
@@ -2208,7 +2231,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value).unwrap();
+                sender.send_or_ignore(value);
             },
             WebGLCommand::GetUniformInt4(program_id, loc, ref sender) => {
                 let mut value = [0; 4];
@@ -2219,7 +2242,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value).unwrap();
+                sender.send_or_ignore(value);
             },
             WebGLCommand::GetUniformUint(program_id, loc, ref sender) => {
                 let mut value = [0];
@@ -2230,7 +2253,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value[0]).unwrap();
+                sender.send_or_ignore(value[0]);
             },
             WebGLCommand::GetUniformUint2(program_id, loc, ref sender) => {
                 let mut value = [0; 2];
@@ -2241,7 +2264,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value).unwrap();
+                sender.send_or_ignore(value);
             },
             WebGLCommand::GetUniformUint3(program_id, loc, ref sender) => {
                 let mut value = [0; 3];
@@ -2252,7 +2275,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value).unwrap();
+                sender.send_or_ignore(value);
             },
             WebGLCommand::GetUniformUint4(program_id, loc, ref sender) => {
                 let mut value = [0; 4];
@@ -2263,7 +2286,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value).unwrap();
+                sender.send_or_ignore(value);
             },
             WebGLCommand::GetUniformFloat(program_id, loc, ref sender) => {
                 let mut value = [0.];
@@ -2274,7 +2297,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value[0]).unwrap();
+                sender.send_or_ignore(value[0]);
             },
             WebGLCommand::GetUniformFloat2(program_id, loc, ref sender) => {
                 let mut value = [0.; 2];
@@ -2285,7 +2308,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value).unwrap();
+                sender.send_or_ignore(value);
             },
             WebGLCommand::GetUniformFloat3(program_id, loc, ref sender) => {
                 let mut value = [0.; 3];
@@ -2296,7 +2319,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value).unwrap();
+                sender.send_or_ignore(value);
             },
             WebGLCommand::GetUniformFloat4(program_id, loc, ref sender) => {
                 let mut value = [0.; 4];
@@ -2307,7 +2330,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value).unwrap();
+                sender.send_or_ignore(value);
             },
             WebGLCommand::GetUniformFloat9(program_id, loc, ref sender) => {
                 let mut value = [0.; 9];
@@ -2318,7 +2341,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value).unwrap();
+                sender.send_or_ignore(value);
             },
             WebGLCommand::GetUniformFloat16(program_id, loc, ref sender) => {
                 let mut value = [0.; 16];
@@ -2329,7 +2352,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value).unwrap();
+                sender.send_or_ignore(value);
             },
             WebGLCommand::GetUniformFloat2x3(program_id, loc, ref sender) => {
                 let mut value = [0.; 2 * 3];
@@ -2340,7 +2363,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value).unwrap()
+                sender.send_or_ignore(value)
             },
             WebGLCommand::GetUniformFloat2x4(program_id, loc, ref sender) => {
                 let mut value = [0.; 2 * 4];
@@ -2351,7 +2374,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value).unwrap()
+                sender.send_or_ignore(value)
             },
             WebGLCommand::GetUniformFloat3x2(program_id, loc, ref sender) => {
                 let mut value = [0.; 3 * 2];
@@ -2362,7 +2385,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value).unwrap()
+                sender.send_or_ignore(value)
             },
             WebGLCommand::GetUniformFloat3x4(program_id, loc, ref sender) => {
                 let mut value = [0.; 3 * 4];
@@ -2373,7 +2396,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value).unwrap()
+                sender.send_or_ignore(value)
             },
             WebGLCommand::GetUniformFloat4x2(program_id, loc, ref sender) => {
                 let mut value = [0.; 4 * 2];
@@ -2384,7 +2407,7 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value).unwrap()
+                sender.send_or_ignore(value)
             },
             WebGLCommand::GetUniformFloat4x3(program_id, loc, ref sender) => {
                 let mut value = [0.; 4 * 3];
@@ -2395,13 +2418,13 @@ impl WebGLImpl {
                         &mut value,
                     );
                 }
-                sender.send(value).unwrap()
+                sender.send_or_ignore(value)
             },
             WebGLCommand::GetUniformBlockIndex(program_id, ref name, ref sender) => {
                 let name = to_name_in_compiled_shader(name);
                 let index = unsafe { gl.get_uniform_block_index(program_id.glow(), &name) };
                 // TODO(#34300): use Option<u32>
-                sender.send(index.unwrap_or(gl::INVALID_INDEX)).unwrap();
+                sender.send_or_ignore(index.unwrap_or(gl::INVALID_INDEX));
             },
             WebGLCommand::GetUniformIndices(program_id, ref names, ref sender) => {
                 let names = names
@@ -2415,17 +2438,17 @@ impl WebGLImpl {
                         .map(|index| index.unwrap_or(gl::INVALID_INDEX))
                         .collect()
                 };
-                sender.send(indices).unwrap();
+                sender.send_or_ignore(indices);
             },
             WebGLCommand::GetActiveUniforms(program_id, ref indices, pname, ref sender) => {
                 let results =
                     unsafe { gl.get_active_uniforms_parameter(program_id.glow(), indices, pname) };
-                sender.send(results).unwrap();
+                sender.send_or_ignore(results);
             },
             WebGLCommand::GetActiveUniformBlockName(program_id, block_idx, ref sender) => {
                 let name =
                     unsafe { gl.get_active_uniform_block_name(program_id.glow(), block_idx) };
-                sender.send(name).unwrap();
+                sender.send_or_ignore(name);
             },
             WebGLCommand::GetActiveUniformBlockParameter(
                 program_id,
@@ -2452,7 +2475,7 @@ impl WebGLImpl {
                         &mut result,
                     )
                 };
-                sender.send(result).unwrap();
+                sender.send_or_ignore(result);
             },
             WebGLCommand::UniformBlockBinding(program_id, block_idx, block_binding) => unsafe {
                 gl.uniform_block_binding(program_id.glow(), block_idx, block_binding)
@@ -2474,15 +2497,15 @@ impl WebGLImpl {
             WebGLCommand::GenerateQuery(ref sender) => {
                 // TODO(#34300): use Option<WebGLQueryId>
                 let id = unsafe { gl.create_query().unwrap() };
-                sender.send(WebGLQueryId::from_glow(id)).unwrap()
+                sender.send_or_ignore(WebGLQueryId::from_glow(id))
             },
             WebGLCommand::GetQueryState(ref sender, query_id, pname) => {
                 let value = unsafe { gl.get_query_parameter_u32(query_id.glow(), pname) };
-                sender.send(value).unwrap()
+                sender.send_or_ignore(value)
             },
             WebGLCommand::GenerateSampler(ref sender) => {
                 let id = unsafe { gl.create_sampler().unwrap() };
-                sender.send(WebGLSamplerId::from_glow(id)).unwrap()
+                sender.send_or_ignore(WebGLSamplerId::from_glow(id))
             },
             WebGLCommand::DeleteSampler(sampler_id) => {
                 unsafe { gl.delete_sampler(sampler_id.glow()) };
@@ -2498,11 +2521,11 @@ impl WebGLImpl {
             },
             WebGLCommand::GetSamplerParameterInt(sampler_id, pname, ref sender) => {
                 let value = unsafe { gl.get_sampler_parameter_i32(sampler_id.glow(), pname) };
-                sender.send(value).unwrap();
+                sender.send_or_ignore(value);
             },
             WebGLCommand::GetSamplerParameterFloat(sampler_id, pname, ref sender) => {
                 let value = unsafe { gl.get_sampler_parameter_f32(sampler_id.glow(), pname) };
-                sender.send(value).unwrap();
+                sender.send_or_ignore(value);
             },
             WebGLCommand::BindBufferBase(target, index, id) => {
                 // https://searchfox.org/mozilla-central/rev/13b081a62d3f3e3e3120f95564529257b0bf451c/dom/canvas/WebGLContextBuffers.cpp#208-210
@@ -2602,6 +2625,7 @@ impl WebGLImpl {
                 );
             }
         }
+        true
     }
 
     fn initialize_framebuffer(gl: &Gl, state: &GLState, color: bool, depth: bool, stencil: bool) {
@@ -2725,7 +2749,7 @@ impl WebGLImpl {
 
     fn finish(gl: &Gl, chan: &GenericSender<()>) {
         unsafe { gl.finish() };
-        chan.send(()).unwrap();
+        chan.send_or_ignore(());
     }
 
     fn shader_precision_format(
@@ -2747,7 +2771,7 @@ impl WebGLImpl {
                     )
                 })
         };
-        chan.send((range_min, range_max, precision)).unwrap();
+        chan.send_or_ignore((range_min, range_max, precision));
     }
 
     /// This is an implementation of `getSupportedExtensions()` from
@@ -2766,7 +2790,7 @@ impl WebGLImpl {
     ) {
         let parameter =
             unsafe { gl.get_framebuffer_attachment_parameter_i32(target, attachment, pname) };
-        chan.send(parameter).unwrap();
+        chan.send_or_ignore(parameter);
     }
 
     /// Reads one component size of a draw framebuffer attachment, or 0 when
@@ -2788,7 +2812,7 @@ impl WebGLImpl {
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.7>
     fn get_renderbuffer_parameter(gl: &Gl, target: u32, pname: u32, chan: &GenericSender<i32>) {
         let parameter = unsafe { gl.get_renderbuffer_parameter_i32(target, pname) };
-        chan.send(parameter).unwrap();
+        chan.send_or_ignore(parameter);
     }
 
     fn uniform_location(
@@ -2801,59 +2825,59 @@ impl WebGLImpl {
             gl.get_uniform_location(program_id.glow(), &to_name_in_compiled_shader(name))
         };
         // (#34300): replace this with WebGLUniformId
-        chan.send(location.map(|l| l.0 as i32)).unwrap();
+        chan.send_or_ignore(location.map(|l| l.0 as i32));
     }
 
     fn shader_info_log(gl: &Gl, shader_id: WebGLShaderId, chan: &GenericSender<String>) {
         let log = unsafe { gl.get_shader_info_log(shader_id.glow()) };
-        chan.send(log).unwrap();
+        chan.send_or_ignore(log);
     }
 
     fn program_info_log(gl: &Gl, program_id: WebGLProgramId, chan: &GenericSender<String>) {
         let log = unsafe { gl.get_program_info_log(program_id.glow()) };
-        chan.send(log).unwrap();
+        chan.send_or_ignore(log);
     }
 
     fn create_buffer(gl: &Gl, chan: &GenericSender<Option<WebGLBufferId>>) {
         let buffer = unsafe { gl.create_buffer() }
             .ok()
             .map(WebGLBufferId::from_glow);
-        chan.send(buffer).unwrap();
+        chan.send_or_ignore(buffer);
     }
 
     fn create_framebuffer(gl: &Gl, chan: &GenericSender<Option<WebGLFramebufferId>>) {
         let framebuffer = unsafe { gl.create_framebuffer() }
             .ok()
             .map(WebGLFramebufferId::from_glow);
-        chan.send(framebuffer).unwrap();
+        chan.send_or_ignore(framebuffer);
     }
 
     fn create_renderbuffer(gl: &Gl, chan: &GenericSender<Option<WebGLRenderbufferId>>) {
         let renderbuffer = unsafe { gl.create_renderbuffer() }
             .ok()
             .map(WebGLRenderbufferId::from_glow);
-        chan.send(renderbuffer).unwrap();
+        chan.send_or_ignore(renderbuffer);
     }
 
     fn create_texture(gl: &Gl, chan: &GenericSender<Option<WebGLTextureId>>) {
         let texture = unsafe { gl.create_texture() }
             .ok()
             .map(WebGLTextureId::from_glow);
-        chan.send(texture).unwrap();
+        chan.send_or_ignore(texture);
     }
 
     fn create_program(gl: &Gl, chan: &GenericSender<Option<WebGLProgramId>>) {
         let program = unsafe { gl.create_program() }
             .ok()
             .map(WebGLProgramId::from_glow);
-        chan.send(program).unwrap();
+        chan.send_or_ignore(program);
     }
 
     fn create_shader(gl: &Gl, shader_type: u32, chan: &GenericSender<Option<WebGLShaderId>>) {
         let shader = unsafe { gl.create_shader(shader_type) }
             .ok()
             .map(WebGLShaderId::from_glow);
-        chan.send(shader).unwrap();
+        chan.send_or_ignore(shader);
     }
 
     fn create_vertex_array(gl: &Gl) -> Option<WebGLVertexArrayId> {

@@ -67,7 +67,7 @@ use crate::dom::webgl::webglquery::WebGLQuery;
 use crate::dom::webgl::webglrenderbuffer::{WebGLRenderbuffer, renderbuffer_format};
 use crate::dom::webgl::webglrenderingcontext::{
     Operation, TexPixels, TexSource, VertexAttrib, WebGLRenderingContext, bytes_per_pixel,
-    uniform_get, uniform_typed,
+    uniform_typed,
 };
 use crate::dom::webgl::webglsampler::{WebGLSampler, WebGLSamplerValue};
 use crate::dom::webgl::webglshader::WebGLShader;
@@ -591,7 +591,7 @@ impl WebGL2RenderingContext {
         self.base.send_command(WebGLCommand::ReadPixels(
             src_rect, format, pixel_type, sender,
         ));
-        let (src, _) = receiver.recv().unwrap();
+        let (src, _) = webgl_reply!(self.base, receiver, ());
 
         for i in 0..src_rect.size.height as usize {
             let src_start = i * src_row_bytes as usize;
@@ -772,7 +772,7 @@ impl WebGL2RenderingContext {
                 target, attachment, pname, sender,
             ));
 
-        let retval = receiver.recv().unwrap();
+        let retval = webgl_reply!(self.base, receiver, Err(servo_canvas_traits::webgl::WebGLError::ContextLost));
         rval.set(Int32Value(retval));
         Ok(())
     }
@@ -1639,7 +1639,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         let data = src_data.as_slice_safe(cx.no_gc()).unwrap_or(&[]);
         let data = &data[src_byte_offset..src_end];
         let buffer = GenericSharedMemory::from_bytes(data);
-        sender.send(buffer).unwrap();
+        if sender.send(buffer).is_err() { self.base.signal_driver_loss(); }
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.3>
@@ -1751,7 +1751,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             copy_bytes,
             sender,
         ));
-        let data = receiver.recv().unwrap();
+        let data = webgl_reply!(self.base, receiver, ());
         let dst_end = dst_byte_offset + copy_bytes;
         let dst_buffer = dst_buffer.as_mut_slice_safe(cx.no_gc()).unwrap_or(&mut []);
         dst_buffer[dst_byte_offset..dst_end].copy_from_slice(&data);
@@ -3100,57 +3100,54 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         let triple = (&*self.base, program.id(), location.id());
 
         match location.type_() {
-            constants::UNSIGNED_INT => retval.set(UInt32Value(uniform_get(
-                triple,
-                WebGLCommand::GetUniformUint,
-            ))),
+            constants::UNSIGNED_INT => retval.set(UInt32Value(webgl_uniform!(triple, WebGLCommand::GetUniformUint, retval))),
             constants::UNSIGNED_INT_VEC2 => uniform_typed::<Uint32>(
                 cx,
-                &uniform_get(triple, WebGLCommand::GetUniformUint2),
+                &webgl_uniform!(triple, WebGLCommand::GetUniformUint2, retval),
                 retval,
             ),
             constants::UNSIGNED_INT_VEC3 => uniform_typed::<Uint32>(
                 cx,
-                &uniform_get(triple, WebGLCommand::GetUniformUint3),
+                &webgl_uniform!(triple, WebGLCommand::GetUniformUint3, retval),
                 retval,
             ),
             constants::UNSIGNED_INT_VEC4 => uniform_typed::<Uint32>(
                 cx,
-                &uniform_get(triple, WebGLCommand::GetUniformUint4),
+                &webgl_uniform!(triple, WebGLCommand::GetUniformUint4, retval),
                 retval,
             ),
             constants::FLOAT_MAT2x3 => uniform_typed::<Float32>(
                 cx,
-                &uniform_get(triple, WebGLCommand::GetUniformFloat2x3),
+                &webgl_uniform!(triple, WebGLCommand::GetUniformFloat2x3, retval),
                 retval,
             ),
             constants::FLOAT_MAT2x4 => uniform_typed::<Float32>(
                 cx,
-                &uniform_get(triple, WebGLCommand::GetUniformFloat2x4),
+                &webgl_uniform!(triple, WebGLCommand::GetUniformFloat2x4, retval),
                 retval,
             ),
             constants::FLOAT_MAT3x2 => uniform_typed::<Float32>(
                 cx,
-                &uniform_get(triple, WebGLCommand::GetUniformFloat3x2),
+                &webgl_uniform!(triple, WebGLCommand::GetUniformFloat3x2, retval),
                 retval,
             ),
             constants::FLOAT_MAT3x4 => uniform_typed::<Float32>(
                 cx,
-                &uniform_get(triple, WebGLCommand::GetUniformFloat3x4),
+                &webgl_uniform!(triple, WebGLCommand::GetUniformFloat3x4, retval),
                 retval,
             ),
             constants::FLOAT_MAT4x2 => uniform_typed::<Float32>(
                 cx,
-                &uniform_get(triple, WebGLCommand::GetUniformFloat4x2),
+                &webgl_uniform!(triple, WebGLCommand::GetUniformFloat4x2, retval),
                 retval,
             ),
             constants::FLOAT_MAT4x3 => uniform_typed::<Float32>(
                 cx,
-                &uniform_get(triple, WebGLCommand::GetUniformFloat4x3),
+                &webgl_uniform!(triple, WebGLCommand::GetUniformFloat4x3, retval),
                 retval,
             ),
             constants::SAMPLER_3D | constants::SAMPLER_2D_ARRAY => {
-                retval.set(Int32Value(uniform_get(triple, WebGLCommand::GetUniformInt)))
+                retval.set(Int32Value(webgl_uniform!(triple, WebGLCommand::GetUniformInt, retval)))
             },
             _ => self.base.GetUniform(cx, program, location, retval),
         }
@@ -4336,7 +4333,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             return None;
         }
 
-        Some(WebGLSync::new(cx, &self.base))
+        WebGLSync::new(cx, &self.base)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.14>
@@ -4364,7 +4361,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
                 let (sender, receiver) = webgl_channel().unwrap();
                 self.base
                     .send_command(WebGLCommand::IsSync(sync.id(), sender));
-                receiver.recv().unwrap()
+                webgl_reply!(self.base, receiver, false)
             },
             None => false,
         }
@@ -4441,7 +4438,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
                 let (sender, receiver) = webgl_channel().unwrap();
                 self.base
                     .send_command(WebGLCommand::GetSyncParameter(sync.id(), pname, sender));
-                retval.set(UInt32Value(receiver.recv().unwrap()))
+                retval.set(UInt32Value(webgl_reply!(self.base, receiver, retval.set(NullValue()))))
             },
             constants::SYNC_STATUS => match sync.get_sync_status(pname, &self.base) {
                 Some(status) => retval.set(UInt32Value(status)),
@@ -4583,7 +4580,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
                 let (sender, receiver) = webgl_channel().unwrap();
                 self.base
                     .send_command(WebGLCommand::IsTransformFeedback(tf.id(), sender));
-                receiver.recv().unwrap()
+                webgl_reply!(self.base, receiver, false)
             },
             // Returns false if `transformFeedback` is null.
             None => false,
@@ -4773,7 +4770,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
                 index,
                 sender,
             ));
-        let (size, ty, name) = receiver.recv().unwrap();
+        let (size, ty, name) = webgl_reply!(self.base, receiver, None);
         Some(WebGLActiveInfo::new(
             cx,
             self.base.global().as_window(),
@@ -5258,7 +5255,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
                     ));
 
                 rooted!(&in(cx) let mut rval = ptr::null_mut::<JSObject>());
-                create_buffer_source::<Int32>(cx, &receiver.recv().unwrap(), rval.handle_mut())
+                create_buffer_source::<Int32>(cx, &webgl_reply!(self.base, receiver, retval.set(NullValue())), rval.handle_mut())
                     .unwrap();
                 retval.set(ObjectValue(rval.get()))
             },

@@ -13,7 +13,7 @@ use servo_canvas_traits::webgl::{WebGLCommand, WebGLContextId, WebGLMsgSender};
 use crate::dom::bindings::codegen::Bindings::WebGLObjectBinding::WebGLObjectMethods;
 use crate::dom::bindings::str::USVString;
 use crate::dom::webgl::webglrenderingcontext::WebGLRenderingContext;
-use crate::dom::webglrenderingcontext::{Operation, capture_webgl_backtrace};
+use crate::dom::webglrenderingcontext::Operation;
 
 #[dom_struct]
 pub(crate) struct WebGLObject {
@@ -41,6 +41,19 @@ impl WebGLObject {
         self.context.root()
     }
 
+    pub(crate) fn signal_driver_loss(&self) {
+        if let Some(context) = self.context() {
+            if context.sender().context_id() == self.context_id() { context.signal_driver_loss(); }
+        }
+    }
+
+    pub(crate) fn receive_reply<T>(&self, receiver: &servo_base::generic_channel::GenericReceiver<T>) -> Option<T>
+    where T: for<'de> serde::Deserialize<'de> + serde::Serialize {
+        let context = self.context()?;
+        if context.sender().context_id() != self.context_id() { return None; }
+        context.receive_reply(receiver)
+    }
+
     #[inline]
     pub(crate) fn context_id(&self) -> WebGLContextId {
         self.webgl_sender.context_id()
@@ -48,9 +61,10 @@ impl WebGLObject {
 
     #[inline]
     pub(crate) fn send_with_fallibility(&self, command: WebGLCommand, fallibility: Operation) {
-        let result = self.webgl_sender.send(command, capture_webgl_backtrace());
-        if matches!(fallibility, Operation::Infallible) {
-            result.expect("Operation failed");
+        if let Some(context) = self.context() {
+            if context.sender().context_id() == self.context_id() {
+                context.send_with_fallibility(command, fallibility);
+            }
         }
     }
 

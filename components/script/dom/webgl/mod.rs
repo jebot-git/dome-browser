@@ -2,6 +2,26 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+// A disconnected native reply is context loss. Each caller supplies the WebGL
+// operation's lost-context return value; never manufacture a resource handle.
+macro_rules! webgl_reply {
+    ($context:expr, $receiver:expr, $fallback:expr) => {
+        match $context.receive_reply(&$receiver) {
+            Some(value) => value,
+            None => return $fallback,
+        }
+    };
+}
+
+macro_rules! webgl_uniform {
+    ($triple:expr, $command:expr, $retval:expr) => {
+        match $crate::dom::webgl::webglrenderingcontext::uniform_get($triple, $command) {
+            Some(value) => value,
+            None => return $retval.set(js::jsval::NullValue()),
+        }
+    };
+}
+
 pub(crate) mod extensions;
 pub(crate) mod validations;
 pub(crate) mod vertexarrayobject;

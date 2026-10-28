@@ -124,7 +124,7 @@ impl WebGLSampler {
         }
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::GenerateSampler(sender));
-        let id = receiver.recv().unwrap();
+        let id = context.receive_reply(&receiver).unwrap_or_else(|| servo_canvas_traits::webgl::WebGLSamplerId::maybe_new(1).unwrap());
 
         reflect_dom_object(
             cx,
@@ -203,7 +203,7 @@ impl WebGLSampler {
                     pname,
                     sender,
                 ));
-                Ok(WebGLSamplerValue::GLenum(receiver.recv().unwrap() as u32))
+                Ok(WebGLSamplerValue::GLenum(webgl_reply!(context, receiver, Err(servo_canvas_traits::webgl::WebGLError::ContextLost)) as u32))
             },
             constants::TEXTURE_MIN_LOD | constants::TEXTURE_MAX_LOD => {
                 let (sender, receiver) = webgl_channel().unwrap();
@@ -212,7 +212,7 @@ impl WebGLSampler {
                     pname,
                     sender,
                 ));
-                Ok(WebGLSamplerValue::Float(receiver.recv().unwrap()))
+                Ok(WebGLSamplerValue::Float(webgl_reply!(context, receiver, Err(servo_canvas_traits::webgl::WebGLError::ContextLost))))
             },
             _ => Err(InvalidEnum),
         }

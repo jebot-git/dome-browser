@@ -81,7 +81,7 @@ impl WebGLQuery {
         }
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::GenerateQuery(sender));
-        let id = receiver.recv().unwrap();
+        let id = context.receive_reply(&receiver).unwrap_or_else(|| servo_canvas_traits::webgl::WebGLQueryId::maybe_new(1).unwrap());
 
         reflect_dom_object(
             cx,
@@ -157,7 +157,7 @@ impl WebGLQuery {
             self.droppable.gl_id,
             constants::QUERY_RESULT_AVAILABLE,
         ));
-        let is_available = receiver.recv().unwrap();
+        let is_available = webgl_reply!(context, receiver, ());
         if is_available == 0 {
             self.query_result_available.set(None);
             return;
@@ -170,7 +170,7 @@ impl WebGLQuery {
             constants::QUERY_RESULT,
         ));
 
-        self.query_result.set(receiver.recv().unwrap());
+        self.query_result.set(webgl_reply!(context, receiver, ()));
         self.query_result_available.set(Some(is_available));
     }
 

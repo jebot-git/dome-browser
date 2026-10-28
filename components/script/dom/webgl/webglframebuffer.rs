@@ -191,7 +191,7 @@ impl WebGLFramebuffer {
     ) -> Option<DomRoot<Self>> {
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::CreateFramebuffer(sender));
-        let id = receiver.recv().unwrap()?;
+        let id = context.receive_reply(&receiver)??;
         let framebuffer = WebGLFramebuffer::new(cx, context, id);
         Some(framebuffer)
     }

@@ -145,10 +145,7 @@ impl WebGLBuffer {
     ) -> Option<DomRoot<Self>> {
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::CreateBuffer(sender));
-        receiver
-            .recv()
-            .unwrap()
-            .map(|id| WebGLBuffer::new(cx, context, id))
+        context.receive_reply(&receiver).flatten().map(|id| WebGLBuffer::new(cx, context, id))
     }
 
     pub(crate) fn new(
@@ -195,7 +192,10 @@ impl WebGLBuffer {
         self.upcast()
             .send_command(WebGLCommand::BufferData(target, receiver, usage));
         let buffer = generic_channel::GenericSharedMemory::from_bytes(data);
-        sender.send(buffer).unwrap();
+        if sender.send(buffer).is_err() {
+            self.upcast().signal_driver_loss();
+            return Err(WebGLError::ContextLost);
+        }
         Ok(())
     }
 

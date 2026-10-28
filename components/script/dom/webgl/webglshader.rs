@@ -109,10 +109,7 @@ impl WebGLShader {
     ) -> Option<DomRoot<Self>> {
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::CreateShader(shader_type, sender));
-        receiver
-            .recv()
-            .unwrap()
-            .map(|id| WebGLShader::new(cx, context, id, shader_type))
+        context.receive_reply(&receiver).flatten().map(|id| WebGLShader::new(cx, context, id, shader_type))
     }
 
     pub(crate) fn new(

@@ -402,6 +402,7 @@ pub struct Preferences {
     /// The background color of shell's viewport. This will be used by OpenGL's `glClearColor`.
     pub shell_background_color_rgba: [f64; 4],
     pub webgl_testing_context_creation_error: bool,
+    pub webgl_testing_force_context_loss: bool,
     /// Maximum number of workers for the main thread pool
     pub thread_pool_workers_max: u64,
     /// Number of workers per thread pool, if we fail to detect how much
@@ -622,6 +623,7 @@ impl Preferences {
             thread_pool_canvas_workers: 3,
             thread_pool_webrender_workers_max: 4,
             webgl_testing_context_creation_error: false,
+            webgl_testing_force_context_loss: false,
             user_agent: String::new(),
             viewport_meta_enabled: false,
             expose_servointernals_globally: false,

@@ -1,0 +1,47 @@
+{
+  "verified_utc": "2026-10-28T00:25:34.465563+00:00",
+  "scope": "Controlled backend loss in a separate software embedder, shipping-browser explicit WebGL lifecycle, upstream Khronos cases, real native XR bridge fixture and desktop history menu. No real hardware reset or adapter migration.",
+  "passed": true,
+  "candidate_sha256": "c65cf4d7bba556fa481cc7fa95504c7c5b7f1267068dc52a1354300f1a2cf7a7",
+  "embedder_sha256": "8139b779a25b8c640b962708adafd546e0e9f82d8c4d67c511dc3b326492ecf0",
+  "release_build_passed": true,
+  "release_all_targets_check_passed": true,
+  "runtime_checks": 1088,
+  "upstream_cases": 489,
+  "history_status": "Preliminarily fixed, user confirmed; 14 checks in the current candidate pass",
+  "physical_device_validation": false,
+  "real_gpu_reset_detection_enabled": false,
+  "adapter_migration": false,
+  "goal_complete": false,
+  "installed": false,
+  "source_base_commit": "d7e603745d7419255a733fb6a050c46f98b4c400",
+  "validation": [
+    {
+      "script": "ports/dome-fltk/tests/webgl-backend-loss.py",
+      "interrupted_operations": 64,
+      "checks": 726,
+      "renderer": "SoftwareRenderingContext / llvmpipe"
+    },
+    {
+      "script": "ports/dome-fltk/tests/webgl-context-loss.py",
+      "checks": 280,
+      "upstream_cases": 489,
+      "original_assertions_changed": false
+    },
+    {
+      "script": "ports/dome-fltk/tests/webxr-context-compatibility.py --context-loss",
+      "checks": 68,
+      "backend": "Private real DomeD XR bridge fixture with synthetic frames"
+    },
+    {
+      "script": "ports/dome-fltk/tests/history-popup.py --open-via desktop-menu",
+      "checks": 14
+    }
+  ],
+  "remaining": [
+    "Enable capability-gated driver reset detection and explicitly compatible creation fallback",
+    "Handle actual reset completion and native cleanup before automatic restoration",
+    "Handle frontend renderer loss and adapter/capability migration",
+    "Run broader WebXR/privacy regressions and available physical device coverage before shipping the integrated recovery feature"
+  ]
+}

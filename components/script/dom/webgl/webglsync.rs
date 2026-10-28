@@ -76,16 +76,17 @@ impl WebGLSync {
         }
     }
 
-    pub(crate) fn new(cx: &mut JSContext, context: &WebGLRenderingContext) -> DomRoot<Self> {
+    pub(crate) fn new(cx: &mut JSContext, context: &WebGLRenderingContext) -> Option<DomRoot<Self>> {
+        if context.is_context_lost() { return None; }
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::FenceSync(sender));
-        let sync_id = receiver.recv().unwrap();
+        let sync_id = context.receive_reply(&receiver)?;
 
-        reflect_dom_object(
+        Some(reflect_dom_object(
             cx,
             Box::new(WebGLSync::new_inherited(context, sync_id)),
             &*context.global(),
-        )
+        ))
     }
 }
 
@@ -111,7 +112,7 @@ impl WebGLSync {
                         timeout,
                         sender,
                     ));
-                    this.client_wait_status.set(Some(receiver.recv().unwrap()));
+                    this.client_wait_status.set(Some(webgl_reply!(context, receiver, ())));
                 });
                 self.global()
                     .task_manager()
@@ -142,7 +143,7 @@ impl WebGLSync {
                     if context.is_context_lost() || context.validate_ownership(&*this).is_err() { return; }
                     let (sender, receiver) = webgl_channel().unwrap();
                     context.send_command(WebGLCommand::GetSyncParameter(this.id(), pname, sender));
-                    this.sync_status.set(Some(receiver.recv().unwrap()));
+                    this.sync_status.set(Some(webgl_reply!(context, receiver, ())));
                 });
                 self.global()
                     .task_manager()

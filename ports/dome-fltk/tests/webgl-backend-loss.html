@@ -1,0 +1,120 @@
+<!doctype html><meta charset="utf-8"><title>Controlled WebGL backend loss</title>
+<style>body{background:#243344;color:white;font:16px monospace}canvas{width:128px;height:96px}</style>
+<h1>Controlled WebGL backend loss</h1><pre id="status">Running…</pre>
+<script>
+'use strict';
+const checks=[],cases=[],retained=[];
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const control=value=>navigator.servo.setBoolPreference('webgl_testing_force_context_loss',value);
+function check(value,name){checks.push({name,passed:!!value});if(!value)throw new Error(name);}
+function once(target,name){return new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Timeout '+name)),6000);target.addEventListener(name,e=>{clearTimeout(timer);resolve(e);},{once:true});});}
+function resources(gl,v){
+ const buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Uint8Array([1,2,3,4]),gl.STATIC_DRAW);
+ const rb=gl.createRenderbuffer();gl.bindRenderbuffer(gl.RENDERBUFFER,rb);gl.renderbufferStorage(gl.RENDERBUFFER,gl.RGBA4,4,4);
+ const texture=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,texture);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,4,4,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+ const vs=gl.createShader(gl.VERTEX_SHADER),fs=gl.createShader(gl.FRAGMENT_SHADER);
+ gl.shaderSource(vs,v===2?'#version 300 es\nin vec4 p;uniform float u;void main(){gl_Position=p+vec4(u);}':'attribute vec4 p;uniform float u;void main(){gl_Position=p+vec4(u);}');
+ gl.shaderSource(fs,v===2?'#version 300 es\nprecision mediump float;out vec4 c;void main(){c=vec4(1.0);}':'precision mediump float;void main(){gl_FragColor=vec4(1.0);}');
+ gl.compileShader(vs);gl.compileShader(fs);const program=gl.createProgram();gl.attachShader(program,vs);gl.attachShader(program,fs);gl.linkProgram(program);gl.useProgram(program);
+ check(gl.getProgramParameter(program,gl.LINK_STATUS),'shader program links before controlled loss');
+ const uniform=gl.getUniformLocation(program,'u');gl.uniform1f(uniform,0.25);
+ const sampler=v===2?gl.createSampler():null,sync=v===2?gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE,0):null;
+ gl.finish();check(gl.getError()===gl.NO_ERROR,'resource setup has no graphics error');
+ return {buffer,rb,texture,program,uniform,sampler,sync};
+}
+async function runVersion(v){
+ const canvas=document.createElement('canvas');canvas.width=8;canvas.height=8;document.body.append(canvas);
+ const gl=canvas.getContext(v===1?'webgl':'webgl2');check(!!gl,'WebGL '+v+' available');
+ const ext=gl.getExtension('WEBGL_lose_context');check(!!ext,'explicit loss extension retained for WebGL '+v);
+ let lost=0,restored=0;canvas.addEventListener('webglcontextlost',e=>{lost++;e.preventDefault();});canvas.addEventListener('webglcontextrestored',()=>restored++);
+ const operations=[
+  ['integer query',()=>gl.getParameter(gl.RED_BITS),x=>x===null],
+  ['unsigned query',()=>gl.getParameter(gl.STENCIL_VALUE_MASK),x=>x===null],
+  ['boolean query',()=>gl.getParameter(gl.SAMPLE_COVERAGE_INVERT),x=>x===null],
+  ['boolean-vector query',()=>gl.getParameter(gl.COLOR_WRITEMASK),x=>x===null],
+  ['float query',()=>gl.getParameter(gl.LINE_WIDTH),x=>x===null],
+  ['float-vector query',()=>gl.getParameter(gl.ALIASED_LINE_WIDTH_RANGE),x=>x===null],
+  ['float4 query',()=>gl.getParameter(gl.BLEND_COLOR),x=>x===null],
+  ['integer2 query',()=>gl.getParameter(gl.MAX_VIEWPORT_DIMS),x=>x===null],
+  ['drawing width',()=>gl.drawingBufferWidth,x=>x===0],
+  ['drawing height',()=>gl.drawingBufferHeight,x=>x===0],
+  ['finish query',()=>gl.finish(),x=>x===undefined],
+  ['context attributes',()=>gl.getContextAttributes(),x=>x===null],
+  ['shader precision',()=>gl.getShaderPrecisionFormat(gl.VERTEX_SHADER,gl.HIGH_FLOAT),x=>x===null],
+  ['texture wrap parameter',()=>gl.getTexParameter(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S),x=>x===null],
+  ['renderbuffer parameter',()=>gl.getRenderbufferParameter(gl.RENDERBUFFER,gl.RENDERBUFFER_WIDTH),x=>x===null],
+  ['program validation',r=>gl.getProgramParameter(r.program,gl.VALIDATE_STATUS),x=>x===null],
+  ['uniform getter',r=>gl.getUniform(r.program,r.uniform),x=>x===null],
+  ['program log',r=>gl.getProgramInfoLog(r.program),x=>x===null],
+  ['uniform location',r=>gl.getUniformLocation(r.program,'u'),x=>x===null],
+  ['interrupted buffer creation',()=>gl.createBuffer(),x=>!!x&&!gl.isBuffer(x)],
+  ['interrupted texture creation',()=>gl.createTexture(),x=>!!x&&!gl.isTexture(x)],
+  ['interrupted framebuffer creation',()=>gl.createFramebuffer(),x=>!!x&&!gl.isFramebuffer(x)],
+  ['interrupted renderbuffer creation',()=>gl.createRenderbuffer(),x=>!!x&&!gl.isRenderbuffer(x)],
+  ['interrupted program creation',()=>gl.createProgram(),x=>!!x&&!gl.isProgram(x)],
+  ['interrupted shader creation',()=>gl.createShader(gl.VERTEX_SHADER),x=>!!x&&!gl.isShader(x)],
+  ['pixel readback',()=>{const a=new Uint8Array([91,92,93,94]);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,a);return [...a];},x=>JSON.stringify(x)==='[91,92,93,94]'],
+ ];
+ if(v===2)operations.push(
+  ['buffer readback',()=>{const a=new Uint8Array([81,82,83,84]);gl.getBufferSubData(gl.ARRAY_BUFFER,0,a);return [...a];},x=>JSON.stringify(x)==='[81,82,83,84]'],
+  ['interrupted sampler creation',()=>gl.createSampler(),x=>!!x&&!gl.isSampler(x)],
+  ['interrupted query creation',()=>gl.createQuery(),x=>!!x&&!gl.isQuery(x)],
+  ['interrupted transform feedback creation',()=>gl.createTransformFeedback(),x=>!!x&&!gl.isTransformFeedback(x)],
+  ['interrupted vertex array creation',()=>gl.createVertexArray(),x=>!!x&&!gl.isVertexArray(x)],
+  ['interrupted fence creation',()=>gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE,0),x=>x===null],
+  ['sampler parameter',r=>gl.getSamplerParameter(r.sampler,gl.TEXTURE_MAG_FILTER),x=>x===null],
+  ['sync parameter',r=>gl.getSyncParameter(r.sync,gl.SYNC_CONDITION),x=>x===null],
+  ['fragment output',r=>gl.getFragDataLocation(r.program,'c'),x=>x===-1],
+  ['uniform indices',r=>gl.getUniformIndices(r.program,['u']),x=>x===null],
+  ['uniform block index',r=>gl.getUniformBlockIndex(r.program,'Missing'),x=>x===gl.INVALID_INDEX],
+  ['active uniform query',r=>gl.getActiveUniforms(r.program,[0],gl.UNIFORM_TYPE),x=>x===null],
+ );
+ for(const [name,operation,valid]of operations){
+  const label='WebGL '+v+' '+name,r=resources(gl,v),lostBefore=lost,restoredBefore=restored;
+  const lostEvent=once(canvas,'webglcontextlost'),restoredEvent=once(canvas,'webglcontextrestored');
+  let value;control(true);try{value=operation(r);}finally{control(false);}
+  check(gl.isContextLost(),label+' synchronously reports loss');check(valid(value),label+' returns defined loss result');
+  check(gl.getError()===gl.CONTEXT_LOST_WEBGL&&gl.getError()===gl.NO_ERROR,label+' reports one loss error');
+  const event=await lostEvent;check(event.isTrusted&&event.cancelable&&!event.bubbles,label+' delivers trusted loss event');
+  const restoredEventValue=await restoredEvent;check(restoredEventValue.isTrusted&&!gl.isContextLost(),label+' automatically restores after cancellation');
+  await sleep(5);check(lost===lostBefore+1&&restored===restoredBefore+1,label+' emits each lifecycle event once');
+  check(!gl.isBuffer(r.buffer)&&!gl.isTexture(r.texture)&&!gl.isProgram(r.program),label+' old resources remain invalid');
+  gl.clearColor(0,1,0,1);gl.clear(gl.COLOR_BUFFER_BIT);const pixel=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
+  check(JSON.stringify([...pixel])==='[0,255,0,255]'&&gl.getError()===gl.NO_ERROR,label+' restored context renders correct pixels');
+  gl.bindBuffer(gl.ARRAY_BUFFER,r.buffer);check(gl.getError()===gl.INVALID_OPERATION&&!gl.isContextLost(),label+' retired resource cannot address the restored generation');
+  cases.push({version:v,name,passed:true});await fetch('/checkpoint',{method:'POST',body:JSON.stringify({version:v,name,checks:checks.length})});
+ }
+ // Input payload channels must also tolerate a backend that has retired.
+ const uploads=[['bufferData',a=>gl.bufferData(gl.ARRAY_BUFFER,a,gl.STATIC_DRAW)],['bufferSubData',a=>gl.bufferSubData(gl.ARRAY_BUFFER,0,a)]];
+ if(v===2)uploads.push(['bufferSubData range',a=>gl.bufferSubData(gl.ARRAY_BUFFER,0,a,0,a.length)]);
+ for(const [name,upload]of uploads){
+  const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,1024*1024,gl.STATIC_DRAW);gl.finish();
+  const event=once(canvas,'webglcontextrestored');control(true);try{upload(new Uint8Array(1024*1024));}finally{control(false);}
+  await event;check(!gl.isContextLost(),'WebGL '+v+' '+name+' interrupted upload settles and restores');
+ }
+ // Several queued commands can encounter the same retired backend generation.
+ const before=lost,event=once(canvas,'webglcontextrestored');control(true);try{gl.clear(gl.COLOR_BUFFER_BIT);gl.clear(gl.COLOR_BUFFER_BIT);gl.finish();}finally{control(false);}
+ await event;await sleep(30);check(lost===before+1&&!gl.isContextLost(),'WebGL '+v+' duplicate queued failures retire one generation');
+ // A queued driver notification must not convert explicit extension loss into
+ // automatic restoration after script has already chosen explicit loss.
+ const explicitLost=once(canvas,'webglcontextlost'),explicitBefore=restored;
+ control(true);try{gl.clear(gl.COLOR_BUFFER_BIT);}finally{control(false);}
+ ext.loseContext();await explicitLost;await sleep(50);
+ check(gl.isContextLost()&&restored===explicitBefore,'WebGL '+v+' delayed backend notification preserves explicit restoration semantics');
+ const explicitRestored=once(canvas,'webglcontextrestored');ext.restoreContext();await explicitRestored;
+ check(!gl.isContextLost(),'WebGL '+v+' explicit restoration remains usable after overlapping notification');
+ // No preventDefault means automatic restoration is forbidden.
+ const denied=document.createElement('canvas'),dgl=denied.getContext(v===1?'webgl':'webgl2');let deniedRestored=0;
+ denied.addEventListener('webglcontextrestored',()=>deniedRestored++);const deniedLoss=once(denied,'webglcontextlost');control(true);try{dgl.getParameter(dgl.RED_BITS);}finally{control(false);}
+ await deniedLoss;await sleep(60);check(dgl.isContextLost()&&deniedRestored===0,'WebGL '+v+' uncancelled loss does not restore');retained.push(denied,dgl);
+}
+(async()=>{let failure=null;try{check(!!navigator.servo,'test-only preference interface is enabled in the separate embedder');for(const v of [1,2])await runVersion(v);
+ for(const version of ['webgl','webgl2']){
+  const frame=document.createElement('iframe'),loaded=once(frame,'load');frame.srcdoc='<canvas width=8 height=8></canvas>';document.body.append(frame);await loaded;
+  const child=frame.contentDocument.querySelector('canvas').getContext(version);check(!!child,version+' departing frame creates context');
+  control(true);try{child.clear(child.COLOR_BUFFER_BIT);}finally{control(false);}frame.remove();await sleep(40);
+  const fresh=document.createElement('canvas').getContext(version);fresh.clearColor(0,1,0,1);fresh.clear(fresh.COLOR_BUFFER_BIT);const pixel=new Uint8Array(4);fresh.readPixels(0,0,1,1,fresh.RGBA,fresh.UNSIGNED_BYTE,pixel);
+  check(!fresh.isContextLost()&&pixel[1]===255,version+' departing frame loss leaves live documents usable');
+ }
+}catch(error){failure=String(error);checks.push({name:'Controlled backend fixture completes',passed:false,error:String(error),stack:error.stack});}finally{if(navigator.servo)control(false);document.querySelector('#status').textContent=JSON.stringify(checks.slice(-4),null,2);await fetch('/report',{method:'POST',body:JSON.stringify({checks,cases,failure,hardwareReset:false,adapterMigration:false,scope:'Controlled backend context loss; software test embedder, synchronous replies, lifecycle events and restored pixel readback'})});}})();
+</script>

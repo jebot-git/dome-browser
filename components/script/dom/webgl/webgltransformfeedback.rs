@@ -85,7 +85,7 @@ impl WebGLTransformFeedback {
         }
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::CreateTransformFeedback(sender));
-        let id = receiver.recv().unwrap();
+        let id = context.receive_reply(&receiver).unwrap_or_else(|| 1);
 
         reflect_dom_object(
             cx,

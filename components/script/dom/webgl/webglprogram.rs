@@ -214,10 +214,7 @@ impl WebGLProgram {
     ) -> Option<DomRoot<Self>> {
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::CreateProgram(sender));
-        receiver
-            .recv()
-            .unwrap()
-            .map(|id| WebGLProgram::new(cx, context, id))
+        context.receive_reply(&receiver).flatten().map(|id| WebGLProgram::new(cx, context, id))
     }
 
     pub(crate) fn new(
@@ -312,7 +309,7 @@ impl WebGLProgram {
         let (sender, receiver) = webgl_channel().unwrap();
         self.upcast()
             .send_command(WebGLCommand::LinkProgram(self.id(), sender));
-        let link_info = receiver.recv().unwrap();
+        let link_info = webgl_reply!(self.upcast::<WebGLObject>(), receiver, Err(WebGLError::ContextLost));
 
         {
             let mut used_locs = HashSet::new();
@@ -526,7 +523,7 @@ impl WebGLProgram {
                 name.into(),
                 sender,
             ));
-        Ok(receiver.recv().unwrap())
+        Ok(webgl_reply!(self.upcast::<WebGLObject>(), receiver, Err(WebGLError::ContextLost)))
     }
 
     /// glGetUniformLocation
@@ -574,7 +571,7 @@ impl WebGLProgram {
             sender,
         ));
         // Members of a named uniform block have no location.
-        let Some(location) = receiver.recv().unwrap() else {
+        let Some(location) = webgl_reply!(self.upcast::<WebGLObject>(), receiver, Err(WebGLError::ContextLost)) else {
             return Ok(None);
         };
         let context_id = self.upcast().context_id();
@@ -607,7 +604,7 @@ impl WebGLProgram {
                 name.into(),
                 sender,
             ));
-        Ok(receiver.recv().unwrap())
+        Ok(webgl_reply!(self.upcast::<WebGLObject>(), receiver, Err(WebGLError::ContextLost)))
     }
 
     pub(crate) fn get_uniform_indices(&self, names: Vec<DOMString>) -> WebGLResult<Vec<u32>> {
@@ -629,7 +626,7 @@ impl WebGLProgram {
         let (sender, receiver) = webgl_channel().unwrap();
         self.upcast()
             .send_command(WebGLCommand::GetUniformIndices(self.id(), names, sender));
-        Ok(receiver.recv().unwrap())
+        Ok(webgl_reply!(self.upcast::<WebGLObject>(), receiver, Err(WebGLError::ContextLost)))
     }
 
     pub(crate) fn get_active_uniforms(
@@ -663,7 +660,7 @@ impl WebGLProgram {
             pname,
             sender,
         ));
-        Ok(receiver.recv().unwrap())
+        Ok(webgl_reply!(self.upcast::<WebGLObject>(), receiver, Err(WebGLError::ContextLost)))
     }
 
     pub(crate) fn get_active_uniform_block_parameter(
@@ -697,7 +694,7 @@ impl WebGLProgram {
                 pname,
                 sender,
             ));
-        Ok(receiver.recv().unwrap())
+        Ok(webgl_reply!(self.upcast::<WebGLObject>(), receiver, Err(WebGLError::ContextLost)))
     }
 
     pub(crate) fn get_active_uniform_block_name(&self, block_index: u32) -> WebGLResult<String> {
@@ -716,7 +713,7 @@ impl WebGLProgram {
                 block_index,
                 sender,
             ));
-        Ok(receiver.recv().unwrap())
+        Ok(webgl_reply!(self.upcast::<WebGLObject>(), receiver, Err(WebGLError::ContextLost)))
     }
 
     pub(crate) fn bind_uniform_block(
@@ -759,7 +756,7 @@ impl WebGLProgram {
         let (sender, receiver) = webgl_channel().unwrap();
         self.upcast()
             .send_command(WebGLCommand::GetProgramInfoLog(self.id(), sender));
-        Ok(receiver.recv().unwrap())
+        Ok(webgl_reply!(self.upcast::<WebGLObject>(), receiver, Err(WebGLError::ContextLost)))
     }
 
     pub(crate) fn attached_shaders(&self) -> WebGLResult<Vec<DomRoot<WebGLShader>>> {

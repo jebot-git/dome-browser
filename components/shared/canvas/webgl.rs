@@ -118,6 +118,10 @@ pub enum WebGLMsg {
         GLContextAttributes,
         GenericSender<Result<WebGLCreateContextResult, String>>,
     ),
+    /// Observe backend-originated loss for this document/context generation.
+    ObserveContextLoss(WebGLContextId, servo_base::generic_channel::GenericCallback<WebGLContextId>),
+    /// Controlled backend loss used only by the opt-in script testing preference.
+    LoseContextForTesting(WebGLContextId),
     /// Set an [`ImageKey`] on a `WebGLContext`.
     SetImageKey(WebGLContextId, ImageKey),
     /// Resizes a WebGLContext.
@@ -212,6 +216,14 @@ impl WebGLMsgSender {
     pub fn send(&self, command: WebGLCommand, backtrace: WebGLCommandBacktrace) -> WebGLSendResult {
         self.sender
             .send(WebGLMsg::WebGLCommand(self.ctx_id, command, backtrace))
+    }
+
+    pub fn observe_context_loss(&self, callback: servo_base::generic_channel::GenericCallback<WebGLContextId>) -> WebGLSendResult {
+        self.sender.send(WebGLMsg::ObserveContextLoss(self.ctx_id, callback))
+    }
+
+    pub fn lose_context_for_testing(&self) -> WebGLSendResult {
+        self.sender.send(WebGLMsg::LoseContextForTesting(self.ctx_id))
     }
 
     /// Set an [`ImageKey`] on this WebGL context.

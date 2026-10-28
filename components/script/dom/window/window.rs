@@ -394,6 +394,8 @@ pub(crate) struct Window {
     #[no_trace]
     #[cfg(feature = "webgl")]
     webgl_chan: Option<WebGLChan>,
+    #[cfg(feature = "webgl")]
+    webgl_contexts: DOMTracker<crate::dom::webgl::webglrenderingcontext::WebGLRenderingContext>,
 
     #[ignore_malloc_size_of = "defined in webxr"]
     #[no_trace]
@@ -3647,6 +3649,21 @@ impl Window {
         }
     }
 
+    #[cfg(feature = "webgl")]
+    pub(crate) fn track_webgl_context(&self, context: &crate::dom::webgl::webglrenderingcontext::WebGLRenderingContext) {
+        self.webgl_contexts.track(context);
+    }
+
+    #[cfg(feature = "webgl")]
+    pub(crate) fn webgl_context_for_generation(&self, id: servo_canvas_traits::webgl::WebGLContextId) -> Option<DomRoot<crate::dom::webgl::webglrenderingcontext::WebGLRenderingContext>> {
+        let mut found = None;
+        self.webgl_contexts.for_each(|context| {
+            if context.sender().context_id() == id { found = Some(context); }
+        });
+        // Release the tracker's borrow before any event can execute script.
+        found
+    }
+
     #[cfg(feature = "webxr")]
     pub(crate) fn track_xr_webgl_context(
         &self,
@@ -4317,6 +4334,8 @@ impl Window {
             test_runner: Default::default(),
             #[cfg(feature = "webgl")]
             webgl_chan,
+            #[cfg(feature = "webgl")]
+            webgl_contexts: DOMTracker::new(),
             #[cfg(feature = "webxr")]
             webxr_registry,
             #[cfg(feature = "webxr")]

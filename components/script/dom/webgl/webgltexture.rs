@@ -166,10 +166,7 @@ impl WebGLTexture {
     ) -> Option<DomRoot<Self>> {
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::CreateTexture(sender));
-        receiver
-            .recv()
-            .unwrap()
-            .map(|id| WebGLTexture::new(cx, context, id))
+        context.receive_reply(&receiver).flatten().map(|id| WebGLTexture::new(cx, context, id))
     }
 
     pub(crate) fn new(

@@ -105,14 +105,14 @@ fn has_invalid_blend_constants(arg1: u32, arg2: u32) -> bool {
     }
 }
 
-pub(crate) fn uniform_get<T, F>(triple: (&WebGLRenderingContext, WebGLProgramId, i32), f: F) -> T
+pub(crate) fn uniform_get<T, F>(triple: (&WebGLRenderingContext, WebGLProgramId, i32), f: F) -> Option<T>
 where
     F: FnOnce(WebGLProgramId, i32, generic_channel::GenericSender<T>) -> WebGLCommand,
     T: for<'de> Deserialize<'de> + Serialize,
 {
     let (sender, receiver) = webgl_channel().unwrap();
     triple.0.send_command(f(triple.1, triple.2, sender));
-    receiver.recv().unwrap()
+    triple.0.receive_reply(&receiver)
 }
 
 pub(crate) fn uniform_typed<T>(
@@ -271,8 +271,8 @@ impl WebGLRenderingContext {
                 attrs,
                 sender,
             ))
-            .unwrap();
-        let result = receiver.recv().unwrap();
+            .map_err(|_| "WebGL creation backend unavailable".to_string())?;
+        let result = receiver.recv().map_err(|_| "WebGL creation reply unavailable".to_string())?;
 
         result.map(|ctx_data| {
             let max_combined_texture_image_units = ctx_data.limits.max_combined_texture_image_units;
@@ -361,6 +361,8 @@ impl WebGLRenderingContext {
         ) {
             Ok(ctx) => {
                 let context = reflect_weak_referenceable_dom_object(cx, Rc::new(ctx), window);
+                window.track_webgl_context(&context);
+                context.observe_backend_loss();
                 #[cfg(feature = "webxr")]
                 window.track_xr_webgl_context(&context);
                 Some(context)
@@ -398,12 +400,8 @@ impl WebGLRenderingContext {
 
     // WEBGL_lose_context retains its extension object across generations.
     // Its two methods are the only operations that can report errors while lost.
-    pub(crate) fn lose_context(&self, cx: &mut JSContext) {
-        use crate::dom::bindings::refcounted::Trusted;
-        if self.context_lost.replace(true) {
-            self.last_error.set(Some(InvalidOperation));
-            return;
-        }
+    fn begin_context_loss(&self) -> bool {
+        if self.context_lost.replace(true) { return false; }
         self.context_loss_error_pending.set(true);
         self.context_restorable.set(false);
         self.restoration_pending.set(false);
@@ -422,15 +420,69 @@ impl WebGLRenderingContext {
         let retired = (*self.sender()).clone();
         *self.droppable.webgl_sender.borrow_mut() = Rc::new(retired);
         self.reset_cached_state();
+        true
+    }
+
+    pub(crate) fn lose_context(&self, cx: &mut JSContext) {
+        if !self.begin_context_loss() {
+            self.last_error.set(Some(InvalidOperation));
+            return;
+        }
         if let HTMLCanvasElementOrOffscreenCanvas::HTMLCanvasElement(canvas) = &self.canvas {
             canvas.webgl_context_lost(cx.no_gc());
         }
+        self.queue_context_loss_event(false);
+    }
+
+    pub(crate) fn signal_driver_loss(&self) {
+        if self.begin_context_loss() { self.queue_context_loss_event(true); }
+    }
+
+    // This path is also used while a synchronous getter holds a NoGC token.
+    // Mark loss now; canvas invalidation/events run on the normal script task.
+    pub(crate) fn receive_reply<T>(&self, receiver: &generic_channel::GenericReceiver<T>) -> Option<T>
+    where T: for<'de> Deserialize<'de> + Serialize {
+        match receiver.recv() {
+            Ok(value) => Some(value),
+            Err(_) => { self.signal_driver_loss(); None }
+        }
+    }
+
+    fn observe_backend_loss(&self) {
+        let global = self.global();
+        let Some(window) = global.downcast::<Window>() else { return; };
+        let pipeline = window.pipeline_id();
+        let expected = self.context_id();
+        let tasks = window.task_manager().webgl_task_source().to_sendable();
+        let callback = generic_channel::GenericCallback::new(move |message| {
+            let id = match message {
+                Ok(id) if id == expected => id,
+                Err(_) => expected,
+                _ => return,
+            };
+            tasks.queue(task!(webgl_backend_context_loss: move |_cx| {
+                let Some(window) = crate::event_loop::script_thread::ScriptThread::find_window(pipeline) else { return; };
+                if let Some(context) = window.webgl_context_for_generation(id) { context.signal_driver_loss(); }
+            }));
+        });
+        if callback.is_err() || callback.is_ok_and(|callback| self.sender().observe_context_loss(callback).is_err()) {
+            self.signal_driver_loss();
+        }
+    }
+
+    fn queue_context_loss_event(&self, automatic: bool) {
+        use crate::dom::bindings::refcounted::Trusted;
+        let id = self.context_id();
         let context = Trusted::new(self);
         self.global().task_manager().webgl_task_source().queue(task!(webgl_context_lost: move |cx| {
             let context = context.root();
-            if !context.is_context_lost() { return; }
+            if context.context_id() != id || !context.is_context_lost() { return; }
+            if automatic && let HTMLCanvasElementOrOffscreenCanvas::HTMLCanvasElement(canvas) = &context.canvas {
+                canvas.webgl_context_lost(cx.no_gc());
+            }
             let cancelled = context.fire_context_event(cx, stylo_atoms::Atom::from("webglcontextlost"));
             context.context_restorable.set(cancelled);
+            if automatic && cancelled { context.restore_context(); }
         }));
     }
 
@@ -452,6 +504,8 @@ impl WebGLRenderingContext {
             context.context_loss_error_pending.set(false);
             context.context_restorable.set(false);
             context.context_lost.set(false);
+            context.observe_backend_loss();
+            if context.is_context_lost() { return; }
             if let HTMLCanvasElementOrOffscreenCanvas::HTMLCanvasElement(canvas) = &context.canvas {
                 if let Some(key) = canvas.webgl_context_restored(cx.no_gc()) { context.set_image_key(key); }
             }
@@ -746,12 +800,14 @@ impl WebGLRenderingContext {
 
     #[inline]
     pub(crate) fn send_with_fallibility(&self, command: WebGLCommand, fallibility: Operation) {
-        let result = self
-            .sender()
-            .send(command, capture_webgl_backtrace());
-        if matches!(fallibility, Operation::Infallible) {
-            result.expect("Operation failed");
+        if self.is_context_lost() { return; }
+        if pref!(webgl_testing_force_context_loss) {
+            let _ = self.sender().lose_context_for_testing();
         }
+        if self.sender().send(command, capture_webgl_backtrace()).is_err() {
+            self.signal_driver_loss();
+        }
+        let _ = fallibility;
     }
 
     #[inline]
@@ -1338,7 +1394,7 @@ impl WebGLRenderingContext {
     fn get_gl_extensions(&self) -> String {
         let (sender, receiver) = webgl_channel().unwrap();
         self.send_command(WebGLCommand::GetExtensions(sender));
-        receiver.recv().unwrap()
+        webgl_reply!(self, receiver, String::new())
     }
 
     // https://www.khronos.org/registry/webgl/extensions/ANGLE_instanced_arrays/
@@ -1554,9 +1610,7 @@ impl WebGLRenderingContext {
     ) -> Option<DomRoot<WebGLVertexArrayObjectOES>> {
         let (sender, receiver) = webgl_channel().unwrap();
         self.send_command(WebGLCommand::CreateVertexArray(sender));
-        receiver
-            .recv()
-            .unwrap()
+        webgl_reply!(self, receiver, Some(WebGLVertexArrayObjectOES::new(cx, self, Some(servo_canvas_traits::webgl::WebGLVertexArrayId::maybe_new(1).unwrap()))))
             .map(|id| WebGLVertexArrayObjectOES::new(cx, self, Some(id)))
     }
 
@@ -1566,9 +1620,7 @@ impl WebGLRenderingContext {
     ) -> Option<DomRoot<WebGLVertexArrayObject>> {
         let (sender, receiver) = webgl_channel().unwrap();
         self.send_command(WebGLCommand::CreateVertexArray(sender));
-        receiver
-            .recv()
-            .unwrap()
+        webgl_reply!(self, receiver, Some(WebGLVertexArrayObject::new(cx, self, Some(servo_canvas_traits::webgl::WebGLVertexArrayId::maybe_new(1).unwrap()))))
             .map(|id| WebGLVertexArrayObject::new(cx, self, Some(id)))
     }
 
@@ -1755,7 +1807,7 @@ impl WebGLRenderingContext {
             receiver,
         ));
         let buffer = GenericSharedMemory::from_bytes(data);
-        sender.send(buffer).unwrap();
+        if sender.send(buffer).is_err() { self.signal_driver_loss(); }
     }
 
     pub(crate) fn bind_buffer_maybe(
@@ -2355,17 +2407,16 @@ impl CanvasContext for WebGLRenderingContext {
         if self.is_context_lost() { return; }
         let size = self.size().cast();
         let (sender, receiver) = webgl_channel().unwrap();
-        self.sender()
-            .send_resize(size, sender)
-            .unwrap();
+        if self.sender().send_resize(size, sender).is_err() { self.signal_driver_loss(); return; }
         // FIXME(#21718) The backend is allowed to choose a size smaller than
         // what was requested
         self.size.set(size);
         self.reflector_
             .update_memory_size(self, size.cast::<usize>().area() * 4);
 
-        if let Err(msg) = receiver.recv().unwrap() {
+        if let Err(msg) = webgl_reply!(self, receiver, ()) {
             error!("Error resizing WebGLContext: {}", msg);
+            self.signal_driver_loss();
             return;
         };
 
@@ -2436,7 +2487,7 @@ impl CanvasContext for WebGLRenderingContext {
             constants::UNSIGNED_BYTE,
             sender,
         ));
-        let (data, alpha_mode) = receiver.recv().unwrap();
+        let (data, alpha_mode) = webgl_reply!(self, receiver, None);
         Some(Snapshot::from_vec(
             size.cast(),
             SnapshotPixelFormat::RGBA,
@@ -2518,7 +2569,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         if self.is_context_lost() { return; }
         let (sender, receiver) = webgl_channel().unwrap();
         self.send_command(WebGLCommand::Finish(sender));
-        receiver.recv().unwrap()
+        webgl_reply!(self, receiver, ())
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.1>
@@ -2526,7 +2577,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         if self.is_context_lost() { return 0; }
         let (sender, receiver) = webgl_channel().unwrap();
         self.send_command(WebGLCommand::DrawingBufferWidth(sender));
-        receiver.recv().unwrap()
+        webgl_reply!(self, receiver, 0)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.1>
@@ -2534,7 +2585,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         if self.is_context_lost() { return 0; }
         let (sender, receiver) = webgl_channel().unwrap();
         self.send_command(WebGLCommand::DrawingBufferHeight(sender));
-        receiver.recv().unwrap()
+        webgl_reply!(self, receiver, 0)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.5>
@@ -2745,28 +2796,28 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             Parameter::Bool(param) => {
                 let (sender, receiver) = webgl_channel().unwrap();
                 self.send_command(WebGLCommand::GetParameterBool(param, sender));
-                retval.set(BooleanValue(receiver.recv().unwrap()))
+                retval.set(BooleanValue(webgl_reply!(self, receiver, retval.set(NullValue()))))
             },
             Parameter::Bool4(param) => {
                 let (sender, receiver) = webgl_channel().unwrap();
                 self.send_command(WebGLCommand::GetParameterBool4(param, sender));
-                receiver.recv().unwrap().to_jsval(cx, retval);
+                webgl_reply!(self, receiver, retval.set(NullValue())).to_jsval(cx, retval);
             },
             Parameter::Int(param) => {
                 let (sender, receiver) = webgl_channel().unwrap();
                 self.send_command(WebGLCommand::GetParameterInt(param, sender));
-                retval.set(Int32Value(receiver.recv().unwrap()))
+                retval.set(Int32Value(webgl_reply!(self, receiver, retval.set(NullValue()))))
             },
             Parameter::UInt(param) => {
                 let (sender, receiver) = webgl_channel().unwrap();
                 self.send_command(WebGLCommand::GetParameterUInt(param, sender));
-                retval.set(UInt32Value(receiver.recv().unwrap()))
+                retval.set(UInt32Value(webgl_reply!(self, receiver, retval.set(NullValue()))))
             },
             Parameter::Int2(param) => {
                 let (sender, receiver) = webgl_channel().unwrap();
                 self.send_command(WebGLCommand::GetParameterInt2(param, sender));
                 rooted!(&in(cx) let mut rval = ptr::null_mut::<JSObject>());
-                create_buffer_source::<Int32>(cx, &receiver.recv().unwrap(), rval.handle_mut())
+                create_buffer_source::<Int32>(cx, &webgl_reply!(self, receiver, retval.set(NullValue())), rval.handle_mut())
                     .unwrap();
                 retval.set(ObjectValue(rval.get()))
             },
@@ -2774,20 +2825,20 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
                 let (sender, receiver) = webgl_channel().unwrap();
                 self.send_command(WebGLCommand::GetParameterInt4(param, sender));
                 rooted!(&in(cx) let mut rval = ptr::null_mut::<JSObject>());
-                create_buffer_source::<Int32>(cx, &receiver.recv().unwrap(), rval.handle_mut())
+                create_buffer_source::<Int32>(cx, &webgl_reply!(self, receiver, retval.set(NullValue())), rval.handle_mut())
                     .unwrap();
                 retval.set(ObjectValue(rval.get()))
             },
             Parameter::Float(param) => {
                 let (sender, receiver) = webgl_channel().unwrap();
                 self.send_command(WebGLCommand::GetParameterFloat(param, sender));
-                retval.set(DoubleValue(receiver.recv().unwrap() as f64))
+                retval.set(DoubleValue(webgl_reply!(self, receiver, retval.set(NullValue())) as f64))
             },
             Parameter::Float2(param) => {
                 let (sender, receiver) = webgl_channel().unwrap();
                 self.send_command(WebGLCommand::GetParameterFloat2(param, sender));
                 rooted!(&in(cx) let mut rval = ptr::null_mut::<JSObject>());
-                create_buffer_source::<Float32>(cx, &receiver.recv().unwrap(), rval.handle_mut())
+                create_buffer_source::<Float32>(cx, &webgl_reply!(self, receiver, retval.set(NullValue())), rval.handle_mut())
                     .unwrap();
                 retval.set(ObjectValue(rval.get()))
             },
@@ -2795,7 +2846,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
                 let (sender, receiver) = webgl_channel().unwrap();
                 self.send_command(WebGLCommand::GetParameterFloat4(param, sender));
                 rooted!(&in(cx) let mut rval = ptr::null_mut::<JSObject>());
-                create_buffer_source::<Float32>(cx, &receiver.recv().unwrap(), rval.handle_mut())
+                create_buffer_source::<Float32>(cx, &webgl_reply!(self, receiver, retval.set(NullValue())), rval.handle_mut())
                     .unwrap();
                 retval.set(ObjectValue(rval.get()))
             },
@@ -2860,17 +2911,17 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             TexParameter::Float(param) => {
                 let (sender, receiver) = webgl_channel().unwrap();
                 self.send_command(WebGLCommand::GetTexParameterFloat(target, param, sender));
-                retval.set(DoubleValue(receiver.recv().unwrap() as f64))
+                retval.set(DoubleValue(webgl_reply!(self, receiver, retval.set(NullValue())) as f64))
             },
             TexParameter::Int(param) => {
                 let (sender, receiver) = webgl_channel().unwrap();
                 self.send_command(WebGLCommand::GetTexParameterInt(target, param, sender));
-                retval.set(Int32Value(receiver.recv().unwrap()))
+                retval.set(Int32Value(webgl_reply!(self, receiver, retval.set(NullValue()))))
             },
             TexParameter::Bool(param) => {
                 let (sender, receiver) = webgl_channel().unwrap();
                 self.send_command(WebGLCommand::GetTexParameterBool(target, param, sender));
-                retval.set(BooleanValue(receiver.recv().unwrap()))
+                retval.set(BooleanValue(webgl_reply!(self, receiver, retval.set(NullValue()))))
             },
         }
     }
@@ -2899,17 +2950,9 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         if self.is_context_lost() { return None; }
         let (sender, receiver) = webgl_channel().unwrap();
 
-        // If the send does not succeed, assume context lost
-        let backtrace = capture_webgl_backtrace();
-        if self
-            .sender()
-            .send(WebGLCommand::GetContextAttributes(sender), backtrace)
-            .is_err()
-        {
-            return None;
-        }
+        self.send_command(WebGLCommand::GetContextAttributes(sender));
 
-        let attrs = receiver.recv().unwrap();
+        let attrs = webgl_reply!(self, receiver, None);
 
         Some(WebGLContextAttributes {
             #[cfg(feature = "webxr")]
@@ -3531,7 +3574,9 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             // belongs to the lost generation and cannot address restored GL names.
             return Some(WebGLBuffer::new(cx, self, servo_canvas_traits::webgl::WebGLBufferId::maybe_new(1).unwrap()));
         }
-        WebGLBuffer::maybe_new(cx, self)
+        WebGLBuffer::maybe_new(cx, self).or_else(|| {
+            if self.is_context_lost() { Some(WebGLBuffer::new(cx, self, servo_canvas_traits::webgl::WebGLBufferId::maybe_new(1).unwrap())) } else { None }
+        })
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.6>
@@ -3541,7 +3586,9 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             // belongs to the lost generation and cannot address restored GL names.
             return Some(WebGLFramebuffer::new(cx, self, servo_canvas_traits::webgl::WebGLFramebufferId::maybe_new(1).unwrap()));
         }
-        WebGLFramebuffer::maybe_new(cx, self)
+        WebGLFramebuffer::maybe_new(cx, self).or_else(|| {
+            if self.is_context_lost() { Some(WebGLFramebuffer::new(cx, self, servo_canvas_traits::webgl::WebGLFramebufferId::maybe_new(1).unwrap())) } else { None }
+        })
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.7>
@@ -3551,7 +3598,9 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             // belongs to the lost generation and cannot address restored GL names.
             return Some(WebGLRenderbuffer::new(cx, self, servo_canvas_traits::webgl::WebGLRenderbufferId::maybe_new(1).unwrap()));
         }
-        WebGLRenderbuffer::maybe_new(cx, self)
+        WebGLRenderbuffer::maybe_new(cx, self).or_else(|| {
+            if self.is_context_lost() { Some(WebGLRenderbuffer::new(cx, self, servo_canvas_traits::webgl::WebGLRenderbufferId::maybe_new(1).unwrap())) } else { None }
+        })
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.8>
@@ -3561,7 +3610,9 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             // belongs to the lost generation and cannot address restored GL names.
             return Some(WebGLTexture::new(cx, self, servo_canvas_traits::webgl::WebGLTextureId::maybe_new(1).unwrap()));
         }
-        WebGLTexture::maybe_new(cx, self)
+        WebGLTexture::maybe_new(cx, self).or_else(|| {
+            if self.is_context_lost() { Some(WebGLTexture::new(cx, self, servo_canvas_traits::webgl::WebGLTextureId::maybe_new(1).unwrap())) } else { None }
+        })
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
@@ -3571,7 +3622,9 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             // belongs to the lost generation and cannot address restored GL names.
             return Some(WebGLProgram::new(cx, self, servo_canvas_traits::webgl::WebGLProgramId::maybe_new(1).unwrap()));
         }
-        WebGLProgram::maybe_new(cx, self)
+        WebGLProgram::maybe_new(cx, self).or_else(|| {
+            if self.is_context_lost() { Some(WebGLProgram::new(cx, self, servo_canvas_traits::webgl::WebGLProgramId::maybe_new(1).unwrap())) } else { None }
+        })
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
@@ -3588,7 +3641,9 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
                 return None;
             },
         }
-        WebGLShader::maybe_new(cx, self, shader_type)
+        WebGLShader::maybe_new(cx, self, shader_type).or_else(|| {
+            if self.is_context_lost() { Some(WebGLShader::new(cx, self, servo_canvas_traits::webgl::WebGLShaderId::maybe_new(1).unwrap(), shader_type)) } else { None }
+        })
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.5>
@@ -3906,7 +3961,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             target, attachment, pname, sender,
         ));
 
-        retval.set(Int32Value(receiver.recv().unwrap()))
+        retval.set(Int32Value(webgl_reply!(self, receiver, retval.set(NullValue()))))
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.7>
@@ -3953,7 +4008,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             self.send_command(WebGLCommand::GetRenderbufferParameter(
                 target, pname, sender,
             ));
-            receiver.recv().unwrap()
+            webgl_reply!(self, receiver, retval.set(NullValue()))
         };
 
         retval.set(Int32Value(result))
@@ -3998,7 +4053,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
                 // but I'm not sure when the value should be reset.
                 let (sender, receiver) = webgl_channel().unwrap();
                 self.send_command(WebGLCommand::GetProgramValidateStatus(program.id(), sender));
-                BooleanValue(receiver.recv().unwrap())
+                BooleanValue(webgl_reply!(self, receiver, retval.set(NullValue())))
             },
             constants::ATTACHED_SHADERS => {
                 // FIXME(nox): This allocates a vector and roots a couple of shaders for nothing.
@@ -4090,7 +4145,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             sender,
         ));
 
-        let (range_min, range_max, precision) = receiver.recv().unwrap();
+        let (range_min, range_max, precision) = webgl_reply!(self, receiver, None);
         Some(WebGLShaderPrecisionFormat::new(
             cx,
             self.global().as_window(),
@@ -4462,7 +4517,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         self.send_command(WebGLCommand::ReadPixels(
             src_rect, format, pixel_type, sender,
         ));
-        let (src, _) = receiver.recv().unwrap();
+        let (src, _) = webgl_reply!(self, receiver, ());
 
         let src_row_len = src_rect.size.width as usize * bytes_per_pixel as usize;
         for i in 0..src_rect.size.height {
@@ -4832,62 +4887,59 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         let triple = (self, program.id(), location.id());
 
         match location.type_() {
-            constants::BOOL => rval.set(BooleanValue(uniform_get(
-                triple,
-                WebGLCommand::GetUniformBool,
-            ))),
+            constants::BOOL => rval.set(BooleanValue(webgl_uniform!(triple, WebGLCommand::GetUniformBool, rval))),
             constants::BOOL_VEC2 => {
-                uniform_get(triple, WebGLCommand::GetUniformBool2).to_jsval(cx, rval)
+                webgl_uniform!(triple, WebGLCommand::GetUniformBool2, rval).to_jsval(cx, rval)
             },
             constants::BOOL_VEC3 => {
-                uniform_get(triple, WebGLCommand::GetUniformBool3).to_jsval(cx, rval)
+                webgl_uniform!(triple, WebGLCommand::GetUniformBool3, rval).to_jsval(cx, rval)
             },
             constants::BOOL_VEC4 => {
-                uniform_get(triple, WebGLCommand::GetUniformBool4).to_jsval(cx, rval)
+                webgl_uniform!(triple, WebGLCommand::GetUniformBool4, rval).to_jsval(cx, rval)
             },
             constants::INT |
             constants::SAMPLER_2D |
             constants::SAMPLER_CUBE |
             WebGL2RenderingContextConstants::SAMPLER_2D_ARRAY |
             WebGL2RenderingContextConstants::SAMPLER_3D => {
-                rval.set(Int32Value(uniform_get(triple, WebGLCommand::GetUniformInt)))
+                rval.set(Int32Value(webgl_uniform!(triple, WebGLCommand::GetUniformInt, rval)))
             },
             constants::INT_VEC2 => {
-                uniform_typed::<Int32>(cx, &uniform_get(triple, WebGLCommand::GetUniformInt2), rval)
+                uniform_typed::<Int32>(cx, &webgl_uniform!(triple, WebGLCommand::GetUniformInt2, rval), rval)
             },
             constants::INT_VEC3 => {
-                uniform_typed::<Int32>(cx, &uniform_get(triple, WebGLCommand::GetUniformInt3), rval)
+                uniform_typed::<Int32>(cx, &webgl_uniform!(triple, WebGLCommand::GetUniformInt3, rval), rval)
             },
             constants::INT_VEC4 => {
-                uniform_typed::<Int32>(cx, &uniform_get(triple, WebGLCommand::GetUniformInt4), rval)
+                uniform_typed::<Int32>(cx, &webgl_uniform!(triple, WebGLCommand::GetUniformInt4, rval), rval)
             },
             constants::FLOAT => rval
                 .set(DoubleValue(
-                    uniform_get(triple, WebGLCommand::GetUniformFloat) as f64,
+                    webgl_uniform!(triple, WebGLCommand::GetUniformFloat, rval) as f64,
                 )),
             constants::FLOAT_VEC2 => uniform_typed::<Float32>(
                 cx,
-                &uniform_get(triple, WebGLCommand::GetUniformFloat2),
+                &webgl_uniform!(triple, WebGLCommand::GetUniformFloat2, rval),
                 rval,
             ),
             constants::FLOAT_VEC3 => uniform_typed::<Float32>(
                 cx,
-                &uniform_get(triple, WebGLCommand::GetUniformFloat3),
+                &webgl_uniform!(triple, WebGLCommand::GetUniformFloat3, rval),
                 rval,
             ),
             constants::FLOAT_VEC4 | constants::FLOAT_MAT2 => uniform_typed::<Float32>(
                 cx,
-                &uniform_get(triple, WebGLCommand::GetUniformFloat4),
+                &webgl_uniform!(triple, WebGLCommand::GetUniformFloat4, rval),
                 rval,
             ),
             constants::FLOAT_MAT3 => uniform_typed::<Float32>(
                 cx,
-                &uniform_get(triple, WebGLCommand::GetUniformFloat9),
+                &webgl_uniform!(triple, WebGLCommand::GetUniformFloat9, rval),
                 rval,
             ),
             constants::FLOAT_MAT4 => uniform_typed::<Float32>(
                 cx,
-                &uniform_get(triple, WebGLCommand::GetUniformFloat16),
+                &webgl_uniform!(triple, WebGLCommand::GetUniformFloat16, rval),
                 rval,
             ),
             _ => panic!("wrong uniform type"),

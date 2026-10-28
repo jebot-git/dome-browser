@@ -83,6 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     opts.config_dir = Some(std::path::PathBuf::from(std::env::var("XR_INPUT_PROFILE")?));
     std::fs::create_dir_all(opts.config_dir.as_ref().unwrap())?;
     let mut prefs = servo::Preferences::default();
+    prefs.expose_servointernals_globally = std::env::var_os("DOME_GRAPHICS_LOSS_TEST").is_some();
     prefs.dom_webxr_glwindow_enabled = false;
     prefs.dom_webxr_openxr_enabled = false;
     prefs.dom_webxr_hands_enabled = false;
