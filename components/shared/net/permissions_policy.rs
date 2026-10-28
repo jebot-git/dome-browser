@@ -280,6 +280,27 @@ impl ContainerPolicy {
         }
     }
 
+    /// Check the intended frame origin without inspecting its loaded document
+    /// or response headers. Destinations belong to this container's parent.
+    /// <https://w3c.github.io/webappsec-permissions-policy/#check-potential-violation>
+    pub fn potential_violation(
+        &self,
+        feature: PolicyFeature,
+        declared_origin: &OriginSnapshot,
+    ) -> Option<PolicyViolation> {
+        let (state, disposition) = if !self.inherits(feature, declared_origin, false) {
+            (&self.parent.enforced, ViolationDisposition::Enforce)
+        } else if !self.inherits(feature, declared_origin, true) {
+            (&self.parent.report_only, ViolationDisposition::Report)
+        } else {
+            return None;
+        };
+        Some(PolicyViolation {
+            disposition,
+            endpoint: state.reporting.get(&feature).cloned(),
+        })
+    }
+
     fn inherits(&self, feature: PolicyFeature, origin: &OriginSnapshot, report_only: bool) -> bool {
         let parent = if report_only {
             &self.parent.report_only

@@ -1,0 +1,144 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Local iframe policy diagnostics</title>
+<p>Testing load-time policy diagnostics and frame lifecycle.</p>
+<script id="configuration" type="application/json">CONFIGURATION</script>
+<script>
+const cfg = JSON.parse(document.getElementById('configuration').textContent);
+const checks = [];
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+function check(passed, name) {
+  checks.push({name, passed: !!passed});
+  if (!passed) throw new Error(name);
+}
+async function until(predicate) {
+  const end = performance.now() + 9000;
+  while (!predicate()) {
+    if (performance.now() > end) throw new Error('Timed out waiting for iframe diagnostics');
+    await delay(10);
+  }
+}
+function units(value) {
+  if (value === null) return null;
+  return Array.from({length:value.length}, (_, i) => value.charCodeAt(i));
+}
+const reports = [], ordinary = [], expected = [];
+let loadCount = 0;
+const firstReports = [];
+let firstObserver;
+if (cfg.case === 'snapshot') {
+  firstObserver = new ReportingObserver(batch => {
+    for (const report of batch) {
+      if (report.body.featureId !== 'xr-spatial-tracking') continue;
+      report.body.allowAttribute = 'changed';
+      report.body.srcAttribute = 'changed';
+      firstReports.push(report);
+    }
+  }, {types:['potential-permissions-policy-violation']});
+  firstObserver.observe();
+}
+const observer = new ReportingObserver(batch => {
+  reports.push(...batch.filter(report => report.body.featureId === 'xr-spatial-tracking'));
+}, {types:['potential-permissions-policy-violation']});
+observer.observe();
+const ordinaryObserver = new ReportingObserver(batch => ordinary.push(...batch),
+  {types:['permissions-policy-violation']});
+ordinaryObserver.observe();
+function shape(report, attributes) {
+  check(report.type === 'potential-permissions-policy-violation', 'Potential diagnostic has its distinct type');
+  check(report.url === location.href.split('#')[0], 'Potential report belongs to the embedding document');
+  check(report.body.featureId === 'xr-spatial-tracking' && report.body.disposition === cfg.disposition,
+        'Potential feature and disposition are correct');
+  check('allowAttribute' in report.body && 'srcAttribute' in report.body,
+        'Potential body includes both nullable attribute values');
+  check(JSON.stringify(units(report.body.allowAttribute)) === JSON.stringify(attributes.allow) &&
+        JSON.stringify(units(report.body.srcAttribute)) === JSON.stringify(attributes.src),
+        'Attribute snapshots preserve missing, empty and UTF-16 text');
+  if (report.body.sourceFile === null) {
+    check(report.body.lineNumber === null && report.body.columnNumber === null,
+          'Unknown script source uses null location fields');
+  } else {
+    check(report.body.sourceFile === location.href.split('#')[0] &&
+          Number.isInteger(report.body.lineNumber) && report.body.lineNumber > 0 &&
+          Number.isInteger(report.body.columnNumber) && report.body.columnNumber > 0,
+          'Known script source has a coherent location');
+  }
+  check(Object.keys(report).sort().join(',') === 'body,type,url', 'Potential observer snapshot contains only report data');
+}
+async function frame(index) {
+  const element = document.createElement('iframe');
+  if (cfg.allow_present) element.setAttribute('allow', cfg.allow);
+  if (cfg.src_present) element.setAttribute('src', cfg.case === 'buffer' ? cfg.src + '&index=' + index : cfg.src);
+  if (cfg.srcdoc) element.srcdoc = '<p>Private child document</p>';
+  if (cfg.sandbox) element.setAttribute('sandbox', cfg.sandbox);
+  let resolve;
+  const loaded = new Promise(r => { resolve = r; });
+  element.onload = () => {
+    ++loadCount;
+    if (cfg.action === 'allow') element.setAttribute('allow', cfg.after_allow);
+    if (cfg.action === 'remove') element.remove();
+    if (cfg.action === 'adopt') document.implementation.createHTMLDocument('Detached owner').adoptNode(element);
+    if (cfg.action === 'navigate' && loadCount === 1) {
+      element.setAttribute('src', cfg.after_src);
+      return;
+    }
+    resolve();
+  };
+  // Introspection and unattached attribute mutation are not feature use or load.
+  const before = element.permissionsPolicy.allowsFeature('xr-spatial-tracking');
+  if (cfg.case === 'unattached') {
+    await delay(150);
+    check(loadCount === 0 && reports.length === 0, 'Unattached frame and introspection do not report');
+    return;
+  }
+  document.body.appendChild(element);
+  await loaded;
+  const attributes = {allow:units(element.getAttribute('allow')), src:units(element.getAttribute('src'))};
+  if (cfg.expected_count) {
+    const count = cfg.case === 'buffer' ? 1 : cfg.expected_count;
+    for (let i = 0; i < count; ++i) expected.push(attributes);
+  }
+  if (cfg.case !== 'onload-adopt') {
+    check(element.permissionsPolicy.allowsFeature('xr-spatial-tracking') === cfg.expected_policy,
+          'Diagnostic generation preserves enforced policy introspection');
+  }
+  element.remove();
+}
+async function main() {
+  check(typeof ReportingObserver === 'function', 'ReportingObserver is exposed');
+  const count = cfg.case === 'buffer' ? 110 : 1;
+  for (let i = 0; i < count; ++i) await frame(i);
+  if (cfg.expected_count) {
+    await until(() => reports.length >= cfg.expected_count);
+    check(reports.length === cfg.expected_count, 'Exactly one diagnostic per relevant load is observed');
+    check(loadCount === cfg.expected_loads, 'Frame load lifecycle completes without duplicate events');
+    for (let i = 0; i < reports.length; ++i) shape(reports[i], expected[i]);
+  } else {
+    await delay(150);
+    check(reports.length === 0, 'Allowed or no-longer-restricted container produces no XR diagnostic');
+  }
+  check(ordinary.length === 0, 'Potential diagnostics do not imply actual feature use');
+  if (cfg.case === 'snapshot') {
+    check(firstReports.length === 1 && firstReports[0] !== reports[0] && firstReports[0].body !== reports[0].body,
+          'Observers receive independent potential-body snapshots');
+    check(firstReports[0].body.srcAttribute === 'changed' && reports[0].body.srcAttribute !== 'changed',
+          'Observer mutation leaves later observers unchanged');
+    firstObserver.disconnect();
+  }
+  observer.disconnect(); ordinaryObserver.disconnect();
+  if (cfg.case === 'buffer' || cfg.case === 'snapshot') {
+    const buffered = [];
+    const later = new ReportingObserver(batch => buffered.push(...batch.filter(report => report.body.featureId === 'xr-spatial-tracking')),
+      {types:['potential-permissions-policy-violation'],buffered:true});
+    later.observe();
+    check(later.takeRecords().length === 0, 'Potential history delivery is asynchronous');
+    await until(() => buffered.length >= Math.min(100, cfg.expected_count));
+    check(buffered.length === Math.min(100,cfg.expected_count), 'Potential history has its own bounded retention');
+    check(JSON.stringify(buffered) === JSON.stringify(reports.slice(-100)), 'Potential history preserves ordering and original attribute data');
+    later.disconnect();
+  }
+  return {checks, expected, loadCount};
+}
+main().then(result => fetch('/__result?case=' + cfg.case, {method:'POST',body:JSON.stringify(result)}))
+  .catch(error => fetch('/__result?case=' + cfg.case, {method:'POST',body:JSON.stringify({checks,expected,loadCount,error:String(error)})}));
+</script>

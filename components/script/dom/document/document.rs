@@ -2173,17 +2173,9 @@ impl Document {
         let origin = self.origin().snapshot();
         let check = self.permissions_policy().check(feature, &origin, &origin);
         if let Some(violation) = check.violation {
-            let caller = js::rust::describe_scripted_caller(cx).ok()
-                .filter(|caller| !caller.filename.is_empty());
-            let body = crate::dom::reporting::report::PermissionsPolicyReportBody {
-                feature_id: feature.name().to_owned(),
-                source_file: caller.as_ref().map(|caller| caller.filename.clone()),
-                line_number: caller.as_ref().map(|caller| caller.line),
-                column_number: caller.as_ref().map(|caller| caller.col.saturating_add(1)),
-                disposition: violation.disposition,
-                allow_attribute: None,
-                src_attribute: None,
-            };
+            let body = crate::dom::reporting::report::PermissionsPolicyReportBody::for_feature(
+                cx, feature, violation.disposition,
+            );
             crate::dom::reporting::reportingobserver::ReportingObserver::generate_and_queue_a_report(
                 &self.global(),
                 "permissions-policy-violation",

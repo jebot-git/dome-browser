@@ -79,7 +79,9 @@ impl ReportingObserver {
     fn report_is_visible_to_reporting_observers(report: &Report) -> bool {
         matches!(
             report.type_.as_str(),
-            "csp-violation" | "permissions-policy-violation"
+            "csp-violation"
+                | "permissions-policy-violation"
+                | "potential-permissions-policy-violation"
         )
     }
 

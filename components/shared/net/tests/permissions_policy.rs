@@ -643,3 +643,173 @@ fn refreshing_live_self_origin_updates_both_policies_without_changing_snapshots(
         D::Report
     );
 }
+
+#[test]
+fn potential_enforced_denial_selects_the_parent_destination() {
+    let a = origin("https://a.test");
+    let b = origin("https://b.test");
+    let p = reporting_policy(
+        "xr-spatial-tracking=();report-to=enforced",
+        "xr-spatial-tracking=();report-to=reportonly",
+        &a,
+    );
+    let container = ContainerPolicy::new(p, a, b.clone(), "xr-spatial-tracking *");
+    let v = container
+        .potential_violation(F::XrSpatialTracking, &b)
+        .unwrap();
+    assert_eq!(v.disposition, D::Enforce);
+    assert_eq!(v.endpoint.as_deref(), Some("enforced"));
+}
+
+#[test]
+fn potential_report_only_does_not_change_the_childs_access_decision() {
+    let a = origin("https://a.test");
+    let b = origin("https://b.test");
+    let p = reporting_policy(
+        "xr-spatial-tracking=*",
+        "xr-spatial-tracking=();report-to=parent",
+        &a,
+    );
+    let container = ContainerPolicy::new(p, a, b.clone(), "xr-spatial-tracking *");
+    let v = container
+        .potential_violation(F::XrSpatialTracking, &b)
+        .unwrap();
+    assert_eq!(v.disposition, D::Report);
+    assert_eq!(v.endpoint.as_deref(), Some("parent"));
+    let child = PermissionsPolicy::for_document(Some(&container), &b, None);
+    let check = child.check(F::XrSpatialTracking, &b, &b);
+    assert!(check.allowed);
+    assert_eq!(check.violation.unwrap().endpoint, None);
+}
+
+#[test]
+fn potential_container_restriction_uses_enforced_precedence() {
+    let a = origin("https://a.test");
+    let b = origin("https://b.test");
+    let p = reporting_policy(
+        "xr-spatial-tracking=*;report-to=enforced",
+        "xr-spatial-tracking=*;report-to=reportonly",
+        &a,
+    );
+    let container = ContainerPolicy::new(p, a, b.clone(), "xr-spatial-tracking 'none'");
+    let v = container
+        .potential_violation(F::XrSpatialTracking, &b)
+        .unwrap();
+    assert_eq!(v.disposition, D::Enforce);
+    assert_eq!(v.endpoint.as_deref(), Some("enforced"));
+}
+
+#[test]
+fn potential_defaults_and_explicit_delegation_follow_the_feature() {
+    let a = origin("https://a.test");
+    let b = origin("https://b.test");
+    let same = ContainerPolicy::new(PermissionsPolicy::default(), a.clone(), a.clone(), "");
+    for feature in F::ALL {
+        assert!(same.potential_violation(feature, &a).is_none());
+    }
+    let cross = ContainerPolicy::new(PermissionsPolicy::default(), a.clone(), b.clone(), "");
+    assert!(cross.potential_violation(F::Gamepad, &b).is_none());
+    assert_eq!(
+        cross
+            .potential_violation(F::Geolocation, &b)
+            .unwrap()
+            .disposition,
+        D::Enforce
+    );
+    assert!(
+        cross
+            .potential_violation(F::XrSpatialTracking, &b)
+            .unwrap()
+            .endpoint
+            .is_none()
+    );
+    let delegated = ContainerPolicy::new(
+        PermissionsPolicy::default(),
+        a,
+        b.clone(),
+        "xr-spatial-tracking",
+    );
+    assert!(
+        delegated
+            .potential_violation(F::XrSpatialTracking, &b)
+            .is_none()
+    );
+}
+
+#[test]
+fn potential_uses_declared_origin_rather_than_redirected_child_state() {
+    let a = origin("https://a.test");
+    let b = origin("https://b.test");
+    let c = origin("https://c.test");
+    let container = ContainerPolicy::new(
+        PermissionsPolicy::default(),
+        a,
+        b.clone(),
+        "xr-spatial-tracking 'src'",
+    );
+    assert!(
+        container
+            .potential_violation(F::XrSpatialTracking, &b)
+            .is_none()
+    );
+    assert!(
+        !PermissionsPolicy::for_document(Some(&container), &c, None).allows(
+            F::XrSpatialTracking,
+            &c,
+            &c
+        )
+    );
+    // A loaded response's headers are not inputs to potential diagnostics.
+    assert!(
+        container
+            .potential_violation(F::XrSpatialTracking, &b)
+            .is_none()
+    );
+}
+
+#[test]
+fn potential_opaque_src_uses_one_declared_identity() {
+    let a = origin("https://a.test");
+    let opaque = MutableOrigin::new(ImmutableOrigin::new_opaque()).snapshot();
+    let container = ContainerPolicy::new(
+        PermissionsPolicy::default(),
+        a,
+        opaque.clone(),
+        "xr-spatial-tracking 'src'",
+    );
+    assert!(
+        container
+            .potential_violation(F::XrSpatialTracking, &opaque)
+            .is_none()
+    );
+    let other = MutableOrigin::new(ImmutableOrigin::new_opaque()).snapshot();
+    assert!(
+        container
+            .potential_violation(F::XrSpatialTracking, &other)
+            .is_some()
+    );
+}
+
+#[test]
+fn potential_parent_must_allow_its_own_and_declared_origins() {
+    let a = origin("https://a.test");
+    let b = origin("https://b.test");
+    for header in [
+        "xr-spatial-tracking=self",
+        "xr-spatial-tracking=\"https://b.test\"",
+    ] {
+        let container = ContainerPolicy::new(
+            policy(header, &a),
+            a.clone(),
+            b.clone(),
+            "xr-spatial-tracking *",
+        );
+        assert_eq!(
+            container
+                .potential_violation(F::XrSpatialTracking, &b)
+                .unwrap()
+                .disposition,
+            D::Enforce
+        );
+    }
+}

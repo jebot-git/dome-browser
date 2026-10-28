@@ -13,7 +13,9 @@ use js::jsapi::Heap;
 use js::jsval::NullValue;
 use js::rust::MutableHandleValue;
 use malloc_size_of_derive::MallocSizeOf;
-use net_traits::permissions_policy::ViolationDisposition;
+use net_traits::permissions_policy::{PolicyFeature, ViolationDisposition};
+use net_traits::reporting::ReportText;
+use script_bindings::str::DOMString;
 use script_bindings::trace::RootedTraceableBox;
 use serde::Serialize;
 
@@ -78,12 +80,31 @@ pub(crate) struct PermissionsPolicyReportBody {
     pub(crate) column_number: Option<u32>,
     pub(crate) disposition: ViolationDisposition,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) allow_attribute: Option<String>,
+    pub(crate) allow_attribute: Option<Option<ReportText>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) src_attribute: Option<String>,
+    pub(crate) src_attribute: Option<Option<ReportText>>,
 }
 
 impl PermissionsPolicyReportBody {
+    pub(crate) fn for_feature(
+        cx: &mut JSContext,
+        feature: PolicyFeature,
+        disposition: ViolationDisposition,
+    ) -> Self {
+        let caller = js::rust::describe_scripted_caller(cx)
+            .ok()
+            .filter(|caller| !caller.filename.is_empty());
+        Self {
+            feature_id: feature.name().to_owned(),
+            source_file: caller.as_ref().map(|caller| caller.filename.clone()),
+            line_number: caller.as_ref().map(|caller| caller.line),
+            column_number: caller.as_ref().map(|caller| caller.col.saturating_add(1)),
+            disposition,
+            allow_attribute: None,
+            src_attribute: None,
+        }
+    }
+
     fn dictionary(&self) -> PermissionsPolicyViolationReportBody {
         PermissionsPolicyViolationReportBody {
             parent: EmptyReportBody::empty(),
@@ -92,8 +113,16 @@ impl PermissionsPolicyReportBody {
             lineNumber: self.line_number,
             columnNumber: self.column_number,
             disposition: self.disposition.as_str().into(),
-            allowAttribute: self.allow_attribute.clone().map(|value| Some(value.into())),
-            srcAttribute: self.src_attribute.clone().map(|value| Some(value.into())),
+            allowAttribute: self.allow_attribute.as_ref().map(|value| {
+                value
+                    .as_ref()
+                    .map(|text| DOMString::from_code_units(text.code_units().to_vec()))
+            }),
+            srcAttribute: self.src_attribute.as_ref().map(|value| {
+                value
+                    .as_ref()
+                    .map(|text| DOMString::from_code_units(text.code_units().to_vec()))
+            }),
         }
     }
 }

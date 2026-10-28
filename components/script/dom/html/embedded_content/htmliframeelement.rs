@@ -872,12 +872,54 @@ impl HTMLIFrameElement {
         // Step 6. Fire an event named load at element.
         self.upcast::<EventTarget>().fire_event(cx, atom!("load"));
 
+        // Permissions Policy adds potential-violation diagnostics after load.
+        // Read the current owner and attributes here: the load handler can
+        // modify them, adopt this node, or remove its browsing context.
+        self.report_potential_policy_violations(cx);
+
         let blocker = &self.load_blocker;
         LoadBlocker::terminate(cx, blocker);
 
         // Step 7. Unset childDocument's iframe load in progress flag
         if let Some(child_document) = self.GetContentDocument() {
             child_document.set_iframe_load_in_progress(false);
+        }
+    }
+
+    /// <https://w3c.github.io/webappsec-permissions-policy/#check-potential-violation>
+    fn report_potential_policy_violations(&self, cx: &mut JSContext) {
+        use net_traits::permissions_policy::{ContainerPolicy, PolicyFeature};
+        use net_traits::reporting::ReportText;
+        use crate::dom::reporting::report::{PermissionsPolicyReportBody, ReportBody};
+        use crate::dom::reporting::reportingobserver::ReportingObserver;
+
+        let document = self.owner_document();
+        let element = self.upcast::<Element>();
+        let allow = element.has_attribute(&local_name!("allow"))
+            .then(|| element.get_string_attribute(&local_name!("allow")));
+        let src = element.has_attribute(&local_name!("src"))
+            .then(|| element.get_string_attribute(&local_name!("src")));
+        let allow_policy = allow.as_ref().map_or_else(String::new, |value| value.str().to_string());
+        // Generate an opaque declared origin only once, so an explicit 'src'
+        // allowlist and the checked origin refer to the same identity.
+        let declared_origin = self.permissions_policy_declared_origin();
+        let container = ContainerPolicy::new(
+            document.permissions_policy(), document.origin().snapshot(),
+            declared_origin.clone(), &allow_policy,
+        );
+        let allow = allow.as_ref().map(|value| ReportText::new(value.to_code_units()));
+        let src = src.as_ref().map(|value| ReportText::new(value.to_code_units()));
+        for feature in PolicyFeature::ALL {
+            let Some(violation) = container.potential_violation(feature, &declared_origin) else {
+                continue;
+            };
+            let mut body = PermissionsPolicyReportBody::for_feature(cx, feature, violation.disposition);
+            body.allow_attribute = Some(allow.clone());
+            body.src_attribute = Some(src.clone());
+            ReportingObserver::generate_and_queue_a_report(
+                &document.global(), "potential-permissions-policy-violation",
+                ReportBody::PermissionsPolicy(body), violation.endpoint.unwrap_or_default(),
+            );
         }
     }
 

@@ -17,7 +17,8 @@ parser.add_argument('--output', required=True, type=Path)
 parser.add_argument('--plain-endpoint', action='store_true', help='Use a simple endpoint for comparison with older parsers')
 parser.add_argument('--cases', nargs='+', help='Run selected lifecycle cases')
 args = parser.parse_args()
-W = Path(__file__).resolve().parents[3]
+HERE = Path(__file__).resolve().parent
+W = next((path for path in HERE.parents if (path/'components/script').is_dir()), Path.cwd())
 T = W / 'ports/dome-fltk/tests'
 sys.path.insert(0, str(T))
 from Xlib import display
@@ -25,13 +26,17 @@ from private_wayland import PrivateWayland
 out = args.output.resolve()
 out.mkdir(mode=0o700, parents=True, exist_ok=False)
 sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
-sources = {str(p.relative_to(W)): sha(p) for p in [T/'reporting-observer.html', T/'reporting-observer-worker.js']}
+sources = {p.name: sha(p) for p in [Path(__file__), HERE/'reporting-observer.html', HERE/'reporting-observer-worker.js']}
 results, deliveries, request_errors = {}, {}, []
 def stop(proc):
     if proc.poll() is None:
         proc.terminate()
         try: proc.wait(timeout=8)
         except subprocess.TimeoutExpired: proc.kill(); proc.wait()
+class FixtureHTTPServer(http.server.ThreadingHTTPServer):
+    # The burst fixture can have 110 reporting connections in flight.
+    request_queue_size = 256
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_): pass
     def reply(self, data, content_type='application/json', policy=None, case=None):
@@ -49,9 +54,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if url.path == '/__counts':
             self.reply(json.dumps({'reports':len(deliveries.get(case, []))}).encode()); return
         if url.path == '/fixture':
-            self.reply((T/'reporting-observer.html').read_bytes(), 'text/html', "img-src 'none'; report-to collector", case); return
+            self.reply((HERE/'reporting-observer.html').read_bytes(), 'text/html', "img-src 'none'; report-to collector", case); return
         if url.path == '/worker.js':
-            self.reply((T/'reporting-observer-worker.js').read_bytes(), 'text/javascript', "script-src 'self'; report-to collector", case); return
+            self.reply((HERE/'reporting-observer-worker.js').read_bytes(), 'text/javascript', "script-src 'self'; report-to collector", case); return
         self.send_error(404)
     def do_POST(self):
         url = urlsplit(self.path)
@@ -81,7 +86,7 @@ with contextlib.ExitStack() as stack:
     screen = ':'+os.read(rd,64).decode().strip(); os.close(rd)
     connection = display.Display(screen); stack.callback(connection.close)
     wayland = PrivateWayland(connection, screen, root, out); stack.callback(wayland.close)
-    server = http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
+    server = FixtureHTTPServer(('127.0.0.1',0),Handler)
     threading.Thread(target=server.serve_forever,daemon=True).start()
     stack.callback(server.server_close); stack.callback(server.shutdown)
     env = {k:v for k,v in os.environ.items() if not k.startswith(('DOME_', 'SERVO_')) and k not in ['WAYLAND_DISPLAY','WAYLAND_SOCKET']}

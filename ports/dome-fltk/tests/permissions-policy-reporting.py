@@ -47,11 +47,11 @@ cases = {
     'disconnect':(base_deny, '', False, 'enforce', {'enforced':2}),
     'records':(base_deny, '', False, 'enforce', {'enforced':1}),
     'snapshot':(base_deny, '', False, 'enforce', {'enforced':1}),
-    'cross-realm':(base_deny, '', False, 'enforce', {'enforced':1}),
+    'cross-realm':(base_deny, '', False, 'enforce', {'enforced':2}),
     'buffer-types':(base_deny, '', False, 'enforce', {'enforced':110,'csp':110}),
-    'frame-report-only':(allow, 'xr-spatial-tracking=();report-to=parent', True, 'report', {'child':1}),
-    'frame-enforced':('xr-spatial-tracking=();report-to=parent', allow, False, 'enforce', {'child':1}),
-    'frame-cross-origin':(allow, 'xr-spatial-tracking=self;report-to=parent', True, 'report', {'child':1}),
+    'frame-report-only':(allow, 'xr-spatial-tracking=();report-to=parent', True, 'report', {'child':1,'parent':1}),
+    'frame-enforced':('xr-spatial-tracking=();report-to=parent', allow, False, 'enforce', {'child':1,'parent':1}),
+    'frame-cross-origin':(allow, 'xr-spatial-tracking=self;report-to=parent', True, 'report', {'child':1,'parent':1}),
     'navigation':(allow, allow, True, 'report', {'child':1}),
 }
 if a.cases:
@@ -145,7 +145,8 @@ with contextlib.ExitStack() as stack:
         payloads = deliveries.get(name,{})
         schema = all(
             isinstance(report.get('age'),int) and report['age']>=0 and isinstance(report.get('body'),dict) and
-            ((report.get('type')=='permissions-policy-violation' and report['body'].get('featureId')=='xr-spatial-tracking' and report['body'].get('disposition') in ['enforce','report']) or
+            ((report.get('type')=='permissions-policy-violation' and report['body'].get('featureId')=='xr-spatial-tracking' and report['body'].get('disposition') in ['enforce','report'] and 'allowAttribute' not in report['body'] and 'srcAttribute' not in report['body']) or
+             (report.get('type')=='potential-permissions-policy-violation' and report['body'].get('featureId')=='xr-spatial-tracking' and report['body'].get('disposition')==config[3] and 'allowAttribute' in report['body'] and 'srcAttribute' in report['body']) or
              (report.get('type')=='csp-violation' and report['body'].get('disposition')=='enforce'))
             for reports in payloads.values() for report in reports)
         row['checks'] += [

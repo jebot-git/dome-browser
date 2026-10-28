@@ -1,0 +1,61 @@
+{
+  "milestone": "Iframe potential Permissions Policy diagnostics",
+  "validated_utc": "2026-10-28T21:36:10.788172+00:00",
+  "specification": "https://www.w3.org/TR/2026/WD-permissions-policy-1-20261026/",
+  "implemented": [
+    "Potential diagnostics after iframe load handlers using current owner, attributes and declared origin",
+    "Independent enforced/report-only inheritance, enforcement precedence, parent-owned endpoints",
+    "Distinct potential report type, nullable missing attributes, preserved empty strings and UTF-16 code units",
+    "Independent observer snapshots, bounded per-type history, unchanged actual-use permission decisions"
+  ],
+  "optimized_release_build": true,
+  "unit_tests": 42,
+  "runtime_checks": 1628,
+  "runtime_breakdown": {
+    "iframe-potentials": 1213,
+    "policy-reporting": 248,
+    "csp-observers": 69,
+    "history": 14,
+    "xr-enforced": 23,
+    "xr-report-only": 47,
+    "xr-pending": 14
+  },
+  "local_iframe_scenarios": 23,
+  "existing_policy_scenarios": 21,
+  "original_reporting_wpt_cases": 2,
+  "original_wpt_assertions_and_headers_unchanged": true,
+  "original_wpt_adapter_scope": "Trusted loopback adapter; not full HTTPS WPT runner coverage",
+  "shared_worker_shutdown_scenarios": 3,
+  "anonymous_live_samples": {
+    "discord": "Survived/closed cleanly; initial capture blank with failed asset transfers; installed comparison and candidate follow-up visibly rendered login form",
+    "x": "Survived/closed cleanly; landing/login page visible; accepted QR overlap remains a non-bug"
+  },
+  "fixture_correction": "CSP collector backlog increased from 5 to 256 for 110 in-flight reports. Original page assertions and deadlines unchanged. Both prior and new engines pass the capacity probe; full corrected suite delivers all 124 reports exactly once. Initial failed receipt retained locally.",
+  "browser_sha256": "38b0b7a64b6ff8b3adf7c8999b198d2c8a78ccf4ef691aa85488963c0493d2ed",
+  "test_embedder_sha256": "53cccb37caf11b4a71ba5e83d418e63e314cf6acbf04551465063d1112a0819f",
+  "engine_source_sha256": {
+    "Cargo.lock": "e149f0b652379f7fd70669a574725ce7943308642b7096313178872f600db182",
+    "components/script/dom/document/document.rs": "06ee1b899120b555ce15daa4a466dcec61cb984f38b2826f75991e02a404795e",
+    "components/script/dom/html/embedded_content/htmliframeelement.rs": "f5f0e240c6a3e08216130c19863058c9a2d2cf8ad8e26a92fe238919a2749fa6",
+    "components/script/dom/reporting/report.rs": "7b29b7840e13c2aa713bcdb226a2968210a484d6907b0fad4ef878f8442cc274",
+    "components/script/dom/reporting/reportingobserver.rs": "d2ad47a71a221675d64cfc2cf3eacf7fa761da46220b652bee324a3ca1c9c3de",
+    "components/shared/net/Cargo.toml": "598765a839d008fda915a4796d41f5d988310155c420bafacb4037a1f5cc9ea6",
+    "components/shared/net/permissions_policy.rs": "9948b404ee7864e2ab675e410e5057b93ce3bbcb1faf0be54172e2b22a2f27de",
+    "components/shared/net/reporting.rs": "7aec9b854fb49b6045a412f086041429c0f69bcf8b4ef5ec6336d16d9d887fad",
+    "components/shared/net/tests/permissions_policy.rs": "acc1e29053d7393b5851695bcf3e1b5dd3f0d35d62a1576ff1f772ace706daf0",
+    "components/shared/net/tests/reporting.rs": "a85eaa8809f9a251b60e1d6b582f50a751f2a629278ff614d2e1f33f025fcefc"
+  },
+  "changed_fixture_sha256": {
+    "ports/dome-fltk/tests/iframe-policy-reporting.py": "d808b2e6d14835de904c33f12573cb3f86c6bedaa533bb54cf512004e9f57781",
+    "ports/dome-fltk/tests/iframe-policy-reporting.html": "3a44ee5d968666c2a61a847a1f656c2b7f121bdeab3814b362fd7cca4dd9c8ec",
+    "ports/dome-fltk/tests/permissions-policy-reporting.py": "3215804abc2aa8cd8bd5ca42528915c5c9ba890c749fcb7678675d0dc2984b1b",
+    "ports/dome-fltk/tests/permissions-policy-reporting.html": "5f13e08e51b4bdb8eb1761e71ced7c502f305db1c2694193a75073c7243158d6",
+    "ports/dome-fltk/tests/reporting-observer.py": "7d9093674d52374220ec848cf4962719e361d1ad5a946d74f80615e4d89dbed0"
+  },
+  "remaining": [
+    "Broader reporting retry/endpoint/document lifecycle and legacy-interface interoperability",
+    "Other policy consumers and wider WebXR backend/device coverage",
+    "Physical-device validation and later standards-focused rendering/scroll-indicator checks"
+  ],
+  "scope": "Scoped engine, private native DomeD and anonymous live-page checks. No full Reporting API, Permissions Policy, WebXR, WPT or whole-site conformance claim; no physical headset or GPU reset tested."
+}

@@ -10,6 +10,8 @@ Reporting history and worker observer lifecycle results are recorded in
 [the reporting validation record](docs/validation-reporting-lifecycle-2026-10-28.json).
 Typed permissions-policy bodies and WebXR diagnostics are covered by
 [the policy reporting validation record](docs/validation-policy-reporting-2026-10-28.json).
+Iframe potential diagnostics and load lifecycle checks are recorded in
+[the iframe policy validation record](docs/validation-iframe-policy-2026-10-28.json).
 
 Supported contexts prefer robust access and reset notifications. The FLTK
 frontend retries renderer reconstruction after permanent native loss. It replays
@@ -2139,6 +2141,33 @@ bodies and header files and verifies their digests. It is not the full WPT runne
 `webxr-context-compatibility.py --policy-report-only` adds the diagnostics observer
 and report-only header to the existing private native-host test. Its original
 consent, lease and stereo-submission assertions still apply, and the browser must
-close cleanly. Broader reporting transport/lifecycle behavior and potential iframe
-policy diagnostics remain follow-up work. No physical headset conformance claim
+close cleanly. Broader reporting transport/lifecycle behavior and legacy interface
+interoperability remain follow-up work. No physical headset conformance claim
 is made by these fixtures.
+
+## Iframe policy diagnostics
+
+After each iframe load event, the embedding document checks the frame's current
+attributes and declared origin for potential permissions-policy violations.
+Enforced and report-only policies are evaluated independently, with enforcement
+selected first. These diagnostics do not change the permission decision and do
+not inspect the loaded child's response policy or redirect destination.
+
+Potential reports use `potential-permissions-policy-violation` and include
+`allowAttribute` and `srcAttribute`. Missing values remain null, empty values
+remain empty strings, and observer/network snapshots preserve UTF-16 code units.
+Ordinary feature-use reports omit these attribute fields. Endpoints belong to
+the embedding document; child feature-use reports remain scoped to the child.
+
+```sh
+DOME_COMPOSITOR=/path/to/private-compositor \
+uv run --no-project --with python-xlib --with pillow --with dbus-next python \
+  ports/dome-fltk/tests/iframe-policy-reporting.py \
+  --binary /path/to/xr-native-input --output /tmp/iframe-policy-reporting
+```
+
+The 23 local scenarios cover policy precedence, missing/empty/Unicode attributes,
+load-handler changes, removal/adoption, declared versus redirected origins,
+sandboxed origins, observer isolation and bounded history. The fixture acquires
+no immersive device. Its XR feature cases are local regressions, not substituted
+upstream camera tests or a complete Permissions Policy conformance suite.

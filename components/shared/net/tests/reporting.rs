@@ -104,3 +104,56 @@ fn relative_endpoint_resolves_against_the_current_response() {
         "https://response.test/redirected/submit"
     );
 }
+
+#[test]
+fn report_text_preserves_valid_unicode_and_json_metacharacters() {
+    for text in [
+        "",
+        "plain",
+        "quote\" slash\\ control\0\n",
+        "žluťoučký",
+        "🦊",
+    ] {
+        let value = net_traits::reporting::ReportText::new(text.encode_utf16().collect());
+        let encoded = serde_json::to_string(&value).unwrap();
+        assert_eq!(serde_json::from_str::<String>(&encoded).unwrap(), text);
+    }
+}
+
+#[test]
+fn report_text_preserves_unpaired_utf16_in_json_strings() {
+    for (units, expected) in [
+        (vec![0xd800], r#""\ud800""#),
+        (vec![0xdc00], r#""\udc00""#),
+        (vec![0x61, 0xd800, 0x62], r#""\u0061\ud800\u0062""#),
+        (
+            vec![0xd800, 0xd83e, 0xdd8a, 0xdc00],
+            r#""\ud800\ud83e\udd8a\udc00""#,
+        ),
+    ] {
+        let value = net_traits::reporting::ReportText::new(units);
+        let encoded = serde_json::to_string(&value).unwrap();
+        assert_eq!(encoded, expected);
+        let raw: Box<serde_json::value::RawValue> = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(raw.get(), expected);
+    }
+}
+
+#[test]
+fn report_text_escapes_cannot_add_json_members() {
+    #[derive(serde::Serialize)]
+    struct Body {
+        attribute: net_traits::reporting::ReportText,
+        unchanged: bool,
+    }
+    let units = vec![0xd800, 0x22, 0x7d, 0x2c, 0x22, 0x5c, 0x0a];
+    let encoded = serde_json::to_string(&Body {
+        attribute: net_traits::reporting::ReportText::new(units),
+        unchanged: true,
+    })
+    .unwrap();
+    assert_eq!(
+        encoded,
+        r#"{"attribute":"\ud800\u0022\u007d\u002c\u0022\u005c\u000a","unchanged":true}"#
+    );
+}

@@ -5,10 +5,50 @@
 //! Response-local Reporting API endpoint configuration.
 
 use http::HeaderMap;
+use malloc_size_of_derive::MallocSizeOf;
+use serde::ser::Error;
+use serde::{Serialize, Serializer};
 use servo_url::ServoUrl;
 use sfv::{BareItem, Dictionary, ListEntry, Parser};
 
 use crate::fetch::headers::get_value_from_header_list;
+
+/// Owned DOM string data for reports. Queued tasks can carry this without a JS
+/// root, and both observer snapshots and JSON preserve all UTF-16 code units.
+#[derive(Clone, Debug, Eq, MallocSizeOf, PartialEq)]
+pub struct ReportText(Vec<u16>);
+
+impl ReportText {
+    pub fn new(code_units: Vec<u16>) -> Self {
+        Self(code_units)
+    }
+
+    pub fn code_units(&self) -> &[u16] {
+        &self.0
+    }
+}
+
+impl Serialize for ReportText {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if let Ok(text) = String::from_utf16(&self.0) {
+            return serializer.serialize_str(&text);
+        }
+        // JSON permits escaped unpaired surrogates. Rust String cannot hold
+        // them, so serialize a validated JSON string made solely of hex escapes.
+        let mut json = String::from("\"");
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for unit in &self.0 {
+            json.push_str("\\u");
+            for shift in [12, 8, 4, 0] {
+                json.push(HEX[((unit >> shift) & 15) as usize] as char);
+            }
+        }
+        json.push('"');
+        serde_json::value::RawValue::from_string(json)
+            .map_err(S::Error::custom)?
+            .serialize(serializer)
+    }
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct ReportingEndpoint {

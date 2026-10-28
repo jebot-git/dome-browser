@@ -108,8 +108,9 @@ async function main() {
     const parentState = observe();
     const frame = document.createElement('iframe');
     frame.allow = 'xr-spatial-tracking *';
+    const childResult = frameResult(frame, cfg.child_url);
     document.body.appendChild(frame);
-    const result = await frameResult(frame, cfg.child_url);
+    const result = await childResult;
     check(result.checks.length > 0 && result.checks.every(row => row.passed), 'Child reporting checks pass');
     check(result.reports.length === 1, 'Child reports are scoped to its own global');
     await delivered({child: 1});
