@@ -343,6 +343,62 @@ impl Paint {
         Ok(painter_id)
     }
 
+    /// Reconstruct native graphics while retaining the painter's live documents.
+    pub fn recover_rendering_context(
+        &mut self,
+        painter_id: PainterId,
+        rendering_context: Rc<dyn RenderingContext>,
+    ) -> Result<(), surfman::Error> {
+        if self.shutdown_state() != ShutdownState::NotShuttingDown {
+            return Err(surfman::Error::Failed);
+        }
+        if self.painters.iter().any(|painter| {
+            let painter = painter.borrow();
+            Rc::ptr_eq(&painter.rendering_context, &rendering_context)
+        }) {
+            return Err(surfman::Error::IncompatibleContext);
+        }
+        let details = if let Some(connection) = rendering_context.connection() {
+            let adapter = connection.create_adapter()?;
+            Some(PainterSurfmanDetails {
+                connection,
+                adapter,
+            })
+        } else {
+            None
+        };
+        let painter = self
+            .painters
+            .iter()
+            .find(|painter| painter.borrow().painter_id == painter_id)
+            .cloned()
+            .ok_or(surfman::Error::Failed)?;
+        self.cleanup_scope.run(|| {
+            painter
+                .borrow_mut()
+                .recover_rendering_context(rendering_context.clone(), self)
+        })?;
+        if let Some(scope) = rendering_context.cleanup_scope() {
+            self.native_context_scopes
+                .push((Rc::downgrade(&rendering_context), scope));
+        }
+        self.native_context_scopes
+            .retain(|(context, scope)| context.strong_count() != 0 || scope.pending());
+        self.painter_surfman_details_map.remove(painter_id);
+        if let Some(details) = details {
+            self.painter_surfman_details_map.insert(painter_id, details);
+        }
+        #[cfg(feature = "webgl")]
+        if !self
+            .webgl_paint
+            .webgl_threads
+            .reset_painter_resources(painter_id)
+        {
+            warn!("WebGL producer reset channel unavailable for {painter_id:?}");
+        }
+        Ok(())
+    }
+
     fn remove_painter(&mut self, painter_id: PainterId) {
         // The shared details map must be removed first in order to avoid the creation of new
         // devices after `clear_painter_resources` is called.
@@ -857,8 +913,18 @@ impl Paint {
         // when calling `handle_new_webrender_frame_ready`.
         let mut saw_webrender_frame_ready_for_painter = HashMap::new();
         messages.retain(|message| match message {
-            PaintMessage::NewWebRenderFrameReady(painter_id, _document_id, need_repaint) => {
+            PaintMessage::NewWebRenderFrameReady(
+                painter_id,
+                document_id,
+                generation,
+                need_repaint,
+            ) => {
                 if let Some(painter) = self.maybe_painter(*painter_id) {
+                    if painter.renderer_generation != *generation
+                        || painter.webrender_document != *document_id
+                    {
+                        return false;
+                    }
                     painter.decrement_pending_frames();
                     *saw_webrender_frame_ready_for_painter
                         .entry(*painter_id)

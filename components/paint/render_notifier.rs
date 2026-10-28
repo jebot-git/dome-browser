@@ -4,12 +4,16 @@
 
 use paint_api::{PaintMessage, PaintProxy};
 use servo_base::id::PainterId;
+use std::sync::atomic::{AtomicU64, Ordering};
 use webrender_api::{DocumentId, FramePublishId, FrameReadyParams};
+
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 pub(crate) struct RenderNotifier {
     painter_id: PainterId,
     paint_proxy: PaintProxy,
+    generation: u64,
 }
 
 impl RenderNotifier {
@@ -17,16 +21,17 @@ impl RenderNotifier {
         RenderNotifier {
             painter_id,
             paint_proxy,
+            generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
         }
+    }
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 }
 
 impl webrender_api::RenderNotifier for RenderNotifier {
     fn clone(&self) -> Box<dyn webrender_api::RenderNotifier> {
-        Box::new(RenderNotifier::new(
-            self.painter_id,
-            self.paint_proxy.clone(),
-        ))
+        Box::new(Clone::clone(self))
     }
 
     fn wake_up(&self, _composite_needed: bool) {}
@@ -40,6 +45,7 @@ impl webrender_api::RenderNotifier for RenderNotifier {
         self.paint_proxy.send(PaintMessage::NewWebRenderFrameReady(
             self.painter_id,
             document_id,
+            self.generation,
             frame_ready_params.render,
         ));
     }

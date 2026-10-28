@@ -580,6 +580,15 @@ impl WebGLThread {
                     warn!("Failed to send response to WebGLMsg::ClearPainterResources ({error})");
                 }
             },
+            WebGLMsg::ResetPainterResources(painter_id, sender) => {
+                if let Some(device) = self.device_map.remove(&painter_id) {
+                    let ids: Vec<_> = self.contexts.iter().filter_map(|(id, data)|
+                        Rc::ptr_eq(&data.device, &device).then_some(*id)).collect();
+                    for id in ids { self.notify_context_loss(id); }
+                }
+                self.bound_context_id = None;
+                let _ = sender.send(());
+            },
             WebGLMsg::Exit => {
                 return true;
             },

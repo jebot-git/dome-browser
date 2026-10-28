@@ -326,6 +326,22 @@ impl WebView {
         self.inner().rendering_context.clone()
     }
 
+    /// Rebuild an unavailable native renderer without navigating or replacing
+    /// the live document. Views sharing this painter acquire the new context;
+    /// old offscreen resources retain their original immutable native owner.
+    pub fn recover_rendering_context(&self, rendering_context: Rc<dyn RenderingContext>) -> Result<(), surfman::Error> {
+        let servo = self.servo();
+        let painter_id = self.id().into();
+        servo.paint_mut().recover_rendering_context(painter_id, rendering_context.clone())?;
+        for (id, view) in servo.webviews_mut().iter() {
+            if servo_base::id::PainterId::from(*id) == painter_id {
+                if let Some(view) = view.upgrade() { view.borrow_mut().rendering_context = rendering_context.clone(); }
+            }
+        }
+        servo.event_loop_waker().wake();
+        Ok(())
+    }
+
     /// Get the load status for the page that is currently loading or loaded in this [`WebView`].
     ///
     /// The embedder can use [`WebViewDelegate::notify_load_status_changed`] to subscribe

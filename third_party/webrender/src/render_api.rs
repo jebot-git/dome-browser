@@ -4,7 +4,7 @@
 
 #![deny(missing_docs)]
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::marker::PhantomData;
 use std::path::PathBuf;
@@ -28,6 +28,8 @@ use glyph_rasterizer::SharedFontResources;
 use crate::scene_builder_thread::{SceneBuilderRequest, SceneBuilderResult};
 use crate::intern::InterningMemoryReport;
 use crate::profiler::{self, TransactionProfile};
+mod recovery;
+pub use self::recovery::RecoveryError;
 #[cfg(feature = "debugger")]
 use crate::debugger::{DebugQuery, DebuggerClient};
 
@@ -1069,6 +1071,7 @@ impl RenderApiSender {
             low_priority_scene_sender: self.low_priority_scene_sender.clone(),
             namespace_id,
             next_id: Cell::new(ResourceId(0)),
+            recovery: RefCell::new(None),
             resources: ApiResources::new(
                 self.blob_image_handler.as_ref().map(|handler| handler.create_similar()),
                 self.fonts.clone(),
@@ -1090,6 +1093,7 @@ impl RenderApiSender {
             low_priority_scene_sender: self.low_priority_scene_sender.clone(),
             namespace_id,
             next_id: Cell::new(ResourceId(0)),
+            recovery: RefCell::new(None),
             resources: ApiResources::new(
                 self.blob_image_handler.as_ref().map(|handler| handler.create_similar()),
                 self.fonts.clone(),
@@ -1100,6 +1104,7 @@ impl RenderApiSender {
 
 /// The main entry point to interact with WebRender.
 pub struct RenderApi {
+    recovery: RefCell<Option<recovery::RecoveryState>>,
     api_sender: Sender<ApiMsg>,
     scene_sender: Sender<SceneBuilderRequest>,
     low_priority_scene_sender: Sender<SceneBuilderRequest>,
@@ -1109,6 +1114,29 @@ pub struct RenderApi {
 }
 
 impl RenderApi {
+    /// Retain the latest CPU-backed scene and resources for native reconstruction.
+    /// Call before adding documents. Updates replace state by key; this is not a
+    /// transaction history and does not retain query callbacks or notifications.
+    pub fn enable_recovery_tracking(&mut self) {
+        *self.recovery.borrow_mut() = Some(recovery::RecoveryState::default());
+    }
+
+    /// Replay a tracked document into a freshly initialized API with the same
+    /// namespace and document ID, preserving future resource-key allocation.
+    /// Opaque producer resources defer recovery rather than silently losing data.
+    pub fn recover_document_from(&mut self, previous: &RenderApi, document: DocumentId) -> Result<(), RecoveryError> {
+        if self.namespace_id != previous.namespace_id { return Err(RecoveryError::NamespaceMismatch); }
+        let transaction = {
+            let target = self.recovery.borrow();
+            if !target.as_ref().ok_or(RecoveryError::NotTracked)?.empty() { return Err(RecoveryError::TargetNotEmpty); }
+            let source = previous.recovery.borrow();
+            source.as_ref().ok_or(RecoveryError::NotTracked)?.replay(document)?
+        };
+        if !self.recovery.borrow().as_ref().unwrap().documents.contains_key(&document) { return Err(RecoveryError::MissingDocument); }
+        self.next_id.set(previous.next_id.get());
+        self.send_transaction(document, transaction);
+        Ok(())
+    }
     /// Returns the namespace ID used by this API object.
     pub fn get_namespace_id(&self) -> IdNamespace {
         self.namespace_id
@@ -1148,6 +1176,9 @@ impl RenderApi {
         window_size_sanity_check(initial_size);
 
         let document_id = DocumentId::new(self.namespace_id, id);
+        if let Some(state) = self.recovery.borrow_mut().as_mut() {
+            state.documents.insert(document_id, recovery::DocumentState::new(initial_size));
+        }
 
         // We send this message to both the render backend and the scene builder instead of having
         // the scene builder thread forward it to the render backend as we do elswhere. This is because
@@ -1166,6 +1197,7 @@ impl RenderApi {
 
     /// Delete a document.
     pub fn delete_document(&self, document_id: DocumentId) {
+        if let Some(state) = self.recovery.borrow_mut().as_mut() { state.documents.remove(&document_id); }
         self.low_priority_scene_sender.send(
             SceneBuilderRequest::DeleteDocument(document_id)
         ).unwrap();
@@ -1332,6 +1364,7 @@ impl RenderApi {
 
     /// Send a transaction to WebRender.
     pub fn send_transaction(&mut self, document_id: DocumentId, transaction: Transaction) {
+        if let Some(state) = self.recovery.borrow_mut().as_mut() { state.record(document_id, &transaction); }
         let mut transaction = transaction.finalize(document_id);
 
         self.resources.update(&mut transaction);

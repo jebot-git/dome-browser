@@ -976,6 +976,17 @@ impl Renderer {
         self.pending_result_msg.take()
     }
 
+    /// Discard queued CPU results after the native context is permanently lost.
+    ///
+    /// This does not apply resource uploads, draw cached targets, or call GL.
+    /// Call on event-loop iterations while waiting for a replacement renderer so
+    /// the old backend does not retain every intervening frame. This renderer
+    /// must never render again; recovery replays CPU scene state into a new one.
+    pub fn discard_pending_results_after_context_loss(&mut self) {
+        self.pending_result_msg.take();
+        while self.result_rx.try_recv().is_ok() {}
+    }
+
     /// Processes the result queue.
     ///
     /// Should be called before `render()`, as texture cache updates are done here.

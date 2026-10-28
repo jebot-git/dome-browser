@@ -78,6 +78,11 @@ pub trait RenderingContext {
     fn native_context_is_lost(&self) -> bool {
         false
     }
+    /// Irreversibly retire an owned native context without requesting a driver
+    /// reset. Outstanding resources keep their owner until normal cleanup.
+    fn retire_native_context(&self) -> Result<(), Error> {
+        Err(Error::UnsupportedOnThisPlatform)
+    }
     /// Returns the `gleam` version of the OpenGL or GLES API.
     fn gleam_gl_api(&self) -> Rc<dyn gleam::gl::Gl>;
     /// Returns the OpenGL or GLES API.
@@ -368,6 +373,11 @@ impl SurfmanRenderingContext {
     fn native_context_is_lost(&self) -> bool {
         self.device.borrow().context_is_lost(&self.context.borrow())
     }
+    fn retire_native_context(&self) -> Result<(), Error> {
+        self.device
+            .borrow()
+            .mark_context_lost(&mut self.context.borrow_mut())
+    }
 
     fn destroy_texture(
         &self,
@@ -516,6 +526,9 @@ impl RenderingContext for SoftwareRenderingContext {
 
     fn native_context_is_lost(&self) -> bool {
         self.surfman_rendering_info.native_context_is_lost()
+    }
+    fn retire_native_context(&self) -> Result<(), Error> {
+        self.surfman_rendering_info.retire_native_context()
     }
 
     fn destroy_texture(
@@ -758,6 +771,9 @@ impl RenderingContext for WindowRenderingContext {
 
     fn native_context_is_lost(&self) -> bool {
         self.surfman_context.native_context_is_lost()
+    }
+    fn retire_native_context(&self) -> Result<(), Error> {
+        self.surfman_context.retire_native_context()
     }
 
     fn destroy_texture(

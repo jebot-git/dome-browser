@@ -4,9 +4,24 @@ The latest scoped native input and XR regression results are recorded in
 [the October 2026 validation report](docs/validation-2026-10-27.md).
 Native reset monitoring and delayed WebGL restoration results are recorded in
 [the native graphics validation record](docs/validation-native-reset-2026-10-28.json).
-Supported contexts prefer robust access and reset notifications. WebGL retries
-transient recreation failures with backoff; full root-renderer reconstruction
-after permanent native loss remains unfinished.
+Live scene reconstruction results are recorded in
+[the renderer recovery validation record](docs/validation-renderer-recovery-2026-10-28.json).
+
+Supported contexts prefer robust access and reset notifications. The FLTK
+frontend retries renderer reconstruction after permanent native loss. It replays
+compact CPU scene and resource state into a distinct native owner while keeping
+live documents, iframe globals, forms, selections, scroll positions and zoom.
+WebGL producers receive context loss and may restore fresh resource generations.
+Old renderer notifications cannot complete frames belonging to the replacement.
+
+Validation covers controlled retirement and repeated reconstruction on native
+and software graphics for WebGL 1 and 2, including visible canvas, image, system
+font and downloaded webfont pixels. The opt-in test embedder captures each
+rendered frame before presentation exchanges its offscreen buffers. No physical
+GPU reset was requested. Opaque blob and snapshot resources defer reconstruction
+until their producers release them; the current Dome frontend does not emit
+those resource types. Optional native-window backends and physical devices
+require further validation.
 
 An experimental FLTK 1.4.5 browser embedding Servo directly through its Rust
 API. The controls are native FLTK widgets. Servo renders HTML, CSS, JavaScript
@@ -18,9 +33,9 @@ The source baseline is Servo `2190554aaa6990416dd92851fcd8240ac63ee750`, fetched
 from <https://github.com/servo/servo> on 2026-10-22. Upstream `main` through
 `61065f91128` was merged on 2026-10-23, including its WebGL, document state,
 JavaScript binding and audio updates. The port is in
-`ports/dome-fltk`; the remaining source changes expose an accelerated offscreen
-constructor and carry the requesting document's origin into the WebXR device
-interface for consent. A further engine fix delivers text-only notifications
+`ports/dome-fltk`. Engine changes include an accelerated offscreen constructor,
+live native-renderer reconstruction, and the requesting document's origin in the
+WebXR device interface for consent. A further engine fix delivers text-only notifications
 without waiting for a nonexistent image-resource callback. Active XR sessions
 are also ended when a document is suspended in history or its window is torn
 down, so navigation and tab closure release the device promptly.
@@ -2027,3 +2042,26 @@ uv run --no-project --with python-xlib --with pillow python ports/dome-fltk/test
   --binary /absolute/path/to/candidate --reference-prefix /private/extracted/rpm-prefix \
   --output /new/private/test-output --wayland
 ```
+
+
+## Native renderer recovery checks
+
+The focused fixture uses the separate `xr-native-input` test embedder. It serves
+local pages, a system font and a webfont under a private profile, bus and
+compositor. The current font fixture uses
+`/usr/share/fonts/google-noto/NotoSansMono-Regular.ttf` and the base Fontconfig
+configuration at `/etc/fonts/fonts.conf`.
+
+```
+uv run --no-project --with python-xlib --with pillow --with dbus-next python \
+  ports/dome-fltk/tests/renderer-recovery.py \
+  --binary /absolute/path/to/test-embedder --output /new/private/test-output
+```
+
+Add `--hardware` for the preferred accelerated adapter and `--webgl2` for WebGL 2.
+Set `DOME_COMPOSITOR` to the private-fixture compositor binary when it is not
+available at `../DomeD/target/release/dome-compositor`.
+
+Each run checks three reconstruction cycles, a rejected replacement before each
+successful recovery, resource-key continuity, live page state, visible pixels,
+actual renderer selection and shutdown with the final context retired.

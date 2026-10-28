@@ -86,6 +86,7 @@ pub(crate) struct Painter {
 
     /// The ID of this painter.
     pub(crate) painter_id: PainterId,
+    pub(crate) renderer_generation: u64,
 
     /// Our [`WebViewRenderer`]s, one for every `WebView`.
     pub(crate) webview_renderers: FxHashMap<WebViewId, WebViewRenderer>,
@@ -158,6 +159,14 @@ impl Painter {
     pub(crate) fn new(
         rendering_context: Rc<dyn RenderingContext>,
         paint: &Paint,
+    ) -> Result<Self, surfman::Error> {
+        Self::new_with_id(rendering_context, paint, PainterId::next())
+    }
+
+    fn new_with_id(
+        rendering_context: Rc<dyn RenderingContext>,
+        paint: &Paint,
+        painter_id: PainterId,
     ) -> Result<Self, surfman::Error> {
         if rendering_context.native_context_is_lost() {
             return Err(surfman::Error::Failed);
@@ -249,10 +258,11 @@ impl Painter {
                 })?,
         ));
 
-        let painter_id = PainterId::next();
+        let notifier = RenderNotifier::new(painter_id, paint.paint_proxy.clone());
+        let renderer_generation = notifier.generation();
         let (mut webrender_renderer, webrender_api_sender) = webrender::create_webrender_instance(
             webrender_gl.clone(),
-            Box::new(RenderNotifier::new(painter_id, paint.paint_proxy.clone())),
+            Box::new(notifier),
             webrender::WebRenderOptions {
                 // We force the use of optimized shaders here because rendering is broken
                 // on Android emulators with unoptimized shaders. This is due to a known
@@ -292,7 +302,8 @@ impl Painter {
 
         webrender_renderer.set_external_image_handler(external_image_handlers);
 
-        let webrender_api = webrender_api_sender.create_api_by_client(painter_id.into());
+        let mut webrender_api = webrender_api_sender.create_api_by_client(painter_id.into());
+        webrender_api.enable_recovery_tracking();
         let webrender_document = webrender_api.add_document(rendering_context.size2d().to_i32());
 
         let gl_renderer = webrender_gl.get_string(gleam::gl::RENDERER);
@@ -303,6 +314,7 @@ impl Painter {
             cleanup_scope: paint.cleanup_scope.clone(),
             render_context_error_reported: false,
             painter_id,
+            renderer_generation,
             embedder_to_constellation_sender,
             webview_renderers: Default::default(),
             rendering_context,
@@ -328,7 +340,59 @@ impl Painter {
         Ok(painter)
     }
 
+    pub(crate) fn recover_rendering_context(
+        &mut self,
+        rendering_context: Rc<dyn RenderingContext>,
+        paint: &Paint,
+    ) -> Result<(), surfman::Error> {
+        // Initialize and replay into a distinct native owner before retiring any
+        // old state. Failure leaves the live document and its previous owner intact.
+        let mut replacement = Self::new_with_id(rendering_context, paint, self.painter_id)?;
+        if replacement.webrender_document != self.webrender_document {
+            return Err(surfman::Error::Failed);
+        }
+        replacement
+            .webrender_api
+            .recover_document_from(&self.webrender_api, self.webrender_document)
+            .map_err(|error| {
+                surfman::Error::GLResourceAllocationFailed(format!(
+                    "Renderer scene recovery: {error:?}"
+                ))
+            })?;
+        std::mem::swap(
+            &mut self.rendering_context,
+            &mut replacement.rendering_context,
+        );
+        std::mem::swap(&mut self.webrender_gl, &mut replacement.webrender_gl);
+        std::mem::swap(&mut self.webrender_api, &mut replacement.webrender_api);
+        std::mem::swap(
+            &mut self.webrender_renderer,
+            &mut replacement.webrender_renderer,
+        );
+        std::mem::swap(
+            &mut self.renderer_generation,
+            &mut replacement.renderer_generation,
+        );
+        self.render_context_error_reported = false;
+        self.pending_frames.set(0);
+        // Keep the CPU WebView/refresh/animation state and its original document ID.
+        // Dropping the temporary painter stops the old backend and retires its
+        // renderer with the old immutable native context, never the new one.
+        drop(replacement);
+        let mut transaction = Transaction::new();
+        transaction.invalidate_rendered_frame(RenderReasons::SCENE);
+        self.generate_frame(&mut transaction, RenderReasons::SCENE);
+        self.send_transaction(transaction);
+        self.set_needs_repaint(RepaintReason::NewWebRenderFrame);
+        Ok(())
+    }
+
     pub(crate) fn perform_updates(&mut self) {
+        if self.rendering_context.native_context_is_lost() {
+            if let Some(renderer) = self.webrender_renderer.as_mut() {
+                renderer.discard_pending_results_after_context_loss();
+            }
+        }
         let mut need_zoom = false;
         let scroll_offset_updates: Vec<_> = self
             .webview_renderers

@@ -76,7 +76,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
     let url = url::Url::parse(&std::env::args().nth(1).ok_or("fixture URL required")?)?;
     let size = dpi::PhysicalSize::new(900, 650);
-    let context = Rc::new(SoftwareRenderingContext::new(size).map_err(|e| format!("{e:?}"))?);
+    let hardware = std::env::var_os("DOME_RENDERER_RECOVERY_HARDWARE").is_some();
+    let create_context = || if hardware { SoftwareRenderingContext::new_accelerated(size) } else { SoftwareRenderingContext::new(size) };
+    let mut context = Rc::new(create_context().map_err(|e| format!("{e:?}"))?);
     context.make_current().map_err(|e| format!("{e:?}"))?;
     let mut opts = servo::Opts::default();
     opts.multiprocess = false;
@@ -122,17 +124,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let deadline = Instant::now() + Duration::from_secs(180);
     let mut quit = false;
+    let mut rendered_frame = None;
     while !quit && Instant::now() < deadline {
-        context.make_current().map_err(|e| format!("{e:?}"))?;
+        if !context.native_context_is_lost() { context.make_current().map_err(|e| format!("{e:?}"))?; }
         servo.spin_event_loop();
         if state.dirty.replace(false) {
             view.paint();
-            context.present();
+            if !context.native_context_is_lost() {
+                if std::env::var_os("DOME_GRAPHICS_LOSS_TEST").is_some() {
+                    rendered_frame = context.read_to_image(servo::DeviceIntRect::from_size(
+                        euclid::Size2D::new(size.width as i32, size.height as i32)));
+                }
+                context.present();
+            }
         }
         if let Ok(line) = rx.try_recv() {
             let command: Value = serde_json::from_str(&line?)?;
             let token = command["token"].as_u64().ok_or("token required")?;
             match command["op"].as_str().ok_or("op required")? {
+                "renderer-loss" => {
+                    assert!(std::env::var_os("DOME_GRAPHICS_LOSS_TEST").is_some());
+                    context.retire_native_context().map_err(|error| format!("{error:?}"))?;
+                    reply(json!({"token":token,"lost":true}));
+                },
+                "renderer-recover" => {
+                    assert!(std::env::var_os("DOME_GRAPHICS_LOSS_TEST").is_some());
+                    let replacement = Rc::new(create_context().map_err(|error| format!("{error:?}"))?);
+                    if command["reject"].as_bool().unwrap_or(false) { replacement.retire_native_context().map_err(|error| format!("{error:?}"))?; }
+                    let result = view.recover_rendering_context(replacement.clone());
+                    if result.is_ok() { context = replacement; rendered_frame = None; state.dirty.set(true); }
+                    reply(json!({"token":token,"recovered":result.is_ok(),"error":result.err().map(|error|format!("{error:?}"))}));
+                },
+                "renderer-frame" => {
+                    assert!(std::env::var_os("DOME_GRAPHICS_LOSS_TEST").is_some());
+                    // present() exchanges the offscreen buffers without copying.
+                    // Capture the frame actually rendered, not the reused back buffer.
+                    let image = rendered_frame.as_ref().ok_or("No rendered frame available")?;
+                    let path=std::path::PathBuf::from(std::env::var("XR_INPUT_PROFILE")?).join("renderer-recovery.png");image.save(&path)?;
+                    reply(json!({"token":token,"path":path}));
+                },
+                "renderer-zoom" => {
+                    assert!(std::env::var_os("DOME_GRAPHICS_LOSS_TEST").is_some());
+                    view.set_page_zoom(command["zoom"].as_f64().ok_or("zoom required")? as f32);
+                    reply(json!({"token":token,"zoomed":true}));
+                },
                 "webgl-test" => {
                     assert!(std::env::var_os("DOME_GRAPHICS_LOSS_TEST").is_some(), "Graphics testing must be explicitly enabled");
                     servo.set_preference("webgl_testing_context_creation_error", servo::PrefValue::Bool(command["creation_error"].as_bool().ok_or("creation_error required")?));

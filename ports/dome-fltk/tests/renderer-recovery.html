@@ -1,0 +1,16 @@
+<!doctype html><meta charset="utf-8"><title>Live renderer recovery</title>
+<style>body{margin:0;background:white;font:22px monospace}section{position:fixed;top:0;left:0;width:700px;background:white;height:420px}#green{width:150px;height:35px;background:rgb(0,200,30)}img{width:128px;height:64px}iframe{width:500px;height:90px}input{font:20px monospace}#text{color:rgb(180,0,180)}</style>
+<section><p id="text">Retained fonts and document state</p><input id="field" value="persistent form value"><br><img id="image" src="/tile.png"><div id="green"></div><iframe src="/frame"></iframe><canvas id="gpu" width="64" height="64"></canvas></section><div style="height:2200px">Scrollable content</div>
+<script>
+window.identity={nonce:Math.random(),origin:performance.timeOrigin};window.test={lost:0,restored:0,ready:false,error:null};
+const field=document.querySelector('#field');field.setSelectionRange(2,8);
+const gl=document.querySelector('#gpu').getContext(new URLSearchParams(location.search).get('version')||'webgl',{preserveDrawingBuffer:true,antialias:false});
+const buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,16,gl.STATIC_DRAW);
+function clear(){gl.clearColor(.25,.8,.1,1);gl.clear(gl.COLOR_BUFFER_BIT)}clear();
+const canvas=document.querySelector('#gpu');canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();test.lost++});
+canvas.addEventListener('webglcontextrestored',()=>{test.restored++;test.oldInvalid=!gl.isBuffer(buffer);clear();const p=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,p);test.pixel=Array.from(p);test.error=gl.getError()});
+addEventListener('load',()=>{test.ready=true;scrollTo(0,120)});
+function snapshot(){return {...test,...identity,value:field.value,start:field.selectionStart,end:field.selectionEnd,y:scrollY,width:innerWidth,text:document.querySelector('#text').textContent,imageReady:document.querySelector('#image').complete,frameIdentity:document.querySelector('iframe').contentWindow.identity,frameReady:document.querySelector('iframe').contentWindow.ready===true,glLost:gl.isContextLost()};}
+function mutate(){field.value='changed during native loss';field.setSelectionRange(3,10);document.querySelector('#text').textContent='Updated while graphics were unavailable';return true;}
+function resources(){const holder=document.createElement('div');for(let i=0;i<180;i++){const image=document.createElement('img');image.style.width='2px';image.style.height='2px';image.src='/tile.png?id='+i;holder.appendChild(image)}document.body.appendChild(holder);return true;}
+</script>

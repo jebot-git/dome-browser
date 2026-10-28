@@ -1,0 +1,248 @@
+{
+  "validated_utc": "2026-10-28T19:19:01.238684+00:00",
+  "base_commit": "e3456065850cad11a3668fafb51092ea55706b34",
+  "optimized_release": true,
+  "passed": true,
+  "browser_sha256": "b77a81b5a859fb4255ee4b171cc326ff4ee26df2f9d7520719cce30fadfff927",
+  "test_embedder_sha256": "eac0f23eed2f39e00bb63a2c0b43b11a00e3f7710d16945e87632f37ba39714b",
+  "source_sha256": {
+    "components/paint/paint.rs": "db41c709f05a197be956ad222c0170b2801229f14d2ee075538bafb577dae0cc",
+    "components/paint/painter.rs": "0368a1820163a3dedbabb81a8b2ef46923c04b7afaa9c63adcc19c9967c3bbc8",
+    "components/paint/render_notifier.rs": "d8498d34f6ec8f1a1c3f823bb0d163d706aac09b584faa86bf0f568e683bb973",
+    "components/servo/webview.rs": "fd5610c908b8905c3fe46975a887b16b977eb846b1a82902c9a8b54f360aac9b",
+    "components/shared/canvas/webgl.rs": "79b308888e5fb6d3cfabebd9dee3725004be583a0a8b972b7021e7429daa903d",
+    "components/shared/paint/lib.rs": "cc5ae0fe1d187b3ea35fd6edf8bab92ede6a433ba2cd3848ef8f51d213daf935",
+    "components/shared/paint/rendering_context.rs": "3dba01dc9ed87fe8f5f749e8b4dd7abbf20b81677a42c72f84a4de082b98e18e",
+    "components/webgl/webgl_thread.rs": "3085ac1f94ebfd9eb88c91eaaa7090143a7c9a65af8b4403d92c932337722ec5",
+    "ports/dome-fltk/examples/xr-native-input.rs": "23a2eadb8a75e3b92aed94d3f7a4e5ab723ff3f3371d4a6ab37f48335379bb8b",
+    "ports/dome-fltk/src/main.rs": "c878ee31ca42e72f3786cc086eb11657f9df7ea92914f54438dd30f6fbc28970",
+    "third_party/webrender/src/render_api.rs": "163567708043f6b9dda8b7e59a1d5802cb242d30534b0bdbada5ffb78b55487d",
+    "third_party/webrender/src/renderer/mod.rs": "0ec45e293af09b8abc96e90f9a7a5159f5fb63b6313afadcb4e620e833209490",
+    "third_party/webrender/src/render_api/recovery.rs": "b7fdba9224be23569f932e287ea927ce00b66efcc9e64292b44c1162cc58ae51",
+    "ports/dome-fltk/tests/renderer-recovery.py": "eec1c0059db4542ba1de7e512c7267ceead77e012229f0eeea0fd6e6166f2ec3",
+    "ports/dome-fltk/tests/renderer-recovery.html": "b76cb2327cf865718529a78a7810b9fec775442fc5012b0d162581f46a427afe"
+  },
+  "results": {
+    "runtime_checks": 1445,
+    "khronos_executions": 978,
+    "native_lifecycle_cases": 12,
+    "live_recovery_cycles": 12,
+    "snapshot_resource_tests": 6
+  },
+  "component_tests_per_configuration": 183,
+  "component_configurations": [
+    "native",
+    "software"
+  ],
+  "component_evidence": "Production engine source bytes match the frozen revision that passed 183 component tests per configuration and six snapshot/resource allocator tests. Test embedder capture and fixture changes were validated with the optimized final bytes.",
+  "compile_checks": [
+    "browser all-targets",
+    "WebGL-only paint",
+    "optional servoshell all-targets",
+    "minimal winit embedder"
+  ],
+  "recovery_configurations": [
+    {
+      "webgl_version": 1,
+      "configuration": "software",
+      "renderers": [
+        "llvmpipe (LLVM 22.1.8, 256 bits)"
+      ],
+      "checks": 28,
+      "cycles": 3,
+      "visible_gpu_pixel_counts": [
+        4096,
+        5929,
+        5929,
+        5929
+      ]
+    },
+    {
+      "webgl_version": 1,
+      "configuration": "native",
+      "renderers": [
+        "Mesa Intel(R) Arc(tm) A770 Graphics (DG2)",
+        "Mesa Intel(R) UHD Graphics 770 (ADL-S GT1)"
+      ],
+      "checks": 28,
+      "cycles": 3,
+      "visible_gpu_pixel_counts": [
+        4096,
+        5929,
+        5929,
+        5929
+      ]
+    },
+    {
+      "webgl_version": 2,
+      "configuration": "software",
+      "renderers": [
+        "llvmpipe (LLVM 22.1.8, 256 bits)"
+      ],
+      "checks": 28,
+      "cycles": 3,
+      "visible_gpu_pixel_counts": [
+        4096,
+        5929,
+        5929,
+        5929
+      ]
+    },
+    {
+      "webgl_version": 2,
+      "configuration": "native",
+      "renderers": [
+        "Mesa Intel(R) Arc(tm) A770 Graphics (DG2)",
+        "Mesa Intel(R) UHD Graphics 770 (ADL-S GT1)"
+      ],
+      "checks": 28,
+      "cycles": 3,
+      "visible_gpu_pixel_counts": [
+        4096,
+        5929,
+        5929,
+        5929
+      ]
+    }
+  ],
+  "behavior": [
+    "Compact latest scene/resource snapshot with deletion, font replay ordering, namespace and monotonic resource-key preservation.",
+    "New renderer and native owner acquired before swapping; failed acquisition keeps live DOM/iframe/form/selection/scroll/zoom state intact.",
+    "Generation-filtered renderer-ready notifications and fresh WebGL producer generations; old canvas objects remain invalid after restoration.",
+    "Known-lost renderers discard queued CPU results without normal GL update/render processing.",
+    "The FLTK frontend retries unavailable reconstruction with existing backoff rather than navigating the document.",
+    "The opt-in test embedder captures the rendered image before presentation exchanges buffers; visible glyph/bitmap/iframe/canvas colors and actual renderer selection are checked."
+  ],
+  "runtime_suites": {
+    "browser-regressions-r18/adblock-disabled/report.json": {
+      "checks": 17,
+      "report_sha256": "06652dfe8adb6def5abdbfe7478630f6aec627c6fa8ea82945b1c3b67ec3d5a1"
+    },
+    "browser-regressions-r18/adblock-enabled/report.json": {
+      "checks": 26,
+      "report_sha256": "e1bacc6009607c9bddf7b044718c15b5081e673c08554beec720d54007cebf1e"
+    },
+    "browser-regressions-r18/cookie-policy/report.json": {
+      "checks": 149,
+      "report_sha256": "b3ae33eae2ae77c32f311c4dcc1392e377ee321957fe17ff8787b025380525d6"
+    },
+    "browser-regressions-r18/cookies/report.json": {
+      "checks": 11,
+      "report_sha256": "aeaf8d7b02badbc6b57773fad809dc25a48e62c2cae5580d4f94080a026af766"
+    },
+    "browser-regressions-r18/history-desktop/report.json": {
+      "checks": 14,
+      "report_sha256": "96fdbe9753dab392036d74f29881c5d182dda0b983feca2a42339df0b38b8f57"
+    },
+    "browser-regressions-r18/live-discord-x/report.json": {
+      "checks": 2,
+      "report_sha256": "3bfe0743eb2cb9586fab2a95682977f2728d3fcee278253b72088879a5389934"
+    },
+    "browser-regressions-r18/scroll/report.json": {
+      "checks": 9,
+      "report_sha256": "22b94a358f4303350e6f323cb4f252a454f07c5f6d93ef7514d9b1a01907f295"
+    },
+    "browser-regressions-r18/stream-terminal/report.json": {
+      "checks": 57,
+      "report_sha256": "b99a0aaa10e8178c0bc5ee18027c49ae1c53980672a13a565d450ce7d96123ce"
+    },
+    "browser-regressions-r18/webgl-accelerated/report.json": {
+      "checks": 280,
+      "report_sha256": "55f8aa794fbc9e5f8a8e2ff5e0dea172ebb931bee6622d1ec119dc3b2ef6b3fd"
+    },
+    "browser-regressions-r18/webgl-software/report.json": {
+      "checks": 280,
+      "report_sha256": "3fbb6bd0c557eeb590fe32c6660c8e2e96bf79c5b55ac2cd00f4bccc88be92e3"
+    },
+    "browser-regressions-r18/xr-context-loss/report.json": {
+      "checks": 68,
+      "report_sha256": "0b456e28adfc78fcf1c8fe5878f170da8fcdcbd9c85b7696212896dd2c373581"
+    },
+    "browser-regressions-r18/xr-pending/report.json": {
+      "checks": 14,
+      "report_sha256": "f49d494041a28ec336dfbbf8cdfb446be24388ac2bcd7f60bc0254da23e8120b"
+    },
+    "additional-regressions-r18/external-links/report.json": {
+      "checks": 63,
+      "report_sha256": "ce7958a51ea89d6a9a4bd7eb4baf9b1dfb89265e04f9fb3a9b786bd8b9d6c846"
+    },
+    "additional-regressions-r18/media-init-shutdown/report.json": {
+      "checks": 1,
+      "report_sha256": "b70d9890b1362ae4a5f1ee630b933ebec7f883f5964738d6613690eaec4f4e67"
+    },
+    "additional-regressions-r18/pdf-handoff/report.json": {
+      "checks": 25,
+      "report_sha256": "15e5231b81bcdba2bee064eb47b833ef6108a4fb449e6eee3fa6e29bc693c8d0"
+    },
+    "additional-regressions-r18/smallnet-profile-wayland/report.json": {
+      "checks": 44,
+      "report_sha256": "fd7f414109d6899cb5bc8c6ab71315717cb8ac7caf319fda75a60e47974c2d01"
+    },
+    "additional-regressions-r18/worker-shutdown/report.json": {
+      "checks": 3,
+      "report_sha256": "2c403c9863098b1ebcfd121505a7a08f5fef932447e891160c3e9826316d18f7"
+    },
+    "xr-regressions-r18/xr-baseline/report.json": {
+      "checks": 45,
+      "report_sha256": "548f9026d08117e867273be2810e1e122ad9cf0380c96691c121c2838297e9be"
+    },
+    "xr-regressions-r18/xr-consent-cancellation/report.json": {
+      "checks": 26,
+      "report_sha256": "3f8f0160a00e252b7e67963d8ab573e33c57c10e7a62440f83bbb7a7e2c7b46b"
+    },
+    "xr-regressions-r18/xr-context-loss/report.json": {
+      "checks": 68,
+      "report_sha256": "2d08bee7ca08e6045a6dbe27515c8253bfea084cd4a58ef7ee43ab04909b3046"
+    },
+    "xr-regressions-r18/xr-device-selection/report.json": {
+      "checks": 18,
+      "report_sha256": "b645a00760cdb32a8efbc47f32fc88c6ca46f8dbf107b86b3e640e67db1c0138"
+    },
+    "xr-regressions-r18/xr-devicechange/report.json": {
+      "checks": 30,
+      "report_sha256": "791ed03ebd19f835e261c8cf5adb7d49fb5b8d97a1f9be66eb69f3811456b486"
+    },
+    "xr-regressions-r18/xr-no-host/report.json": {
+      "checks": 31,
+      "report_sha256": "11bd46dc74421e0deaea9e765c57bdef72c55d0c69557f593d75f2f4926091e0"
+    },
+    "xr-regressions-r18/xr-pending/report.json": {
+      "checks": 14,
+      "report_sha256": "c1e9b7595f7eb80554dea841dd4437dd399462fb65b21991e06586c3b1a0ec0b"
+    },
+    "xr-regressions-r18/xr-policy-denied/report.json": {
+      "checks": 23,
+      "report_sha256": "fe0bd7ffd13e814f7981cedc0418db5266fcf3bb969b057d4b32c43a4d841a29"
+    },
+    "restoration-retry-r18/report.json": {
+      "checks": 15,
+      "report_sha256": "2e2cc179c1bee529df12ce79c1a9409a1d13f080a38ac3fd3ee1349dbca79146"
+    },
+    "renderer-recovery-software-webgl1-r18/report.json": {
+      "checks": 28,
+      "report_sha256": "d3fbd27396b2b3579962940241156f5d54c37b9ab1cd55aedf2c4808ce057cc8"
+    },
+    "renderer-recovery-native-webgl1-r18/report.json": {
+      "checks": 28,
+      "report_sha256": "292a7d9c183b260c42d155cb1be94fce99bd7f29877e42d350e32a2d7ee056cf"
+    },
+    "renderer-recovery-software-webgl2-r18/report.json": {
+      "checks": 28,
+      "report_sha256": "6ad0a014f3a0c60de8367075467859ced6bf9f4fa09464b62d8a9fc99186f944"
+    },
+    "renderer-recovery-native-webgl2-r18/report.json": {
+      "checks": 28,
+      "report_sha256": "ae2cf9fbef748a353923c4c535a2cdb6e478a87898e3d58e16721a24ab912e3b"
+    }
+  },
+  "scope": "Controlled native context retirement and reconstruction with unchanged live DOM/forms/selection/iframe/scroll/zoom, system fonts and downloaded webfonts, images and visible restored WebGL1/2 pixels. No physical GPU reset, adapter migration or complete browser/WebXR conformance claim.",
+  "remaining": [
+    "Root/native-window backend coverage beyond default Dome offscreen frontend",
+    "Broader WebXR policy reporting and backend/device compliance",
+    "Actual scroll indicator high DPI/zoom/input validation",
+    "Remaining standards-focused rendering and continued user stability testing"
+  ],
+  "physical_gpu_reset_requested": false,
+  "desktop_sessions_restarted": false,
+  "media_playback_in_scope": false
+}

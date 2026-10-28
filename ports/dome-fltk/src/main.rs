@@ -1257,6 +1257,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cosmetic_generation = cosmetic_generation.wrapping_add(1);
             servo.set_preference("network_cosmetic_filter_generation", servo::PrefValue::Int(cosmetic_generation));
         }
+        let current_context = tabs[active].view.rendering_context();
+        if !Rc::ptr_eq(&tabs[active].context, &current_context) {
+            tabs[active].context = current_context;
+            tabs[active].state.dirty.set(true);
+        }
+        if tabs[active].context.native_context_is_lost() && tabs[active].state.graphics.due(Instant::now()) {
+            let replacement = context(software).and_then(|replacement| {
+                tabs[active].view.recover_rendering_context(replacement.clone())
+                    .map_err(|error| format!("{error:?}"))?;
+                Ok(replacement)
+            });
+            match replacement {
+                Ok(replacement) => { tabs[active].context = replacement; tabs[active].state.dirty.set(true); },
+                Err(error) => display_failed(&tabs[active].state, &surfman::Error::GLContextInitializationFailed(error.to_string())),
+            }
+        }
         if tabs[active].state.graphics.due(Instant::now()) {
             if let Err(error) = tabs[active].context.make_current() {
                 display_failed(&tabs[active].state, &error);

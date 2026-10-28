@@ -99,6 +99,13 @@ impl WebGLThreads {
             .is_ok_and(|_| webgl_exit_receiver.recv().is_ok())
     }
 
+    /// Invalidate producer generations after a painter acquires a new native device.
+    pub fn reset_painter_resources(&self, painter_id: PainterId) -> bool {
+        let Some((sender, receiver)) = webgl_channel() else { return false; };
+        self.0.send(WebGLMsg::ResetPainterResources(painter_id, sender))
+            .is_ok_and(|_| receiver.recv().is_ok())
+    }
+
     /// Inform the WebGLThreads that WebRender has finished rendering a particular WebGL context,
     /// and if it was marked for deletion, it can now be released.
     pub fn finished_rendering_to_context(&self, context_id: WebGLContextId) -> WebGLSendResult {
@@ -110,6 +117,8 @@ impl WebGLThreads {
 /// WebGL Message API
 #[derive(Debug, Deserialize, Serialize)]
 pub enum WebGLMsg {
+    /// Retire producer generations and let pages renegotiate on a replacement device.
+    ResetPainterResources(PainterId, GenericSender<()>),
     /// Creates a new WebGLContext.
     CreateContext(
         PainterId,
