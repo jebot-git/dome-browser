@@ -41,6 +41,7 @@ unsafe extern "C" {
     pub fn browser_ui_close();
     pub fn browser_ui_scroll_metrics(tab: u64, generation: u64, offset: f32, visible: f32, total: f32);
     pub fn browser_ui_frame(pixels: *const u8, width: u32, height: u32);
+    pub fn browser_ui_clear_frame();
     pub fn browser_ui_title(title: *const c_char, url: *const c_char, back: i32, forward: i32);
     pub fn browser_ui_wallet(json: *const c_char) -> *const c_char;
     pub fn browser_ui_wallet_clear();

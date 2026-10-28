@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Isolated embedder regression for owner-thread retirement at final shutdown.
 //! Uses private offscreen contexts; never resets the GPU or controls a desktop.
+#[path = "../src/graphics.rs"]
+mod graphics;
 use servo::{
     EventLoopWaker, RenderingContext, ServoBuilder, SoftwareRenderingContext, WebViewBuilder,
 };
@@ -86,8 +88,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
     let scenario = std::env::args()
         .nth(1)
-        .ok_or("recover, retain, fallback or render required")?;
-    assert!(["recover", "retain", "fallback", "render"].contains(&scenario.as_str()));
+        .ok_or("recover, retain, fallback, render, application or create required")?;
+    assert!(
+        [
+            "recover",
+            "retain",
+            "fallback",
+            "render",
+            "application",
+            "create"
+        ]
+        .contains(&scenario.as_str())
+    );
     let size = dpi::PhysicalSize::new(64, 64);
     let inner = if std::env::var_os("DOME_CREATION_SOFTWARE").is_some() {
         SoftwareRenderingContext::new(size)
@@ -122,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .event_loop_waker(Box::new(Waker))
         .build();
     let view = WebViewBuilder::new(&servo, context.clone()).build();
-    if scenario == "render" {
+    if ["render", "application", "create"].contains(&scenario.as_str()) {
         let peer = if std::env::var_os("DOME_CREATION_SOFTWARE").is_some() {
             SoftwareRenderingContext::new(size)
         } else {
@@ -138,25 +150,89 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             servo::DeviceIntPoint::new(0, 0),
             servo::DeviceIntPoint::new(64, 64),
         );
-        fail.store(true, Ordering::Release);
-        view.paint();
-        assert!(
-            peer.read_to_image(rect)
-                .unwrap()
-                .pixels()
-                .all(|pixel| pixel.0 == [0, 0, 255, 255]),
-            "unavailable frame must preserve the peer target"
-        );
-        fail.store(false, Ordering::Release);
-        view.paint();
-        assert!(
-            context
-                .read_to_image(rect)
-                .unwrap()
-                .pixels()
-                .all(|pixel| pixel.0 == [255, 0, 0, 255]),
-            "a later available frame must render normally"
-        );
+        if scenario == "create" {
+            let inner = if std::env::var_os("DOME_CREATION_SOFTWARE").is_some() {
+                SoftwareRenderingContext::new(size)
+            } else {
+                SoftwareRenderingContext::new_accelerated(size)
+            }
+            .map_err(|error| format!("{error:?}"))?;
+            let unavailable = Arc::new(AtomicBool::new(true));
+            let candidate = Rc::new(Context {
+                inner,
+                fail: unavailable.clone(),
+                attempts: Rc::new(Cell::new(0)),
+                host_alive: host_alive.clone(),
+                expose_scope: true,
+            });
+            peer.make_current().map_err(|error| format!("{error:?}"))?;
+            peer.prepare_for_rendering();
+            for _ in 0..3 {
+                assert!(
+                    WebViewBuilder::new(&servo, candidate.clone())
+                        .try_build()
+                        .is_err()
+                );
+                assert!(
+                    peer.read_to_image(rect)
+                        .unwrap()
+                        .pixels()
+                        .all(|pixel| pixel.0 == [0, 0, 255, 255])
+                );
+            }
+            unavailable.store(false, Ordering::Release);
+            let recovered = WebViewBuilder::new(&servo, candidate.clone())
+                .try_build()
+                .map_err(|error| format!("{error:?}"))?;
+            recovered.paint();
+            assert!(
+                candidate
+                    .read_to_image(rect)
+                    .unwrap()
+                    .pixels()
+                    .all(|pixel| pixel.0 == [255, 0, 0, 255])
+            );
+            drop(recovered);
+            drop(candidate);
+        } else if scenario == "application" {
+            let retry = graphics::RetryState::default();
+            let now = Instant::now();
+            fail.store(true, Ordering::Release);
+            assert!(graphics::capture(&*context, || view.paint()).is_err());
+            assert!(retry.failure(now) && !retry.due(now));
+            assert!(
+                peer.read_to_image(rect)
+                    .unwrap()
+                    .pixels()
+                    .all(|pixel| pixel.0 == [0, 0, 255, 255])
+            );
+            fail.store(false, Ordering::Release);
+            assert!(retry.due(now + Duration::from_secs(1)));
+            let image = graphics::capture(&*context, || view.paint())
+                .map_err(|error| format!("{error:?}"))?;
+            assert!(image.pixels().all(|pixel| pixel.0 == [255, 0, 0, 255]));
+            assert!(retry.recover());
+        } else {
+            fail.store(true, Ordering::Release);
+            view.paint();
+            assert!(
+                peer.read_to_image(rect)
+                    .unwrap()
+                    .pixels()
+                    .all(|pixel| pixel.0 == [0, 0, 255, 255]),
+                "unavailable frame must preserve the peer target"
+            );
+            fail.store(false, Ordering::Release);
+            view.paint();
+            assert!(
+                context
+                    .read_to_image(rect)
+                    .unwrap()
+                    .pixels()
+                    .all(|pixel| pixel.0 == [255, 0, 0, 255]),
+                "a later available frame must render normally"
+            );
+        }
         drop(view);
         drop(context);
         drop(servo);
@@ -170,7 +246,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         host_alive.set(false);
         println!(
             "NATIVE_RENDER {}",
-            serde_json::json!({"passed":true,"failed_frame_skipped":true,"recovered":true})
+            serde_json::json!({"scenario":scenario,"passed":true,"failed_frame_skipped":true,"recovered":true})
         );
         return Ok(());
     }

@@ -155,14 +155,23 @@ impl Drop for Painter {
 }
 
 impl Painter {
-    pub(crate) fn new(rendering_context: Rc<dyn RenderingContext>, paint: &Paint) -> Self {
-        let webrender_gl = rendering_context.gleam_gl_api();
-
-        // Make sure the gl context is made current.
-        if let Err(err) = rendering_context.make_current() {
-            warn!("Failed to make the rendering context current: {:?}", err);
+    pub(crate) fn new(
+        rendering_context: Rc<dyn RenderingContext>,
+        paint: &Paint,
+    ) -> Result<Self, surfman::Error> {
+        if rendering_context.native_context_is_lost() {
+            return Err(surfman::Error::Failed);
         }
-        debug_assert_eq!(webrender_gl.get_error(), gleam::gl::NO_ERROR,);
+        rendering_context.make_current()?;
+        if rendering_context.native_context_is_lost() {
+            return Err(surfman::Error::Failed);
+        }
+        let webrender_gl = rendering_context.gleam_gl_api();
+        if webrender_gl.get_error() != gleam::gl::NO_ERROR {
+            return Err(surfman::Error::GLResourceAllocationFailed(
+                "Renderer entry state".into(),
+            ));
+        }
 
         let id_manager = paint.webrender_external_image_id_manager();
         let mut external_image_handlers = Box::new(WebRenderExternalImageHandlers::new(id_manager));
@@ -200,6 +209,9 @@ impl Painter {
         ));
 
         rendering_context.prepare_for_rendering();
+        if rendering_context.native_context_is_lost() {
+            return Err(surfman::Error::Failed);
+        }
         let clear_color = servo_config::pref!(shell_background_color_rgba);
         let clear_color = ColorF::new(
             clear_color[0] as f32,
@@ -230,7 +242,11 @@ impl Painter {
                     )
                 })
                 .build()
-                .expect("Unable to initialize WebRender worker pool."),
+                .map_err(|error| {
+                    surfman::Error::GLResourceAllocationFailed(format!(
+                        "Renderer worker initialization: {error:?}"
+                    ))
+                })?,
         ));
 
         let painter_id = PainterId::next();
@@ -268,7 +284,11 @@ impl Painter {
             },
             None,
         )
-        .expect("Unable to initialize WebRender.");
+        .map_err(|error| {
+            surfman::Error::GLResourceAllocationFailed(format!(
+                "Renderer initialization: {error:?}"
+            ))
+        })?;
 
         webrender_renderer.set_external_image_handler(external_image_handlers);
 
@@ -305,7 +325,7 @@ impl Painter {
         };
         painter.assert_gl_framebuffer_complete();
         painter.clear_background();
-        painter
+        Ok(painter)
     }
 
     pub(crate) fn perform_updates(&mut self) {

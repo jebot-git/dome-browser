@@ -9,6 +9,7 @@ mod wallet;
 mod storage;
 mod cookie_settings;
 mod memory_diagnostics;
+mod graphics;
 mod native_touch;
 mod native_pen;
 mod ui;
@@ -94,6 +95,7 @@ impl servo::ServoDelegate for Services {
 }
 struct PageState {
     dirty: Cell<bool>,
+    graphics: graphics::RetryState,
     scroll_metrics: Cell<(f32,f32,f32)>,
     scroll_generation: Cell<u64>,
     title: RefCell<String>,
@@ -447,6 +449,7 @@ fn context(software: bool) -> Result<Rc<dyn RenderingContext>, Box<dyn std::erro
 fn state(id: usize, permissions: Rc<RefCell<std::collections::HashSet<String>>>, services: Rc<Services>) -> Rc<PageState> {
     Rc::new(PageState {
         dirty: Cell::new(true),
+        graphics: graphics::RetryState::default(),
         scroll_metrics: Cell::new((0.,0.,0.)),
         scroll_generation: Cell::new(0),
         title: RefCell::new("New tab".into()),
@@ -464,6 +467,14 @@ fn state(id: usize, permissions: Rc<RefCell<std::collections::HashSet<String>>>,
         services,
         permissions,
     })
+}
+fn display_failed(state: &PageState, error: &surfman::Error) {
+    state.dirty.set(true);
+    if state.graphics.failure(Instant::now()) {
+        unsafe { ui::browser_ui_clear_frame(); }
+        ui::status("Page display unavailable. Other tabs remain usable.");
+        eprintln!("DISPLAY: {error:?}");
+    }
 }
 fn parse_url(text: &str) -> Result<Url, url::ParseError> {
     let text = text.trim();
@@ -600,7 +611,7 @@ fn restore(servo: &servo::Servo, saved: &storage::Session, software: bool,
             .user_content_manager(compatibility::manager(servo))
             .clipboard_delegate(Rc::new(Clipboard)).url(Url::parse(&item.url)?)
             .protocol_state(item.protocol_state.clone())
-            .delegate(state.clone()).build();
+            .delegate(state.clone()).try_build().map_err(|error| format!("Cannot prepare restored page: {error:?}"))?;
         view.set_page_zoom(item.zoom);
         tabs.push(Tab { view, context: ctx, state, zoom: item.zoom });
     }
@@ -817,7 +828,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .clipboard_delegate(Rc::new(Clipboard))
         .url(parse_url(&target)?)
         .delegate(first.clone())
-        .build();
+        .try_build().map_err(|error| format!("Cannot prepare initial page: {error:?}"))?;
     let mut tabs = vec![Tab {
         view,
         context: initial,
@@ -827,8 +838,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut active = 0;
     let mut next_id = 1;
     if let Some(saved) = restored {
-        tabs = restore(&servo, &saved, software, permissions.clone(), services.clone(), &mut next_id)?;
-        active = saved.active;
+        match restore(&servo, &saved, software, permissions.clone(), services.clone(), &mut next_id) {
+            Ok(restored) => { tabs = restored; active = saved.active; },
+            Err(error) => { ui::status("Session restore is temporarily unavailable"); eprintln!("SESSION: {error}"); autosave = false; },
+        }
     }
     let mut last_session = None;
     let mut last_save = Instant::now() - Duration::from_secs(1);
@@ -975,18 +988,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 4 => tabs[active].view.reload(),
                 5 => {
-                    let url=parse_url(&event.text())?;
+                    let url = match parse_url(&event.text()) {
+                        Ok(url) => url,
+                        Err(error) => { ui::status(&error.to_string()); continue; },
+                    };
                     if external_links::handles(&url) { services.external_links.launch(url); continue; }
-                    let ctx = context(software)?;
+                    let ctx = match context(software) {
+                        Ok(context) => context,
+                        Err(error) => { ui::status("Cannot open another tab right now"); eprintln!("PAGE: {error}"); continue; },
+                    };
                     let s = state(next_id, permissions.clone(), services.clone());
-                    *s.url.borrow_mut() = parse_url(&event.text())?.to_string();
+                    *s.url.borrow_mut() = url.to_string();
                     next_id += 1;
                     let view = WebViewBuilder::new(&servo, ctx.clone())
                         .user_content_manager(compatibility::manager(&servo))
                         .clipboard_delegate(Rc::new(Clipboard))
                         .delegate(s.clone())
-                        .url(parse_url(&event.text())?)
-                        .build();
+                        .url(url)
+                        .try_build();
+                    let view = match view {
+                        Ok(view) => view,
+                        Err(error) => { ui::status("Cannot open another tab right now"); eprintln!("PAGE: {error:?}"); continue; },
+                    };
                     tabs.push(Tab {
                         view,
                         context: ctx,
@@ -1234,10 +1257,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cosmetic_generation = cosmetic_generation.wrapping_add(1);
             servo.set_preference("network_cosmetic_filter_generation", servo::PrefValue::Int(cosmetic_generation));
         }
-        tabs[active]
-            .context
-            .make_current()
-            .map_err(|e| format!("Graphics context lost: {e:?}"))?;
+        if tabs[active].state.graphics.due(Instant::now()) {
+            if let Err(error) = tabs[active].context.make_current() {
+                display_failed(&tabs[active].state, &error);
+            }
+        }
         wake.store(false, Ordering::Release);
         servo.spin_event_loop();
         if tabs.iter().any(|t| t.state.closed.get()) {
@@ -1254,7 +1278,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let requests: Vec<_> = tabs.iter().flat_map(|t| t.state.pending.take()).collect();
         for request in requests {
-            let ctx = context(software)?;
+            let ctx = match context(software) {
+                Ok(context) => context,
+                Err(error) => { ui::status("Cannot open the requested window right now"); eprintln!("PAGE: {error}"); continue; },
+            };
             let s = state(next_id, permissions.clone(), services.clone());
             next_id += 1;
             let view = request
@@ -1262,7 +1289,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .user_content_manager(compatibility::manager(&servo))
                 .clipboard_delegate(Rc::new(Clipboard))
                 .delegate(s.clone())
-                .build();
+                .try_build();
+            let view = match view {
+                Ok(view) => view,
+                Err(error) => { ui::status("Cannot open the requested window right now"); eprintln!("PAGE: {error:?}"); continue; },
+            };
             tabs.push(Tab {
                 view,
                 context: ctx,
@@ -1325,23 +1356,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = &tabs[active].state;
         let (offset, visible, total) = state.scroll_metrics.get();
         unsafe { ui::browser_ui_scroll_metrics(state.tab as u64, state.scroll_generation.get(), offset, visible, total); }
-        if tabs[active].state.dirty.replace(false) {
+        if tabs[active].state.dirty.get() && tabs[active].state.graphics.due(Instant::now()) {
             let tab = &tabs[active];
-            tab.context.make_current().map_err(|e| format!("{e:?}"))?;
-            tab.view.paint();
-            let size = tab.context.size();
-            if let Some(image) =
-                tab.context
-                    .read_to_image(servo::DeviceIntRect::from_size(euclid::Size2D::new(
-                        size.width as i32,
-                        size.height as i32,
-                    )))
-            {
-                if let Some(path) = std::env::var_os("DOME_BROWSER_FRAME_CAPTURE") {
-                    image.save(path)?;
-                }
-                unsafe { ui::browser_ui_frame(image.as_ptr(), size.width, size.height) };
-                captures += 1;
+            match graphics::capture(&*tab.context, || tab.view.paint()) {
+                Ok(image) => {
+                    let size = tab.context.size();
+                    if let Some(path) = std::env::var_os("DOME_BROWSER_FRAME_CAPTURE") { image.save(path)?; }
+                    unsafe { ui::browser_ui_frame(image.as_ptr(), size.width, size.height) };
+                    tab.state.dirty.set(false);
+                    if tab.state.graphics.recover() { ui::status("Page display restored"); }
+                    captures += 1;
+                },
+                Err(error) => display_failed(&tab.state, &error),
             }
         }
         memory_capture.update(&servo, start.elapsed());

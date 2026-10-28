@@ -278,6 +278,17 @@ impl Paint {
         &mut self,
         rendering_context: Rc<dyn RenderingContext>,
     ) -> PainterId {
+        self.try_register_rendering_context(rendering_context)
+            .expect("Unable to initialize rendering context")
+    }
+
+    pub fn try_register_rendering_context(
+        &mut self,
+        rendering_context: Rc<dyn RenderingContext>,
+    ) -> Result<PainterId, surfman::Error> {
+        if rendering_context.native_context_is_lost() {
+            return Err(surfman::Error::Failed);
+        }
         if let Some(painter_id) = self.painters.iter().find_map(|painter| {
             let painter = painter.borrow();
             if Rc::ptr_eq(&painter.rendering_context, &rendering_context) {
@@ -286,7 +297,7 @@ impl Paint {
                 None
             }
         }) {
-            return painter_id;
+            return Ok(painter_id);
         }
 
         // Retain a completion handle while its context lives or owns deferred
@@ -294,10 +305,18 @@ impl Paint {
         self.native_context_scopes
             .retain(|(context, scope)| context.strong_count() != 0 || scope.pending());
         if let Some(scope) = rendering_context.cleanup_scope() {
-            self.native_context_scopes
-                .push((Rc::downgrade(&rendering_context), scope));
+            let owner = Rc::downgrade(&rendering_context);
+            if !self
+                .native_context_scopes
+                .iter()
+                .any(|(existing, _)| existing.ptr_eq(&owner))
+            {
+                self.native_context_scopes.push((owner, scope));
+            }
         }
-        let painter = Painter::new(rendering_context.clone(), self);
+        let painter = self
+            .cleanup_scope
+            .run(|| Painter::new(rendering_context.clone(), self))?;
         let painter_id = painter.painter_id;
         self.painters.push(Rc::new(RefCell::new(painter)));
 
@@ -305,12 +324,12 @@ impl Paint {
         // absence from the map
         let Some(connection) = rendering_context.connection() else {
             warn!("The rendering context has no surfman connection, WebGL will be unavailable");
-            return painter_id;
+            return Ok(painter_id);
         };
         let Ok(adapter) = connection.create_adapter().inspect_err(|error| {
             warn!("Could not create a surfman adapter, WebGL will be unavailable: {error:?}")
         }) else {
-            return painter_id;
+            return Ok(painter_id);
         };
 
         self.painter_surfman_details_map.insert(
@@ -321,7 +340,7 @@ impl Paint {
             },
         );
 
-        painter_id
+        Ok(painter_id)
     }
 
     fn remove_painter(&mut self, painter_id: PainterId) {

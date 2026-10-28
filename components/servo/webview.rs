@@ -154,11 +154,11 @@ impl Drop for WebViewInner {
 }
 
 impl WebView {
-    pub(crate) fn new(mut builder: WebViewBuilder) -> Self {
+    pub(crate) fn new(mut builder: WebViewBuilder) -> Result<Self, surfman::Error> {
         let servo = builder.servo;
         let painter_id = servo
             .paint_mut()
-            .register_rendering_context(builder.rendering_context.clone());
+            .try_register_rendering_context(builder.rendering_context.clone())?;
 
         let id = WebViewId::new(painter_id);
         let webview = Self(Rc::new(RefCell::new(WebViewInner {
@@ -243,7 +243,7 @@ impl WebView {
             },
         }
 
-        webview
+        Ok(webview)
     }
 
     fn inner(&self) -> Ref<'_, WebViewInner> {
@@ -1248,6 +1248,12 @@ impl WebViewBuilder {
 
     /// Create the [`WebView`] using the configuration specified in this [`WebViewBuilder`].
     pub fn build(self) -> WebView {
+        self.try_build().expect("Unable to initialize WebView rendering context")
+    }
+
+    /// Create a view without committing a new page if native rendering setup
+    /// fails. An auxiliary-window request is automatically declined on failure.
+    pub fn try_build(self) -> Result<WebView, surfman::Error> {
         WebView::new(self)
     }
 }

@@ -169,6 +169,10 @@ public:
     if(indicator.opacity(now())>0 && !Fl::has_timeout(fade,this))Fl::add_timeout(0.02,fade,this);
   }
   Page(int x,int y,int w,int h):Fl_Widget(x,y,w,h){}
+  void clear_frame() {
+    std::vector<uint8_t>().swap(pixels);pw=ph=0;indicator=ScrollIndicator{};
+    Fl::remove_timeout(fade,this);redraw();
+  }
   void frame(const uint8_t *p,unsigned width,unsigned height) {
     if (!p || width>8192 || height>8192) return;
     pixels.assign(p,p+size_t(width)*height*4); pw=width;ph=height;redraw();
@@ -370,6 +374,7 @@ extern "C" void browser_ui_wake(){Fl::awake();}
 extern "C" void browser_ui_close(){if(Fl::event_dispatch()==nativeDispatch)Fl::event_dispatch(previousDispatch);keyboardFocused=false;reportedPageFocus=-1;if(setNativePenHandler)setNativePenHandler(nullptr,nullptr);setNativePenHandler=nullptr;if(fl_wl_set_touch_handler)fl_wl_set_touch_handler(nullptr,nullptr);browser_ui_smallnet_form_close();browser.reset();if(applicationBus){if(applicationObject)g_dbus_connection_unregister_object(applicationBus,applicationObject);g_object_unref(applicationBus);applicationBus=nullptr;}if(applicationInfo){g_dbus_node_info_unref(applicationInfo);applicationInfo=nullptr;}}
 extern "C" void browser_ui_scroll_metrics(uint64_t tab,uint64_t generation,float offset,float visible,float total){if(browser)browser->page->scroll_metrics(tab,generation,offset,visible,total);}
 extern "C" void browser_ui_frame(const uint8_t *p,unsigned w,unsigned h){browser->page->frame(p,w,h);}
+extern "C" void browser_ui_clear_frame(){if(browser)browser->page->clear_frame();}
 extern "C" void browser_ui_title(const char *title,const char *url,int back,int forward){browser->copy_label((flatCaption(title,false,160)+" — Dome Browser").c_str());if(Fl::focus()!=browser->address)browser->address->setUrl(url);if(back)browser->back->activate();else browser->back->deactivate();if(forward)browser->forward->activate();else browser->forward->deactivate();}
 extern "C" void browser_ui_tabs(const char *text,int active){try{auto data=Json::parse(text);std::vector<std::string> labels;int index=0;for(const auto &item:data)labels.push_back(std::to_string(++index)+". "+item.get<std::string>());browser->tabs->assign(labels,active);}catch(...){} }
 extern "C" void browser_ui_status(const char *text){browser->status->copy_label(text);}
