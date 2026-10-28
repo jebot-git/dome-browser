@@ -1157,6 +1157,10 @@ impl ReadableStream {
 
     /// <https://streams.spec.whatwg.org/#readablestream-enqueue>
     pub(crate) fn enqueue_native(&self, cx: &mut JSContext, bytes: Vec<u8>) {
+        // Native callbacks can arrive after cancellation or an earlier failure.
+        if !self.is_readable() {
+            return;
+        }
         match self.controller.borrow().as_ref() {
             Some(ControllerType::Default(controller)) => controller
                 .get()
@@ -1233,12 +1237,26 @@ impl ReadableStream {
         handle_mut.set(self.stored_error.get());
     }
 
-    /// <https://streams.spec.whatwg.org/#readable-stream-error>
-    /// Note: in other use cases this call happens via the controller.
+    /// Error a native source through its controller, including the controller's
+    /// terminal-state check and queue/algorithm cleanup. Network completion or
+    /// cancellation may report another error after the stream has settled.
     pub(crate) fn error_native(&self, cx: &mut JSContext, error: Error) {
+        if !self.is_readable() {
+            return;
+        }
         rooted!(&in(cx) let mut error_val = UndefinedValue());
         error.to_jsval(cx, &self.global(), error_val.handle_mut());
-        self.error(cx, error_val.handle());
+        match self.controller.borrow().as_ref() {
+            Some(ControllerType::Default(controller)) => controller
+                .get()
+                .expect("Stream should have controller.")
+                .error(cx, error_val.handle()),
+            Some(ControllerType::Byte(controller)) => controller
+                .get()
+                .expect("Stream should have controller.")
+                .error(cx, error_val.handle()),
+            None => unreachable!("Native stream does not have a controller."),
+        }
     }
 
     /// Call into the controller's `Close` method.

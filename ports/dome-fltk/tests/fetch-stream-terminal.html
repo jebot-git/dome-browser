@@ -1,0 +1,49 @@
+<!doctype html><meta charset=utf-8><title>Native fetch stream lifecycle</title>
+<body style="background:#234;color:white;font:16px monospace">Native fetch stream lifecycle</body>
+<script>
+(async()=>{
+ const checks=[];
+ function check(value,name){checks.push({name,passed:!!value});if(!value)throw Error(name)}
+ const pause=()=>new Promise(resolve=>setTimeout(resolve,30));
+ async function rejected(promise){try{await promise;throw Error('Expected rejection')}catch(error){check(error instanceof TypeError,'Network failure rejects with TypeError');return error}}
+ async function positive(label){check(await(await fetch('/ok?'+label)).text()==='ordinary content','Successful fetch after '+label)}
+ try{
+  for(let i=0;i<8;i++){
+   await rejected(fetch('/unavailable?'+i));
+   await pause();await positive('early failure '+i);
+  }
+  for(let i=0;i<4;i++){
+   const abort=new AbortController();
+   const response=await fetch('/truncated?'+i,{signal:abort.signal});
+   const reader=response.body.getReader();
+   const closed=reader.closed.catch(error=>error);
+   let first;
+   try{while(!(await reader.read()).done){}}catch(error){first=error}
+   check(first instanceof TypeError,'Truncated response errors its reader');
+   check(await closed===first,'Reader closed promise retains the first body error');
+   abort.abort();await pause();
+   check(await rejected(reader.read())===first,'Late abort retains the first body error');
+   reader.releaseLock();await positive('body error '+i);
+  }
+  for(let i=0;i<4;i++){
+   const abort=new AbortController();
+   const response=await fetch('/slow?'+i,{signal:abort.signal});
+   await response.body.cancel('ordinary cancellation');abort.abort();await pause();
+   const reader=response.body.getReader();
+   check((await reader.read()).done,'Cancelled body remains closed after late abort');
+   await reader.closed;reader.releaseLock();await positive('cancelled body '+i);
+  }
+  for(let i=0;i<4;i++){
+   const abort=new AbortController();
+   const response=await fetch('/ok?complete='+i,{signal:abort.signal});
+   check(await response.text()==='ordinary content','Complete response body is consumed');
+   abort.abort();await pause();
+   const reader=response.body.getReader();
+   check((await reader.read()).done,'Consumed body remains closed after late abort');
+   await reader.closed;reader.releaseLock();await positive('completed body '+i);
+  }
+  check(true,'Page survives all native fetch lifecycle cases');
+ }catch(error){checks.push({name:'Fixture completes',passed:false,error:String(error)})}
+ await fetch('/report',{method:'POST',body:JSON.stringify({checks})});
+})();
+</script>

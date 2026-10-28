@@ -1,0 +1,94 @@
+{
+  "date": "2026-10-28",
+  "problem": "Repeated native fetch completion errors could stop a script thread after the response stream was already terminal.",
+  "change": [
+    "Preserve terminal state and the first error on late native callbacks",
+    "Use the existing default/byte controller error lifecycle to clear queued data and algorithms",
+    "Discard data arriving after cancellation or completion",
+    "Keep the internal ReadableStreamError assertion intact"
+  ],
+  "standards": [
+    "https://streams.spec.whatwg.org/#readable-stream-default-controller-error",
+    "https://streams.spec.whatwg.org/#readable-byte-stream-controller-error"
+  ],
+  "candidate_sha256": "0237870688bf826184d93516fd594665fa38626a335f2dc16ad7e9e272211df0",
+  "test_embedder_sha256": "fb4ceecde5c4b27eca6d34f265ce9db58e1a4bd8e8923c7f8b7e19d8a2f3e4ec",
+  "focused_stream_checks": 57,
+  "focused_cases": {
+    "early_network_failures": 8,
+    "truncated_response_bodies": 4,
+    "cancelled_bodies_with_late_abort": 4,
+    "consumed_bodies_with_late_abort": 4
+  },
+  "focused_baseline_failed_before_fix": true,
+  "additional_unchanged_stream_wpt_cases": 402,
+  "stream_wpt_globals": [
+    "window",
+    "worker"
+  ],
+  "stream_wpt_suites": 10,
+  "privacy_checks": 203,
+  "privacy_breakdown": {
+    "adblock_enabled": 26,
+    "adblock_disabled_control": 17,
+    "cookie_persistence_edit_delete": 11,
+    "cookie_policy": 149
+  },
+  "integration_suites": 49,
+  "integration_runtime_checks": 7562,
+  "integration_upstream_passed_cases": 563,
+  "upstream_optional_unsupported": [
+    {
+      "name": "recommendedViewportScale for inline session - webgl",
+      "status": 4,
+      "message": "recommendedViewportScale not provided"
+    },
+    {
+      "name": "recommendedViewportScale for inline session - webgl2",
+      "status": 4,
+      "message": "recommendedViewportScale not provided"
+    },
+    {
+      "name": "recommendedViewportScale for immersive-vr session - webgl",
+      "status": 4,
+      "message": "recommendedViewportScale not provided"
+    },
+    {
+      "name": "recommendedViewportScale for immersive-vr session - webgl2",
+      "status": 4,
+      "message": "recommendedViewportScale not provided"
+    }
+  ],
+  "upstream_obsolete_expectations": [
+    {
+      "all_original_assertions_passed": false,
+      "passed_cases": 3,
+      "obsolete_expectation_cases": 1,
+      "case": {
+        "name": "Validate xr compatibility requests without xr-spatial-tracking policy",
+        "status": 1,
+        "message": "assert_unreached: Should have rejected: makeXRCompatible should reject without permissions policy Reached unreachable code"
+      },
+      "current_spec": "https://www.w3.org/TR/2026/CRD-webxr-20260609/#dom-webglrenderingcontextbase-makexrcompatible",
+      "current_spec_behavior_verified_by": "webxr-context-compatibility.py --policy-denied"
+    }
+  ],
+  "all_original_upstream_assertions_passed": false,
+  "original_upstream_assertions_changed": false,
+  "worker_shutdown_cases": 3,
+  "all_required_checks_passed": true,
+  "optimized_release_build": true,
+  "release_check_all_targets_passed": true,
+  "evidence": "artifacts/servo-rendering-goal/webgl-driver-reset-v1/release-validation-r3.json",
+  "source_manifest": "artifacts/servo-rendering-goal/webgl-driver-reset-v1/reset-retirement-source-r4.json",
+  "runtime_input_manifest": "artifacts/servo-rendering-goal/webgl-driver-reset-v1/reset-retirement-runtime-inputs-r3.json",
+  "native_probe_inputs_unchanged": true,
+  "native_probes_rerun_after_stream_fix": false,
+  "harness_import_failure_recovered_without_production_change": true,
+  "physical_headset_validation": false,
+  "hardware_reset_requested": false,
+  "desktop_sessions_restarted": false,
+  "browser_driver_detection_enabled": false,
+  "whole_browser_gpu_recovery_complete": false,
+  "counts_scope": "Integration and focused runtime counts include repeated executions of shared suites; reported separately. Stream WPT cases are additional to integration upstream cases."
+}
