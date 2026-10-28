@@ -14,6 +14,8 @@ Iframe potential diagnostics and load lifecycle checks are recorded in
 [the iframe policy validation record](docs/validation-iframe-policy-2026-10-28.json).
 WebGL XR compatibility requests are covered by
 [the compatibility reporting record](docs/validation-webgl-xr-policy-2026-10-28.json).
+Gamepad API-use diagnostics are covered by
+[the gamepad policy record](docs/validation-gamepad-policy-2026-10-28.json).
 
 Supported contexts prefer robust access and reset notifications. The FLTK
 frontend retries renderer reconstruction after permanent native loss. It replays
@@ -2205,3 +2207,27 @@ device. The separate mock adapter runs six unchanged upstream cases for repeated
 concurrent and lost-context compatibility calls. This is selected regression
 coverage; it does not include the upstream OffscreenCanvas creation cases or
 claim full WebXR/WPT conformance.
+
+## Gamepad policy reporting
+
+Each explicit `navigator.getGamepads()` call checks enforced and report-only
+`gamepad` policy and emits an actual-use diagnostic when restricted. Enforced
+policy retains its `SecurityError`; report-only mode retains normal access and
+the empty pre-gesture list. Inactive documents return an empty list before policy
+reporting. Permission queries, policy introspection and device-event filtering
+retain their non-reporting checks.
+
+```sh
+DOME_COMPOSITOR=/path/to/private-compositor \
+uv run --no-project --with python-xlib --with pillow --with dbus-next python \
+  ports/dome-fltk/tests/gamepad-policy-reporting.py \
+  --binary /path/to/xr-native-input --output /tmp/gamepad-policy-reporting
+```
+
+The 14 local scenarios cover enforced/report-only precedence, exact observer and
+endpoint counts, source locations, unknown endpoints, repeated polling, bounded
+history, independent snapshots, inactive documents, cross-origin defaults and
+non-reporting query/listener controls. They use separate profiles and no
+controller gesture. Two unchanged original gamepad WPT pages cover advertised
+policy support and blocked-frame listener registration through the local WPT
+adapter. This is scoped regression coverage, not complete Gamepad conformance.

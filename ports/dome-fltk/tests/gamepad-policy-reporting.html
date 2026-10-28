@@ -1,0 +1,114 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Local gamepad policy diagnostics</title>
+<p>Checking gamepad policy reports and permission-query controls.</p>
+<script id="configuration" type="application/json">CONFIGURATION</script>
+<script src="/gamepad-policy-caller.js"></script>
+<script>
+const cfg = JSON.parse(document.getElementById('configuration').textContent);
+const checks = [], reports = [];
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+function check(passed, name) {
+  checks.push({name, passed:!!passed});
+  if (!passed) throw new Error(name);
+}
+async function until(predicate) {
+  const end = performance.now() + 7000;
+  while (!predicate()) {
+    if (performance.now() > end) throw new Error('Timed out waiting for gamepad diagnostics');
+    await delay(10);
+  }
+}
+let firstObserver, firstReport;
+if (cfg.case === 'snapshot') {
+  firstObserver = new ReportingObserver(batch => {
+    firstReport = batch[0];
+    firstReport.body.featureId = 'modified';
+  }, {types:['permissions-policy-violation']});
+  firstObserver.observe();
+}
+const observer = new ReportingObserver(batch => reports.push(...batch),
+  {types:['permissions-policy-violation']});
+observer.observe();
+function shape(report) {
+  check(report.type === 'permissions-policy-violation' && report.url === location.href &&
+        Object.keys(report).sort().join(',') === 'body,type,url', 'Report belongs to the calling document');
+  check(report.body.featureId === 'gamepad' && report.body.disposition === cfg.disposition,
+        'Gamepad feature and policy disposition are correct');
+  check(report.body.sourceFile === new URL('/gamepad-policy-caller.js', location.href).href &&
+        report.body.lineNumber === 1 && Number.isInteger(report.body.columnNumber) && report.body.columnNumber > 0,
+        'Gamepad report captures the script call site');
+  check(!('allowAttribute' in report.body) && !('srcAttribute' in report.body),
+        'Actual-use report omits iframe potential-violation attributes');
+}
+async function main() {
+  check(typeof navigator.getGamepads === 'function' && typeof ReportingObserver === 'function',
+        'Gamepad and reporting APIs are exposed');
+  check(document.permissionsPolicy.allowsFeature('gamepad') === cfg.allowed,
+        'Introspection matches the enforced policy');
+  const permission = await navigator.permissions.query({name:'gamepad'});
+  check(cfg.allowed || permission.state === 'denied', 'Permission query respects enforced policy');
+  await delay(75);
+  check(reports.length === 0, 'Permission queries and introspection do not report API use');
+  if (cfg.operation === 'listeners') {
+    addEventListener('gamepadconnected', () => {});
+    addEventListener('gamepaddisconnected', () => {});
+  } else if (cfg.operation === 'detached') {
+    const frame = document.createElement('iframe');
+    const loaded = new Promise(resolve => { frame.onload = resolve; });
+    frame.src = '/child?case=' + cfg.case;
+    document.body.appendChild(frame);
+    await loaded;
+    const child = frame.contentWindow, childNavigator = child.navigator;
+    const childObserver = new child.ReportingObserver(() => {}, {types:['permissions-policy-violation']});
+    childObserver.observe();
+    frame.remove();
+    check(readGamepads(childNavigator).length === 0, 'Detached document returns an empty gamepad list');
+    check(childObserver.takeRecords().length === 0, 'Inactive document is checked before policy reporting');
+    childObserver.disconnect();
+  } else if (cfg.operation === 'cross') {
+    const frame = document.createElement('iframe');
+    const result = new Promise(resolve => addEventListener('message', function listener(event) {
+      if (event.source !== frame.contentWindow || event.origin !== new URL(cfg.cross_url).origin) return;
+      removeEventListener('message', listener); resolve(event.data);
+    }));
+    frame.src = cfg.cross_url;
+    document.body.appendChild(frame);
+    const child = await result;
+    check(child.allowed && child.length === 0 && child.reports === 0,
+          'Wildcard default permits a cross-origin frame without a gamepad gesture or diagnostics');
+    frame.remove();
+  } else if (cfg.operation === 'read') {
+    for (let i = 0; i < cfg.calls; ++i) {
+      try {
+        const result = readGamepads(navigator);
+        check(cfg.allowed && Array.isArray(result) && result.length === 0,
+              'Allowed/report-only polling preserves the empty pre-gesture list');
+      } catch (error) {
+        check(!cfg.allowed && error.name === 'SecurityError', 'Enforced restriction throws SecurityError');
+      }
+    }
+  }
+  if (cfg.expected_reports) await until(() => reports.length >= cfg.expected_reports);
+  await delay(100);
+  check(reports.length === cfg.expected_reports, 'Only actual gamepad calls produce exact report counts');
+  for (const report of reports) shape(report);
+  if (cfg.case === 'snapshot') {
+    check(firstReport && firstReport.body.featureId === 'modified' && reports[0].body.featureId === 'gamepad',
+          'Observer mutation cannot change later snapshots or endpoint bodies');
+    firstObserver.disconnect();
+  }
+  observer.disconnect();
+  const buffered = [];
+  const later = new ReportingObserver(batch => buffered.push(...batch),
+    {types:['permissions-policy-violation'],buffered:true});
+  later.observe();
+  if (cfg.expected_reports) await until(() => buffered.length === Math.min(100,cfg.expected_reports));
+  else await delay(100);
+  check(JSON.stringify(buffered) === JSON.stringify(reports.slice(-100)), 'Buffered history retains the correct original gamepad reports');
+  later.disconnect();
+  return {checks, reports};
+}
+main().then(result => fetch('/__result?case=' + cfg.case, {method:'POST',body:JSON.stringify(result)}))
+ .catch(error => fetch('/__result?case=' + cfg.case, {method:'POST',body:JSON.stringify({checks,reports,error:String(error)})}));
+</script>

@@ -31,8 +31,6 @@ use servo_url::ServoUrl;
 
 use crate::ScriptThread;
 use crate::dom::bindings::codegen::Bindings::NavigatorBinding::NavigatorMethods;
-#[cfg(feature = "gamepad")]
-use crate::dom::bindings::codegen::Bindings::PermissionStatusBinding::PermissionName;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::Window_Binding::WindowMethods;
 use crate::dom::bindings::codegen::Bindings::XMLHttpRequestBinding::BodyInit;
 use crate::dom::bindings::error::{Error, Fallible};
@@ -440,7 +438,10 @@ impl NavigatorMethods<crate::DomTypeHolder> for Navigator {
 
         // Step 3. If doc is not allowed to use the "gamepad" permission,
         // then throw a "SecurityError" DOMException.
-        if !doc.allowed_to_use_feature(PermissionName::Gamepad) {
+        if !doc.allowed_to_use_policy_feature_with_reporting(
+            cx,
+            net_traits::permissions_policy::PolicyFeature::Gamepad,
+        ) {
             return Err(Error::Security(Some(
                 "Gamepad permission not allowed".into(),
             )));

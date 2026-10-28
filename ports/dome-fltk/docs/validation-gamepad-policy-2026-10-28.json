@@ -1,0 +1,57 @@
+{
+  "milestone": "Gamepad API-use policy diagnostics",
+  "validated_utc": "2026-10-28T22:29:25.441025+00:00",
+  "specifications": [
+    "https://www.w3.org/TR/2025/WD-gamepad-20250710/#dom-navigator-getgamepads",
+    "https://www.w3.org/TR/2026/WD-permissions-policy-1-20261026/#is-feature-enabled"
+  ],
+  "implemented": [
+    "Report enforced/report-only policy diagnostics for explicit navigator.getGamepads calls",
+    "Retain the active-document check before policy checking and the empty pre-gesture list",
+    "Keep permission queries, policy introspection and background device-event filtering free of reporting side effects"
+  ],
+  "geolocation_excluded": true,
+  "geolocation_source_unchanged": true,
+  "optimized_release_build": true,
+  "new_dependencies": false,
+  "local_gamepad_scenarios": 14,
+  "runtime_checks": 3119,
+  "runtime_breakdown": {
+    "gamepad-policy": 749,
+    "webgl-xr-policy": 712,
+    "iframe-potentials": 1213,
+    "policy-reporting": 248,
+    "csp-observers": 69,
+    "history": 14,
+    "xr-enforced": 23,
+    "xr-report-only": 47,
+    "xr-pending": 14,
+    "xr-devicechange": 30
+  },
+  "original_gamepad_wpt_cases": 2,
+  "selected_original_compatibility_wpt_cases": 6,
+  "original_reporting_wpt_cases": 2,
+  "original_assertions_and_headers_unchanged": true,
+  "net_unit_tests_retained": 42,
+  "net_unit_tests_rerun_this_checkpoint": false,
+  "net_unit_retention_proof": "Policy, endpoint and UTF-16 implementation/test sources match the preceding validated 42-unit checkpoint.",
+  "graphics_recovery_tests_rerun_this_checkpoint": false,
+  "historical_graphics_record": "validation-webgl-xr-policy-2026-10-28.json",
+  "shared_worker_shutdown_scenarios": 3,
+  "anonymous_discord_x_samples": 2,
+  "visual_review": {
+    "discord": "Login form visibly rendered at 30 seconds; process survived and closed cleanly",
+    "x": "Landing/login visibly rendered at 30 seconds; process survived and closed cleanly; accepted QR overlap remains a non-bug"
+  },
+  "browser_sha256": "9d2fcc891f2c8b8b3ad7191d8f2bb863f0aff9691c1e83e8b77a404e1899eee8",
+  "test_embedder_sha256": "19d205154d3cb1a646a7c44485a7cd0aba728b3cb1e1b24542cb15e05a46673a",
+  "engine_source_sha256": {
+    "components/script/dom/navigator/navigator.rs": "375dd3a4e95b82c7884664aba07f8cd8aa2f89cb53f48002d67e94351570b87f"
+  },
+  "remaining": [
+    "Reporting response handling, endpoint retirement, document lifecycle and interoperability review",
+    "Broader WebXR backend/device compliance and physical-device coverage",
+    "Later standards-focused rendering and scroll-indicator validation"
+  ],
+  "scope": "Scoped gamepad/observer/network, WebGL policy and private native DomeD regressions plus anonymous live-page review. Geolocation implementation and API tests excluded. Prior native/software graphics recovery results are historical, not rerun. No full Reporting API, Gamepad, WebXR, WPT or site conformance; no physical headset, GPU reset or adapter migration tested."
+}
