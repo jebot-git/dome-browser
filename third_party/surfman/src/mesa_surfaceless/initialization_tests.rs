@@ -397,6 +397,43 @@ fn initialization_failure_does_not_poison_a_healthy_shared_peer() {
 }
 
 #[test]
+fn optional_robust_context_reports_resets_and_preserves_the_peer_binding() {
+    let device = device();
+    let mut owner = crate::recovery::create_context_with_optional_robustness(
+        &device,
+        ContextAttributes {
+            version: GLVersion::new(3, 3),
+            flags: ContextAttributeFlags::ALPHA,
+        },
+    )
+    .unwrap();
+    attach(&device, &mut owner);
+    green(&device, &owner);
+    let flags = owner.2.robustness_flags;
+    let mut peer = device.create_context(&descriptor(&device), None).unwrap();
+    attach(&device, &mut peer);
+    let binding = NativeContext::current().unwrap().egl_context;
+    let monitor = crate::recovery::ResetStatusMonitor::new();
+    let healthy = monitor.check(&device, &mut owner).is_ok() && monitor.enabled();
+    let preserved = NativeContext::current().unwrap().egl_context == binding;
+    let status = device.graphics_reset_status(&owner).unwrap();
+    device.mark_context_lost(&mut owner).unwrap();
+    let rejected = monitor
+        .check(&device, &mut owner)
+        .unwrap_err()
+        .is_context_lost();
+    let still_preserved = NativeContext::current().unwrap().egl_context == binding;
+    green(&device, &peer);
+    device.destroy_context(&mut owner).unwrap();
+    device.destroy_context(&mut peer).unwrap();
+    assert!(flags.contains(
+        ContextAttributeFlags::RESET_NOTIFICATION | ContextAttributeFlags::ROBUST_ACCESS
+    ));
+    assert_eq!(status, Some(crate::GraphicsResetStatus::NoError));
+    assert!(healthy && preserved && rejected && still_preserved);
+}
+
+#[test]
 fn initialization_failed_native_import_preserves_external_owner() {
     let device = device();
     let descriptor = descriptor(&device);

@@ -9,6 +9,10 @@ pub(crate) enum Input<M> {
 }
 pub(crate) trait Worker {
     type Message;
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+    fn tick(&mut self) {}
     fn receive(&mut self, timeout: Option<Duration>) -> Input<Self::Message>;
     /// True requests shutdown. Once closing, accept only cleanup messages.
     fn handle(&mut self, message: Self::Message, closing: bool) -> bool;
@@ -21,9 +25,23 @@ pub(crate) fn run(worker: &mut impl Worker) {
     let mut disconnected = false;
     let mut delay = Duration::from_millis(10);
     let mut next_retry = Instant::now();
+    let mut next_tick = None;
     loop {
+        next_tick = if closing {
+            None
+        } else {
+            worker
+                .tick_interval()
+                .map(|interval| next_tick.unwrap_or_else(|| Instant::now() + interval))
+        };
         let pending = closing || worker.pending();
-        let timeout = pending.then(|| next_retry.saturating_duration_since(Instant::now()));
+        let retirement_timeout =
+            pending.then(|| next_retry.saturating_duration_since(Instant::now()));
+        let tick_timeout = next_tick.map(|due| due.saturating_duration_since(Instant::now()));
+        let timeout = match (retirement_timeout, tick_timeout) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         let input = if disconnected {
             // A disconnected receiver returns immediately. Sleep instead of spinning.
             std::thread::sleep(timeout.unwrap_or(delay));
@@ -45,6 +63,10 @@ pub(crate) fn run(worker: &mut impl Worker) {
             },
             Input::Timeout => {},
         }
+        if !closing && next_tick.is_some_and(|due| Instant::now() >= due) {
+            worker.tick();
+            next_tick = None;
+        }
         if (closing || worker.pending()) && Instant::now() >= next_retry {
             if worker.retire(closing) {
                 if closing {
@@ -62,6 +84,47 @@ pub(crate) fn run(worker: &mut impl Worker) {
 mod tests {
     use super::*;
     use std::{collections::VecDeque, rc::Rc};
+    #[test]
+    fn observation_ticks_run_without_messages_and_stop_on_shutdown() {
+        struct Observing {
+            ticks: usize,
+            closed: bool,
+        }
+        impl Worker for Observing {
+            type Message = ();
+            fn tick_interval(&self) -> Option<Duration> {
+                Some(Duration::from_millis(1))
+            }
+            fn tick(&mut self) {
+                assert!(!self.closed);
+                self.ticks += 1;
+            }
+            fn receive(&mut self, timeout: Option<Duration>) -> Input<()> {
+                if self.ticks == 2 {
+                    return Input::Message(());
+                }
+                std::thread::sleep(timeout.unwrap());
+                Input::Timeout
+            }
+            fn handle(&mut self, _: (), _: bool) -> bool {
+                self.closed = true;
+                true
+            }
+            fn pending(&self) -> bool {
+                false
+            }
+            fn retire(&mut self, closing: bool) -> bool {
+                assert!(closing && self.closed);
+                true
+            }
+        }
+        let mut worker = Observing {
+            ticks: 0,
+            closed: false,
+        };
+        run(&mut worker);
+        assert_eq!(worker.ticks, 2);
+    }
     struct Owner {
         // Deliberately !Send, as with native consumer textures.
         native: Rc<()>,

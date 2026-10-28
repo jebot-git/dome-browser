@@ -103,6 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .preferences(prefs)
         .event_loop_waker(Box::new(Waker))
         .build();
+    if std::env::var_os("DOME_GRAPHICS_LOSS_TEST").is_some() { servo.setup_logging(); }
     servo.register_webxr_registry(Box::new(Registry));
     let state = Rc::new(State::default());
     let view = WebViewBuilder::new(&servo, context.clone())
@@ -132,6 +133,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let command: Value = serde_json::from_str(&line?)?;
             let token = command["token"].as_u64().ok_or("token required")?;
             match command["op"].as_str().ok_or("op required")? {
+                "webgl-test" => {
+                    assert!(std::env::var_os("DOME_GRAPHICS_LOSS_TEST").is_some(), "Graphics testing must be explicitly enabled");
+                    servo.set_preference("webgl_testing_context_creation_error", servo::PrefValue::Bool(command["creation_error"].as_bool().ok_or("creation_error required")?));
+                    servo.set_preference("webgl_testing_force_context_loss", servo::PrefValue::Bool(command["context_loss"].as_bool().ok_or("context_loss required")?));
+                    reply(json!({"token":token,"configured":true}));
+                },
                 "touch" => {
                     assert!(
                         state.pending.borrow().is_empty(),

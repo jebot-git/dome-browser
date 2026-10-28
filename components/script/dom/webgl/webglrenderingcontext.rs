@@ -162,6 +162,11 @@ pub(crate) enum Operation {
     Infallible,
 }
 
+enum ContextRestoreError {
+    RetryLater,
+    Unavailable,
+}
+
 #[derive(JSTraceable, MallocSizeOf)]
 struct DroppableWebGLRenderingContext {
     #[no_trace]
@@ -211,6 +216,7 @@ pub(crate) struct WebGLRenderingContext {
     context_loss_error_pending: Cell<bool>,
     context_restorable: Cell<bool>,
     restoration_pending: Cell<bool>,
+    restoration_retry_delay: Cell<u32>,
     #[no_trace]
     #[ignore_malloc_size_of = "Fixed native context creation options"]
     creation_attributes: GLContextAttributes,
@@ -293,6 +299,7 @@ impl WebGLRenderingContext {
                 context_loss_error_pending: Cell::new(false),
                 context_restorable: Cell::new(false),
                 restoration_pending: Cell::new(false),
+                restoration_retry_delay: Cell::new(0),
                 creation_attributes: attrs,
                 webgl2_context: DomRefCell::new(None),
                 texture_packing_alignment: Cell::new(4),
@@ -405,6 +412,7 @@ impl WebGLRenderingContext {
         self.context_loss_error_pending.set(true);
         self.context_restorable.set(false);
         self.restoration_pending.set(false);
+        self.restoration_retry_delay.set(0);
         self.last_error.set(None);
         self.xr_compatible.set(false);
         #[cfg(feature = "webxr")]
@@ -498,12 +506,16 @@ impl WebGLRenderingContext {
             let context = context.root();
             context.restoration_pending.set(false);
             if !context.is_context_lost() || !context.context_restorable.get() { return; }
-            if context.recreate_drawing_buffer().is_err() { return; }
+            if let Err(error) = context.recreate_drawing_buffer() {
+                if matches!(error, ContextRestoreError::RetryLater) { context.retry_context_restoration(); }
+                return;
+            }
             context.reset_cached_state();
             context.last_error.set(None);
             context.context_loss_error_pending.set(false);
             context.context_restorable.set(false);
             context.context_lost.set(false);
+            context.restoration_retry_delay.set(0);
             context.observe_backend_loss();
             if context.is_context_lost() { return; }
             if let HTMLCanvasElementOrOffscreenCanvas::HTMLCanvasElement(canvas) = &context.canvas {
@@ -523,21 +535,41 @@ impl WebGLRenderingContext {
         !not_cancelled
     }
 
-    fn recreate_drawing_buffer(&self) -> Result<(), String> {
+    fn retry_context_restoration(&self) {
+        if self.restoration_pending.replace(true) { return; }
+        let delay = (self.restoration_retry_delay.get().saturating_mul(2)).clamp(100, 2000);
+        self.restoration_retry_delay.set(delay);
+        let generation = self.context_id();
+        // A pending retry must not keep a discarded canvas alive indefinitely.
+        let context = WeakRef::new(self);
+        self.global().run_steps_after_a_timeout(DOMString::from("webgl-restoration"), delay as i64, move |_cx, _global| {
+            let Some(context) = context.root() else { return; };
+            if context.context_id() != generation { return; }
+            context.restoration_pending.set(false);
+            if context.is_context_lost() && context.context_restorable.get() { context.restore_context(); }
+        });
+    }
+
+    fn recreate_drawing_buffer(&self) -> Result<(), ContextRestoreError> {
+        if pref!(webgl_testing_context_creation_error) {
+            log::debug!("Creation rejected by existing WebGL test preference");
+            return Err(ContextRestoreError::RetryLater);
+        }
         let global = self.global();
-        let window = global.downcast::<Window>().ok_or("WebGL window unavailable")?;
-        let channel = window.webgl_chan().ok_or("WebGL backend unavailable")?;
+        let window = global.downcast::<Window>().ok_or(ContextRestoreError::Unavailable)?;
+        let channel = window.webgl_chan().ok_or(ContextRestoreError::Unavailable)?;
         let size = self.size();
-        let (sender, receiver) = webgl_channel().ok_or("WebGL channel unavailable")?;
+        let (sender, receiver) = webgl_channel().ok_or(ContextRestoreError::Unavailable)?;
         // Restoration starts with xrCompatible false; an application can negotiate again.
         let mut attrs = self.creation_attributes;
         attrs.xr_compatible = false;
         channel.send(WebGLMsg::CreateContext(window.webview_id().into(), self.webgl_version, size, attrs, sender))
-            .map_err(|_| "WebGL backend unavailable")?;
-        let data = receiver.recv().map_err(|_| "WebGL restoration failed")??;
+            .map_err(|_| ContextRestoreError::Unavailable)?;
+        let data = receiver.recv().map_err(|_| ContextRestoreError::Unavailable)?
+            .map_err(|_| ContextRestoreError::RetryLater)?;
         if data.limits != self.limits || data.api_type != self.api_type || data.glsl_version != self.glsl_version {
             let _ = data.sender.send_remove();
-            return Err("WebGL graphics capabilities changed during restoration".into());
+            return Err(ContextRestoreError::Unavailable);
         }
         // A new context ID invalidates every old WebGLObject and uniform location,
         // even if the native driver recycles a numeric GL object name.

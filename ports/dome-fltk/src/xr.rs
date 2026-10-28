@@ -524,6 +524,7 @@ struct BridgeDevice {
     device: Device,
     context: Context,
     gl: Rc<glow::Context>,
+    reset_monitor: surfman::recovery::ResetStatusMonitor,
     fbo: Option<glow::NativeFramebuffer>,
     cleanup_phase: webxr::native_cleanup::CleanupPhase,
     pending_consumer: Option<SurfaceConsumer<Device>>,
@@ -594,15 +595,13 @@ impl BridgeDevice {
         } else {
             GLVersion::new(3, 2)
         };
-        let desc = device
-            .create_context_descriptor(&ContextAttributes {
+        let context = surfman::recovery::create_context_with_optional_robustness(&device, ContextAttributes {
                 version,
                 flags: ContextAttributeFlags::ALPHA
                     | ContextAttributeFlags::DEPTH
                     | ContextAttributeFlags::STENCIL,
             })
             .map_err(backend)?;
-        let context = device.create_context(&desc, None).map_err(backend)?;
         let mut pending = webxr::pending_context::PendingContext::new(device, context);
         let (device, context) = pending.parts();
         let surface = device
@@ -617,6 +616,8 @@ impl BridgeDevice {
         pending.bind(surface).map_err(backend)?;
         let (device, context) = pending.parts();
         device.make_context_current(context).map_err(backend)?;
+        let reset_monitor = surfman::recovery::ResetStatusMonitor::new();
+        reset_monitor.check(device, context).map_err(backend)?;
         let gl = Rc::new(unsafe {
             glow::Context::try_from_loader_function(|symbol| device.get_proc_address(context, symbol))
         }.map_err(backend)?);
@@ -631,6 +632,7 @@ impl BridgeDevice {
             device,
             context,
             gl,
+            reset_monitor,
             fbo: Some(fbo),
             cleanup_phase: Default::default(),
             pending_consumer: None,
@@ -700,6 +702,7 @@ impl BridgeDevice {
         Ok(())
     }
     fn submit(&mut self, layers: &[(ContextId, LayerId)]) -> Result<()> {
+        self.reset_monitor.check(&self.device, &mut self.context).map_err(|e| format!("{e:?}"))?;
         self.return_consumer()?;
         // A lost context removes its shared swap chain before the page has
         // installed a new base layer. Submit an empty frame in that interval.
@@ -839,6 +842,10 @@ impl DeviceAPI for BridgeDevice {
     }
     fn begin_animation_frame(&mut self, layers: &[(ContextId, LayerId)]) -> Option<Frame> {
         if self.ended {
+            return None;
+        }
+        if let Err(error) = self.reset_monitor.check(&self.device, &mut self.context) {
+            self.fail(format!("XR display unavailable: {error:?}"));
             return None;
         }
         let after = self.frame.as_ref().map_or(0, |f| f.frame_id);

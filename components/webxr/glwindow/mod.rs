@@ -152,6 +152,7 @@ pub struct GlWindowDevice {
     device: SurfmanDevice,
     context: SurfmanContext,
     gl: Rc<Gl>,
+    reset_monitor: surfman::recovery::ResetStatusMonitor,
     window: Rc<dyn GlWindow>,
     grand_manager: LayerGrandManager<SurfmanGL>,
     layer_manager: Option<LayerManager>,
@@ -216,6 +217,9 @@ impl DeviceAPI for GlWindowDevice {
 
     fn begin_animation_frame(&mut self, layers: &[(ContextId, LayerId)]) -> Option<Frame> {
         log::debug!("Begin animation frame for layers {:?}", layers);
+        self.reset_monitor
+            .check(&self.device, &mut self.context)
+            .ok()?;
         let viewport_size = self.viewport_size().ok()?;
         let translation = Vector3D::from_untyped(self.window.get_translation());
         let translation: RigidTransform3D<_, _, Native> =
@@ -365,6 +369,9 @@ impl GlWindowDevice {
         self.device
             .make_context_current(&self.context)
             .map_err(|e| format!("{e:?}"))?;
+        self.reset_monitor
+            .check(&self.device, &mut self.context)
+            .map_err(|e| format!("{e:?}"))?;
         self.return_consumer()?;
         self.restore_present_surface()?;
         debug_assert_eq!(unsafe { self.gl.get_error() }, gl::NO_ERROR);
@@ -472,17 +479,18 @@ impl GlWindowDevice {
         let device = connection
             .create_device(&adapter)
             .map_err(|e| Error::BackendSpecific(format!("{e:?}")))?;
-        let context_descriptor = device
-            .create_context_descriptor(&context_attributes)
-            .map_err(|e| Error::BackendSpecific(format!("{e:?}")))?;
-        let context = device
-            .create_context(&context_descriptor, None)
-            .map_err(|e| Error::BackendSpecific(format!("{e:?}")))?;
+        let context =
+            surfman::recovery::create_context_with_optional_robustness(&device, context_attributes)
+                .map_err(|e| Error::BackendSpecific(format!("{e:?}")))?;
         let mut pending = crate::pending_context::PendingContext::new(device, context);
         pending.keep_alive(window.clone());
         let (device, context) = pending.parts();
         device
             .make_context_current(context)
+            .map_err(|e| Error::BackendSpecific(format!("{e:?}")))?;
+        let reset_monitor = surfman::recovery::ResetStatusMonitor::new();
+        reset_monitor
+            .check(device, context)
             .map_err(|e| Error::BackendSpecific(format!("{e:?}")))?;
         let gl = Rc::new(
             unsafe { Gl::try_from_loader_function(|name| device.get_proc_address(context, name)) }
@@ -541,6 +549,7 @@ impl GlWindowDevice {
 
         Ok(GlWindowDevice {
             gl,
+            reset_monitor,
             window,
             device,
             context,

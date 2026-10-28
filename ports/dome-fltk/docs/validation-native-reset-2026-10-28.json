@@ -1,0 +1,75 @@
+{
+  "validated_utc": "2026-10-28T16:56:08.363265+00:00",
+  "base_commit": "e786af00e23b75ff5b9897f452b6dc6219454e32",
+  "optimized_release": true,
+  "browser_sha256": "4363f6dcace924496f5fbc2dff2201dcb013a4f41cf24738114110d09e8c5f10",
+  "test_embedder_sha256": "ad09a88676b9e36d4e57c12838b95eaa5a1b68b36478f927a6afbe0d21b49dee",
+  "source_sha256": {
+    "components/script/dom/webgl/webglrenderingcontext.rs": "8bc39494c0b03732bbf66e6cab1639777dff17ac7a9cf4bbbaa1b4ef8d80e9c6",
+    "components/shared/paint/rendering_context.rs": "c45af5ac9c8b24594831432407c6f39fbd99e239f88b2017943be382caa4a998",
+    "components/webgl/retirement_loop.rs": "a6f5f61e576c9579edc6c641a0f49b46fada56ba635b9510e3df6ec2f359ed0a",
+    "components/webgl/webgl_thread.rs": "cc3452b39575a2b8f752b0227ee66affd69c7cf073eee9e15c8afb591ca9ac34",
+    "components/webxr/glwindow/mod.rs": "42d04d04a1867a917a46685c2531a9da2bf2070c339a637abbbd2ac87ff76393",
+    "ports/dome-fltk/README.md": "267ee75a93231e1ffdf59098529388767ff6099c2e4e08d68fd8e101a2919fbb",
+    "ports/dome-fltk/examples/xr-native-input.rs": "5bb8eee0e7186eae35987a0d7d3acec34599ca4de1be013f0da307bf7f9c5784",
+    "ports/dome-fltk/src/xr.rs": "b2d54a66e91efa0876804c5cad471346d813bd1006b180b24825552043ab6706",
+    "ports/dome-fltk/tests/graphics-initialization.py": "a5103874c68085a57c0a56bef1453b89c407e9c3eba9eb171588c7325fdab605",
+    "third_party/surfman/src/lib.rs": "198c6e8a4c77021c3837546d0753ac5f7c29a0a57363877db426abf0e88b3e37",
+    "third_party/surfman/src/mesa_surfaceless/initialization_tests.rs": "d8d58148594ae126eaeb2e75aa7953062383f0f93ddd9aad24fc30d6ea8ee96f",
+    "third_party/surfman/src/recovery.rs": "55a401d70f8e0503738efdcef7616fa0b6897b834cda54b94a522bc4343202a6",
+    "ports/dome-fltk/tests/webgl-restoration-retry.py": "bea2b740cd3e1a261ab6956281da3cf46b0e1657b4cd46f8d1f01b5d9690073b",
+    "ports/dome-fltk/tests/webgl-restoration-retry.html": "fdeac996dfdc16d9ca54b571ee4dd9be7053095bec03c371b48447eda1707dfe"
+  },
+  "passed": true,
+  "results": {
+    "component_tests_per_configuration": 183,
+    "configuration_count": 2,
+    "runtime_checks": 1327,
+    "khronos_executions": 978,
+    "native_lifecycle_cases": 12,
+    "xr_bridge_scenarios": 8,
+    "restoration_checks": 15,
+    "native_gles_shader_programs_per_renderer": 3,
+    "loader_and_native_helpers": {
+      "glow": {
+        "passed": true,
+        "library_unit_tests": 29,
+        "native_loader_tests": 26
+      },
+      "reset_monitor_policy": {
+        "passed": true,
+        "tests": 7
+      },
+      "native": {
+        "passed": true,
+        "initialization_tests": 12,
+        "reset_monitor_tests": 1,
+        "renderers": [
+          "Mesa Intel(R) Arc(tm) A770 Graphics (DG2)"
+        ]
+      },
+      "software": {
+        "passed": true,
+        "initialization_tests": 12,
+        "reset_monitor_tests": 1,
+        "renderers": [
+          "llvmpipe (LLVM 22.1.8, 256 bits)"
+        ]
+      }
+    }
+  },
+  "behavior": [
+    "Optional robust/notified context creation with compatibility fallback limited to optional-attribute rejection; allocation and device errors propagate.",
+    "Supported reset polling before GL work and during idle WebGL ownership; unsupported contexts stop polling.",
+    "Delayed, generation-checked weak WebGL restoration retries; transient failures, fresh pixels/resources, and shutdown with pending retry verified."
+  ],
+  "reproduce_native_helpers": "python3 ports/dome-fltk/tests/graphics-initialization.py --cargo /usr/bin/cargo --output <new-directory>",
+  "reproduce_restoration": "DOME_COMPOSITOR=<private-test-compositor> python3 ports/dome-fltk/tests/webgl-restoration-retry.py --binary <xr-native-input-example> --output <new-directory>",
+  "limitations": [
+    "No driver reset was induced. Native GL/GLES probes cover healthy reset queries and simulated known-loss refusal.",
+    "Full root-renderer reconstruction preserving live document state remains unfinished.",
+    "Physical-device coverage and broader WebXR/standards compliance remain open.",
+    "Individual blocking native driver calls are not preemptible by the cleanup deadline.",
+    "Discord/X live samples are anonymous 30-second lifecycle checks, not whole-site rendering or authentication conformance."
+  ]
+}

@@ -89,6 +89,7 @@ pub(crate) struct GLContextData {
     retirement: RetirementPhase,
     retiring_surfaces: Vec<Surface>,
     loss_observer: Option<servo_base::generic_channel::GenericCallback<WebGLContextId>>,
+    reset_monitor: surfman::recovery::ResetStatusMonitor,
 }
 
 fn release_attached_surfaces(device: &Device, ctx: &mut Context, pending: &mut Vec<Surface>) -> Result<(), surfman::Error> {
@@ -366,6 +367,15 @@ const SAFE_VIEWPORT_DIMS: [u32; 2] = [1024, 1024];
 
 impl crate::retirement_loop::Worker for WebGLThread {
     type Message = WebGLMsg;
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        self.contexts.values().any(|data| !data.lost && !data.marked_for_deletion && data.reset_monitor.enabled())
+            .then_some(surfman::recovery::ResetStatusMonitor::INTERVAL)
+    }
+    fn tick(&mut self) {
+        let ids: Vec<_> = self.contexts.iter().filter_map(|(id,data)|
+            (!data.lost && !data.marked_for_deletion && data.reset_monitor.enabled()).then_some(*id)).collect();
+        for id in ids { self.ensure_context_current(id); }
+    }
     fn receive(&mut self, timeout: Option<std::time::Duration>) -> crate::retirement_loop::Input<WebGLMsg> {
         use crate::retirement_loop::Input;
         match timeout {
@@ -741,10 +751,9 @@ impl WebGLThread {
         let flags = requested_flags | ContextAttributeFlags::ALPHA |
             ContextAttributeFlags::DEPTH | ContextAttributeFlags::STENCIL;
         let device = self.get_or_create_device_for_painter(painter_id)?;
-        let descriptor = device.create_context_descriptor(&ContextAttributes {
+        let ctx = surfman::recovery::create_context_with_optional_robustness(&*device, ContextAttributes {
             version: webgl_version.to_surfman_version(api_type), flags,
-        }).map_err(|error| format!("Failed to create context descriptor: {error:?}"))?;
-        let ctx = device.create_context(&descriptor, None)
+        })
             .map_err(|error| format!("Failed to create the GL context: {error:?}"))?;
         let id = WebGLContextId(self.external_image_id_manager.next_id(WebRenderImageHandlerType::WebGl).0);
         let safe_size = Size2D::new(requested_size.width.min(SAFE_VIEWPORT_DIMS[0]).max(1),
@@ -754,6 +763,7 @@ impl WebGLThread {
             device: device.clone(), ctx, returned_surfaces: Vec::new(), chain_id: None,
             chains: self.webrender_swap_chains.clone(), gl: None, retirement: RetirementPhase::default(),
         };
+        let reset_monitor = surfman::recovery::ResetStatusMonitor::new();
         let initialization = (|| {
             let surface = device.create_surface(&creation.ctx, access,
                 SurfaceType::Generic { size: safe_size.to_i32() })
@@ -761,6 +771,8 @@ impl WebGLThread {
             creation.bind_initial_surface(surface)?;
             device.make_context_current(&creation.ctx)
                 .map_err(|error| format!("Failed to select new context: {error:?}"))?;
+            reset_monitor.check(&*device, &mut creation.ctx)
+                .map_err(|error| format!("New context reset status unavailable: {error:?}"))?;
             creation.chains.create_attached_swap_chain(id, &*device, &mut creation.ctx, access)
                 .map_err(|error| format!("Failed to create swap chain: {error:?}"))?;
             creation.chain_id = Some(id);
@@ -820,6 +832,7 @@ impl WebGLThread {
             ctx, device, gl, state, attributes, marked_for_deletion: false,
             lost: false, native_lost: false, retirement: RetirementPhase::default(),
             retiring_surfaces: Vec::new(), loss_observer: None,
+            reset_monitor,
         });
         self.cached_context_info.insert(id, WebGLContextInfo {
             image_key: None, size: size.to_i32(), alpha: has_alpha,
@@ -1025,13 +1038,14 @@ impl WebGLThread {
     }
 
     fn ensure_context_current(&mut self, context_id: WebGLContextId) -> bool {
-        let Some(data) = self.contexts.get(&context_id) else { return false; };
+        let Some(data) = self.contexts.get_mut(&context_id) else { return false; };
         if !data.retirement.needs_resources() { return false; }
         let result = bind_context(&mut self.bound_context_id, context_id, || {
             if data.native_lost || data.device.context_is_lost(&data.ctx) {
                 Err(surfman::Error::MakeCurrentFailed(surfman::WindowingApiError::ContextLost))
             } else { Ok(()) }
         }, || data.device.make_context_current(&data.ctx));
+        let result = result.and_then(|()| data.reset_monitor.check(&*data.device, &mut data.ctx));
         if let Err(error) = result {
             warn!("Cannot select WebGL context {context_id:?}: {error:?}");
             self.native_context_failed(context_id, &error);

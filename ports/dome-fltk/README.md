@@ -2,6 +2,11 @@
 
 The latest scoped native input and XR regression results are recorded in
 [the October 2026 validation report](docs/validation-2026-10-27.md).
+Native reset monitoring and delayed WebGL restoration results are recorded in
+[the native graphics validation record](docs/validation-native-reset-2026-10-28.json).
+Supported contexts prefer robust access and reset notifications. WebGL retries
+transient recreation failures with backoff; full root-renderer reconstruction
+after permanent native loss remains unfinished.
 
 An experimental FLTK 1.4.5 browser embedding Servo directly through its Rust
 API. The controls are native FLTK widgets. Servo renders HTML, CSS, JavaScript
@@ -26,8 +31,9 @@ Use the patched DomeD FLTK prefix, a recent Rust toolchain, a C++17 compiler,
 libclang with its resource headers, and the development files for Fontconfig,
 FreeType, Cairo, GIO, X11, Wayland, EGL/OpenGL and GStreamer (including
 the base/bad development libraries for app, video, play and WebRTC). Runtime
-GStreamer plugins determine codec availability; VP8 WebM and H.264/AAC MP4
-playback are covered by the integration fixture. The helper uses the local
+GStreamer plugins determine supported media. Unsupported media types are handed
+to an external player; expanding browser media playback is outside the current
+work. The helper uses the local
 toolchain from the adjacent canonical `dome-compositor` checkout when present.
 It disables Rust debug information and defaults to one job to limit memory.
 

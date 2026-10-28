@@ -34,6 +34,7 @@ pub mod macros;
 #[cfg(free_unix)]
 pub mod mesa_surfaceless;
 pub mod multi;
+pub mod recovery;
 mod renderbuffers;
 mod retirement;
 mod surface;

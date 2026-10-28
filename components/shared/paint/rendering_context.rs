@@ -121,6 +121,7 @@ struct SurfmanRenderingContext {
     glow_gl: Arc<glow::Context>,
     native: NativeContextOwner,
     refresh_driver: Option<Rc<dyn RefreshDriver>>,
+    reset_monitor: surfman::recovery::ResetStatusMonitor,
 }
 
 impl Deref for SurfmanRenderingContext {
@@ -154,12 +155,13 @@ impl SurfmanRenderingContext {
             GLApi::GLES => GLVersion::new(3, 0),
             GLApi::GL => GLVersion::new(3, 2),
         };
-        let descriptor = device.create_context_descriptor(&ContextAttributes { flags, version })?;
-        let context = device
-            .create_context(&descriptor, None)
-            .inspect_err(|error| {
-                warn!("Unable to create {gl_api:?} {version:?} rendering context: {error:?}");
-            })?;
+        let context = surfman::recovery::create_context_with_optional_robustness(
+            &device,
+            ContextAttributes { flags, version },
+        )
+        .inspect_err(|error| {
+            warn!("Unable to create {gl_api:?} {version:?} rendering context: {error:?}");
+        })?;
         let native = NativeContextOwner::new(device, context);
         if let Some(owner) = keep_alive {
             native.keep_alive(owner);
@@ -181,10 +183,12 @@ impl SurfmanRenderingContext {
         refresh_driver: Option<Rc<dyn RefreshDriver>>,
         load: impl FnOnce(&Device, &Context) -> Result<glow::Context, Error>,
     ) -> Result<Rc<Self>, Error> {
+        let reset_monitor = surfman::recovery::ResetStatusMonitor::new();
         let (glow_gl, gleam_gl) = {
             let device = native.state().device.borrow();
-            let context = native.state().context.borrow();
+            let mut context = native.state().context.borrow_mut();
             device.make_context_current(&context)?;
+            reset_monitor.check(&*device, &mut context)?;
             // Validate the loader before publishing either GL interface.
             let glow_gl = load(&device, &context)?;
             #[expect(unsafe_code)]
@@ -203,6 +207,7 @@ impl SurfmanRenderingContext {
             gleam_gl,
             glow_gl: Arc::new(glow_gl),
             refresh_driver,
+            reset_monitor,
         }))
     }
 
@@ -334,8 +339,9 @@ impl SurfmanRenderingContext {
                 return Err(Error::Failed);
             }
             let device = &self.device.borrow();
-            let context = &mut self.context.borrow();
-            device.make_context_current(context)
+            let mut context = self.context.borrow_mut();
+            device.make_context_current(&context)?;
+            self.reset_monitor.check(&**device, &mut context)
         })
     }
 
