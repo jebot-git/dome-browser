@@ -46,8 +46,15 @@ impl XrDiscoveryWebXrRegistry {
             #[cfg(not(target_os = "windows"))]
             None
         } else if preferences.dom_webxr_glwindow_enabled {
-            let window = window.new_glwindow(event_loop);
-            Some(XrDiscovery::GlWindow(GlWindowDiscovery::new(window)))
+            match window.new_glwindow(event_loop).and_then(|window| {
+                GlWindowDiscovery::new(window).map_err(|error| format!("{error:?}"))
+            }) {
+                Ok(discovery) => Some(XrDiscovery::GlWindow(discovery)),
+                Err(error) => {
+                    log::warn!("XR window discovery unavailable: {error:?}");
+                    None
+                },
+            }
         } else {
             None
         };

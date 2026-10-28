@@ -53,7 +53,7 @@ pub trait GlWindow {
     fn get_mode(&self) -> GlWindowMode {
         GlWindowMode::Blit
     }
-    fn display_handle(&self) -> DisplayHandle<'_>;
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, String>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,9 +78,13 @@ pub struct GlWindowDiscovery {
 }
 
 impl GlWindowDiscovery {
-    pub fn new(window: Rc<dyn GlWindow>) -> GlWindowDiscovery {
-        let connection = Connection::from_display_handle(window.display_handle()).unwrap();
-        let adapter = connection.create_adapter().unwrap();
+    pub fn new(window: Rc<dyn GlWindow>) -> Result<GlWindowDiscovery, Error> {
+        let handle = window.display_handle().map_err(Error::BackendSpecific)?;
+        let connection = Connection::from_display_handle(handle)
+            .map_err(|error| Error::BackendSpecific(format!("XR display: {error:?}")))?;
+        let adapter = connection
+            .create_adapter()
+            .map_err(|error| Error::BackendSpecific(format!("XR adapter: {error:?}")))?;
         let flags = ContextAttributeFlags::ALPHA
             | ContextAttributeFlags::DEPTH
             | ContextAttributeFlags::STENCIL;
@@ -89,12 +93,12 @@ impl GlWindowDiscovery {
             GLApi::GL => GLVersion { major: 3, minor: 2 },
         };
         let context_attributes = ContextAttributes { flags, version };
-        GlWindowDiscovery {
+        Ok(GlWindowDiscovery {
             connection,
             adapter,
             context_attributes,
             window,
-        }
+        })
     }
 }
 
@@ -170,7 +174,9 @@ impl DeviceAPI for GlWindowDevice {
     }
 
     fn viewports(&self) -> Viewports {
-        let size = self.viewport_size();
+        let Ok(size) = self.viewport_size() else {
+            return Viewports { viewports: vec![] };
+        };
         let viewports = match self.window.get_mode() {
             #[expect(clippy::erasing_op, clippy::identity_op)]
             GlWindowMode::Cubemap | GlWindowMode::Spherical => vec![
@@ -193,18 +199,24 @@ impl DeviceAPI for GlWindowDevice {
 
     fn create_layer(&mut self, context_id: ContextId, init: LayerInit) -> Result<LayerInfo, Error> {
         let viewports = self.viewports();
+        if viewports.viewports.is_empty() {
+            return Err(Error::BackendSpecific(
+                "XR render target unavailable".into(),
+            ));
+        }
         self.layer_manager()?
             .create_layer(context_id, init, viewports)
     }
 
     fn destroy_layer(&mut self, context_id: ContextId, layer_id: LayerId) {
-        self.layer_manager()
-            .unwrap()
-            .destroy_layer(context_id, layer_id)
+        if let Some(manager) = self.layer_manager.as_mut() {
+            manager.destroy_layer(context_id, layer_id);
+        }
     }
 
     fn begin_animation_frame(&mut self, layers: &[(ContextId, LayerId)]) -> Option<Frame> {
         log::debug!("Begin animation frame for layers {:?}", layers);
+        let viewport_size = self.viewport_size().ok()?;
         let translation = Vector3D::from_untyped(self.window.get_translation());
         let translation: RigidTransform3D<_, _, Native> =
             RigidTransform3D::from_translation(translation);
@@ -215,7 +227,7 @@ impl DeviceAPI for GlWindowDevice {
         Some(Frame {
             pose: Some(ViewerPose {
                 transform,
-                views: self.views(transform),
+                views: self.views(transform, viewport_size),
             }),
             inputs: vec![],
             events: vec![],
@@ -347,6 +359,9 @@ impl GlWindowDevice {
     }
     fn render_frame(&mut self, layers: &[(ContextId, LayerId)]) -> Result<(), String> {
         log::debug!("End animation frame for layers {:?}", layers);
+        if self.device.context_is_lost(&self.context) {
+            return Err("XR native context unavailable".into());
+        }
         self.device
             .make_context_current(&self.context)
             .map_err(|e| format!("{e:?}"))?;
@@ -354,19 +369,19 @@ impl GlWindowDevice {
         self.restore_present_surface()?;
         debug_assert_eq!(unsafe { self.gl.get_error() }, gl::NO_ERROR);
 
+        let window_size = self.window_size()?;
+        let viewport_size = self.viewport_size()?;
         self.layer_manager()
             .map_err(|e| format!("{e:?}"))?
             .end_frame(layers)
             .map_err(|e| format!("{e:?}"))?;
 
-        let window_size = self.window_size();
-        let viewport_size = self.viewport_size();
-
         let framebuffer_object = self
             .device
             .context_surface_info(&self.context)
             .map_err(|e| format!("{e:?}"))?
-            .and_then(|info| info.framebuffer_object);
+            .ok_or("XR render target has no attached surface")?
+            .framebuffer_object;
         unsafe {
             self.gl
                 .bind_framebuffer(gl::FRAMEBUFFER, framebuffer_object);
@@ -464,6 +479,7 @@ impl GlWindowDevice {
             .create_context(&context_descriptor, None)
             .map_err(|e| Error::BackendSpecific(format!("{e:?}")))?;
         let mut pending = crate::pending_context::PendingContext::new(device, context);
+        pending.keep_alive(window.clone());
         let (device, context) = pending.parts();
         device
             .make_context_current(context)
@@ -587,20 +603,26 @@ impl GlWindowDevice {
         Ok(self.layer_manager.as_mut().unwrap())
     }
 
-    fn window_size(&self) -> Size2D<i32, Viewport> {
+    fn window_size(&self) -> Result<Size2D<i32, Viewport>, String> {
+        if self.device.context_is_lost(&self.context) {
+            return Err("XR native context unavailable".into());
+        }
         let window_size = self
             .device
             .context_surface_info(&self.context)
-            .unwrap()
-            .unwrap()
+            .map_err(|error| format!("{error:?}"))?
+            .ok_or("XR render target has no attached surface")?
             .size
             .to_i32();
-        Size2D::from_untyped(window_size)
+        if window_size.width <= 0 || window_size.height <= 0 {
+            return Err("XR render target has no drawable area".into());
+        }
+        Ok(Size2D::from_untyped(window_size))
     }
 
-    fn viewport_size(&self) -> Size2D<i32, Viewport> {
-        let window_size = self.window_size();
-        match self.window.get_mode() {
+    fn viewport_size(&self) -> Result<Size2D<i32, Viewport>, String> {
+        let window_size = self.window_size()?;
+        let size = match self.window.get_mode() {
             GlWindowMode::StereoRedCyan => {
                 // This device has a slightly odd characteristic, which is that anaglyphic stereo
                 // renders both eyes to the same surface. If we want the two eyes to be parallel,
@@ -623,21 +645,32 @@ impl GlWindowDevice {
             GlWindowMode::StereoLeftRight | GlWindowMode::Blit => {
                 Size2D::new(window_size.width / 2, window_size.height)
             },
+        };
+        if size.width <= 0 || size.height <= 0 {
+            return Err("XR render target has no drawable viewport".into());
         }
+        Ok(size)
     }
 
-    fn views(&self, viewer: RigidTransform3D<f32, Viewer, Native>) -> Views {
+    fn views(
+        &self,
+        viewer: RigidTransform3D<f32, Viewer, Native>,
+        size: Size2D<i32, Viewport>,
+    ) -> Views {
         match self.window.get_mode() {
             GlWindowMode::Cubemap | GlWindowMode::Spherical => Views::Cubemap(
-                self.view(viewer, VIEWER),
-                self.view(viewer, CUBE_LEFT),
-                self.view(viewer, CUBE_RIGHT),
-                self.view(viewer, CUBE_TOP),
-                self.view(viewer, CUBE_BOTTOM),
-                self.view(viewer, CUBE_BACK),
+                self.view(viewer, VIEWER, size),
+                self.view(viewer, CUBE_LEFT, size),
+                self.view(viewer, CUBE_RIGHT, size),
+                self.view(viewer, CUBE_TOP, size),
+                self.view(viewer, CUBE_BOTTOM, size),
+                self.view(viewer, CUBE_BACK, size),
             ),
             GlWindowMode::Blit | GlWindowMode::StereoLeftRight | GlWindowMode::StereoRedCyan => {
-                Views::Stereo(self.view(viewer, LEFT_EYE), self.view(viewer, RIGHT_EYE))
+                Views::Stereo(
+                    self.view(viewer, LEFT_EYE, size),
+                    self.view(viewer, RIGHT_EYE, size),
+                )
             },
         }
     }
@@ -646,8 +679,9 @@ impl GlWindowDevice {
         &self,
         viewer: RigidTransform3D<f32, Viewer, Native>,
         eye: SomeEye<Eye>,
+        size: Size2D<i32, Viewport>,
     ) -> View<Eye> {
-        let projection = self.perspective();
+        let projection = self.perspective(size);
         let translation = if eye == RIGHT_EYE {
             Vector3D::new(-INTER_PUPILLARY_DISTANCE / 2.0, 0.0, 0.0)
         } else if eye == LEFT_EYE {
@@ -688,7 +722,10 @@ impl GlWindowDevice {
         }
     }
 
-    fn perspective<Eye>(&self) -> Transform3D<f32, Eye, Display> {
+    fn perspective<Eye>(
+        &self,
+        viewport_size: Size2D<i32, Viewport>,
+    ) -> Transform3D<f32, Eye, Display> {
         let near = self.clip_planes.near;
         let far = self.clip_planes.far;
         // https://github.com/toji/gl-matrix/blob/bd3307196563fbb331b40fc6ebecbbfcc2a4722c/src/mat4.js#L1271
@@ -700,7 +737,6 @@ impl GlWindowDevice {
         };
         let f = 1.0 / fov_up.radians.tan();
         let nf = 1.0 / (near - far);
-        let viewport_size = self.viewport_size();
         let aspect = viewport_size.width as f32 / viewport_size.height as f32;
 
         // Sigh, row-major vs column-major
@@ -1050,6 +1086,51 @@ mod presentation_tests {
         detached: bool,
         mode: GlWindowMode,
     }
+    #[test]
+    fn discovery_rejects_an_unavailable_display_without_opening_a_target() {
+        let window = Rc::new(PrivateWindow {
+            reject: true,
+            detached: false,
+            mode: GlWindowMode::Blit,
+        });
+        assert!(matches!(
+            GlWindowDiscovery::new(window),
+            Err(Error::BackendSpecific(_))
+        ));
+    }
+
+    struct UnsupportedDisplay;
+    impl GlWindow for UnsupportedDisplay {
+        fn get_render_target(
+            &self,
+            _: &mut SurfmanDevice,
+            _: &mut SurfmanContext,
+        ) -> Result<GlWindowRenderTarget, String> {
+            panic!("Unsupported display must not acquire a render target")
+        }
+        fn get_rotation(&self) -> Rotation3D<f32, UnknownUnit, UnknownUnit> {
+            Rotation3D::identity()
+        }
+        fn get_translation(&self) -> Vector3D<f32, UnknownUnit> {
+            Vector3D::zero()
+        }
+        fn display_handle(&self) -> Result<DisplayHandle<'_>, String> {
+            // Web handles contain no native pointer and are unsupported by the
+            // Linux display backends. No real desktop connection is involved.
+            Ok(unsafe {
+                DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Web(
+                    raw_window_handle::WebDisplayHandle::new(),
+                ))
+            })
+        }
+    }
+    #[test]
+    fn discovery_rejects_an_unsupported_display_connection() {
+        assert!(matches!(
+            GlWindowDiscovery::new(Rc::new(UnsupportedDisplay)),
+            Err(Error::BackendSpecific(_))
+        ));
+    }
     impl GlWindow for PrivateWindow {
         fn get_render_target(
             &self,
@@ -1105,8 +1186,8 @@ mod presentation_tests {
         fn get_mode(&self) -> GlWindowMode {
             self.mode
         }
-        fn display_handle(&self) -> DisplayHandle<'_> {
-            unreachable!("offscreen fixture opens no desktop")
+        fn display_handle(&self) -> Result<DisplayHandle<'_>, String> {
+            Err("Offscreen fixture has no display".into())
         }
     }
     #[derive(Clone)]
@@ -1163,6 +1244,39 @@ mod presentation_tests {
             crate::native_cleanup::CleanupPhase::Complete
         );
         assert!(window.read_fbo.is_none() && window.target_swap_chain.is_none());
+    }
+    #[test]
+    fn detached_target_defers_frame_and_layer_creation_then_restores_viewports() {
+        let mut window = private_window(false, GlWindowMode::Blit).unwrap();
+        let expected = window.viewports().viewports;
+        let surface = window
+            .device
+            .unbind_surface_from_context(&mut window.context)
+            .unwrap()
+            .unwrap();
+        let unavailable = window.viewports().viewports.is_empty()
+            && window.begin_animation_frame(&[]).is_none()
+            && window.render_frame(&[]).is_err()
+            && window
+                .create_layer(
+                    ContextId(1),
+                    LayerInit::ProjectionLayer {
+                        depth: false,
+                        stencil: false,
+                        alpha: true,
+                        scale_factor: 1.0,
+                    },
+                )
+                .is_err();
+        // Destruction of an absent layer must not try to initialize a manager.
+        window.destroy_layer(ContextId(1), LayerId::default());
+        window
+            .device
+            .bind_surface_to_context(&mut window.context, surface)
+            .unwrap();
+        let recovered = window.viewports().viewports == expected;
+        assert!(window.poll_cleanup());
+        assert!(unavailable && recovered);
     }
     #[test]
     fn private_shader_is_disposed_before_native_context() {

@@ -146,8 +146,8 @@ impl PlatformWindow for HeadlessWindow {
     fn new_glwindow(
         &self,
         _event_loop: &winit::event_loop::ActiveEventLoop,
-    ) -> Rc<dyn servo::webxr::GlWindow> {
-        unimplemented!()
+    ) -> Result<Rc<dyn servo::webxr::GlWindow>, String> {
+        Err("Headless windows do not provide an XR display".into())
     }
 
     fn window_rect(&self) -> DeviceIndependentIntRect {

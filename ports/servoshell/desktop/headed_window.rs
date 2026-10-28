@@ -997,7 +997,10 @@ impl PlatformWindow for HeadedWindow {
     }
 
     #[cfg(feature = "webxr")]
-    fn new_glwindow(&self, event_loop: &ActiveEventLoop) -> Rc<dyn servo::webxr::GlWindow> {
+    fn new_glwindow(
+        &self,
+        event_loop: &ActiveEventLoop,
+    ) -> Result<Rc<dyn servo::webxr::GlWindow>, String> {
         let size = self.winit_window.outer_size();
 
         let window_attr = winit::window::Window::default_attributes()
@@ -1007,14 +1010,14 @@ impl PlatformWindow for HeadedWindow {
 
         let winit_window = event_loop
             .create_window(window_attr)
-            .expect("Failed to create window.");
+            .map_err(|error| format!("Could not create XR window: {error}"))?;
 
         let pose = Rc::new(XRWindowPose {
             xr_rotation: Cell::new(Rotation3D::identity()),
             xr_translation: Cell::new(Vector3D::zero()),
         });
         self.xr_window_poses.borrow_mut().push(pose.clone());
-        Rc::new(XRWindow { winit_window, pose })
+        Ok(Rc::new(XRWindow { winit_window, pose }))
     }
 
     fn rendering_context(&self) -> Rc<dyn RenderingContext> {
@@ -1203,17 +1206,24 @@ impl servo::webxr::GlWindow for XRWindow {
         device: &mut surfman::Device,
         _context: &mut surfman::Context,
     ) -> Result<servo::webxr::GlWindowRenderTarget, String> {
-        self.winit_window.set_visible(true);
         let window_handle = self
             .winit_window
             .window_handle()
             .map_err(|e| format!("Could not get XR window handle: {e}"))?;
         let size = self.winit_window.inner_size();
+        if size.width == 0
+            || size.height == 0
+            || size.width > i32::MAX as u32
+            || size.height > i32::MAX as u32
+        {
+            return Err("XR window has no supported drawable area".into());
+        }
         let size = Size2D::new(size.width as i32, size.height as i32);
         let native_widget = device
             .connection()
             .create_native_widget_from_window_handle(window_handle, size)
             .map_err(|e| format!("Could not create XR native widget: {e:?}"))?;
+        self.winit_window.set_visible(true);
         Ok(servo::webxr::GlWindowRenderTarget::NativeWidget(
             native_widget,
         ))
@@ -1242,10 +1252,10 @@ impl servo::webxr::GlWindow for XRWindow {
         }
     }
 
-    fn display_handle(&self) -> raw_window_handle::DisplayHandle<'_> {
+    fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, String> {
         self.winit_window
             .display_handle()
-            .expect("Every window should have a display handle")
+            .map_err(|error| format!("Could not get XR display handle: {error}"))
     }
 }
 

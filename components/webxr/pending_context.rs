@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 //! Own a private, unpublished context throughout consumer initialization.
+use std::any::Any;
 use surfman::{Context, Device, Error, Surface};
 
 pub struct PendingContext {
@@ -8,6 +9,9 @@ pub struct PendingContext {
     returned_surface: Option<Surface>,
     retired: bool,
     target_chain: Option<surfman::chains::SwapChain<Device>>,
+    // Native display/window handles must outlive context destruction, including
+    // an initialization rollback deferred while a surface is on loan.
+    keep_alive: Vec<Box<dyn Any>>,
 }
 impl PendingContext {
     pub fn new(device: Device, context: Context) -> Self {
@@ -17,7 +21,11 @@ impl PendingContext {
             returned_surface: None,
             retired: false,
             target_chain: None,
+            keep_alive: vec![],
         }
+    }
+    pub fn keep_alive(&mut self, owner: impl Any) {
+        self.keep_alive.push(Box::new(owner));
     }
     pub fn parts(&mut self) -> (&Device, &mut Context) {
         (
@@ -86,7 +94,7 @@ impl PendingContext {
 }
 impl Drop for PendingContext {
     fn drop(&mut self) {
-        if self.context.is_none() || self.rollback() {
+        if self.context.is_none() {
             return;
         }
         let mut owner = Self {
@@ -95,8 +103,9 @@ impl Drop for PendingContext {
             returned_surface: self.returned_surface.take(),
             retired: self.retired,
             target_chain: self.target_chain.take(),
+            keep_alive: std::mem::take(&mut self.keep_alive),
         };
-        webxr_api::deferred_cleanup::defer(move || owner.rollback());
+        webxr_api::deferred_cleanup::retire(move || owner.rollback());
     }
 }
 
@@ -104,9 +113,49 @@ impl Drop for PendingContext {
 mod tests {
     use super::*;
     use euclid::default::Size2D;
+    use std::{cell::Cell, rc::Rc};
     use surfman::{
         ContextAttributeFlags, ContextAttributes, GLVersion, SurfaceAccess, SurfaceType,
     };
+    struct Host(Rc<Cell<bool>>);
+    impl Drop for Host {
+        fn drop(&mut self) {
+            self.0.set(false);
+        }
+    }
+    #[test]
+    fn rollback_keeps_host_alive_until_a_borrowed_surface_returns() {
+        use surfman::chains::{PreserveBuffer, SwapChain, SwapChainAPI};
+        let scope = webxr_api::deferred_cleanup::CleanupScope::new();
+        let alive = Rc::new(Cell::new(true));
+        let mut owner = owner();
+        owner.keep_alive(Host(alive.clone()));
+        let target = surface(&mut owner);
+        owner.bind(target).unwrap();
+        let (device, context) = owner.parts();
+        let chain = SwapChain::create_attached(device, context, SurfaceAccess::GPUOnly).unwrap();
+        chain
+            .swap_buffers(device, context, PreserveBuffer::No)
+            .unwrap();
+        let loan = chain.take_surface().unwrap();
+        owner.adopt_chain(chain.clone());
+        scope.run(|| drop(owner));
+        assert!(alive.get() && scope.pending());
+        chain.recycle_surface(loan);
+        webxr_api::deferred_cleanup::poll();
+        assert!(!alive.get() && !scope.pending());
+    }
+    #[test]
+    fn retained_scope_keeps_unpublished_native_context_and_host_inert() {
+        let scope = webxr_api::deferred_cleanup::CleanupScope::new();
+        let alive = Rc::new(Cell::new(true));
+        let mut owner = owner();
+        owner.keep_alive(Host(alive.clone()));
+        scope.retain_unfinished();
+        scope.run(|| drop(owner));
+        webxr_api::deferred_cleanup::poll();
+        assert!(alive.get() && scope.pending());
+    }
     fn owner() -> PendingContext {
         let connection = surfman::mesa_surfaceless::connection::Connection::new().unwrap();
         let adapter = if std::env::var_os("DOME_XR_RETIRE_SOFTWARE").is_some() {
