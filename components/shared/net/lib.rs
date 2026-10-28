@@ -61,6 +61,7 @@ pub mod policy_container;
 pub mod permissions_policy;
 pub mod pub_domains;
 pub mod quality;
+pub mod reporting;
 pub mod request;
 pub(crate) mod resource_fetch_timing;
 pub mod response;

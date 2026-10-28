@@ -39,6 +39,9 @@ pub(crate) struct ReportingObserver {
     buffered: Cell<bool>,
     types: DomRefCell<Vec<TracedDOMString>>,
     report_queue: DomRefCell<Vec<Report>>,
+    // Keep snapshots traced on the owning script thread. Sendable queued tasks
+    // carry only a Trusted observer and an index, never a DOMString or JS value.
+    pending_buffered_reports: DomRefCell<Vec<Report>>,
 }
 
 impl ReportingObserver {
@@ -60,6 +63,7 @@ impl ReportingObserver {
                     .collect(),
             ),
             report_queue: Default::default(),
+            pending_buffered_reports: Default::default(),
         }
     }
 
@@ -115,12 +119,18 @@ impl ReportingObserver {
             let global = self.global();
             // Step 5.2. Queue a task to § 4.4 Invoke reporting observers with notify list
             // with a copy of global’s registered reporting observer list.
-            let observers_global = Trusted::new(&*global);
+            // Snapshot at queue time. disconnect() stops new reports, but must
+            // not cancel notification of reports which are already queued.
+            let notify_list: Vec<_> = global
+                .registered_reporting_observers()
+                .iter()
+                .map(|observer| Trusted::new(&**observer))
+                .collect();
             global.task_manager().dom_manipulation_task_source().queue(
                 task!(notify_reporting_observers: move |cx| {
                     Self::invoke_reporting_observers_with_notify_list(
                         cx,
-                        observers_global.root().registered_reporting_observers()
+                        notify_list.iter().map(Trusted::root).collect(),
                     );
                 }),
             );
@@ -135,12 +145,7 @@ impl ReportingObserver {
             observer.add_report_to_observer(report);
         }
         // Step 2. Append report to scope’s report buffer.
-        global.append_report(report.clone());
-        // Step 3. Let type be report’s type.
-        // TODO(37328)
-        // Step 4. If scope’s report buffer now contains more than 100 reports with
-        // type equal to type, remove the earliest item with type equal to type in the report buffer.
-        // TODO(37328)
+        global.buffer_report(report.clone());
     }
 
     /// <https://w3c.github.io/reporting/#invoke-observers>
@@ -270,9 +275,20 @@ impl ReportingObserverMethods<crate::DomTypeHolder> for ReportingObserver {
         self.buffered.set(false);
         // Step 5.For each report in global’s report buffer, queue a task to
         // execute § 4.3 Add report to observer with report and this.
-        for report in global.buffered_reports() {
-            // TODO(37328): Figure out how to put this in a task
-            self.add_report_to_observer(&report);
+        *self.pending_buffered_reports.borrow_mut() = global.buffered_reports();
+        let count = self.pending_buffered_reports.borrow().len();
+        for index in 0..count {
+            let observer = Trusted::new(self);
+            global.task_manager().dom_manipulation_task_source().queue(
+                task!(add_buffered_report: move || {
+                    let observer = observer.root();
+                    let report = observer.pending_buffered_reports.borrow()[index].clone();
+                    observer.add_report_to_observer(&report);
+                    if index + 1 == count {
+                        observer.pending_buffered_reports.borrow_mut().clear();
+                    }
+                }),
+            );
         }
     }
 
@@ -297,6 +313,15 @@ impl ReportingObserverMethods<crate::DomTypeHolder> for ReportingObserver {
 }
 
 impl GlobalScope {
+    fn buffer_report(&self, report: Report) {
+        if let Some(window) = self.downcast::<Window>() {
+            return window.buffer_report(report);
+        }
+        if let Some(worker) = self.downcast::<WorkerGlobalScope>() {
+            return worker.buffer_report(report);
+        }
+        unreachable!();
+    }
     fn append_reporting_observer(&self, reporting_observer: &ReportingObserver) {
         if let Some(window) = self.downcast::<Window>() {
             return window.append_reporting_observer(reporting_observer);
@@ -349,3 +374,15 @@ impl GlobalScope {
 }
 
 impl OwnerWindow<crate::DomTypeHolder> for ReportingObserver {}
+
+/// The observer history is independent of pending network deliveries. Keep
+/// only the latest 100 entries of each type, as required by Reporting API §4.2.
+pub(crate) fn buffer_report(buffer: &mut Vec<Report>, report: Report) {
+    let type_ = report.type_.clone();
+    buffer.push(report);
+    if buffer.iter().filter(|report| report.type_ == type_).count() > 100 {
+        if let Some(index) = buffer.iter().position(|report| report.type_ == type_) {
+            buffer.remove(index);
+        }
+    }
+}

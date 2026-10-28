@@ -6,6 +6,8 @@ Native reset monitoring and delayed WebGL restoration results are recorded in
 [the native graphics validation record](docs/validation-native-reset-2026-10-28.json).
 Live scene reconstruction results are recorded in
 [the renderer recovery validation record](docs/validation-renderer-recovery-2026-10-28.json).
+Reporting history and worker observer lifecycle results are recorded in
+[the reporting validation record](docs/validation-reporting-lifecycle-2026-10-28.json).
 
 Supported contexts prefer robust access and reset notifications. The FLTK
 frontend retries renderer reconstruction after permanent native loss. It replays
@@ -2065,3 +2067,34 @@ available at `../DomeD/target/release/dome-compositor`.
 Each run checks three reconstruction cycles, a rejected replacement before each
 successful recovery, resource-key continuity, live page state, visible pixels,
 actual renderer selection and shutdown with the final context retired.
+
+## Reporting lifecycle checks
+
+Observer history is retained independently of pending endpoint delivery and is
+bounded to the latest 100 reports per type. Endpoint delivery does not erase
+buffered observation history or enqueue each report twice. Repeated `observe()`
+registers once; `disconnect()` prevents new reports while queued notifications
+still run. Worker removal releases the observer-list read borrow before mutation.
+
+`Reporting-Endpoints` uses the engine structured-field parser, including quoted
+commas, member parameters, repeated headers and duplicate names. Permissions
+Policy state now carries independent enforced and report-only inherited policies
+and response-local reporting destinations. Typed permissions-policy bodies and
+DOM/WebXR report emission remain unfinished; this does not claim the original
+WebXR reporting WPT cases pass. The existing CSP observer body is preserved.
+
+Run the local delivery and lifecycle fixture against the `xr-native-input` test
+embedder with a private DomeD compositor fixture:
+
+```sh
+DOME_COMPOSITOR=/path/to/private-compositor \
+uv run --no-project --with python-xlib --with pillow --with dbus-next python \
+  ports/dome-fltk/tests/reporting-observer.py \
+  --binary /path/to/xr-native-input --output /tmp/reporting-lifecycle
+```
+
+The nine cases cover retained history, the buffer bound, queued disconnection,
+record draining, repeated registration, filtering, one-time buffered observation,
+callback mutation and worker disconnection/closure. They also require each of 124
+CSP reports to reach its endpoint exactly once. This is scoped regression
+coverage, not complete Reporting API conformance.

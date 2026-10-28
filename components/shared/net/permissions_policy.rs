@@ -121,29 +121,77 @@ impl Allowlist {
 
 type Declarations = BTreeMap<PolicyFeature, Allowlist>;
 
-fn header_policy(headers: Option<&HeaderMap>, origin: &OriginSnapshot) -> Declarations {
-    let Some(bytes) =
-        headers.and_then(|headers| get_value_from_header_list("permissions-policy", headers))
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ViolationDisposition {
+    Enforce,
+    Report,
+}
+
+impl ViolationDisposition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enforce => "enforce",
+            Self::Report => "report",
+        }
+    }
+}
+
+/// Diagnostics for a feature check. A report-only violation never changes the
+/// enforced decision, and an enforced violation takes precedence over it.
+#[derive(Debug, Eq, PartialEq)]
+pub struct PolicyViolation {
+    pub disposition: ViolationDisposition,
+    pub endpoint: Option<String>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct PolicyCheck {
+    pub allowed: bool,
+    pub violation: Option<PolicyViolation>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, MallocSizeOf, Serialize)]
+struct PolicyState {
+    // Absent inherited entries are Enabled (the empty top-level policy).
+    inherited: BTreeMap<PolicyFeature, bool>,
+    declared: Declarations,
+    // Configuration belongs to this response. An ancestor's endpoint must not
+    // become a destination for reports from a different document.
+    reporting: BTreeMap<PolicyFeature, String>,
+}
+
+fn header_policy(
+    headers: Option<&HeaderMap>,
+    origin: &OriginSnapshot,
+    header: &str,
+) -> PolicyState {
+    let Some(bytes) = headers.and_then(|headers| get_value_from_header_list(header, headers))
     else {
-        return Declarations::new();
+        return PolicyState::default();
     };
     let Ok(dictionary) = Parser::new(&bytes).parse::<Dictionary>() else {
-        return Declarations::new();
+        return PolicyState::default();
     };
-    let mut declarations = Declarations::new();
+    let mut state = PolicyState::default();
     for (name, entry) in dictionary {
         let Some(feature) = PolicyFeature::parse(name.as_str()) else {
             continue;
         };
-        let items = match entry {
+        let (items, params) = match entry {
             ListEntry::Item(item) => match item.bare_item {
-                value @ (BareItem::Token(_) | BareItem::String(_)) => vec![value],
+                value @ (BareItem::Token(_) | BareItem::String(_)) => (vec![value], item.params),
                 _ => continue,
             },
-            ListEntry::InnerList(list) => {
-                list.items.into_iter().map(|item| item.bare_item).collect()
-            },
+            ListEntry::InnerList(list) => (
+                list.items.into_iter().map(|item| item.bare_item).collect(),
+                list.params,
+            ),
         };
+        if let Some(BareItem::Token(endpoint)) = params.get("report-to") {
+            state
+                .reporting
+                .insert(feature, endpoint.as_str().to_owned());
+        }
         let mut allowlist = Allowlist::default();
         for item in items {
             match item {
@@ -157,9 +205,9 @@ fn header_policy(headers: Option<&HeaderMap>, origin: &OriginSnapshot) -> Declar
                 _ => {},
             }
         }
-        declarations.insert(feature, allowlist);
+        state.declared.insert(feature, allowlist);
     }
-    declarations
+    state
 }
 
 fn container_policy(value: &str, origin: &OriginSnapshot, src: &OriginSnapshot) -> Declarations {
@@ -205,9 +253,8 @@ fn container_policy(value: &str, origin: &OriginSnapshot, src: &OriginSnapshot) 
 
 #[derive(Clone, Debug, Default, Deserialize, MallocSizeOf, Serialize)]
 pub struct PermissionsPolicy {
-    // Absent inherited entries are Enabled (the empty top-level policy).
-    inherited: BTreeMap<PolicyFeature, bool>,
-    declared: Declarations,
+    enforced: PolicyState,
+    report_only: PolicyState,
 }
 
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
@@ -232,9 +279,14 @@ impl ContainerPolicy {
         }
     }
 
-    fn inherits(&self, feature: PolicyFeature, origin: &OriginSnapshot) -> bool {
-        if !self.parent.feature_value(feature, &self.parent_origin)
-            || !self.parent.feature_value(feature, origin)
+    fn inherits(&self, feature: PolicyFeature, origin: &OriginSnapshot, report_only: bool) -> bool {
+        let parent = if report_only {
+            &self.parent.report_only
+        } else {
+            &self.parent.enforced
+        };
+        if !parent.feature_value(feature, &self.parent_origin)
+            || !parent.feature_value(feature, origin)
         {
             return false;
         }
@@ -249,7 +301,12 @@ impl PermissionsPolicy {
     /// Header self-origin denotes the document's live origin, including domain
     /// relaxation. Inherited policy remains the value established at navigation.
     pub fn refresh_self_origin(&mut self, origin: &OriginSnapshot) {
-        for allowlist in self.declared.values_mut() {
+        for allowlist in self
+            .enforced
+            .declared
+            .values_mut()
+            .chain(self.report_only.declared.values_mut())
+        {
             if allowlist.self_origin.is_some() {
                 allowlist.self_origin = Some(origin.clone());
             }
@@ -261,27 +318,56 @@ impl PermissionsPolicy {
         origin: &OriginSnapshot,
         headers: Option<&HeaderMap>,
     ) -> Self {
-        let inherited = PolicyFeature::ALL
-            .into_iter()
-            .map(|feature| {
-                (
-                    feature,
-                    container.is_none_or(|container| container.inherits(feature, origin)),
-                )
-            })
-            .collect();
+        let make_state = |report_only| {
+            let header = if report_only {
+                "permissions-policy-report-only"
+            } else {
+                "permissions-policy"
+            };
+            let mut state = header_policy(headers, origin, header);
+            state.inherited = PolicyFeature::ALL
+                .into_iter()
+                .map(|feature| {
+                    (
+                        feature,
+                        container.is_none_or(|container| {
+                            container.inherits(feature, origin, report_only)
+                        }),
+                    )
+                })
+                .collect();
+            state
+        };
         Self {
-            inherited,
-            declared: header_policy(headers, origin),
+            enforced: make_state(false),
+            report_only: make_state(true),
         }
     }
 
-    fn feature_value(&self, feature: PolicyFeature, origin: &OriginSnapshot) -> bool {
-        self.inherited.get(&feature).copied().unwrap_or(true)
-            && self
-                .declared
-                .get(&feature)
-                .is_none_or(|allowlist| allowlist.matches(origin))
+    /// Compute the enforced decision and the report, if any, without emitting
+    /// it. Introspection uses `allows` instead and has no reporting side effect.
+    /// <https://w3c.github.io/webappsec-permissions-policy/#is-feature-enabled>
+    pub fn check(
+        &self,
+        feature: PolicyFeature,
+        origin: &OriginSnapshot,
+        document_origin: &OriginSnapshot,
+    ) -> PolicyCheck {
+        let allowed = self.enforced.allows(feature, origin, document_origin);
+        let violation = if !allowed {
+            Some((&self.enforced, ViolationDisposition::Enforce))
+        } else if !self.report_only.allows(feature, origin, document_origin) {
+            Some((&self.report_only, ViolationDisposition::Report))
+        } else {
+            None
+        };
+        PolicyCheck {
+            allowed,
+            violation: violation.map(|(state, disposition)| PolicyViolation {
+                disposition,
+                endpoint: state.reporting.get(&feature).cloned(),
+            }),
+        }
     }
 
     pub fn allows(
@@ -290,17 +376,14 @@ impl PermissionsPolicy {
         origin: &OriginSnapshot,
         document_origin: &OriginSnapshot,
     ) -> bool {
-        self.feature_value(feature, origin)
-            && (self.declared.contains_key(&feature)
-                || feature.default_all()
-                || origin.same_origin(document_origin))
+        self.enforced.allows(feature, origin, document_origin)
     }
 
     pub fn allowlist(&self, feature: PolicyFeature, origin: &OriginSnapshot) -> Vec<String> {
         if !self.allows(feature, origin, origin) {
             return vec![];
         }
-        self.declared.get(&feature).map_or_else(
+        self.enforced.declared.get(&feature).map_or_else(
             || {
                 if feature.default_all() {
                     vec!["*".into()]
@@ -310,5 +393,27 @@ impl PermissionsPolicy {
             },
             Allowlist::strings,
         )
+    }
+}
+
+impl PolicyState {
+    fn feature_value(&self, feature: PolicyFeature, origin: &OriginSnapshot) -> bool {
+        self.inherited.get(&feature).copied().unwrap_or(true)
+            && self
+                .declared
+                .get(&feature)
+                .is_none_or(|allowlist| allowlist.matches(origin))
+    }
+
+    fn allows(
+        &self,
+        feature: PolicyFeature,
+        origin: &OriginSnapshot,
+        document_origin: &OriginSnapshot,
+    ) -> bool {
+        self.feature_value(feature, origin)
+            && (self.declared.contains_key(&feature)
+                || feature.default_all()
+                || origin.same_origin(document_origin))
     }
 }

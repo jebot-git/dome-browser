@@ -371,6 +371,9 @@ pub(crate) struct WorkerGlobalScope {
     /// <https://w3c.github.io/reporting/#windoworworkerglobalscope-reports>
     report_list: DomRefCell<Vec<Report>>,
 
+    /// <https://w3c.github.io/reporting/#windoworworkerglobalscope-report-buffer>
+    report_buffer: DomRefCell<Vec<Report>>,
+
     /// <https://w3c.github.io/reporting/#windoworworkerglobalscope-endpoints>
     #[no_trace]
     endpoints_list: DomRefCell<Vec<ReportingEndpoint>>,
@@ -474,6 +477,7 @@ impl WorkerGlobalScope {
             trusted_types: Default::default(),
             reporting_observer_list: Default::default(),
             report_list: Default::default(),
+            report_buffer: Default::default(),
             endpoints_list: Default::default(),
             debugger_global: Default::default(),
             pipeline_id: init.pipeline_id,
@@ -599,18 +603,16 @@ impl WorkerGlobalScope {
     }
 
     pub(crate) fn append_reporting_observer(&self, reporting_observer: &ReportingObserver) {
-        self.reporting_observer_list
-            .borrow_mut()
-            .push(Dom::from_ref(reporting_observer));
+        let mut list = self.reporting_observer_list.borrow_mut();
+        if !list.iter().any(|observer| &**observer == reporting_observer) {
+            list.push(Dom::from_ref(reporting_observer));
+        }
     }
 
     pub(crate) fn remove_reporting_observer(&self, reporting_observer: &ReportingObserver) {
-        if let Some(index) = self
-            .reporting_observer_list
-            .borrow()
-            .iter()
-            .position(|observer| &**observer == reporting_observer)
-        {
+        let index = self.reporting_observer_list.borrow().iter()
+            .position(|observer| &**observer == reporting_observer);
+        if let Some(index) = index {
             self.reporting_observer_list.borrow_mut().remove(index);
         }
     }
@@ -625,6 +627,9 @@ impl WorkerGlobalScope {
 
     pub(crate) fn append_report(&self, report: Report) {
         self.report_list.borrow_mut().push(report);
+        if self.report_list.borrow().len() != 1 {
+            return;
+        }
         let trusted_worker = Trusted::new(self);
         self.upcast::<GlobalScope>()
             .task_manager()
@@ -640,7 +645,13 @@ impl WorkerGlobalScope {
     }
 
     pub(crate) fn buffered_reports(&self) -> Vec<Report> {
-        self.report_list.borrow().clone()
+        self.report_buffer.borrow().clone()
+    }
+
+    pub(crate) fn buffer_report(&self, report: Report) {
+        crate::dom::reporting::reportingobserver::buffer_report(
+            &mut self.report_buffer.borrow_mut(), report,
+        );
     }
 
     pub(crate) fn set_endpoints_list(&self, endpoints: Option<Vec<ReportingEndpoint>>) {

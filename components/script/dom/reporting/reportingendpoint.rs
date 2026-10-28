@@ -49,60 +49,16 @@ impl ReportingEndpoint {
         headers: &Option<Serde<HeaderMap>>,
     ) -> Option<Vec<ReportingEndpoint>> {
         let headers = headers.as_ref()?;
-        let reporting_headers = headers.get_all("reporting-endpoints");
-        // Step 2. Let parsed header be the result of executing get a structured field value
-        // given "Reporting-Endpoints" and "dictionary" from response’s header list.
-        let mut parsed_header = Vec::new();
-        for header in reporting_headers.iter() {
-            let Some(header_value) = header.to_str().ok() else {
-                continue;
-            };
-            parsed_header.append(&mut header_value.split(",").map(|s| s.trim()).collect());
-        }
-        // Step 3. If parsed header is null, abort these steps.
-        if parsed_header.is_empty() {
-            return None;
-        }
-        // Step 4. Let endpoints be an empty list.
-        let mut endpoints = Vec::new();
-        // Step 5. For each name → value_and_parameters of parsed header:
-        for header in parsed_header {
-            // There could be a '=' in the URL itself (for example query parameters). Therefore, we can't
-            // split on '=', but instead look for the first one.
-            let Some(split_index) = header.find('=') else {
-                continue;
-            };
-            // Step 5.1. Let endpoint url string be the first element of the tuple value_and_parameters.
-            // If endpoint url string is not a string, then continue.
-            let (name, endpoint_url_string) = header.split_at(split_index);
-            let length = endpoint_url_string.len();
-            let endpoint_bytes = endpoint_url_string.as_bytes();
-            // Note that the first character is the '=' and we check for the next and last character to be '"'
-            if length < 3 || endpoint_bytes[1] != b'"' || endpoint_bytes[length - 1] != b'"' {
-                continue;
-            }
-            // The '="' at the start and '"' at the end removed
-            let endpoint_url_value = &endpoint_url_string[2..length - 1];
-            // Step 5.2. Let endpoint url be the result of executing the URL parser on endpoint url string,
-            // with base URL set to response’s url. If endpoint url is failure, then continue.
-            let Ok(endpoint_url) =
-                ServoUrl::parse_with_base(Some(response_url), endpoint_url_value)
-            else {
-                continue;
-            };
-            // Step 5.3. If endpoint url’s origin is not potentially trustworthy, then continue.
-            if !endpoint_url.is_potentially_trustworthy() {
-                continue;
-            }
-            // Step 5.4. Let endpoint be a new endpoint whose properties are set as follows:
-            // Step 5.5. Add endpoint to endpoints.
-            endpoints.push(ReportingEndpoint {
-                name: DOMString::from(name),
-                url: endpoint_url,
-                failures: 0,
-            });
-        }
-        Some(endpoints)
+        Some(
+            net_traits::reporting::parse_reporting_endpoints(response_url, headers)?
+                .into_iter()
+                .map(|endpoint| ReportingEndpoint {
+                    name: endpoint.name.into(),
+                    url: endpoint.url,
+                    failures: 0,
+                })
+                .collect(),
+        )
     }
 }
 

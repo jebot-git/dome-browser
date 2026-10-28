@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "validated_utc": "2026-10-28T20:03:22.981812+00:00",
+  "base_commit": "e5d239296624f03b6565b030380c92bbffa3a760",
+  "changes": [
+    "Separate bounded observer history from pending endpoint deliveries, preventing duplicated network reports and retaining delivered reports for buffered observation.",
+    "Preserve queued observer notifications after disconnect and keep buffered snapshots traced on their owning script thread.",
+    "Make registration idempotent and release the worker observer-list read borrow before removal.",
+    "Parse Reporting-Endpoints as one structured dictionary, including quoted delimiters, parameters, repeated fields, duplicate names and trustworthy destination origins.",
+    "Prepare independent enforced/report-only Permissions Policy state, inheritance and response-local endpoint selection. DOM report generation is a separate remaining step."
+  ],
+  "optimized_binaries": {
+    "browser-candidate-r4": {
+      "path": "browser-candidate-r4",
+      "sha256": "1a7d18d67ca986f5e9d03cb095cec619c8057ef111eb8dbee0104bb6e344fb6f"
+    },
+    "test-embedder-r4": {
+      "path": "test-embedder-r4",
+      "sha256": "adc8b36a31233a593689a09bf9514a7e20b7f6e205d1811899ecba89d4a99317"
+    }
+  },
+  "validation": {
+    "network_policy_and_endpoint_unit_tests": 32,
+    "reporting_lifecycle_checks": 69,
+    "csp_reports_delivered_exactly_once": 124,
+    "history_checks": 14,
+    "xr_policy_checks": 23,
+    "xr_pending_request_checks": 14,
+    "total_runtime_checks": 120,
+    "shared_worker_shutdown_scenarios": 3,
+    "anonymous_live_samples": [
+      {
+        "url": "https://discord.com/login",
+        "alive_at_end": true,
+        "clean_close": true,
+        "crashes": []
+      },
+      {
+        "url": "https://x.com/",
+        "alive_at_end": true,
+        "clean_close": true,
+        "crashes": []
+      }
+    ],
+    "sample_captures_visually_reviewed": true,
+    "release_compile_check": "dome-browser and servo-webxr/glwindow, all targets",
+    "release_build": true,
+    "source_freeze_verified": true
+  },
+  "scope": [
+    "Local reporting fixtures use private temporary profiles, session buses and compositors.",
+    "Worker disconnection crash is fixed in the scoped regression; this is not a claim that all browser crashes are resolved.",
+    "Public pages are anonymous survival/closure samples, not whole-site rendering conformance tests. The accepted X QR overlap remains a non-bug.",
+    "XR checks use a synthetic private DomeD host, not a physical headset.",
+    "Permissions Policy observer bodies and WebXR report emission are not implemented in this checkpoint. The original two XR reporting WPT cases are not claimed to pass.",
+    "The Reporting dictionary / Permissions Policy legacy interface mismatch and mixed-type/document lifecycle tests remain for the typed report-body integration."
+  ],
+  "retained_failed_runs": [
+    {
+      "phase": "initial compile check",
+      "result": "Buffered report snapshots cannot be captured by sendable tasks; corrected to keep snapshots traced on the observer and queue only Trusted handles and indices."
+    },
+    {
+      "phase": "initial endpoint unit run",
+      "result": "Trustworthiness check corrected to inspect destination origin."
+    },
+    {
+      "phase": "initial local fixture",
+      "result": "CSP event timing assumption corrected before candidate runtime validation; old disconnect/takeRecords timings are not conformance evidence."
+    },
+    {
+      "phase": "initial history harness",
+      "result": "uv environment lacked system dbus-python; rerun with the system interpreter passed."
+    }
+  ],
+  "source_sha256": {
+    "Cargo.lock": "5c745c15841e28330ce06816171cce233b22067d670b4682f4b10c5a63ca2ad8",
+    "components/script/dom/reporting/reportingendpoint.rs": "fc6458a0898b73646ac0456d96c86eb52d0a0c56c5ce369af069f0e1ad8e8f9c",
+    "components/script/dom/reporting/reportingobserver.rs": "2e392762900265207baf3c3833fb52ad3887f6dc66466432866ff989b90819bc",
+    "components/script/dom/window/window.rs": "9a16c14fd6576a4cd7a0e669cccf008cc8f233a45362c9bfe52cfdb5bb348730",
+    "components/script/dom/workers/workerglobalscope.rs": "1f238b141851f462ea9554a822f3fa98f28132127edff2565e791775f413d4cb",
+    "components/shared/net/lib.rs": "4bb5c504e8ab35245f8f6690fe3b091144042c1abf8da0b7bd8d995124b5cfe8",
+    "components/shared/net/permissions_policy.rs": "57b45d898a112d8474c3a267d36cb6f34376bd89465817189cfddaffcc858d32",
+    "components/shared/net/reporting.rs": "3767b9b28661d0dfde42fd9afb8c8b0d4b63e59f95cfbd02d752440c722d9b12",
+    "components/shared/net/tests/permissions_policy.rs": "7105eb2ba1ea3419d4e864deac9188bb03aee5f7d907774c85b8c7eab56575c4",
+    "components/shared/net/tests/reporting.rs": "174f4f82ed487cf225c4476cabded5235061ae9fd7324036fd6a911ceaea710a",
+    "ports/dome-fltk/tests/reporting-observer-worker.js": "1e28de4bff75e7bed91f541edee567113cb3c9acc84a8b240582ffd186def8f5",
+    "ports/dome-fltk/tests/reporting-observer.html": "65d00fd14db660925f1511a19429cf07c25f738100d6f9c86637ce12f2649a87",
+    "ports/dome-fltk/tests/reporting-observer.py": "e9afef69b6da10b626ff055942c7b05e6240350e7bb5232f2512b82954cee845"
+  }
+}

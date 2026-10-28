@@ -2,7 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 use http::{HeaderMap, HeaderValue};
-use net_traits::permissions_policy::{ContainerPolicy, PermissionsPolicy, PolicyFeature as F};
+use net_traits::permissions_policy::{
+    ContainerPolicy, PermissionsPolicy, PolicyFeature as F, ViolationDisposition as D,
+};
 use servo_url::{ImmutableOrigin, MutableOrigin, OriginSnapshot, ServoUrl};
 
 fn origin(value: &str) -> OriginSnapshot {
@@ -377,4 +379,267 @@ fn header_self_follows_the_documents_live_origin_domain() {
     assert!(!allows(&p, &b.snapshot()));
     b.set_domain(url::Host::parse("example.test").unwrap());
     assert!(allows(&p, &b.snapshot()));
+}
+
+fn reporting_policy(enforced: &str, report_only: &str, at: &OriginSnapshot) -> PermissionsPolicy {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "permissions-policy",
+        HeaderValue::from_str(enforced).unwrap(),
+    );
+    headers.insert(
+        "permissions-policy-report-only",
+        HeaderValue::from_str(report_only).unwrap(),
+    );
+    PermissionsPolicy::for_document(None, at, Some(&headers))
+}
+
+#[test]
+fn report_only_has_a_separate_decision_and_destination() {
+    let a = origin("https://a.test");
+    let p = reporting_policy(
+        "xr-spatial-tracking=*;report-to=enforced",
+        "xr-spatial-tracking=();report-to=diagnostics",
+        &a,
+    );
+    assert!(allows(&p, &a));
+    assert_eq!(p.allowlist(F::XrSpatialTracking, &a), ["*"]);
+    let check = p.check(F::XrSpatialTracking, &a, &a);
+    assert!(check.allowed);
+    let violation = check.violation.unwrap();
+    assert_eq!(violation.disposition, D::Report);
+    assert_eq!(violation.endpoint.as_deref(), Some("diagnostics"));
+    // Other features retain their own state and produce no spurious report.
+    assert!(p.check(F::Geolocation, &a, &a).violation.is_none());
+    assert!(p.check(F::Gamepad, &a, &a).violation.is_none());
+}
+
+#[test]
+fn enforced_denial_takes_precedence_over_report_only() {
+    let a = origin("https://a.test");
+    for report_only in [
+        "xr-spatial-tracking=*;report-to=diagnostics",
+        "xr-spatial-tracking=();report-to=diagnostics",
+    ] {
+        let p = reporting_policy("xr-spatial-tracking=();report-to=enforced", report_only, &a);
+        let check = p.check(F::XrSpatialTracking, &a, &a);
+        assert!(!check.allowed);
+        let violation = check.violation.unwrap();
+        assert_eq!(violation.disposition, D::Enforce);
+        assert_eq!(violation.endpoint.as_deref(), Some("enforced"));
+    }
+}
+
+#[test]
+fn reporting_parameter_is_a_member_token_and_not_an_allowlist_item_parameter() {
+    let a = origin("https://a.test");
+    for value in [
+        "xr-spatial-tracking=();report-to=collector",
+        "xr-spatial-tracking=unknown;report-to=collector",
+        "xr-spatial-tracking=(\"https://other.test\");report-to=collector",
+    ] {
+        let p = reporting_policy("", value, &a);
+        let check = p.check(F::XrSpatialTracking, &a, &a);
+        assert!(check.allowed, "{value}");
+        assert_eq!(
+            check.violation.unwrap().endpoint.as_deref(),
+            Some("collector"),
+            "{value}"
+        );
+    }
+    for value in [
+        "xr-spatial-tracking=();report-to=\"collector\"",
+        "xr-spatial-tracking=();report-to=?1",
+        "xr-spatial-tracking=();report-to=42",
+        "xr-spatial-tracking=(\"https://other.test\";report-to=collector)",
+    ] {
+        let check = reporting_policy("", value, &a).check(F::XrSpatialTracking, &a, &a);
+        assert!(check.allowed, "{value}");
+        assert_eq!(check.violation.unwrap().endpoint, None, "{value}");
+    }
+}
+
+#[test]
+fn malformed_report_only_does_not_replace_enforced_policy() {
+    let a = origin("https://a.test");
+    for report_only in [
+        "xr-spatial-tracking=(",
+        "xr-spatial-tracking=();report-to=@",
+        "unknown-feature=();report-to=collector",
+    ] {
+        let p = reporting_policy("xr-spatial-tracking=*", report_only, &a);
+        assert!(p.check(F::XrSpatialTracking, &a, &a).violation.is_none());
+        let p = reporting_policy("xr-spatial-tracking=()", report_only, &a);
+        let check = p.check(F::XrSpatialTracking, &a, &a);
+        assert!(!check.allowed);
+        assert_eq!(check.violation.unwrap().disposition, D::Enforce);
+    }
+}
+
+#[test]
+fn repeated_report_only_fields_and_duplicate_declarations_use_structured_fields() {
+    let a = origin("https://a.test");
+    let mut headers = HeaderMap::new();
+    for value in [
+        "geolocation=();report-to=geo",
+        "xr-spatial-tracking=*;report-to=old, xr-spatial-tracking=();report-to=xr",
+    ] {
+        headers.append(
+            "permissions-policy-report-only",
+            HeaderValue::from_str(value).unwrap(),
+        );
+    }
+    let p = PermissionsPolicy::for_document(None, &a, Some(&headers));
+    assert_eq!(
+        p.check(F::Geolocation, &a, &a)
+            .violation
+            .unwrap()
+            .endpoint
+            .as_deref(),
+        Some("geo")
+    );
+    assert_eq!(
+        p.check(F::XrSpatialTracking, &a, &a)
+            .violation
+            .unwrap()
+            .endpoint
+            .as_deref(),
+        Some("xr")
+    );
+}
+
+#[test]
+fn report_only_restrictions_inherit_without_enforcing_or_inheriting_endpoints() {
+    let a = origin("https://a.test");
+    let b = origin("https://b.test");
+    let c = origin("https://c.test");
+    let parent = reporting_policy(
+        "xr-spatial-tracking=*",
+        "xr-spatial-tracking=();report-to=parent",
+        &a,
+    );
+    let p = child(parent, &a, &b, &b, "xr-spatial-tracking *");
+    let check = p.check(F::XrSpatialTracking, &b, &b);
+    assert!(check.allowed);
+    let violation = check.violation.unwrap();
+    assert_eq!(violation.disposition, D::Report);
+    assert_eq!(violation.endpoint, None);
+    let container = ContainerPolicy::new(p, b, c.clone(), "xr-spatial-tracking *");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "permissions-policy-report-only",
+        HeaderValue::from_static("xr-spatial-tracking=*;report-to=child"),
+    );
+    // A descendant response cannot undo its inherited report-only restriction.
+    let p = PermissionsPolicy::for_document(Some(&container), &c, Some(&headers));
+    let check = p.check(F::XrSpatialTracking, &c, &c);
+    assert!(check.allowed);
+    let violation = check.violation.unwrap();
+    assert_eq!(violation.disposition, D::Report);
+    assert_eq!(violation.endpoint.as_deref(), Some("child"));
+}
+
+#[test]
+fn enforced_ancestor_restrictions_do_not_turn_into_report_only_restrictions() {
+    let a = origin("https://a.test");
+    let b = origin("https://b.test");
+    let parent = reporting_policy(
+        "xr-spatial-tracking=();report-to=parent",
+        "xr-spatial-tracking=*",
+        &a,
+    );
+    let p = child(parent, &a, &b, &b, "xr-spatial-tracking *");
+    let check = p.check(F::XrSpatialTracking, &b, &b);
+    assert!(!check.allowed);
+    let violation = check.violation.unwrap();
+    assert_eq!(violation.disposition, D::Enforce);
+    assert_eq!(violation.endpoint, None);
+}
+
+#[test]
+fn container_delegation_and_parent_origin_apply_to_both_dispositions() {
+    let a = origin("https://a.test");
+    let b = origin("https://b.test");
+    let parent = reporting_policy("xr-spatial-tracking=*", "xr-spatial-tracking=self", &a);
+    let p = child(parent, &a, &b, &b, "xr-spatial-tracking *");
+    assert!(p.check(F::XrSpatialTracking, &b, &b).allowed);
+    assert_eq!(
+        p.check(F::XrSpatialTracking, &b, &b)
+            .violation
+            .unwrap()
+            .disposition,
+        D::Report
+    );
+    let parent = reporting_policy(
+        "xr-spatial-tracking=*",
+        "xr-spatial-tracking=\"https://b.test\"",
+        &a,
+    );
+    let p = child(parent, &a, &b, &b, "xr-spatial-tracking *");
+    assert_eq!(
+        p.check(F::XrSpatialTracking, &b, &b)
+            .violation
+            .unwrap()
+            .disposition,
+        D::Report
+    );
+    let parent = reporting_policy("xr-spatial-tracking=*", "xr-spatial-tracking=*", &a);
+    let p = child(parent, &a, &b, &b, "xr-spatial-tracking 'none'");
+    assert!(!p.check(F::XrSpatialTracking, &b, &b).allowed);
+    assert_eq!(
+        p.check(F::XrSpatialTracking, &b, &b)
+            .violation
+            .unwrap()
+            .disposition,
+        D::Enforce
+    );
+}
+
+#[test]
+fn a_new_navigation_replaces_both_response_policies_and_their_destinations() {
+    let a = origin("https://a.test");
+    let b = origin("https://b.test");
+    let container = ContainerPolicy::new(
+        PermissionsPolicy::default(),
+        a.clone(),
+        b.clone(),
+        "xr-spatial-tracking *",
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "permissions-policy-report-only",
+        HeaderValue::from_static("xr-spatial-tracking=();report-to=old"),
+    );
+    let old = PermissionsPolicy::for_document(Some(&container), &b, Some(&headers));
+    assert!(old.check(F::XrSpatialTracking, &b, &b).violation.is_some());
+    let next = PermissionsPolicy::for_document(Some(&container), &b, None);
+    assert!(next.check(F::XrSpatialTracking, &b, &b).violation.is_none());
+}
+
+#[test]
+fn refreshing_live_self_origin_updates_both_policies_without_changing_snapshots() {
+    let a = MutableOrigin::new(ServoUrl::parse("https://a.example.test").unwrap().origin());
+    let b = MutableOrigin::new(ServoUrl::parse("https://b.example.test").unwrap().origin());
+    let mut p = reporting_policy(
+        "xr-spatial-tracking=*",
+        "xr-spatial-tracking=self;report-to=collector",
+        &a.snapshot(),
+    );
+    let old_snapshot = p.clone();
+    a.set_domain(url::Host::parse("example.test").unwrap());
+    b.set_domain(url::Host::parse("example.test").unwrap());
+    p.refresh_self_origin(&a.snapshot());
+    assert!(
+        p.check(F::XrSpatialTracking, &b.snapshot(), &a.snapshot())
+            .violation
+            .is_none()
+    );
+    assert_eq!(
+        old_snapshot
+            .check(F::XrSpatialTracking, &b.snapshot(), &a.snapshot())
+            .violation
+            .unwrap()
+            .disposition,
+        D::Report
+    );
 }

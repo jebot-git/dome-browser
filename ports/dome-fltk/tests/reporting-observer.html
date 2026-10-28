@@ -1,0 +1,168 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Local reporting lifecycle regression</title>
+<p>Testing reporting buffers, delivery and observer lifecycle.</p>
+<script>
+const scenario = new URL(location).searchParams.get('case');
+const checks = [];
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+function check(passed, name) {
+  checks.push({name, passed: !!passed});
+  if (!passed) throw new Error(name);
+}
+async function until(predicate) {
+  const deadline = performance.now() + 6000;
+  while (!predicate()) {
+    if (performance.now() > deadline) throw new Error('Timed out waiting for observer');
+    await delay(10);
+  }
+}
+async function delivered(count) {
+  const deadline = performance.now() + 6000;
+  while (performance.now() < deadline) {
+    const response = await fetch('/__counts?case=' + scenario);
+    if ((await response.json()).reports >= count) return;
+    await delay(10);
+  }
+  throw new Error('Timed out waiting for endpoint delivery');
+}
+async function violate(index) {
+  const event = new Promise(resolve =>
+    addEventListener('securitypolicyviolation', resolve, {once: true}));
+  const image = new Image();
+  image.src = '/blocked?case=' + scenario + '&index=' + index;
+  await event;
+}
+function observe(options) {
+  const batches = [];
+  const observer = new ReportingObserver(reports => batches.push(reports), options);
+  return {observer, batches};
+}
+async function main() {
+  check(typeof ReportingObserver === 'function', 'ReportingObserver is exposed');
+  if (scenario === 'buffer' || scenario === 'bound') {
+    const count = scenario === 'bound' ? 110 : 3;
+    for (let i = 0; i < count; ++i) await violate(i);
+    await delivered(count);
+    const {observer, batches} = observe({buffered: true});
+    observer.observe();
+    check(observer.takeRecords().length === 0, 'Buffered observation queues tasks');
+    await until(() => batches.length > 0);
+    const reports = batches.flat();
+    check(reports.length === Math.min(100, count), 'History survives delivery and is bounded');
+    check(reports.every((report, i) => report.body.blockedURL.endsWith('index=' + (i + Math.max(0, count - 100)))),
+          'History retains the latest reports in order');
+    check(reports.every(report => report.type === 'csp-violation' && report.body.disposition === 'enforce'),
+          'CSP report body and disposition are preserved');
+    observer.disconnect();
+  } else if (scenario === 'disconnect' || scenario === 'records') {
+    // The first callback runs after both observers have been queued. This is
+    // independent of when securitypolicyviolation's event checkpoint runs.
+    const batches = [];
+    let acted = false, receivedAfterDisconnect = false, records = [];
+    const observer = new ReportingObserver(reports => {
+      batches.push(reports);
+      receivedAfterDisconnect = acted;
+    });
+    const driver = new ReportingObserver(() => {
+      driver.disconnect();
+      if (scenario === 'disconnect') observer.disconnect();
+      else records = observer.takeRecords();
+      acted = true;
+    });
+    driver.observe();
+    observer.observe();
+    await violate(0);
+    await until(() => acted);
+    if (scenario === 'disconnect') {
+      await until(() => batches.length > 0);
+      check(batches.flat().length === 1 && receivedAfterDisconnect,
+            'Disconnect preserves already queued notification');
+      await violate(1);
+      await delivered(2);
+      await delay(60);
+      check(batches.flat().length === 1, 'Disconnect prevents subsequent reports');
+    } else {
+      check(records.length === 1, 'takeRecords drains the pending observer queue');
+      check(observer.takeRecords().length === 0, 'takeRecords empties only that queue');
+      await delivered(1);
+      await delay(60);
+      check(batches.length === 0, 'Drained reports do not trigger an empty callback');
+      observer.disconnect();
+      const later = observe({buffered: true});
+      later.observer.observe();
+      await until(() => later.batches.length > 0);
+      check(later.batches.flat().length === 1, 'takeRecords preserves global history');
+      later.observer.disconnect();
+    }
+  } else if (scenario === 'repeat') {
+    const {observer, batches} = observe();
+    observer.observe();
+    observer.observe();
+    await violate(0);
+    await until(() => batches.length > 0);
+    check(batches.flat().length === 1, 'Repeated observe registers once');
+    observer.disconnect();
+    await violate(1);
+    await delivered(2);
+    await delay(60);
+    check(batches.flat().length === 1, 'One disconnect removes the registration');
+    observer.observe();
+    await violate(2);
+    await until(() => batches.length === 2);
+    check(batches[1].length === 1, 'Re-observation receives new reports');
+    observer.disconnect();
+  } else if (scenario === 'filter') {
+    const filtered = observe({types: ['permissions-policy-violation'], buffered: true});
+    filtered.observer.observe();
+    await violate(0);
+    await delivered(1);
+    await delay(60);
+    check(filtered.batches.length === 0, 'Type filtering excludes other reports');
+    const matching = observe({types: ['csp-violation'], buffered: true});
+    matching.observer.observe();
+    await until(() => matching.batches.length > 0);
+    check(matching.batches.flat().length === 1, 'Type filtering also applies to history');
+    filtered.observer.disconnect();
+    matching.observer.disconnect();
+  } else if (scenario === 'buffer-once') {
+    await violate(0);
+    await delivered(1);
+    const {observer, batches} = observe({buffered: true});
+    observer.observe();
+    await until(() => batches.length > 0);
+    observer.disconnect();
+    observer.observe();
+    await delay(60);
+    check(batches.flat().length === 1, 'Buffered history is requested only once');
+    await violate(1);
+    await until(() => batches.length === 2);
+    check(batches[1].length === 1, 'Live reports continue after re-observation');
+    observer.disconnect();
+  } else if (scenario === 'notify-snapshot') {
+    const batches = [];
+    const second = new ReportingObserver(reports => batches.push(reports));
+    const first = new ReportingObserver(reports => { batches.push(reports); second.disconnect(); });
+    first.observe();
+    second.observe();
+    await violate(0);
+    await until(() => batches.length === 2);
+    check(batches.every(batch => batch.length === 1), 'Callback mutation preserves the notification snapshot');
+    first.disconnect();
+  } else if (scenario === 'worker') {
+    const worker = new Worker('/worker.js?case=worker');
+    const result = await new Promise((resolve, reject) => {
+      worker.onmessage = event => resolve(event.data);
+      worker.onerror = event => reject(new Error(event.message));
+    });
+    check(result.queued === 1, 'Worker disconnect preserves queued notification');
+    check(result.buffered === 1, 'Worker history survives endpoint delivery');
+    worker.terminate();
+  } else {
+    throw new Error('Unknown case');
+  }
+}
+main().then(() => fetch('/__result?case=' + scenario, {method: 'POST',
+  body: JSON.stringify({checks})})).catch(error => fetch('/__result?case=' + scenario, {
+  method: 'POST', body: JSON.stringify({checks, error: String(error)})}));
+</script>
