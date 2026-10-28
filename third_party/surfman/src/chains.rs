@@ -76,7 +76,17 @@ impl<Device: DeviceAPI> BackBuffer<Device> {
             _ => return Err(Error::Failed),
         };
         let surface = match mem::replace(self, new_back_buffer) {
-            BackBuffer::Attached => device.unbind_surface_from_context(context)?.unwrap(),
+            BackBuffer::Attached => match device.unbind_surface_from_context(context) {
+                Ok(Some(surface)) => surface,
+                Ok(None) => {
+                    *self = BackBuffer::Attached;
+                    return Err(Error::Failed);
+                },
+                Err(error) => {
+                    *self = BackBuffer::Attached;
+                    return Err(error);
+                },
+            },
             BackBuffer::Detached(surface) => surface,
             _ => unreachable!(),
         };
@@ -109,7 +119,7 @@ impl<Device: DeviceAPI> BackBuffer<Device> {
                     return Err(err);
                 }
                 BackBuffer::Attached
-            }
+            },
             BackBuffer::TakenDetached => BackBuffer::Detached(surface),
             _ => return Err(Error::Failed),
         };
@@ -454,16 +464,19 @@ impl<Device: DeviceAPI> SwapChainData<Device> {
     // Returns an error if `context` is not the producer context for this swap chain.
     fn destroy(&mut self, device: &Device, context: &mut Device::Context) -> Result<(), Error> {
         self.validate_context(device, context)?;
-        let surfaces = self
-            .pending_surface
-            .take()
-            .into_iter()
-            .chain(self.back_buffer.take_surface(device, context))
-            .chain(self.recycled_surfaces.drain(..));
-        for mut surface in surfaces {
-            device.destroy_surface(context, &mut surface)?;
+        if matches!(
+            self.back_buffer,
+            BackBuffer::Attached | BackBuffer::Detached(_)
+        ) {
+            let surface = self.back_buffer.take_surface(device, context)?;
+            self.recycled_surfaces.push(surface);
         }
-        Ok(())
+        if let Some(surface) = self.pending_surface.take() {
+            self.recycled_surfaces.push(surface);
+        }
+        crate::retirement::retire_pending(&mut self.recycled_surfaces, |surface| {
+            device.destroy_surface(context, surface)
+        })
     }
 }
 
@@ -701,7 +714,7 @@ where
             Entry::Occupied(_) => Err(Error::Failed)?,
             Entry::Vacant(entry) => {
                 entry.insert(SwapChain::create_attached(device, context, surface_access)?)
-            }
+            },
         };
         self.ids()
             .entry(device.context_id(context))
@@ -745,9 +758,11 @@ where
         device: &Device,
         context: &mut Device::Context,
     ) -> Result<(), Error> {
-        if let Some(swap_chain) = self.table_mut().remove(&id) {
+        let swap_chain = self.table().get(&id).cloned();
+        if let Some(swap_chain) = swap_chain {
             swap_chain.destroy(device, context)?;
         }
+        self.table_mut().remove(&id);
         if let Some(ids) = self.ids().get_mut(&device.context_id(context)) {
             ids.remove(&id);
         }

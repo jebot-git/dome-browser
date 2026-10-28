@@ -25,6 +25,8 @@ mod context;
 pub mod device;
 pub mod error;
 mod gl_utils;
+pub mod graphics_reset;
+pub use graphics_reset::GraphicsResetStatus;
 #[cfg(any(android_platform, ohos_platform))]
 pub mod hardware_buffer;
 mod info;
@@ -33,6 +35,7 @@ pub mod macros;
 pub mod mesa_surfaceless;
 pub mod multi;
 mod renderbuffers;
+mod retirement;
 mod surface;
 #[cfg(all(x11_platform, not(wayland_default)))]
 pub mod unix;

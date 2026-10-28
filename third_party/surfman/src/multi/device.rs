@@ -141,6 +141,19 @@ where
         Device::destroy_context(self, context)
     }
 
+    fn graphics_reset_status(
+        &self,
+        context: &Self::Context,
+    ) -> Result<Option<crate::GraphicsResetStatus>, Error> {
+        Device::graphics_reset_status(self, context)
+    }
+    fn supports_context_loss_recovery(&self) -> bool {
+        Device::supports_context_loss_recovery(self)
+    }
+    fn mark_context_lost(&self, context: &mut Self::Context) -> Result<(), Error> {
+        Device::mark_context_lost(self, context)
+    }
+
     #[inline]
     fn context_descriptor(&self, context: &Context<Def, Alt>) -> Self::ContextDescriptor {
         Device::context_descriptor(self, context)

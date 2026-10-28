@@ -6,7 +6,7 @@ pub mod context;
 pub mod device;
 pub mod surface;
 
-crate::implement_interfaces!();
+crate::implement_interfaces!(context_loss_recovery);
 
 #[cfg(test)]
 #[path = "../tests.rs"]

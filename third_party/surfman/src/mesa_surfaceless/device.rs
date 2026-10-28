@@ -176,7 +176,19 @@ impl Device {
                 share_with.map(|ctx| &ctx.0),
                 self.gl_api(),
             )?;
-            context.make_current(self.native_connection.egl_display)?;
+            if let Err(error) = context.make_current(self.native_connection.egl_display) {
+                if matches!(
+                    error,
+                    Error::MakeCurrentFailed(crate::WindowingApiError::ContextLost)
+                ) {
+                    context.lost.set(true);
+                }
+                context.retire_failed_creation(
+                    self.native_connection.egl_display,
+                    Box::new(self.connection()),
+                );
+                return Err(error);
+            }
             let gl = Gl::from_loader_function(context::get_proc_address);
             let actual = ContextDescriptor::from_egl_context(
                 &gl,
@@ -219,20 +231,67 @@ impl Device {
     ///
     /// The context must have been created on this device.
     pub fn destroy_context(&self, context: &mut Context) -> Result<(), Error> {
-        if let Ok(Some(mut surface)) = self.unbind_surface_from_context(context) {
-            self.destroy_surface(context, &mut surface)?;
+        match self.unbind_surface_from_context(context) {
+            Ok(Some(mut surface)) => {
+                if let Err(error) = self.destroy_surface(context, &mut surface) {
+                    context.0.framebuffer = crate::surface::Framebuffer::Surface(surface.0);
+                    return Err(error);
+                }
+            },
+            Ok(None) | Err(Error::ExternalRenderTarget) => {},
+            Err(error) => return Err(error),
         }
-
-        unsafe {
-            context.0.destroy(self.native_connection.egl_display);
-            Ok(())
-        }
+        unsafe { context.0.destroy(self.native_connection.egl_display) }
     }
 
     /// Given a context, returns its underlying EGL context and attached surfaces.
     #[inline]
     pub fn native_context(&self, context: &Context) -> NativeContext {
         context.0.native_context()
+    }
+
+    /// This EGL backend supports loss-aware resource retirement.
+    pub fn supports_context_loss_recovery(&self) -> bool {
+        true
+    }
+
+    /// Queries only supported, reset-notified contexts using the correct native
+    /// entry point. Other current bindings are restored after the query.
+    pub fn graphics_reset_status(
+        &self,
+        context: &Context,
+    ) -> Result<Option<crate::GraphicsResetStatus>, Error> {
+        if context.0.lost.get() {
+            return Err(Error::MakeCurrentFailed(
+                crate::WindowingApiError::ContextLost,
+            ));
+        }
+        let notified = context
+            .2
+            .robustness_flags
+            .contains(crate::ContextAttributeFlags::RESET_NOTIFICATION);
+        if !notified {
+            return Ok(None);
+        }
+        // Procedure addresses are context-local; select the target before lookup.
+        let _guard = if context.0.is_current() {
+            None
+        } else {
+            Some(self.temporarily_make_context_current(context)?)
+        };
+        let Some(query) = crate::graphics_reset::load(&context.1, notified, |name| {
+            self.get_proc_address(context, name)
+        })?
+        else {
+            return Ok(None);
+        };
+        unsafe { query.poll().map(Some) }
+    }
+
+    /// Marks this context's owned share group as lost; no driver reset is issued.
+    pub fn mark_context_lost(&self, context: &mut Context) -> Result<(), Error> {
+        context.0.lost.set(true);
+        Ok(())
     }
 
     /// Returns the actual descriptor captured when this context was initialized.
@@ -441,7 +500,11 @@ impl Device {
         surface: &mut Surface,
     ) -> Result<(), Error> {
         let egl_display = self.native_connection.egl_display;
-        let window = surface.0.destroy(&context.1, egl_display, context.0.id)?;
+        let window = if context.0.lost.get() {
+            surface.0.destroy_after_loss(egl_display, context.0.id)?
+        } else {
+            surface.0.destroy(&context.1, egl_display, context.0.id)?
+        };
         debug_assert!(window.is_none());
         Ok(())
     }
@@ -458,6 +521,10 @@ impl Device {
         context: &mut Context,
         surface_texture: SurfaceTexture,
     ) -> Result<Surface, (Error, SurfaceTexture)> {
+        if context.0.lost.get() {
+            return Ok(Surface(surface_texture.0.forget_after_loss()));
+        }
+
         match self.temporarily_make_context_current(context) {
             Ok(_guard) => Ok(Surface(surface_texture.0.destroy(&context.1))),
             Err(err) => Err((err, surface_texture)),

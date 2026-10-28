@@ -2,17 +2,17 @@
 
 use super::context::CurrentContextGuard;
 use super::device::EGL_FUNCTIONS;
+use crate::Gl;
 use crate::base::egl::error::ToWindowingApiError;
 use crate::base::egl::ffi::{
-    EGLClientBuffer, EGLImageKHR, EGL_EXTENSION_FUNCTIONS, EGL_GL_TEXTURE_2D_KHR,
-    EGL_IMAGE_PRESERVED_KHR, EGL_NO_IMAGE_KHR,
+    EGL_EXTENSION_FUNCTIONS, EGL_GL_TEXTURE_2D_KHR, EGL_IMAGE_PRESERVED_KHR, EGL_NO_IMAGE_KHR,
+    EGLClientBuffer, EGLImageKHR,
 };
 use crate::egl;
 use crate::egl::types::{EGLAttrib, EGLConfig, EGLContext, EGLDisplay, EGLSurface, EGLint};
 use crate::gl;
 use crate::gl_utils;
 use crate::renderbuffers::Renderbuffers;
-use crate::Gl;
 use crate::{ContextAttributes, ContextID, Error, SurfaceID, SurfaceInfo};
 
 use euclid::default::Size2D;
@@ -211,6 +211,9 @@ impl EGLBackedSurface {
         if context_id != self.context_id {
             return Err(Error::IncompatibleSurface);
         }
+        if self.destroyed {
+            return Ok(None);
+        }
 
         unsafe {
             match self.objects {
@@ -227,7 +230,12 @@ impl EGLBackedSurface {
                     renderbuffers.destroy(gl);
 
                     let result = (EGL_EXTENSION_FUNCTIONS.DestroyImageKHR)(egl_display, *egl_image);
-                    assert_ne!(result, egl::FALSE);
+                    if result == egl::FALSE {
+                        let error = EGL_FUNCTIONS.with(|egl| egl.GetError());
+                        return Err(Error::SurfaceDestructionFailed(
+                            error.to_windowing_api_error(),
+                        ));
+                    }
                     *egl_image = EGL_NO_IMAGE_KHR;
 
                     if let Some(texture) = texture_object.take() {
@@ -236,19 +244,90 @@ impl EGLBackedSurface {
 
                     self.destroyed = true;
                     Ok(None)
-                }
+                },
                 EGLSurfaceObjects::Window {
                     ref mut egl_surface,
                     ref mut native_window,
                 } => {
                     EGL_FUNCTIONS.with(|egl| {
-                        egl.DestroySurface(egl_display, *egl_surface);
+                        if egl.DestroySurface(egl_display, *egl_surface) == egl::FALSE {
+                            return Err(Error::SurfaceDestructionFailed(
+                                egl.GetError().to_windowing_api_error(),
+                            ));
+                        }
                         *egl_surface = egl::NO_SURFACE;
-                    });
+                        Ok(())
+                    })?;
 
                     self.destroyed = true;
                     Ok(Some(mem::replace(native_window, ptr::null())))
-                }
+                },
+            }
+        }
+    }
+
+    pub(crate) fn destroy_after_loss(
+        &mut self,
+        egl_display: EGLDisplay,
+        context_id: ContextID,
+    ) -> Result<Option<*const c_void>, Error> {
+        if context_id != self.context_id {
+            return Err(Error::IncompatibleSurface);
+        }
+        if self.destroyed {
+            return Ok(None);
+        }
+        unsafe {
+            match &mut self.objects {
+                EGLSurfaceObjects::TextureImage {
+                    egl_image,
+                    framebuffer_object,
+                    texture_object,
+                    renderbuffers,
+                } => {
+                    if *egl_image != EGL_NO_IMAGE_KHR {
+                        let result =
+                            (EGL_EXTENSION_FUNCTIONS.DestroyImageKHR)(egl_display, *egl_image);
+                        if result == egl::FALSE {
+                            let error = EGL_FUNCTIONS.with(|egl| egl.GetError());
+                            if !matches!(
+                                error as u32,
+                                egl::BAD_DISPLAY | egl::NOT_INITIALIZED | egl::BAD_PARAMETER
+                            ) {
+                                return Err(Error::SurfaceDestructionFailed(
+                                    error.to_windowing_api_error(),
+                                ));
+                            }
+                        }
+                        *egl_image = EGL_NO_IMAGE_KHR;
+                    }
+                    *framebuffer_object = None;
+                    *texture_object = None;
+                    renderbuffers.forget_after_loss();
+                    self.destroyed = true;
+                    Ok(None)
+                },
+                EGLSurfaceObjects::Window {
+                    egl_surface,
+                    native_window,
+                } => {
+                    let result =
+                        EGL_FUNCTIONS.with(|egl| egl.DestroySurface(egl_display, *egl_surface));
+                    if result == egl::FALSE {
+                        let error = EGL_FUNCTIONS.with(|egl| egl.GetError());
+                        if !matches!(
+                            error as u32,
+                            egl::BAD_DISPLAY | egl::NOT_INITIALIZED | egl::BAD_SURFACE
+                        ) {
+                            return Err(Error::SurfaceDestructionFailed(
+                                error.to_windowing_api_error(),
+                            ));
+                        }
+                    }
+                    *egl_surface = egl::NO_SURFACE;
+                    self.destroyed = true;
+                    Ok(Some(mem::replace(native_window, ptr::null())))
+                },
             }
         }
     }
@@ -283,7 +362,7 @@ impl EGLBackedSurface {
                             ))
                         }
                     })
-                }
+                },
                 EGLSurfaceObjects::TextureImage { .. } => Err(Error::NoWidgetAttached),
             }
         }
@@ -333,8 +412,8 @@ impl EGLBackedSurface {
                         ..
                     } => {
                         gl_utils::unbind_framebuffer_if_necessary(gl, framebuffer_object);
-                    }
-                    EGLSurfaceObjects::TextureImage { .. } | EGLSurfaceObjects::Window { .. } => {}
+                    },
+                    EGLSurfaceObjects::TextureImage { .. } | EGLSurfaceObjects::Window { .. } => {},
                 }
             })
         }
@@ -356,6 +435,11 @@ impl EGLBackedSurface {
 }
 
 impl EGLSurfaceTexture {
+    pub(crate) fn forget_after_loss(mut self) -> EGLBackedSurface {
+        self.texture_object = None;
+        self.surface
+    }
+
     pub(crate) fn destroy(mut self, gl: &Gl) -> EGLBackedSurface {
         if let Some(texture) = self.texture_object.take() {
             unsafe {

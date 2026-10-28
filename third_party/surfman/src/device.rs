@@ -61,6 +61,27 @@ where
     /// The context must have been created on this device.
     fn destroy_context(&self, context: &mut Self::Context) -> Result<(), Error>;
 
+    /// Whether this backend can retire lost contexts without issuing GL commands.
+    fn supports_context_loss_recovery(&self) -> bool {
+        false
+    }
+
+    /// Query a context with actual reset notifications. `None` means this
+    /// context cannot report resets. No GL rendering command is issued.
+    fn graphics_reset_status(
+        &self,
+        _context: &Self::Context,
+    ) -> Result<Option<crate::GraphicsResetStatus>, Error> {
+        Ok(None)
+    }
+
+    /// Irreversibly retire a lost context and its owned share group. Normal GL
+    /// use is rejected afterward; surfaces/context must still be destroyed.
+    /// Unsupported backends return an error without changing the context.
+    fn mark_context_lost(&self, _context: &mut Self::Context) -> Result<(), Error> {
+        Err(Error::UnsupportedOnThisPlatform)
+    }
+
     /// Returns the descriptor that this context was created with.
     fn context_descriptor(&self, context: &Self::Context) -> Self::ContextDescriptor;
 

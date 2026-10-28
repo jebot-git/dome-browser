@@ -1,8 +1,8 @@
 //! A utility module for backends that wrap surfaces in OpenGL FBOs.
 
+use crate::Gl;
 use crate::context::{ContextAttributeFlags, ContextAttributes};
 use crate::gl;
-use crate::Gl;
 use std::thread;
 
 use euclid::default::Size2D;
@@ -24,12 +24,12 @@ impl Drop for Renderbuffers {
                 depth: None,
                 stencil: None,
             }
-            | Renderbuffers::CombinedDepthStencil(None) => {}
+            | Renderbuffers::CombinedDepthStencil(None) => {},
             _ => {
                 if !thread::panicking() {
                     panic!("Should have destroyed the FBO renderbuffers with `destroy()`!")
                 }
-            }
+            },
         }
     }
 }
@@ -99,7 +99,7 @@ impl Renderbuffers {
                             renderbuffer,
                         );
                     }
-                }
+                },
                 Renderbuffers::IndividualDepthStencil {
                     depth: depth_renderbuffer,
                     stencil: stencil_renderbuffer,
@@ -120,8 +120,20 @@ impl Renderbuffers {
                             stencil_renderbuffer,
                         );
                     }
-                }
+                },
             }
+        }
+    }
+
+    // GL names belong to a retired share group. EGL context destruction releases
+    // their storage; issuing GL delete commands after reset is not required.
+    pub(crate) fn forget_after_loss(&mut self) {
+        match self {
+            Self::CombinedDepthStencil(value) => *value = None,
+            Self::IndividualDepthStencil { depth, stencil } => {
+                *depth = None;
+                *stencil = None;
+            },
         }
     }
 
@@ -134,7 +146,7 @@ impl Renderbuffers {
                     if let Some(renderbuffer) = renderbuffer.take() {
                         gl.delete_renderbuffer(renderbuffer);
                     }
-                }
+                },
                 Renderbuffers::IndividualDepthStencil {
                     depth: ref mut depth_renderbuffer,
                     stencil: ref mut stencil_renderbuffer,
@@ -145,7 +157,7 @@ impl Renderbuffers {
                     if let Some(depth_renderbuffer) = depth_renderbuffer.take() {
                         gl.delete_renderbuffer(depth_renderbuffer);
                     }
-                }
+                },
             }
         }
     }

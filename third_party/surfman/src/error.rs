@@ -45,6 +45,8 @@ pub enum Error {
     DeviceOpenFailed,
     /// The system couldn't create a surface.
     SurfaceCreationFailed(WindowingApiError),
+    /// A surface could not be released; its ownership is retained for retry.
+    SurfaceDestructionFailed(WindowingApiError),
     /// The system couldn't import a surface from another thread.
     SurfaceImportFailed(WindowingApiError),
     /// The system couldn't create a surface texture from a surface.

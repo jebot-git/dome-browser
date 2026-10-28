@@ -88,25 +88,25 @@ where
                     Some(Context::Default(other)) => Some(other),
                     Some(_) => {
                         return Err(Error::IncompatibleSharedContext);
-                    }
+                    },
                     None => None,
                 };
                 device
                     .create_context(descriptor, shared)
                     .map(Context::Default)
-            }
+            },
             (Device::Alternate(device), ContextDescriptor::Alternate(descriptor)) => {
                 let shared = match share_with {
                     Some(Context::Alternate(other)) => Some(other),
                     Some(_) => {
                         return Err(Error::IncompatibleSharedContext);
-                    }
+                    },
                     None => None,
                 };
                 device
                     .create_context(descriptor, shared)
                     .map(Context::Alternate)
-            }
+            },
             _ => Err(Error::IncompatibleContextDescriptor),
         }
     }
@@ -118,10 +118,47 @@ where
         match (self, &mut *context) {
             (Device::Default(device), &mut Context::Default(ref mut context)) => {
                 device.destroy_context(context)
-            }
+            },
             (Device::Alternate(device), &mut Context::Alternate(ref mut context)) => {
                 device.destroy_context(context)
-            }
+            },
+            _ => Err(Error::IncompatibleContext),
+        }
+    }
+
+    /// Whether the selected backend supports context-loss retirement.
+    pub fn supports_context_loss_recovery(&self) -> bool {
+        match self {
+            Device::Default(device) => device.supports_context_loss_recovery(),
+            Device::Alternate(device) => device.supports_context_loss_recovery(),
+        }
+    }
+
+    /// Queries the selected context's reset-notification status.
+    pub fn graphics_reset_status(
+        &self,
+        context: &Context<Def, Alt>,
+    ) -> Result<Option<crate::GraphicsResetStatus>, Error> {
+        match (self, context) {
+            (Device::Default(device), Context::Default(context)) => {
+                device.graphics_reset_status(context)
+            },
+            (Device::Alternate(device), Context::Alternate(context)) => {
+                device.graphics_reset_status(context)
+            },
+            _ => Err(Error::IncompatibleContext),
+        }
+    }
+
+    /// Retires the selected backend's context and owned share group.
+    pub fn mark_context_lost(&self, context: &mut Context<Def, Alt>) -> Result<(), Error> {
+        match (self, context) {
+            (Device::Default(device), Context::Default(context)) => {
+                device.mark_context_lost(context)
+            },
+            (Device::Alternate(device), Context::Alternate(context)) => {
+                device.mark_context_lost(context)
+            },
             _ => Err(Error::IncompatibleContext),
         }
     }
@@ -131,10 +168,10 @@ where
         match (self, context) {
             (Device::Default(device), Context::Default(context)) => {
                 ContextDescriptor::Default(device.context_descriptor(context))
-            }
+            },
             (Device::Alternate(device), Context::Alternate(context)) => {
                 ContextDescriptor::Alternate(device.context_descriptor(context))
-            }
+            },
             _ => panic!("Incompatible context!"),
         }
     }
@@ -146,10 +183,10 @@ where
         match (self, context) {
             (Device::Default(device), Context::Default(context)) => {
                 device.make_context_current(context)
-            }
+            },
             (Device::Alternate(device), Context::Alternate(context)) => {
                 device.make_context_current(context)
-            }
+            },
             _ => Err(Error::IncompatibleContext),
         }
     }
@@ -194,7 +231,7 @@ where
                         .map_err(|(err, surface)| (err, Surface::Alternate(surface))),
                     _ => Err((Error::IncompatibleSurface, surface)),
                 }
-            }
+            },
             _ => Err((Error::IncompatibleContext, surface)),
         }
     }
@@ -227,10 +264,10 @@ where
         match (self, context) {
             (Device::Default(device), Context::Default(context)) => {
                 device.present_bound_surface(context)
-            }
+            },
             (Device::Alternate(device), Context::Alternate(context)) => {
                 device.present_bound_surface(context)
-            }
+            },
             _ => Err(Error::IncompatibleContext),
         }
     }
@@ -244,10 +281,10 @@ where
         match (self, context) {
             (Device::Default(device), Context::Default(context)) => {
                 device.resize_bound_surface(context, size)
-            }
+            },
             (Device::Alternate(device), Context::Alternate(context)) => {
                 device.resize_bound_surface(context, size)
-            }
+            },
             _ => Err(Error::IncompatibleContext),
         }
     }
@@ -260,10 +297,10 @@ where
         match (self, context_descriptor) {
             (Device::Default(device), ContextDescriptor::Default(context_descriptor)) => {
                 device.context_descriptor_attributes(context_descriptor)
-            }
+            },
             (Device::Alternate(device), ContextDescriptor::Alternate(context_descriptor)) => {
                 device.context_descriptor_attributes(context_descriptor)
-            }
+            },
             _ => panic!("Incompatible context!"),
         }
     }
@@ -283,10 +320,10 @@ where
         match (self, context) {
             (Device::Default(device), Context::Default(context)) => {
                 device.get_proc_address(context, symbol_name)
-            }
+            },
             (Device::Alternate(device), Context::Alternate(context)) => {
                 device.get_proc_address(context, symbol_name)
-            }
+            },
             _ => panic!("Incompatible context!"),
         }
     }
@@ -313,10 +350,10 @@ where
         match (self, context) {
             (Device::Default(device), Context::Default(context)) => {
                 device.context_surface_info(context)
-            }
+            },
             (Device::Alternate(device), Context::Alternate(context)) => {
                 device.context_surface_info(context)
-            }
+            },
             _ => Err(Error::IncompatibleContext),
         }
     }

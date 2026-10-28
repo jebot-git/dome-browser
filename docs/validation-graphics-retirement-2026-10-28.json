@@ -1,0 +1,30 @@
+{
+  "date": "2026-10-28",
+  "scope": "Linux EGL context-reset query and loss-aware retirement prerequisites; whole-browser recovery remains incomplete",
+  "source_base_commit": "f8b6154c05d656b0011ddd32167003108ece9fe7",
+  "native_policy_unit_tests": 16,
+  "creation_query_configurations": 8,
+  "retirement_configurations": 10,
+  "renderers": [
+    "Mesa Intel Arc A770",
+    "llvmpipe"
+  ],
+  "actual_hardware_reset_requested": false,
+  "native_probe_evidence": "artifacts/servo-rendering-goal/webgl-driver-reset-v1/reset-retirement-final-r4/report.json",
+  "library_browser_cohort_sha256": "bc5b3b98bb296fc32044cb5a324a436eff6b4f123fa793ad04e7d2e5af8a8441",
+  "library_browser_runtime_checks": 1088,
+  "library_browser_upstream_cases": 489,
+  "additional_privacy_testing_found_preexisting_native_stream_failure": true,
+  "stream_failure_reproduced_on_published_parent": true,
+  "combined_followup_validation": "validation-native-stream-terminal-state-2026-10-28.json",
+  "browser_reset_flags_enabled": false,
+  "remaining": [
+    "Real backend polling and creation fallback based on observed capabilities",
+    "Fallible context/surface initialization during reset",
+    "Cleanup readiness, retryable retirement and permitted restoration",
+    "Weak loss notifications for worker-owned contexts as well as documents",
+    "Frontend renderer recovery and adapter/capability migration",
+    "Broader native device and physical-headset coverage"
+  ],
+  "limitations": "Healthy reset-status queries and private context/display invalidation do not establish recovery from a physical GPU reset."
+}

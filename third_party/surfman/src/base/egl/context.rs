@@ -15,10 +15,12 @@ use crate::{Gl, SurfaceInfo};
 use euclid::default::Size2D;
 use glow::HasContext;
 
+use std::cell::Cell;
 use std::ffi::{CStr, CString};
 use std::mem;
 use std::os::raw::c_void;
 use std::ptr;
+use std::rc::Rc;
 use std::thread;
 
 #[allow(dead_code)]
@@ -31,6 +33,7 @@ pub(crate) struct EGLBackedContext {
     pbuffer: EGLSurface,
     pub(crate) framebuffer: Framebuffer<EGLBackedSurface, ExternalEGLSurfaces>,
     context_is_owned: bool,
+    pub(crate) lost: Rc<Cell<bool>>,
 }
 
 /// Wrapper for a native `EGLContext`.
@@ -129,6 +132,12 @@ impl EGLBackedContext {
         share_with: Option<&EGLBackedContext>,
         gl_api: GLApi,
     ) -> Result<EGLBackedContext, Error> {
+        collect_failed_creations();
+        if share_with.is_some_and(|context| context.lost.get()) {
+            return Err(Error::MakeCurrentFailed(
+                crate::WindowingApiError::ContextLost,
+            ));
+        }
         let mut next_context_id = CREATE_CONTEXT_MUTEX.lock().unwrap();
 
         // Create the context.
@@ -148,6 +157,9 @@ impl EGLBackedContext {
             id: *next_context_id,
             framebuffer: Framebuffer::None,
             context_is_owned: true,
+            lost: share_with
+                .map(|context| context.lost.clone())
+                .unwrap_or_else(|| Rc::new(Cell::new(false))),
             pbuffer,
         };
         next_context_id.0 += 1;
@@ -164,34 +176,51 @@ impl EGLBackedContext {
                 read: native_context.egl_read_surface,
             }),
             context_is_owned: false,
+            lost: Rc::new(Cell::new(false)),
             pbuffer: egl::NO_SURFACE,
         };
         next_context_id.0 += 1;
         context
     }
 
-    pub(crate) unsafe fn destroy(&mut self, egl_display: EGLDisplay) {
-        EGL_FUNCTIONS.with(|egl| {
-            if self.pbuffer != egl::NO_SURFACE {
-                let result = egl.DestroySurface(egl_display, self.pbuffer);
-                assert_ne!(result, egl::FALSE);
-                self.pbuffer = egl::NO_SURFACE;
-            }
+    pub(crate) unsafe fn destroy(&mut self, egl_display: EGLDisplay) -> Result<(), Error> {
+        destroy_native_handles(
+            egl_display,
+            &mut self.egl_context,
+            &mut self.pbuffer,
+            self.context_is_owned,
+            self.lost.get(),
+        )
+    }
 
-            egl.MakeCurrent(
-                egl_display,
-                egl::NO_SURFACE,
-                egl::NO_SURFACE,
-                egl::NO_CONTEXT,
-            );
-
-            if self.context_is_owned {
-                let result = egl.DestroyContext(egl_display, self.egl_context);
-                assert_ne!(result, egl::FALSE);
-            }
-
+    // A failed initialization never exposes this context or attaches a surface.
+    // Transfer native ownership to the retry queue if EGL cannot release it yet.
+    pub(crate) unsafe fn retire_failed_creation(
+        mut self,
+        egl_display: EGLDisplay,
+        connection_owner: Box<dyn std::any::Any + Send>,
+    ) {
+        if destroy_native_handles(
+            egl_display,
+            &mut self.egl_context,
+            &mut self.pbuffer,
+            true,
+            true,
+        )
+        .is_err()
+        {
+            PENDING_NATIVE_CONTEXTS
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(PendingNativeContext {
+                    display: egl_display as usize,
+                    context: self.egl_context as usize,
+                    pbuffer: self.pbuffer as usize,
+                    _connection_owner: connection_owner,
+                });
             self.egl_context = egl::NO_CONTEXT;
-        });
+            self.pbuffer = egl::NO_SURFACE;
+        }
     }
 
     pub(crate) fn native_context(&self) -> NativeContext {
@@ -209,6 +238,13 @@ impl EGLBackedContext {
     }
 
     pub(crate) unsafe fn make_current(&self, egl_display: EGLDisplay) -> Result<(), Error> {
+        collect_failed_creations();
+        if self.lost.get() {
+            return Err(Error::MakeCurrentFailed(
+                crate::WindowingApiError::ContextLost,
+            ));
+        }
+
         let egl_surfaces = match self.framebuffer {
             Framebuffer::Surface(ref surface) => surface.egl_surfaces(),
             Framebuffer::External(ref surfaces) => (*surfaces).clone(),
@@ -267,7 +303,9 @@ impl EGLBackedContext {
         egl_display: EGLDisplay,
     ) -> Result<Option<EGLBackedSurface>, Error> {
         // Flush to avoid races on Mesa/Intel and possibly other GPUs.
-        gl.flush();
+        if !self.lost.get() {
+            gl.flush();
+        }
 
         match self.framebuffer {
             Framebuffer::None => return Ok(None),
@@ -281,7 +319,9 @@ impl EGLBackedContext {
         };
 
         // If we're current, we stay current, but with no surface attached.
-        surface.unbind(gl, egl_display, self.egl_context);
+        if !self.lost.get() {
+            surface.unbind(gl, egl_display, self.egl_context);
+        }
 
         Ok(Some(surface))
     }
@@ -307,6 +347,107 @@ impl EGLBackedContext {
             Framebuffer::Surface(ref surface) => Ok(Some(surface.info())),
         }
     }
+}
+
+// These contexts were never exposed or made usable. EGL deletion is legal
+// across threads and does not issue GL commands. Handles are retained globally
+// until a later context operation can release them (or the process exits).
+struct PendingNativeContext {
+    display: usize,
+    context: usize,
+    pbuffer: usize,
+    // Native handles cannot outlive the owning display connection. Keep its
+    // reference until cleanup succeeds; borrowed displays retain their external
+    // owner's existing unsafe lifetime requirement.
+    _connection_owner: Box<dyn std::any::Any + Send>,
+}
+static PENDING_NATIVE_CONTEXTS: std::sync::Mutex<Vec<PendingNativeContext>> =
+    std::sync::Mutex::new(Vec::new());
+
+unsafe fn collect_failed_creations() {
+    let mut pending = PENDING_NATIVE_CONTEXTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _ = crate::retirement::retire_pending(&mut pending, |item| {
+        let mut context = item.context as EGLContext;
+        let mut pbuffer = item.pbuffer as EGLSurface;
+        let result = destroy_native_handles(
+            item.display as EGLDisplay,
+            &mut context,
+            &mut pbuffer,
+            true,
+            true,
+        );
+        item.context = context as usize;
+        item.pbuffer = pbuffer as usize;
+        result
+    });
+}
+
+unsafe fn destroy_native_handles(
+    egl_display: EGLDisplay,
+    context: &mut EGLContext,
+    pbuffer: &mut EGLSurface,
+    owned: bool,
+    lost: bool,
+) -> Result<(), Error> {
+    if *context == egl::NO_CONTEXT {
+        return Ok(());
+    }
+    EGL_FUNCTIONS.with(|egl| {
+        if egl.GetCurrentContext() == *context {
+            let result = egl.MakeCurrent(
+                egl_display,
+                egl::NO_SURFACE,
+                egl::NO_SURFACE,
+                egl::NO_CONTEXT,
+            );
+            if result == egl::FALSE {
+                let error = egl.GetError();
+                if !lost {
+                    return Err(Error::MakeCurrentFailed(error.to_windowing_api_error()));
+                }
+                // Release only this thread's retired binding. This is also
+                // valid after its display/context handles were invalidated.
+                egl.ReleaseThread();
+            }
+        }
+        if *pbuffer != egl::NO_SURFACE {
+            let result = egl.DestroySurface(egl_display, *pbuffer);
+            if result == egl::FALSE {
+                let error = egl.GetError();
+                if !lost
+                    || !matches!(
+                        error as u32,
+                        egl::BAD_DISPLAY | egl::NOT_INITIALIZED | egl::BAD_SURFACE
+                    )
+                {
+                    return Err(Error::SurfaceDestructionFailed(
+                        error.to_windowing_api_error(),
+                    ));
+                }
+            }
+            *pbuffer = egl::NO_SURFACE;
+        }
+        if owned {
+            let result = egl.DestroyContext(egl_display, *context);
+            if result == egl::FALSE {
+                let error = egl.GetError();
+                if !lost
+                    || !matches!(
+                        error as u32,
+                        egl::BAD_DISPLAY | egl::NOT_INITIALIZED | egl::BAD_CONTEXT
+                    )
+                {
+                    return Err(Error::ContextDestructionFailed(
+                        error.to_windowing_api_error(),
+                    ));
+                }
+            }
+        }
+        *context = egl::NO_CONTEXT;
+        Ok(())
+    })
 }
 
 impl NativeContext {

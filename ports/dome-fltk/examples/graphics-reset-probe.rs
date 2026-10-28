@@ -39,6 +39,14 @@ fn check_context(device: &Device, context: &mut Context, flags: Flags) -> String
         );
         assert_eq!(gl.get_error(), glow::NO_ERROR);
     }
+    assert_eq!(
+        device.graphics_reset_status(context).unwrap(),
+        if flags.contains(Flags::RESET_NOTIFICATION) {
+            Some(surfman::GraphicsResetStatus::NoError)
+        } else {
+            None
+        }
+    );
     let actual = device.context_descriptor(context);
     let actual = device.context_descriptor_attributes(&actual);
     let mask = Flags::RESET_NOTIFICATION | Flags::ROBUST_ACCESS;
@@ -116,6 +124,16 @@ fn main() {
             .unwrap();
         let mut other = device.create_context(&other_descriptor, None).unwrap();
         let previous = NativeContext::current().unwrap().egl_context;
+        assert_eq!(
+            device.graphics_reset_status(&context).unwrap(),
+            if flags.contains(Flags::RESET_NOTIFICATION) {
+                Some(surfman::GraphicsResetStatus::NoError)
+            } else {
+                None
+            }
+        );
+        assert_eq!(NativeContext::current().unwrap().egl_context, previous);
+
         let actual_flags = |context: &Context| {
             device
                 .context_descriptor_attributes(&device.context_descriptor(context))
@@ -181,6 +199,7 @@ fn main() {
             serde_json::json!({
                 "mode": name, "renderer": renderer, "software_requested": software,
                 "actual_strategy_verified": true, "actual_robust_access_verified": true,
+            "reset_query_verified": true,
                 "descriptor_roundtrip": true, "noncurrent_descriptor_verified": true,
                 "borrowed_native_descriptor_verified": true, "native_import_binding_restored": true,
                 "shared_context_verified": true, "incompatible_share_rejected": true,

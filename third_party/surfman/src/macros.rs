@@ -32,7 +32,7 @@ macro_rules! declare_surfman {
 
 /// Internal macro used for generating implementations of the `Connection` and `Device` traits.
 macro_rules! implement_interfaces {
-    () => {
+    ($($loss:tt)*) => {
         mod implementation {
             use super::connection::Connection;
             use super::context::{Context, ContextDescriptor};
@@ -138,6 +138,8 @@ macro_rules! implement_interfaces {
                 }
 
                 // context.rs
+
+                $crate::implement_context_loss_recovery!($($loss)*);
 
                 #[inline]
                 fn create_context_descriptor(
@@ -318,3 +320,23 @@ macro_rules! implement_interfaces {
 }
 
 pub(crate) use implement_interfaces;
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! implement_context_loss_recovery {
+    () => {};
+    (context_loss_recovery) => {
+        fn graphics_reset_status(
+            &self,
+            context: &Self::Context,
+        ) -> Result<Option<$crate::GraphicsResetStatus>, Error> {
+            Device::graphics_reset_status(self, context)
+        }
+        fn supports_context_loss_recovery(&self) -> bool {
+            Device::supports_context_loss_recovery(self)
+        }
+        fn mark_context_lost(&self, context: &mut Self::Context) -> Result<(), Error> {
+            Device::mark_context_lost(self, context)
+        }
+    };
+}

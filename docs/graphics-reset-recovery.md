@@ -56,17 +56,41 @@ cancellation, overlapping notifications, event permissions, restored pixels,
 resource generations and departing frames. All run under software rendering.
 The existing browser/Khronos and native XR lifecycle suites remain separate.
 
-This routing layer does not complete browser graphics recovery. The remaining
-requirements are:
+The library now exposes capability-gated reset queries and loss-aware retirement
+on the Linux EGL backends. A context without reset notifications returns `None`,
+not a healthy-reset result. Querying a different context temporarily selects it
+and restores the previous binding. Retirement of an explicitly marked share
+group rejects further normal context use, releases EGL handles without issuing
+GL deletion commands and retains ownership when destruction needs a retry.
+Other backends inherit an unsupported result rather than advertising recovery.
+
+Validate these library paths separately with:
+
+```sh
+python3 ports/dome-fltk/tests/graphics-reset-retirement.py \
+  --cargo /usr/bin/cargo --output /absolute/path/to/new-report-directory
+```
+
+The runner uses production policy modules and private offscreen native/software
+contexts. Healthy native reset queries and context/display retirement establish
+library behavior; they do not establish recovery from a physical GPU reset.
+Display invalidation is confined to the probe subprocess's EGL connection.
+
+Reset-query entry points and notification behavior follow
+[KHR_robustness](https://registry.khronos.org/OpenGL/extensions/KHR/KHR_robustness.txt)
+and the EGL context-creation extensions. Native resource retirement and creation
+of a replacement context are separate steps: a reset context remains unusable
+even after its reset-status query reports that reset processing has finished.
+
+This library and routing work does not complete browser graphics recovery. The
+remaining requirements are:
 
 - Enable supported creation flags with an explicit compatible legacy fallback,
   then capability-gate the actual reset-status query.
-- Register weak document/context-generation loss notification without keeping
-  a DOM root alive in the rendering backend.
-- Complete or fail every pending synchronous command on loss. A lost backend
-  must not strand a receiver or cause an abrupt browser exit.
-- Deliver the established DOM loss lifecycle exactly once; invalidate old
-  resources and XR compatibility consistently.
+- Harden native context/surface initialization failures during a real reset.
+- Integrate the real query into the backend loop and retain resources until
+  outstanding renderer ownership and native destruction have settled. Preserve
+  the tested weak document/generation routing and completion of pending replies.
 - Restore automatically only when the loss event permits it and reset has
   completed. Recreate native resources and keep previous handles invalid.
 - Handle frontend renderer/context failure and adapter/capability changes.
