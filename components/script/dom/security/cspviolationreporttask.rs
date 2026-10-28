@@ -10,11 +10,11 @@ use net_traits::request::{
     CredentialsMode, Destination, RequestBody, RequestId, create_request_body_with_content,
 };
 use net_traits::{FetchMetadata, NetworkError, ResourceFetchTiming};
-use script_bindings::str::DOMString;
 use servo_url::ServoUrl;
 use stylo_atoms::Atom;
 
 use crate::conversions::Convert;
+use crate::dom::bindings::codegen::Bindings::CSPViolationReportBodyBinding::CSPViolationReportBody;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::csp::Violation;
@@ -160,13 +160,13 @@ impl TaskOnce for CSPViolationReportTask {
             .find(|directive| directive.name == "report-to")
         {
             // Step 3.5.1. Let body be a new CSPViolationReportBody, initialized as follows:
-            let body = self.violation_report.clone().convert();
+            let body: CSPViolationReportBody = self.violation_report.clone().convert();
             // Step 3.5.2. Let settings object be violation’s global object’s relevant settings object.
             // Step 3.5.3. Generate and queue a report with the following arguments:
             ReportingObserver::generate_and_queue_a_report(
                 &self.global.root(),
-                DOMString::from_static("csp-violation"),
-                Some(body),
+                "csp-violation",
+                body.into(),
                 report_to_directive.value.join(" ").into(),
             )
         }

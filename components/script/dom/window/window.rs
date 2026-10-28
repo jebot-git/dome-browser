@@ -123,7 +123,7 @@ use crate::dom::bindings::codegen::Bindings::ImageBitmapBinding::{
 };
 use crate::dom::bindings::codegen::Bindings::MediaQueryListBinding::MediaQueryList_Binding::MediaQueryListMethods;
 use crate::dom::bindings::codegen::Bindings::MessagePortBinding::StructuredSerializeOptions;
-use crate::dom::bindings::codegen::Bindings::ReportingObserverBinding::Report;
+use crate::dom::reporting::report::Report;
 use crate::dom::bindings::codegen::Bindings::RequestBinding::{RequestInfo, RequestInit};
 use crate::dom::bindings::codegen::Bindings::VoidFunctionBinding::VoidFunction;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::{
@@ -479,9 +479,11 @@ pub(crate) struct Window {
     reporting_observer_list: DomRefCell<Vec<Dom<ReportingObserver>>>,
 
     /// <https://w3c.github.io/reporting/#windoworworkerglobalscope-reports>
+    #[no_trace]
     report_list: DomRefCell<Vec<Report>>,
 
     /// <https://w3c.github.io/reporting/#windoworworkerglobalscope-report-buffer>
+    #[no_trace]
     report_buffer: DomRefCell<Vec<Report>>,
 
     /// <https://w3c.github.io/reporting/#windoworworkerglobalscope-endpoints>

@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use headers::{ContentType, HeaderMapExt};
@@ -18,13 +19,10 @@ use script_bindings::str::DOMString;
 use serde::Serialize;
 use servo_url::{ImmutableOrigin, ServoUrl};
 
-use crate::dom::bindings::codegen::Bindings::CSPViolationReportBodyBinding::CSPViolationReportBody;
-use crate::dom::bindings::codegen::Bindings::ReportingObserverBinding::Report;
-use crate::dom::bindings::codegen::Bindings::SecurityPolicyViolationEventBinding::SecurityPolicyViolationEventDisposition;
 use crate::dom::csp::Violation;
-use crate::dom::csppolicyviolationreport::serialize_disposition;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::performance::performanceresourcetiming::InitiatorType;
+use crate::dom::reporting::report::{Report, ReportBody};
 use crate::fetch::fetch::{RequestWithGlobalScope, create_a_potential_cors_request_with_claim};
 use crate::fetch::network_listener::{
     FetchResponseListener, ResourceTimingListener, submit_timing,
@@ -85,11 +83,15 @@ impl SendReportsToEndpoints for GlobalScope {
         // Step 1. Let endpoint map be an empty map of endpoint objects to lists of report objects.
         let mut endpoint_map: HashMap<&ReportingEndpoint, Vec<Report>> = HashMap::new();
         // Step 2. For each report in reports:
-        reports.retain(|report| {
+        reports.retain_mut(|report| {
             // Step 2.1. If there exists an endpoint (endpoint) in context’s endpoints
             // list whose name is report’s destination:
-            if let Some(endpoint) = endpoints.iter().find(|e| e.name == report.destination) {
+            if let Some(endpoint) = endpoints
+                .iter()
+                .find(|e| e.name.str() == report.destination.as_str())
+            {
                 // Step 2.1.1. Append report to endpoint map’s list of reports for endpoint.
+                report.attempts = report.attempts.saturating_add(1);
                 endpoint_map
                     .entry(endpoint)
                     .or_default()
@@ -106,7 +108,7 @@ impl SendReportsToEndpoints for GlobalScope {
             let mut origin_map: HashMap<ImmutableOrigin, Vec<&Report>> = HashMap::new();
             // Step 3.2. For each report in report list:
             for report in report_list {
-                let Ok(url) = ServoUrl::parse(&report.url.str()) else {
+                let Ok(url) = ServoUrl::parse(&report.url) else {
                     continue;
                 };
                 // Step 3.2.1. Let origin be the origin of report’s url.
@@ -189,19 +191,22 @@ impl SendReportsToEndpoints for GlobalScope {
     fn serialize_list_of_reports(reports: &[&Report]) -> Option<RequestBody> {
         // Step 1. Let collection be an empty list.
         // Step 2. For each report in reports:
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u64::MAX as u128) as u64;
         let report_body: Vec<SerializedReport> = reports
             .iter()
             // Step 2.1. Let data be a map with the following key/value pairs:
             .map(|r| SerializedReport {
-                // TODO(37238)
-                age: 0,
+                age: now.saturating_sub(r.timestamp),
                 type_: r.type_.to_string(),
                 url: r.url.to_string(),
                 user_agent: String::new(),
-                body: r.body.clone().map(|b| b.into()),
+                body: r.body.clone(),
             })
-            // Step 2.2. Increment report’s attempts.
-            // TODO(37238)
+            // Attempts are counted when each pending report is selected for delivery.
             // Step 2.3. Append data to collection.
             .collect();
         // Step 3. Return the byte sequence resulting from executing serialize an
@@ -219,44 +224,7 @@ struct SerializedReport {
     type_: String,
     url: String,
     user_agent: String,
-    body: Option<CSPReportingEndpointBody>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct CSPReportingEndpointBody {
-    sample: Option<String>,
-    #[serde(rename = "blockedURL")]
-    blocked_url: Option<String>,
-    referrer: Option<String>,
-    status_code: u16,
-    #[serde(rename = "documentURL")]
-    document_url: String,
-    source_file: Option<String>,
-    effective_directive: String,
-    line_number: Option<u32>,
-    column_number: Option<u32>,
-    original_policy: String,
-    #[serde(serialize_with = "serialize_disposition")]
-    disposition: SecurityPolicyViolationEventDisposition,
-}
-
-impl From<CSPViolationReportBody> for CSPReportingEndpointBody {
-    fn from(value: CSPViolationReportBody) -> Self {
-        CSPReportingEndpointBody {
-            sample: value.sample.map(String::from),
-            blocked_url: value.blockedURL.map(String::from),
-            referrer: value.referrer.map(String::from),
-            status_code: value.statusCode,
-            document_url: String::from(value.documentURL),
-            source_file: value.sourceFile.map(String::from),
-            effective_directive: String::from(value.effectiveDirective),
-            line_number: value.lineNumber,
-            column_number: value.columnNumber,
-            original_policy: value.originalPolicy.into(),
-            disposition: value.disposition,
-        }
-    }
+    body: ReportBody,
 }
 
 struct CSPReportEndpointFetchListener {

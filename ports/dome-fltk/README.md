@@ -8,6 +8,8 @@ Live scene reconstruction results are recorded in
 [the renderer recovery validation record](docs/validation-renderer-recovery-2026-10-28.json).
 Reporting history and worker observer lifecycle results are recorded in
 [the reporting validation record](docs/validation-reporting-lifecycle-2026-10-28.json).
+Typed permissions-policy bodies and WebXR diagnostics are covered by
+[the policy reporting validation record](docs/validation-policy-reporting-2026-10-28.json).
 
 Supported contexts prefer robust access and reset notifications. The FLTK
 frontend retries renderer reconstruction after permanent native loss. It replays
@@ -2078,10 +2080,11 @@ still run. Worker removal releases the observer-list read borrow before mutation
 
 `Reporting-Endpoints` uses the engine structured-field parser, including quoted
 commas, member parameters, repeated headers and duplicate names. Permissions
-Policy state now carries independent enforced and report-only inherited policies
-and response-local reporting destinations. Typed permissions-policy bodies and
-DOM/WebXR report emission remain unfinished; this does not claim the original
-WebXR reporting WPT cases pass. The existing CSP observer body is preserved.
+Policy state carries independent enforced and report-only inherited policies
+and response-local reporting destinations. WebXR emits typed policy reports;
+the two original reporting WPT assertion bodies now pass through the local
+adapter. The existing CSP observer body is preserved. Wider Reporting API and
+WebXR conformance remain incomplete.
 
 Run the local delivery and lifecycle fixture against the `xr-native-input` test
 embedder with a private DomeD compositor fixture:
@@ -2098,3 +2101,44 @@ record draining, repeated registration, filtering, one-time buffered observation
 callback mutation and worker disconnection/closure. They also require each of 124
 CSP reports to reach its endpoint exactly once. This is scoped regression
 coverage, not complete Reporting API conformance.
+
+## WebXR policy reporting checks
+
+Immersive availability checks and spatial-tracking session requests generate
+permissions-policy diagnostics. Enforced policy can deny access; report-only
+policy produces diagnostics without changing the access decision or bypassing
+consent. Required and optional spatial features are checked, while viewer-only
+inline sessions and policy introspection do not generate spatial-use reports.
+Reports include feature, disposition and available script source location.
+
+Internal report queues store typed Rust data. Each observer or `takeRecords()`
+call receives fresh plain dictionaries with `type`, `url` and a concrete `body`.
+Callback snapshots use the callback's realm, and page mutations cannot change
+retained history or endpoint payloads. Delivery bookkeeping is internal. This
+follows the current Reporting dictionary model; it does not claim legacy
+Report/ReportBody interface or `toJSON()` compatibility.
+
+```sh
+DOME_COMPOSITOR=/path/to/private-compositor \
+uv run --no-project --with python-xlib --with pillow --with dbus-next python \
+  ports/dome-fltk/tests/permissions-policy-reporting.py \
+  --binary /path/to/xr-native-input --output /tmp/policy-reporting
+
+DOME_COMPOSITOR=/path/to/private-compositor \
+uv run --no-project --with python-xlib --with pillow --with dbus-next python \
+  ports/dome-fltk/tests/original-xr-reporting.py \
+  --binary /path/to/xr-native-input --output /tmp/original-xr-reporting
+```
+
+The 21 local scenarios cover enforced/report-only precedence, response-local
+endpoints, source locations, dictionary mutation, cross-realm callbacks, per-type
+buffer limits and ordering, inline required/optional features, iframe inheritance
+and navigation isolation. The original adapter preserves both WPT assertion
+bodies and header files and verifies their digests. It is not the full WPT runner.
+
+`webxr-context-compatibility.py --policy-report-only` adds the diagnostics observer
+and report-only header to the existing private native-host test. Its original
+consent, lease and stereo-submission assertions still apply, and the browser must
+close cleanly. Broader reporting transport/lifecycle behavior and potential iframe
+policy diagnostics remain follow-up work. No physical headset conformance claim
+is made by these fixtures.

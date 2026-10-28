@@ -2160,6 +2160,40 @@ impl Document {
             )
     }
 
+    /// An attempted API use checks both policy dispositions, but only the
+    /// enforced policy can deny access. Introspection uses the pure check above.
+    pub(crate) fn allowed_to_use_policy_feature_with_reporting(
+        &self,
+        cx: &mut JSContext,
+        feature: PolicyFeature,
+    ) -> bool {
+        if !self.has_browsing_context || !self.is_fully_active() {
+            return false;
+        }
+        let origin = self.origin().snapshot();
+        let check = self.permissions_policy().check(feature, &origin, &origin);
+        if let Some(violation) = check.violation {
+            let caller = js::rust::describe_scripted_caller(cx).ok()
+                .filter(|caller| !caller.filename.is_empty());
+            let body = crate::dom::reporting::report::PermissionsPolicyReportBody {
+                feature_id: feature.name().to_owned(),
+                source_file: caller.as_ref().map(|caller| caller.filename.clone()),
+                line_number: caller.as_ref().map(|caller| caller.line),
+                column_number: caller.as_ref().map(|caller| caller.col.saturating_add(1)),
+                disposition: violation.disposition,
+                allow_attribute: None,
+                src_attribute: None,
+            };
+            crate::dom::reporting::reportingobserver::ReportingObserver::generate_and_queue_a_report(
+                &self.global(),
+                "permissions-policy-violation",
+                crate::dom::reporting::report::ReportBody::PermissionsPolicy(body),
+                violation.endpoint.unwrap_or_default(),
+            );
+        }
+        check.allowed
+    }
+
     pub(crate) fn container_embedder_policy(&self) -> EmbedderPolicyValue {
         self.container_embedder_policy.get()
     }

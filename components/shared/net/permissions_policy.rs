@@ -121,7 +121,8 @@ impl Allowlist {
 
 type Declarations = BTreeMap<PolicyFeature, Allowlist>;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, MallocSizeOf, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ViolationDisposition {
     Enforce,
     Report,

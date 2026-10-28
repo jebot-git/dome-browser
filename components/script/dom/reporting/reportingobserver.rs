@@ -7,27 +7,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
+use js::realm::AutoRealm;
 use js::rust::HandleObject;
-use script_bindings::callback::{OwnerWindow, RootedCallback, TracedCallback};
+use script_bindings::callback::{HasCallbackHolder, OwnerWindow, RootedCallback, TracedCallback};
 use script_bindings::cell::DomRefCell;
 use script_bindings::domstring::TracedDOMString;
-use script_bindings::match_domstring_ascii;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_proto};
-use script_bindings::str::DOMString;
 use servo_url::ServoUrl;
 
 use crate::dom::bindings::callback::ExceptionHandling;
-use crate::dom::bindings::codegen::Bindings::CSPViolationReportBodyBinding::CSPViolationReportBody;
 use crate::dom::bindings::codegen::Bindings::ReportingObserverBinding::{
-    Report, ReportList, ReportingObserverCallback, ReportingObserverMethods,
-    ReportingObserverOptions,
+    ReportList, ReportingObserverCallback, ReportingObserverMethods, ReportingObserverOptions,
 };
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::reporting::report::{Report, ReportBody};
 use crate::dom::window::Window;
 use crate::dom::workerglobalscope::WorkerGlobalScope;
 
@@ -38,10 +35,8 @@ pub(crate) struct ReportingObserver {
     callback: TracedCallback<ReportingObserverCallback>,
     buffered: Cell<bool>,
     types: DomRefCell<Vec<TracedDOMString>>,
+    #[no_trace]
     report_queue: DomRefCell<Vec<Report>>,
-    // Keep snapshots traced on the owning script thread. Sendable queued tasks
-    // carry only a Trusted observer and an index, never a DOMString or JS value.
-    pending_buffered_reports: DomRefCell<Vec<Report>>,
 }
 
 impl ReportingObserver {
@@ -63,7 +58,6 @@ impl ReportingObserver {
                     .collect(),
             ),
             report_queue: Default::default(),
-            pending_buffered_reports: Default::default(),
         }
     }
 
@@ -83,10 +77,9 @@ impl ReportingObserver {
     }
 
     fn report_is_visible_to_reporting_observers(report: &Report) -> bool {
-        match_domstring_ascii!(report.type_,
-                // https://w3c.github.io/webappsec-csp/#reporting
-                "csp-violation" => true,
-                _ =>  false,
+        matches!(
+            report.type_.as_str(),
+            "csp-violation" | "permissions-policy-violation"
         )
     }
 
@@ -98,19 +91,12 @@ impl ReportingObserver {
         }
         // Step 2. If observer’s options has a non-empty types member which does not contain report’s type, return.
         let types = self.types.borrow();
-        if !types.is_empty() && !types.contains(&report.type_) {
+        if !types.is_empty() && !types.iter().any(|kind| kind.str() == report.type_.as_str()) {
             return;
         }
         // Step 3. Create a new Report r with type initialized to report’s type,
         // url initialized to report’s url, and body initialized to report’s body.
-        let report = Report {
-            type_: report.type_.clone(),
-            url: report.url.clone(),
-            body: report.body.clone(),
-            destination: report.destination.clone(),
-            attempts: report.attempts,
-            timestamp: report.timestamp,
-        };
+        let report = report.clone();
         // Step 4. Append r to observer’s report queue.
         self.report_queue.borrow_mut().push(report);
         // Step 5. If the size of observer’s report queue is 1:
@@ -161,7 +147,16 @@ impl ReportingObserver {
             }
             // Step 1.2. Let reports be a copy of observer’s report queue
             // Step 1.3. Empty observer’s report queue
-            let reports = std::mem::take(&mut *observer.report_queue.borrow_mut());
+            // Create concrete body dictionaries in the same realm that callback
+            // setup uses for the enclosing Report dictionaries. A callback can
+            // belong to a different window than its ReportingObserver.
+            rooted!(&in(cx) let callback = observer.callback.callback());
+            let mut realm = AutoRealm::new_from_handle(cx, callback.handle());
+            let cx = &mut realm.current_realm();
+            let reports = std::mem::take(&mut *observer.report_queue.borrow_mut())
+                .iter()
+                .map(|report| report.snapshot(cx))
+                .collect();
             // Step 1.4. Invoke observer’s callback with « reports, observer » and "report",
             // and with observer as the callback this value.
             let _ = observer.callback.Call_(
@@ -177,30 +172,29 @@ impl ReportingObserver {
     /// <https://w3c.github.io/reporting/#generate-a-report>
     fn generate_a_report(
         global: &GlobalScope,
-        type_: DOMString,
+        type_: &str,
         url: Option<ServoUrl>,
-        body: Option<CSPViolationReportBody>,
-        destination: DOMString,
+        body: ReportBody,
+        destination: String,
     ) -> Report {
         // Step 2. If url was not provided by the caller, let url be settings’s creation URL.
         let url = url.unwrap_or(global.creation_url());
         // Step 3. Set url’s username to the empty string, and its password to null.
         // Step 4. Set report’s url to the result of executing the URL serializer
         // on url with the exclude fragment flag set.
-        let url = Self::strip_url_for_reports(url).into();
+        let url = Self::strip_url_for_reports(url);
         // Step 1. Let report be a new report object with its values initialized as follows:
         // Step 5. Return report.
         Report {
-            type_,
+            type_: type_.to_owned(),
             url,
             body,
             destination,
-            timestamp: Finite::wrap(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as f64,
-            ),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .min(u64::MAX as u128) as u64,
             attempts: 0,
         }
     }
@@ -208,9 +202,9 @@ impl ReportingObserver {
     /// <https://w3c.github.io/reporting/#generate-and-queue-a-report>
     pub(crate) fn generate_and_queue_a_report(
         global: &GlobalScope,
-        type_: DOMString,
-        body: Option<CSPViolationReportBody>,
-        destination: DOMString,
+        type_: &str,
+        body: ReportBody,
+        destination: String,
     ) {
         // Step 1. Let settings be context’s relevant settings object.
         // Step 2. Let report be the result of running generate a report with data, type, destination and settings.
@@ -275,18 +269,11 @@ impl ReportingObserverMethods<crate::DomTypeHolder> for ReportingObserver {
         self.buffered.set(false);
         // Step 5.For each report in global’s report buffer, queue a task to
         // execute § 4.3 Add report to observer with report and this.
-        *self.pending_buffered_reports.borrow_mut() = global.buffered_reports();
-        let count = self.pending_buffered_reports.borrow().len();
-        for index in 0..count {
+        for report in global.buffered_reports() {
             let observer = Trusted::new(self);
             global.task_manager().dom_manipulation_task_source().queue(
                 task!(add_buffered_report: move || {
-                    let observer = observer.root();
-                    let report = observer.pending_buffered_reports.borrow()[index].clone();
-                    observer.add_report_to_observer(&report);
-                    if index + 1 == count {
-                        observer.pending_buffered_reports.borrow_mut().clear();
-                    }
+                    observer.root().add_report_to_observer(&report);
                 }),
             );
         }
@@ -304,11 +291,14 @@ impl ReportingObserverMethods<crate::DomTypeHolder> for ReportingObserver {
     }
 
     /// <https://w3c.github.io/reporting/#dom-reportingobserver-takerecords>
-    fn TakeRecords(&self) -> ReportList {
+    fn TakeRecords(&self, cx: &mut JSContext) -> ReportList {
         // Step 1. Let reports be a copy of this’s report queue.
         // Step 2. Empty this’s report queue.
         // Step 3. Return reports.
         std::mem::take(&mut *self.report_queue.borrow_mut())
+            .iter()
+            .map(|report| report.snapshot(cx))
+            .collect()
     }
 }
 

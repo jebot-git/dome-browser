@@ -1,0 +1,277 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Local WebXR permissions reporting regression</title>
+<p>Testing WebXR policy reports and document lifecycle.</p>
+<script id="configuration" type="application/json">CONFIGURATION</script>
+<script src="/caller.js"></script>
+<script>
+const cfg = JSON.parse(document.getElementById('configuration').textContent);
+const checks = [];
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+function check(passed, name) {
+  checks.push({name, passed: !!passed});
+  if (!passed) throw new Error(name);
+}
+async function until(predicate) {
+  const end = performance.now() + 7000;
+  while (!predicate()) {
+    if (performance.now() > end) throw new Error('Timed out waiting for report');
+    await delay(10);
+  }
+}
+async function counts() {
+  return (await fetch('/__counts?case=' + cfg.case)).json();
+}
+async function delivered(expected) {
+  const end = performance.now() + 7000;
+  while (performance.now() < end) {
+    const actual = await counts();
+    if (Object.entries(expected).every(([key, value]) => (actual[key] || 0) >= value)) return;
+    await delay(10);
+  }
+  throw new Error('Timed out waiting for endpoint');
+}
+function observe(options = {types: ['permissions-policy-violation']}) {
+  const reports = [];
+  const observer = new ReportingObserver(batch => reports.push(...batch), options);
+  observer.observe();
+  return {observer, reports};
+}
+function query() {
+  const promise = spatialQuery();
+  promise.catch(() => {});
+  return promise;
+}
+async function expectQuery(allowed) {
+  try {
+    const supported = await query();
+    check(allowed && typeof supported === 'boolean', 'Availability resolves without enforcing report-only policy');
+  } catch (error) {
+    check(!allowed && error.name === 'SecurityError', 'Enforced policy rejects availability with SecurityError');
+  }
+}
+function reportShape(report, disposition, expectedURL = location.href.split('#')[0]) {
+  check(Object.keys(report).sort().join(',') === 'body,type,url', 'Observer exposes only report data');
+  check(report.type === 'permissions-policy-violation' && report.url === expectedURL,
+        'Report type and creation URL are correct');
+  check(report.body.featureId === 'xr-spatial-tracking' && report.body.disposition === disposition,
+        'Feature and disposition are correct');
+  check(report.body.sourceFile === new URL('/caller.js', expectedURL).href && report.body.lineNumber === 1 &&
+        Number.isInteger(report.body.columnNumber) && report.body.columnNumber > 0,
+        'Script source location is captured');
+  check(!('allowAttribute' in report.body) && !('srcAttribute' in report.body),
+        'Actual-use body omits potential-violation attributes');
+  const serialized = JSON.parse(JSON.stringify(report));
+  check(serialized.body.featureId === report.body.featureId && serialized.url === report.url,
+        'Dictionary report serializes with its concrete body');
+}
+async function violateImage(index) {
+  const event = new Promise(resolve => addEventListener('securitypolicyviolation', resolve, {once: true}));
+  const image = new Image();
+  image.src = '/blocked?case=' + cfg.case + '&index=' + index;
+  await event;
+}
+async function child() {
+  const state = observe({types: ['permissions-policy-violation'], buffered: cfg.role === 'empty-child'});
+  if (cfg.role === 'empty-child') {
+    await delay(100);
+    check(state.reports.length === 0, 'New document has no old reporting history');
+    check(await navigator.xr.isSessionSupported('inline'), 'New document retains inline support');
+  } else {
+    check(document.permissionsPolicy.allowsFeature('xr-spatial-tracking') === cfg.allowed,
+          'Child introspection reflects enforced inheritance');
+    await expectQuery(cfg.allowed);
+    await until(() => state.reports.length > 0);
+    check(state.reports.length === 1, 'Child receives one policy report');
+    reportShape(state.reports[0], cfg.disposition);
+  }
+  state.observer.disconnect();
+  return {checks, reports: state.reports, url: location.href, origin: location.origin};
+}
+function frameResult(frame, url) {
+  return new Promise((resolve, reject) => {
+    const expectedOrigin = new URL(url).origin;
+    const timer = setTimeout(() => { removeEventListener('message', listener); reject(new Error('Child timed out')); }, 9000);
+    function listener(event) {
+      if (event.source !== frame.contentWindow || event.origin !== expectedOrigin || event.data.channel !== 'DomePolicyReporting') return;
+      clearTimeout(timer); removeEventListener('message', listener);
+      if (event.data.error) reject(new Error(event.data.error));
+      else resolve(event.data.result);
+    }
+    addEventListener('message', listener);
+    frame.src = url;
+  });
+}
+async function main() {
+  check(typeof ReportingObserver === 'function' && !!navigator.xr, 'Reporting and WebXR are exposed');
+  if (cfg.case.startsWith('frame-') || cfg.case === 'navigation') {
+    const parentState = observe();
+    const frame = document.createElement('iframe');
+    frame.allow = 'xr-spatial-tracking *';
+    document.body.appendChild(frame);
+    const result = await frameResult(frame, cfg.child_url);
+    check(result.checks.length > 0 && result.checks.every(row => row.passed), 'Child reporting checks pass');
+    check(result.reports.length === 1, 'Child reports are scoped to its own global');
+    await delivered({child: 1});
+    if (cfg.case === 'navigation') {
+      const next = await frameResult(frame, cfg.empty_url);
+      check(next.checks.every(row => row.passed) && next.reports.length === 0,
+            'Navigation replaces reporting history and policy');
+    }
+    check(parentState.reports.length === 0, 'Parent observer does not receive child reports');
+    parentState.observer.disconnect();
+    frame.remove();
+    return;
+  }
+  if (cfg.case === 'introspection') {
+    const state = observe();
+    for (let i = 0; i < 5; ++i) {
+      check(!document.permissionsPolicy.allowsFeature('xr-spatial-tracking'), 'Introspection observes denial');
+      check(!document.permissionsPolicy.allowedFeatures().includes('xr-spatial-tracking'), 'Allowed feature list observes denial');
+      check(document.permissionsPolicy.getAllowlistForFeature('xr-spatial-tracking').length === 0, 'Allowlist observes denial');
+    }
+    check(await navigator.xr.isSessionSupported('inline'), 'Inline availability ignores spatial-tracking policy');
+    const session = await navigator.xr.requestSession('inline');
+    await session.end();
+    check(true, 'Viewer-only inline session remains usable');
+    await delay(100);
+    check(state.reports.length === 0, 'Pure introspection and viewer-only inline do not report');
+    state.observer.disconnect();
+    return;
+  }
+  if (cfg.case === 'inline-required' || cfg.case === 'inline-optional') {
+    const state = observe();
+    if (cfg.case === 'inline-required') {
+      try {
+        await navigator.xr.requestSession('inline', {requiredFeatures: ['local']});
+        check(false, 'Required spatial feature must be rejected');
+      } catch (error) {
+        check(error.name === 'NotSupportedError', 'Required spatial feature is denied');
+      }
+    } else {
+      const session = await navigator.xr.requestSession('inline', {optionalFeatures: ['local']});
+      try {
+        await session.requestReferenceSpace('local');
+        check(false, 'Denied optional local space must be absent');
+      } catch (error) {
+        check(error.name === 'NotSupportedError', 'Denied optional spatial feature is removed');
+      }
+      await session.end();
+      check(true, 'Optional denial preserves viewer-only inline session');
+    }
+    await until(() => state.reports.length > 0);
+    check(state.reports.length === 1 && state.reports[0].body.disposition === 'enforce',
+          'Spatial request creates one enforced report');
+    check(state.reports[0].body.featureId === 'xr-spatial-tracking', 'Spatial request identifies the feature');
+    state.observer.disconnect();
+    return;
+  }
+  if (cfg.case === 'buffer-types') {
+    const live = observe({});
+    for (let i = 0; i < 110; ++i) {
+      await query().catch(() => {});
+      await violateImage(i);
+    }
+    await delivered({enforced: 110, csp: 110});
+    await until(() => live.reports.length === 220);
+    live.observer.disconnect();
+    const seen = {};
+    const expected = live.reports.filter(report => {
+      seen[report.type] = (seen[report.type] || 0) + 1;
+      return seen[report.type] > 10;
+    });
+    const buffered = observe({buffered: true});
+    check(buffered.observer.takeRecords().length === 0, 'Buffered delivery remains asynchronous');
+    await until(() => buffered.reports.length === 200);
+    check(buffered.reports.filter(report => report.type === 'permissions-policy-violation').length === 100,
+          'Policy reports retain their own 100-entry bound');
+    check(buffered.reports.filter(report => report.type === 'csp-violation').length === 100,
+          'CSP reports retain an independent 100-entry bound');
+    check(JSON.stringify(buffered.reports) === JSON.stringify(expected), 'Mixed buffered ordering and body data match live reports');
+    buffered.observer.disconnect();
+    return;
+  }
+  if (cfg.case === 'cross-realm') {
+    const frame = document.createElement('iframe');
+    const loaded = new Promise(resolve => { frame.onload = resolve; });
+    frame.srcdoc = '<script>window.policyCallback = reports => { parent.crossRealmResult = {report: reports[0], matchingPrototype: Object.getPrototypeOf(reports[0]) === Object.getPrototypeOf(reports[0].body)}; };<\/script>';
+    window.crossRealmResult = null;
+    document.body.appendChild(frame);
+    await loaded;
+    const observer = new ReportingObserver(frame.contentWindow.policyCallback,
+      {types: ['permissions-policy-violation']});
+    observer.observe();
+    await query().catch(() => {});
+    await until(() => window.crossRealmResult !== null);
+    check(crossRealmResult.matchingPrototype, 'Cross-realm report and concrete body share their dictionary realm');
+    reportShape(crossRealmResult.report, cfg.disposition);
+    observer.disconnect(); frame.remove();
+    return;
+  }
+  if (cfg.case === 'snapshot') {
+    const first = {reports: []};
+    first.observer = new ReportingObserver(batch => {
+      for (const report of batch) {
+        report.url = 'about:blank';
+        report.body.featureId = 'modified';
+        first.reports.push(report);
+      }
+    });
+    first.observer.observe();
+    const second = observe();
+    await query().catch(() => {});
+    await until(() => first.reports.length === 1 && second.reports.length === 1);
+    check(first.reports[0] !== second.reports[0] && first.reports[0].body !== second.reports[0].body,
+          'Observers receive independent dictionary snapshots');
+    reportShape(second.reports[0], cfg.disposition);
+    await delivered({enforced: 1});
+    const later = observe({buffered: true});
+    await until(() => later.reports.length === 1);
+    reportShape(later.reports[0], cfg.disposition);
+    first.observer.disconnect(); second.observer.disconnect(); later.observer.disconnect();
+    return;
+  }
+  const state = observe();
+  if (cfg.case === 'records') {
+    query();
+    const records = state.observer.takeRecords();
+    check(records.length === 1, 'Synchronous policy check queues a record before returning');
+    reportShape(records[0], cfg.disposition);
+    records[0].body.featureId = 'modified';
+    await delivered({enforced: 1});
+    await delay(60);
+    check(state.reports.length === 0, 'takeRecords drains only the observer callback queue');
+    const later = observe({buffered: true});
+    await until(() => later.reports.length === 1);
+    reportShape(later.reports[0], cfg.disposition);
+    later.observer.disconnect();
+  } else if (cfg.case === 'disconnect') {
+    query();
+    state.observer.disconnect();
+    await until(() => state.reports.length === 1);
+    reportShape(state.reports[0], cfg.disposition);
+    query();
+    await delivered({enforced: 2});
+    await delay(60);
+    check(state.reports.length === 1, 'Disconnect stops new reports while preserving the queued notification');
+  } else {
+    await expectQuery(cfg.allowed);
+    if (cfg.disposition) {
+      await until(() => state.reports.length > 0);
+      check(state.reports.length === 1, 'Feature check produces one policy report');
+      reportShape(state.reports[0], cfg.disposition);
+    } else {
+      await delay(100);
+      check(state.reports.length === 0, 'Allowed or malformed policy creates no violation report');
+    }
+  }
+  state.observer.disconnect();
+}
+if (cfg.role !== 'main') {
+  child().then(result => parent.postMessage({channel: 'DomePolicyReporting', result}, cfg.parent_origin))
+    .catch(error => parent.postMessage({channel: 'DomePolicyReporting', error: String(error)}, cfg.parent_origin));
+} else {
+  main().then(() => fetch('/__result?case=' + cfg.case, {method: 'POST', body: JSON.stringify({checks})}))
+    .catch(error => fetch('/__result?case=' + cfg.case, {method: 'POST', body: JSON.stringify({checks, error: String(error)})}));
+}
+</script>

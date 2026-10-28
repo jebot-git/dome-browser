@@ -10,11 +10,9 @@ dictionary ReportBody {
 dictionary Report {
   required DOMString type;
   required DOMString url;
-  required DOMString destination;
-  required double timestamp;
-  required long attempts;
-  // TODO(37328): Change this to parent class ReportBody
-  CSPViolationReportBody body;
+  // Concrete report-body dictionaries are converted separately so that their
+  // derived fields survive conversion to this polymorphic output member.
+  any body = null;
 };
 
 [Exposed=(Window,Worker)]

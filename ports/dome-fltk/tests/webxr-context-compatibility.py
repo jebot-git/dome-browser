@@ -19,10 +19,12 @@ p.add_argument('--devicechange',action='store_true',help='Validate notifications
 p.add_argument('--consent-cancellation',action='store_true',help='Cancel native consent when its document leaves')
 p.add_argument('--pending-sessions',action='store_true',help='Validate cleanup when a native session response outlives its requesting frame')
 p.add_argument('--device-selection',action='store_true',help='Validate compatibility invalidation without XR event listeners')
+p.add_argument('--policy-report-only',action='store_true',help='Validate that report-only tracking policy preserves a consented native session')
 p.add_argument('--policy-denied',action='store_true',help='Validate response policy with a live private host available')
 p.add_argument('--context-loss',action='store_true',help='Lose and recreate active immersive WebGL contexts')
 a=p.parse_args()
 if a.device_selection:a.devicechange=True
+if a.policy_report_only and any([a.policy_denied,a.no_xr_host,a.pending_sessions,a.consent_cancellation,a.devicechange]):p.error('Report-only mode uses the normal live-host scenario')
 if a.consent_cancellation and any([a.pending_sessions,a.devicechange,a.policy_denied,a.context_loss,a.no_xr_host]):p.error('Consent cancellation uses its own native scenario')
 if a.pending_sessions and (a.devicechange or a.policy_denied or a.context_loss or a.no_xr_host):p.error('Pending-session validation uses its own native scenario')
 if a.devicechange and (a.policy_denied or a.context_loss or a.no_xr_host):p.error('Device-change mode uses its own live bridge scenario')
@@ -124,8 +126,10 @@ try:
      b=b'''<script>let count=0;const tag=new URL(location).searchParams.get('tag');navigator.xr.ondevicechange=e=>parent.postMessage({availabilityObserver:true,tag,count:++count,trusted:e.isTrusted},'*');addEventListener('pageshow',()=>parent.postMessage({availabilityObserver:true,tag,count,ready:true},'*'));addEventListener('message',e=>{if(e.data.availabilityCommand==='idle')location.assign('/idle')});</script>'''
     elif a.devicechange and self.path.startswith('/idle'):
      b=b'''<script>addEventListener('pageshow',()=>parent.postMessage({availabilityObserver:true,tag:'idle',count:0,ready:true},'*'));addEventListener('message',e=>{if(e.data.availabilityCommand==='back')history.back()});</script>'''
+    if a.policy_report_only:b=b.replace(b'<script>',b"<script>\nnew ReportingObserver(reports=>fetch('/policy-report',{method:'POST',body:JSON.stringify({type:'policy-report',stage:'policy-report',reports:reports.map(report=>({type:report.type,feature:report.body.featureId,disposition:report.body.disposition}))})}),{types:['permissions-policy-violation']}).observe();\n</script>\n<script>",1)
     self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(b)));
     if a.policy_denied:self.send_header('Permissions-Policy','xr-spatial-tracking=()')
+    if a.policy_report_only:self.send_header('Permissions-Policy-Report-Only','xr-spatial-tracking=()')
     self.end_headers();self.wfile.write(b)
    def do_POST(self):
     value=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
@@ -202,10 +206,14 @@ try:
    check(host_ops.count('begin_session')==1 and host_ops.count('end_session')==1,'Only the explicitly consented immersive session consumes a lease')
    for marker in ([70,71,78,79] if a.context_loss else [70,71]):
     capture=wait(lambda:next((v for v in reversed(captures) if v['marker']==marker),None));im=Image.open(capture['path']);h=capture['header'];check(h['layer_flags']==2 and list(im.getpixel((31,im.height//2)))==[255,0,marker,255] and list(im.getpixel((95,im.height//2)))==[0,255,marker,255],'Negotiated '+('WebGL 1' if marker in [70,78] else 'WebGL 2')+' context submits correct stereo pixels')
+  if a.policy_report_only:
+   report_events=wait(lambda:[event for event in events if event.get('stage')=='policy-report'])
+   policy_reports=[report for event in report_events for report in event['reports']]
+   check(bool(policy_reports) and all(report=={'type':'permissions-policy-violation','feature':'xr-spatial-tracking','disposition':'report'} for report in policy_reports),'Report-only policy emits diagnostics while preserving the consented native session')
   check(child.poll() is None,'Browser survives asynchronous consent cancellation and fresh session creation' if a.consent_cancellation else 'Browser survives pending request cancellation and fresh session creation' if a.pending_sessions else 'Browser survives native availability transitions and observer cleanup' if a.devicechange else 'Browser survives context negotiation, device absence and reconnection')
-  if a.context_loss or a.policy_denied or a.devicechange or a.pending_sessions or a.consent_cancellation:
+  if a.context_loss or a.policy_denied or a.policy_report_only or a.devicechange or a.pending_sessions or a.consent_cancellation:
    fixture.wayland.api('/api/action',{'op':'close','id':window.id})
    check(child.wait(timeout=10)==0,'Browser closes cleanly after native XR validation')
 except BaseException as ex:failure=str(ex);raise
 finally:
- (out/'report.json').write_text(json.dumps(dict(passed=failure is None and bool(checks),failure=failure,checks=checks,events=events,captures=captures,relay_errors=errors,host_operations=host_ops,host_timings=host_timings,no_xr_host=a.no_xr_host,context_loss=a.context_loss,policy_denied=a.policy_denied,devicechange=a.devicechange,device_selection=a.device_selection,pending_sessions=a.pending_sessions,consent_cancellation=a.consent_cancellation,consent_status=consent_status,simulated_capabilities=caps,binary_sha256=hashlib.sha256(a.binary.read_bytes()).hexdigest(),scope='Real browser request cleanup and native DomeD bridge with a private continuously published synthetic XR host; no pixel buffers submitted and no headset claim' if a.pending_sessions or a.consent_cancellation else 'Real browser and native DomeD availability notifications with a private synthetic XR host; no headset claim' if a.devicechange else 'Real browser, WebGL GPU buffers and native DomeD bridge with a private synthetic XR host; no headset claim'),indent=2))
+ (out/'report.json').write_text(json.dumps(dict(passed=failure is None and bool(checks),failure=failure,checks=checks,events=events,captures=captures,relay_errors=errors,host_operations=host_ops,host_timings=host_timings,no_xr_host=a.no_xr_host,context_loss=a.context_loss,policy_denied=a.policy_denied,policy_report_only=a.policy_report_only,devicechange=a.devicechange,device_selection=a.device_selection,pending_sessions=a.pending_sessions,consent_cancellation=a.consent_cancellation,consent_status=consent_status,simulated_capabilities=caps,binary_sha256=hashlib.sha256(a.binary.read_bytes()).hexdigest(),scope='Real browser request cleanup and native DomeD bridge with a private continuously published synthetic XR host; no pixel buffers submitted and no headset claim' if a.pending_sessions or a.consent_cancellation else 'Real browser and native DomeD availability notifications with a private synthetic XR host; no headset claim' if a.devicechange else 'Real browser, WebGL GPU buffers and native DomeD bridge with a private synthetic XR host; no headset claim'),indent=2))

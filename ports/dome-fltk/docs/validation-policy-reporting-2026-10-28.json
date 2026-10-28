@@ -1,0 +1,92 @@
+{
+  "passed": true,
+  "runtime_checks": 415,
+  "breakdown": {
+    "policy_reporting": 248,
+    "csp_observers": 69,
+    "history": 14,
+    "xr_enforced": 23,
+    "xr_report_only": 47,
+    "xr_pending": 14
+  },
+  "policy_scenarios": 21,
+  "original_wpt_cases": 2,
+  "original_wpt_assertions_changed": false,
+  "original_wpt_headers_preserved": true,
+  "network_unit_tests": 32,
+  "network_units_retained_from_unchanged_sources": true,
+  "shared_worker_shutdown_scenarios": 3,
+  "anonymous_live_samples": 2,
+  "packaged_fixture_rechecks": [
+    "original-xr",
+    "policy-reporting",
+    "native-report-only"
+  ],
+  "engine_source_sha256": {
+    "Cargo.lock": "5c745c15841e28330ce06816171cce233b22067d670b4682f4b10c5a63ca2ad8",
+    "components/script/dom/document/document.rs": "4e80bf0fe6f011a5632ec7b0458b03d3a40ab45669510d3c713a955aac6e9679",
+    "components/script/dom/reporting/mod.rs": "426a2a37803fb78f588881e6905abc84b74be4db1fb734cf6a0f4f5e42450991",
+    "components/script/dom/reporting/report.rs": "9962e8a9151e53f1458fc2c78f011ea0705d271caadcf1134aa5916e8c3b0ff1",
+    "components/script/dom/reporting/reportingendpoint.rs": "1cd8a460cfdd434ffe391d3075bec6ea945ef858490e51f3aa3fada37876e74e",
+    "components/script/dom/reporting/reportingobserver.rs": "490ff7eca8ada6b7361df59e528901d8bc9d135ba9ae02e9163bf8efbbb91a10",
+    "components/script/dom/security/cspviolationreporttask.rs": "45e3d66f7b4d218eb524370463fe99e50d7c84a4b6f10a4f759b234c0e193f54",
+    "components/script/dom/webxr/xrsystem.rs": "47c8a94ed21641b6579fb8b58ac7e11f80705b0aaf648072bdf4ef6a94dbbec6",
+    "components/script/dom/window/window.rs": "24bca76fb62764ce7628d0126f7a843ce11bdc26f2d738d45534d6d957ccbe54",
+    "components/script/dom/workers/workerglobalscope.rs": "6e7545844a0a0240f13083018df21cb5ae1303c110a7a28fa7dff6d0fc448aea",
+    "components/script_bindings/codegen/Bindings.conf": "cb5e9998f226ccb270fa601ab273423c836ba1c79c8605a6eec309713f3c041a",
+    "components/script_bindings/webidls/PermissionsPolicyViolationReportBody.webidl": "430f9b2b875ddb2ee68fd2ad7d6d7c5c676016f967f87fe512de978d07d2994a",
+    "components/script_bindings/webidls/ReportingObserver.webidl": "4352c9c0e7fedcd815cae55ebe635a85341149f6689269e97caf8b32a32b5081",
+    "components/shared/net/permissions_policy.rs": "fa0ddf8219654e4ccba4e1d73de87fc0a6274f6c47940449c4045d6e411a2c12"
+  },
+  "packaged_fixture_source_sha256": {
+    "ports/dome-fltk/tests/webxr-context-compatibility.py": "1610f1f59104c44ee517d65b943243d06ea0ddfa420db3769f4905b02bbefe50",
+    "ports/dome-fltk/tests/permissions-policy-reporting.py": "4f2bcade704628636c9b76dc99f250d7dc9bf9844b5e8e7b55acdc3d6d3c2353",
+    "ports/dome-fltk/tests/permissions-policy-reporting.html": "60e8d08b5fe63ab23f1271b10f26a892877ac34018200faa9e1ef94c245b3337",
+    "ports/dome-fltk/tests/caller.js": "05a5c9a8f4daed95fcc0e4e9e300d8edb57dd96d3176616d0712025e8d69af69",
+    "ports/dome-fltk/tests/original-xr-reporting.py": "f143e6e2768fe4aab00ae97e07b48934c22957fc0edc472680dc11b270b918d5"
+  },
+  "completed_utc": "2026-10-28T20:51:18.782839+00:00",
+  "base_commit": "a57b2a7c3b893096ef5f6eaaad5beb7bfeb25a92",
+  "optimized_binaries": {
+    "browser-candidate-r4": {
+      "sha256": "b022e19eb63ededcb6b49188347800573eb02a508a6ec6f3188028f615ae8671"
+    },
+    "test-embedder-r4": {
+      "sha256": "a4e5f366af307f03acdd528945a903361f7c86ba6257b10a19b773ddd55c4ae7"
+    }
+  },
+  "changes": [
+    "Use typed Rust report bodies internally and fresh three-field Report dictionaries for callback/takeRecords snapshots. Keep delivery metadata internal and preserve CSP body fields.",
+    "Create concrete body snapshots in the callback realm, including callbacks supplied by another window. Keep retained history and network bodies independent of page mutations.",
+    "Emit WebXR spatial-tracking policy diagnostics with feature/disposition and script source location. Enforced denial takes precedence; report-only policy does not change access decisions.",
+    "Report spatial session requests, including denied optional features, while keeping introspection and viewer-only inline sessions free of spatial-tracking reports.",
+    "Preserve independent per-type buffer bounds, document isolation, response-selected destinations and inherited policy restrictions.",
+    "Compute nonnegative delivery age and count delivery attempts internally."
+  ],
+  "scope": [
+    "Two original asynchronous WebXR reporting cases retain their assertion bodies and headers; a completion reporter is injected after testharness. They run through a trusted loopback adapter, not the full WPT runner or an HTTPS deployment.",
+    "All 21 local reporting scenarios and 248 associated checks pass, including exact endpoint counts, independent snapshots, cross-realm callbacks, mixed buffers, source locations, inline features, iframe inheritance and navigation.",
+    "The native report-only fixture verifies diagnostics together with a consented lease, stereo submission and clean closure using a private synthetic DomeD host and software GL. No physical headset was tested.",
+    "Anonymous Discord/X survival, clean closure and captured appearance were checked. This is not authenticated or whole-site correctness coverage. The X QR overlap remains an accepted non-bug.",
+    "Current Reporting drafts define Report and ReportBody dictionaries; Permissions Policy still references a historical interface hierarchy. The adapter preserves concrete dictionary fields without migrating CSP to DOM interfaces. Legacy interface/toJSON compatibility is not claimed.",
+    "Broader Reporting API and WebXR conformance remain incomplete: potential iframe policy diagnostics, other feature consumers, endpoint retry/lifecycle behavior and wider device/backend coverage need further work."
+  ],
+  "retained_failed_runs": [
+    {
+      "phase": "initial compile check",
+      "result": "Corrected the Heap import; release compile checks then passed."
+    },
+    {
+      "phase": "first expanded runtime matrix",
+      "result": "Cross-realm report/body prototype mismatch was corrected by building body snapshots in the callback realm; the final matrix passes."
+    },
+    {
+      "phase": "burst delivery fixture",
+      "result": "The local server listen backlog of five delayed the 220-report burst. Increasing fixture backlog to 256 allowed the unchanged first candidate to deliver all 220 reports; no engine delivery workaround was added."
+    },
+    {
+      "phase": "first native report-only fixture",
+      "result": "Observer telemetry initially omitted the existing event type field. Corrected the fixture; both diagnostic and final packaged native runs pass."
+    }
+  ]
+}

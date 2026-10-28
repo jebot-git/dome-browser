@@ -211,7 +211,8 @@ impl XRSystemMethods<crate::DomTypeHolder> for XRSystem {
             .global()
             .as_window()
             .Document()
-            .allowed_to_use_policy_feature(
+            .allowed_to_use_policy_feature_with_reporting(
+                cx,
                 net_traits::permissions_policy::PolicyFeature::XrSpatialTracking,
             )
         {
@@ -332,23 +333,29 @@ impl XRSystemMethods<crate::DomTypeHolder> for XRSystem {
             required_features.push("local".to_string());
         }
 
-        if !window.Document().allowed_to_use_policy_feature(
+        let spatial = |feature: &str| {
+            matches!(
+                feature,
+                "local"
+                    | "local-floor"
+                    | "bounded-floor"
+                    | "unbounded"
+                    | "hit-test"
+                    | "anchors"
+                    | "plane-detection"
+                    | "mesh-detection"
+                    | "hand-tracking"
+            )
+        };
+        // Viewer-only inline requests do not use spatial tracking. Optional
+        // spatial features still require a policy check even if denied features
+        // will subsequently be removed from the device request.
+        let requests_spatial = required_features.iter().chain(&optional_features)
+            .any(|feature| spatial(feature));
+        if requests_spatial && !window.Document().allowed_to_use_policy_feature_with_reporting(
+            realm,
             net_traits::permissions_policy::PolicyFeature::XrSpatialTracking,
         ) {
-            let spatial = |feature: &str| {
-                matches!(
-                    feature,
-                    "local"
-                        | "local-floor"
-                        | "bounded-floor"
-                        | "unbounded"
-                        | "hit-test"
-                        | "anchors"
-                        | "plane-detection"
-                        | "mesh-detection"
-                        | "hand-tracking"
-                )
-            };
             if required_features.iter().any(|feature| spatial(feature)) {
                 if mode != XRSessionMode::Inline {
                     self.pending_immersive_session.set(false);
