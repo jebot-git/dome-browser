@@ -1,0 +1,46 @@
+<!doctype html><meta charset=utf-8><title>WebXR local-floor estimation</title>
+<script>
+'use strict';
+const state=window.test={ready:true,finished:false,error:null,checks:[],frames:0};
+state.snapshot=()=>({...state,snapshot:undefined});
+const check=(ok,label)=>{if(!ok)throw Error(label);state.checks.push(label);};
+const near=(p,want)=>p&&[p.transform.position.x,p.transform.position.y,p.transform.position.z].every((v,i)=>Math.abs(v-want[i])<.0002);
+const projection=[1,0,0,0,0,1,0,0,0,0,-1,-1,0,0,-.2,0];
+(async()=>{
+for(const mode of ['inline','immersive-vr']){
+ const label=text=>mode+': '+text;
+ const device=await navigator.xr.test.simulateDeviceConnection({supportsImmersive:true,supportedModes:['inline','immersive-vr'],supportedFeatures:['local','local-floor','bounded-floor'],viewerOrigin:{position:[0,0,0],orientation:[0,0,0,1]},views:['left','right'].map((eye,i)=>({eye,projectionMatrix:projection,viewOffset:{position:[i?.03:-.03,0,0],orientation:[0,0,0,1]},resolution:{width:128,height:96}}))});
+ let request;navigator.xr.test.simulateUserActivation(()=>request=navigator.xr.requestSession(mode,{requiredFeatures:['local','local-floor'],optionalFeatures:mode==='immersive-vr'?['bounded-floor']:[]}));const session=await request;
+ const canvas=document.createElement('canvas');canvas.width=128;canvas.height=96;document.body.append(canvas);const gl=canvas.getContext('webgl',{xrCompatible:true});await gl.makeXRCompatible();session.updateRenderState({baseLayer:new XRWebGLLayer(session,gl)});
+ const [viewer,local,floor,secondFloor]=await Promise.all(['viewer','local','local-floor','local-floor'].map(type=>session.requestReferenceSpace(type)));
+ const offset=floor.getOffsetReferenceSpace(new XRRigidTransform({y:.5,z:2}));
+ const bounded=mode==='immersive-vr'?await session.requestReferenceSpace('bounded-floor'):null;
+ const inspect=fn=>new Promise((resolve,reject)=>session.requestAnimationFrame((time,frame)=>{state.frames++;try{fn(frame);resolve();}catch(error){reject(error);}}));
+ await inspect(frame=>{
+  const located=frame.getViewerPose(floor);check(near(located,[0,1.6,0]),label('Unknown floor uses a fixed initial estimate'));
+  check(!located.emulatedPosition,label('Floor estimation does not mark tracked viewer position emulated'));
+  const ordinary=frame.getPose(viewer,floor);check(near(ordinary,[0,1.6,0])&&!ordinary.emulatedPosition,label('Ordinary viewer pose uses the same estimated floor'));
+  check(near(frame.getPose(local,floor),[0,1.6,0])&&near(frame.getPose(floor,local),[0,-1.6,0]),label('Estimated floor has a stable relationship with local space'));
+  check(near(frame.getViewerPose(offset),[0,1.1,-2]),label('Offsets compose with the estimated floor'));
+  check(near(frame.getPose(floor,secondFloor),[0,0,0]),label('Independent local-floor spaces share their origin'));
+  if(bounded){check(frame.getViewerPose(bounded)===null,label('Floor estimate does not invent bounded-floor calibration'));check(frame.getPose(floor,bounded)===null&&frame.getPose(bounded,floor)===null,label('Estimated and unavailable bounded floors are not falsely aliased'));}
+ });
+ const resets=[];for(const [space,name]of [[floor,'floor'],[offset,'offset']])space.addEventListener('reset',event=>resets.push({name,y:event.transform?.position.y,own:event.referenceSpace===space,trusted:event.isTrusted}));
+ device.setFloorOrigin({position:[0,-2,0],orientation:[0,0,0,1]});
+ for(let n=0;n<12&&resets.length<2;n++)await inspect(()=>{});
+ await inspect(frame=>{
+  check(near(frame.getViewerPose(floor),[0,2,0])&&near(frame.getPose(viewer,floor),[0,2,0]),label('Native calibration replaces the estimate for both pose APIs'));
+  check(resets.length===2&&resets.every(e=>Math.abs(e.y+.4)<.0002&&e.own&&e.trusted),label('Calibration resets base and offset spaces using the previous estimate'));
+  if(bounded)check(near(frame.getPose(floor,bounded),[0,0,0])&&near(frame.getViewerPose(bounded),[0,2,0]),label('Known native calibration restores the common floor relationship'));
+ });
+ resets.length=0;device.clearFloorOrigin();for(let n=0;n<12&&resets.length<2;n++)await inspect(()=>{});
+ await inspect(frame=>{const located=frame.getViewerPose(floor);check(near(located,[0,1.6,0])&&!located.emulatedPosition,label('Removing calibration restores the fixed floor estimate'));check(resets.length===2&&resets.every(e=>Math.abs(e.y-.4)<.0002),label('Returning to estimation reports the reverse floor reset'));});
+ device.clearViewerOrigin();for(let n=0;n<4;n++)await inspect(()=>{});
+ await inspect(frame=>{check(frame.getPose(viewer,floor)===null,label('Floor estimation does not invent ordinary viewer tracking'));const cached=frame.getViewerPose(floor);check(near(cached,[0,1.6,0])&&cached.emulatedPosition,label('Viewer tracking loss retains the last floor-relative pose as emulated'));});
+ device.setViewerOrigin({position:[.2,.3,.4],orientation:[0,0,0,1]});for(let n=0;n<4;n++)await inspect(()=>{});
+ await inspect(frame=>{const restored=frame.getViewerPose(floor);check(near(restored,[.2,1.9,.4])&&!restored.emulatedPosition,label('Restored viewer tracking moves relative to the fixed estimated floor'));});
+ await session.end();await device.disconnect();canvas.remove();check(true,label('Session and device close cleanly'));
+}
+state.finished=true;
+})().catch(error=>{state.error=String(error)+' '+error.stack;});
+</script>

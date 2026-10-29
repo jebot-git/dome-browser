@@ -37,13 +37,20 @@ impl ViewerCache {
             transform: cast_transform(pose.transform),
             emulated: pose.emulated_position,
         });
-        let floor = frame.pose.as_ref().zip(frame.floor_transform).map(|(pose, floor)| LocatedViewer {
+        let floor = frame.pose.as_ref().map(|pose| LocatedViewer {
+            transform: cast_transform(pose.transform.then(&webxr_api::util::local_floor_transform(frame.floor_transform))),
+            // Estimating the floor alone does not emulate viewer position.
+            emulated: pose.emulated_position,
+        });
+        let bounded_floor = frame.pose.as_ref().zip(frame.floor_transform).map(|(pose, floor)| LocatedViewer {
             transform: cast_transform(pose.transform.then(&floor)),
             emulated: pose.emulated_position,
         });
         if let Some(pose) = &local { self.local = Some(pose.transform); }
         if let Some(pose) = &floor {
             self.floor = Some(pose.transform);
+        }
+        if let Some(pose) = &bounded_floor {
             self.bounded_floor = Some(pose.transform);
         }
         if let Some(pose) = &frame.pose {
@@ -54,7 +61,7 @@ impl ViewerCache {
         ViewerFrameState {
             local: local.or_else(|| self.local.map(|transform| LocatedViewer { transform, emulated: true })),
             floor: floor.clone().or_else(|| self.floor.map(|transform| LocatedViewer { transform, emulated: true })),
-            bounded_floor: floor.or_else(|| self.bounded_floor.map(|transform| LocatedViewer { transform, emulated: true })),
+            bounded_floor: bounded_floor.or_else(|| self.bounded_floor.map(|transform| LocatedViewer { transform, emulated: true })),
             views: self.views.clone(),
         }
     }

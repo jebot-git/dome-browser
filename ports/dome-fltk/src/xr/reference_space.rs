@@ -22,7 +22,7 @@ pub(super) struct Tracker {
 impl Tracker {
     pub fn new(previous: Option<State>) -> Self { Self { previous } }
     pub fn frame_events(&mut self, next: Option<State>, anchor: RigidTransform3D<f32, Native, Native>,
-        floor: bool) -> Result<Vec<FrameUpdateEvent>> {
+        native_floor: bool) -> Result<Vec<FrameUpdateEvent>> {
         let delta = match (self.previous, next) {
             (None, None) => return Ok(vec![]),
             (Some(_), None) => return Err("Reference-space state disappeared".into()),
@@ -54,11 +54,12 @@ impl Tracker {
         };
         let local = delta.map(|delta| webxr_api::util::offset_reference_space_reset(anchor.cast_unit(), delta));
         let mut events = vec![FrameUpdateEvent::ReferenceSpaceChanged(BaseSpace::Local, local)];
-        if floor {
-            let offset = RigidTransform3D::from_translation(Vector3D::new(0., -anchor.translation.y, 0.));
-            events.push(FrameUpdateEvent::ReferenceSpaceChanged(BaseSpace::Floor,
-                local.map(|delta| webxr_api::util::offset_reference_space_reset(offset, delta))));
-        }
+        let floor = webxr_api::util::local_floor_transform(native_floor.then(|| {
+            RigidTransform3D::from_translation(Vector3D::new(0., anchor.translation.y, 0.))
+        }));
+        let offset = floor.inverse().cast_unit();
+        events.push(FrameUpdateEvent::ReferenceSpaceChanged(BaseSpace::Floor,
+            local.map(|delta| webxr_api::util::offset_reference_space_reset(offset, delta))));
         Ok(events)
     }
 }
@@ -85,7 +86,10 @@ mod tests {
     fn lost_continuity_is_null_and_replays_or_missing_extension_are_rejected() {
         let mut tracker = Tracker::new(Some(state(1,0,2.)));
         let events = tracker.frame_events(Some(state(2,1,0.)),RigidTransform3D::identity(),false).unwrap();
-        assert!(matches!(events.as_slice(),[FrameUpdateEvent::ReferenceSpaceChanged(BaseSpace::Local,None)]));
+        assert!(matches!(events.as_slice(),[
+            FrameUpdateEvent::ReferenceSpaceChanged(BaseSpace::Local,None),
+            FrameUpdateEvent::ReferenceSpaceChanged(BaseSpace::Floor,None)
+        ]));
         assert!(tracker.frame_events(Some(state(1,0,2.)),RigidTransform3D::identity(),false).is_err());
         assert!(tracker.frame_events(None,RigidTransform3D::identity(),false).is_err());
     }
@@ -95,5 +99,20 @@ mod tests {
         assert!(tracker.frame_events(None,RigidTransform3D::identity(),false).unwrap().is_empty());
         let mut tracker = Tracker::new(Some(state(40,3,2.)));
         assert!(tracker.frame_events(Some(state(40,3,2.)),RigidTransform3D::identity(),false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn estimated_floor_reset_uses_the_default_height_instead_of_native_anchor_height() {
+        let mut tracker = Tracker::new(Some(state(0,0,0.)));
+        let mut next = state(1,0,0.);
+        next.origin.orientation = [std::f32::consts::FRAC_1_SQRT_2, 0., 0., std::f32::consts::FRAC_1_SQRT_2];
+        let anchor = RigidTransform3D::from_translation(Vector3D::new(0., 2.2, 0.));
+        let events = tracker.frame_events(Some(next), anchor, false).unwrap();
+        let FrameUpdateEvent::ReferenceSpaceChanged(BaseSpace::Floor, Some(delta)) = events[1] else {
+            panic!("Estimated floor reset expected")
+        };
+        assert!((delta.translation.y + 0.6).abs() < 1e-5);
+        assert!((delta.translation.z - 0.6).abs() < 1e-5);
+        assert!(delta.translation.x.abs() < 1e-5);
     }
 }

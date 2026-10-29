@@ -1,0 +1,76 @@
+{
+  "change": "Estimate local-floor consistently when native floor calibration is unavailable",
+  "base_commit": "ac389619822bfe16b7f328373a7cc4e4eb9c6a03",
+  "default_floor_height_metres": 1.6,
+  "behavior": [
+    "Use the same fixed floor basis for viewer poses, ordinary poses, offsets and mock hit-test rays",
+    "Keep native bounded-floor calibration separate from the estimated local floor",
+    "Do not mark a tracked viewer position emulated solely because the floor is estimated",
+    "Preserve viewer tracking loss, cached pose emulation and restoration",
+    "Report calibration and native-origin changes to floor and offset-space reset listeners before animation",
+    "Grant supported local-floor requests through native DomeD transport without a calibrated stage"
+  ],
+  "optimized_release": true,
+  "compiled_source_sha256": {
+    "components/script/dom/webxr/xrframe.rs": "3d8b0da73b02f30066d64cc05f2028bdefe953f10d82e71621974994b1dae6cb",
+    "components/script/dom/webxr/xrreferencespace.rs": "51580bd52057ba375e517a1d6478b907caed6908621ad87274d7ba7b9b765cc2",
+    "components/script/dom/webxr/xrsession/viewer_state.rs": "82a29108616c8ef39a8a73332c56040fe949b1281883a70d0248e3a9c34f1917",
+    "components/script/dom/webxr/xrspace.rs": "233cf1041bed2252d1bbe54552b4d85f8c2d6d4c0af0ff6f1c10a76ca4bd5583",
+    "components/shared/webxr/util.rs": "a8a634f396bb725cefa4ae0badf852147a2524b2132cc946e58a4d177f50330c",
+    "components/webxr/headless/mod.rs": "2f2f693834470824f7e2a721a45c915620aae7d3a59f087688ad3b3abe18aec5",
+    "ports/dome-fltk/src/xr.rs": "2c812e99cd672b7527e5ac516002ac5cb788e6e66830f23e4fd25c4d72a20625",
+    "ports/dome-fltk/src/xr/reference_space.rs": "191a1110966f49fef9a981a26b6a9b81ad64e895e1ac3611790943cf9d53228e",
+    "ports/dome-fltk/tests/webxr-floor-estimation.html": "b3c37b5cb91db882e4c3b23040b21eb552ab52a9d854d16937e26e45cd0664a2",
+    "ports/dome-fltk/tests/webxr-floor-estimation.py": "a3f781be2d52ed874d4c27bdcfe37db73ca8ef0da685cc9fffc101a3931a9bf8",
+    "ports/dome-fltk/tests/webxr-floor-native.html": "f5bddc30a136d87247f207442653373b8839d15ce18bdb1acb4f648940a4ddc1",
+    "ports/dome-fltk/tests/webxr-floor-native.py": "4d6089421d25ecc2276d17e4dc72251379e070476e1a3e4f1c0c398e97786e7d"
+  },
+  "binaries_sha256": {
+    "browser": "119b33f91ef3e2fbd5e324279a7a7c9e39ab13bee19a47baab8cfaedcaee78b8",
+    "embedder": "99ee6741c2db28f56fb8090920d9043ebfdbccf1d408320cd9a0e746095d05ed",
+    "fixture": "b51768ee47fef6d319cdcf5140d3f0a80d10d4f9f18bde7ff35864d3de3f6d0b"
+  },
+  "unit_tests": {
+    "webxr_api": 53,
+    "webxr_library_with_headless": 24,
+    "frontend_xr": 43,
+    "total_unique": 120,
+    "existing_ignored_shader_test": 1
+  },
+  "runtime_checks": 482,
+  "runtime_breakdown": {
+    "floor-model": 33,
+    "native-floor": 35,
+    "native-floor-legacy-clock": 35,
+    "original-floor": 4,
+    "tracking-loss": 19,
+    "tracking-lifecycle": 27,
+    "xr-bounded": 21,
+    "native-validity": 24,
+    "native-history": 30,
+    "native-projection": 43,
+    "xr-native-reset": 101,
+    "xr-native-input": 61,
+    "xr-inline": 35,
+    "history": 14
+  },
+  "additional_original_spatial_passes": 38,
+  "unchanged_original_projection_setup_discrepancies": 2,
+  "worker_shutdown_scenarios": 3,
+  "anonymous_discord_x_runs": 2,
+  "live_sample_seconds_each": 30,
+  "live_samples_clean_close": true,
+  "live_samples_visual_reviewed": true,
+  "adblock_enabled": true,
+  "full_wpt_runner": false,
+  "physical_device_conformance_claim": false,
+  "whole_site_correctness_claim": false,
+  "geolocation_excluded": true,
+  "full_goal_achieved": false,
+  "references": [
+    "https://www.w3.org/TR/webxr/#xrreferencespace-interface",
+    "https://www.w3.org/TR/webxr/#xrpose-interface"
+  ],
+  "validated_utc": "2026-10-29T08:58:17.508229+00:00",
+  "dome_fixture_commit": "742d009f446cffdeb89031664b72885ff6f16a19"
+}

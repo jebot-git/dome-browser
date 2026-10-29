@@ -168,7 +168,10 @@ impl XRReferenceSpace {
                 // for most devices is (0, 0, 0)
                 Some(RigidTransform3D::identity())
             },
-            XRReferenceSpaceType::Local_floor | XRReferenceSpaceType::Bounded_floor => {
+            XRReferenceSpaceType::Local_floor => {
+                Some(cast_transform(webxr_api::util::local_floor_transform(base_pose.floor_transform).inverse()))
+            },
+            XRReferenceSpaceType::Bounded_floor => {
                 let native_to_floor = base_pose.floor_transform?;
                 Some(cast_transform(native_to_floor.inverse()))
             },

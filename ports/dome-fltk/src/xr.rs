@@ -437,8 +437,8 @@ impl DiscoveryAPI<SurfmanGL> for Discovery {
             return Err(backend("WebXR requires the focused browser page"));
         }
         self.focus_settle = None;
-        let hello = Hello::parse(probe().map_err(backend)?).map_err(backend)?;
-        init.validate(mode, &if hello.stage { vec!["local-floor".into()] } else { vec![] })?;
+        let _hello = Hello::parse(probe().map_err(backend)?).map_err(backend)?;
+        init.validate(mode, &["local-floor".into()])?;
         let dialog = crate::ui::ConsentDialog::new("Enter immersive WebXR", &format!(
             "{}\n\nAllow this site to use headset tracking and display immersive content in DomeD's XR session?\n\nLeaving the page ends only this browser session.", init.origin
         )).ok_or_else(|| backend("WebXR consent window unavailable"))?;
@@ -475,11 +475,7 @@ impl DiscoveryAPI<SurfmanGL> for Discovery {
                 .map_err(backend)?;
         let features = init.validate(
             mode,
-            &if hello.stage {
-                vec!["local-floor".into()]
-            } else {
-                vec![]
-            },
+            &["local-floor".into()],
         )?;
         if init.origin == "null" || self.approved_request.take() != Some(builder.id()) {
             return Err(backend("WebXR requires an accepted live consent request"));

@@ -107,14 +107,14 @@ impl XRSpace {
                 (BaseSpace::TargetRay(_), BaseSpace::Grip(_)))
     }
 
-    pub(crate) fn static_relative_pose(&self, base: &XRSpace) -> Option<ApiRigidTransform> {
+    pub(crate) fn static_relative_pose(&self, base: &XRSpace, frame: &Frame) -> Option<ApiRigidTransform> {
         if (self.input_source.get().is_some() && !self.input_pose_visible()) ||
             (base.input_source.get().is_some() && !base.input_pose_visible()) {
             return None;
         }
         let space = self.space();
         let base = base.space();
-        let same_floor = matches!((space.base, base.base),
+        let same_floor = frame.floor_transform.is_some() && matches!((space.base, base.base),
             (BaseSpace::Floor, BaseSpace::BoundedFloor) | (BaseSpace::BoundedFloor, BaseSpace::Floor));
         (space.base == base.base || same_floor)
             .then(|| space.offset.then(&base.offset.inverse()))

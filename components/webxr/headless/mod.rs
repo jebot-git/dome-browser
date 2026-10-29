@@ -547,11 +547,14 @@ impl HeadlessDeviceData {
                 self.viewer_emulated = emulated;
             },
             MockDeviceMsg::SetFloorOrigin(floor_origin) => {
-                let delta = self
+                let bounded_delta = self
                     .floor_transform
                     .zip(floor_origin)
                     .map(|(old, new)| new.then(&old).cast_unit());
+                let old_floor = webxr_api::util::local_floor_transform(self.floor_transform);
                 self.floor_transform = floor_origin.map(|f| f.inverse());
+                let new_floor = webxr_api::util::local_floor_transform(self.floor_transform);
+                let delta = Some(new_floor.inverse().then(&old_floor).cast_unit());
                 let floor = self.floor_transform;
                 with_all_sessions!(self, |s| {
                     s.frame_events
@@ -562,7 +565,7 @@ impl HeadlessDeviceData {
                     ));
                     s.frame_events.push(FrameUpdateEvent::ReferenceSpaceChanged(
                         BaseSpace::BoundedFloor,
-                        delta,
+                        bounded_delta,
                     ));
                 });
             },
@@ -716,7 +719,8 @@ impl HeadlessDeviceData {
     fn native_ray(&self, ray: Ray<ApiSpace>, space: Space) -> Option<Ray<Native>> {
         let origin: RigidTransform3D<f32, ApiSpace, Native> = match space.base {
             BaseSpace::Local => RigidTransform3D::identity(),
-            BaseSpace::Floor => self.floor_transform?.inverse().cast_unit(),
+            BaseSpace::Floor => webxr_api::util::local_floor_transform(self.floor_transform)
+                .inverse().cast_unit(),
             BaseSpace::Viewer => self.viewer_origin?.cast_unit(),
             BaseSpace::BoundedFloor => self.floor_transform?.inverse().cast_unit(),
             BaseSpace::TargetRay(id) => self
@@ -744,9 +748,9 @@ impl HeadlessDeviceData {
 }
 
 #[cfg(test)]
-mod secondary_views_tests {
+mod tests {
     use super::*;
-    use euclid::{Rect, Size2D, Transform3D};
+    use euclid::{Rect, Size2D, Transform3D, Vector3D};
     use webxr_api::{LayerGeometry, ViewEye};
 
     fn init(eye: ViewEye, width: i32, height: i32, observer: bool) -> MockViewInit<ApiSpace> {
@@ -799,6 +803,28 @@ mod secondary_views_tests {
             next_id: 0,
             bounds_geometry: vec![],
         }
+    }
+
+    #[test]
+    fn local_floor_rays_use_the_pose_estimate_without_inventing_bounded_calibration() {
+        let mut device = data();
+        let ray = Ray { origin: Vector3D::zero(), direction: Vector3D::new(0., -1., 0.) };
+        let space = Space { base: BaseSpace::Floor, offset: RigidTransform3D::identity() };
+        let estimated = device.native_ray(ray, space).unwrap();
+        assert_eq!(estimated.origin, Vector3D::new(0., -1.6, 0.));
+        assert_eq!(estimated.direction, Vector3D::new(0., -1., 0.));
+        assert!(device.native_ray(ray, Space { base: BaseSpace::BoundedFloor, ..space }).is_none());
+        let shifted = device.native_ray(ray, Space {
+            offset: RigidTransform3D::from_translation(Vector3D::new(3., 0.5, 1.)),
+            ..space
+        }).unwrap();
+        assert!((shifted.origin.y + 1.1).abs() < 1e-5);
+        assert_eq!(shifted.origin.x, 3.);
+        assert_eq!(shifted.origin.z, 1.);
+        device.floor_transform = Some(RigidTransform3D::from_translation(Vector3D::new(0., 2., 0.)));
+        assert_eq!(device.native_ray(ray, space).unwrap().origin, Vector3D::new(0., -2., 0.));
+        assert_eq!(device.native_ray(ray, Space { base: BaseSpace::BoundedFloor, ..space }).unwrap().origin,
+            Vector3D::new(0., -2., 0.));
     }
     fn session(mode: SessionMode, secondary: bool) -> PerSessionData {
         PerSessionData {

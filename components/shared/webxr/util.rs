@@ -7,6 +7,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::{FrameUpdateEvent, HitTestId, HitTestSource};
 
+/// Local-floor remains available without native floor calibration. A fixed
+/// default avoids deriving a floor estimate from user-specific measurements.
+/// Bounded-floor must continue to use the actual native floor basis.
+pub fn local_floor_transform(
+    native_floor: Option<RigidTransform3D<f32, crate::Native, crate::Floor>>,
+) -> RigidTransform3D<f32, crate::Native, crate::Floor> {
+    native_floor.unwrap_or_else(|| {
+        RigidTransform3D::from_translation(Vector3D::new(0., 1.6, 0.))
+    })
+}
+
 /// A compositor's known cadence must be a positive finite value in hertz.
 pub fn valid_frame_rate(rate: f32) -> bool {
     rate.is_finite() && rate > 0.0
@@ -248,5 +259,29 @@ mod reference_reset_tests {
         let delta = Pose::from_translation(Vector3D::new(1., 0., 0.));
         let reset = offset_reference_space_reset(offset, delta);
         close(reset.translation.to_point(), [0., 0., 1.]);
+    }
+}
+
+#[cfg(test)]
+mod floor_estimation_tests {
+    use super::*;
+
+    #[test]
+    fn unknown_floor_has_a_fixed_height_in_local_coordinates() {
+        let floor = local_floor_transform(None);
+        assert_eq!(floor.translation, Vector3D::new(0., 1.6, 0.));
+        assert_eq!(floor.rotation, Rotation3D::identity());
+        let moved_viewer = euclid::Point3D::new(2., 0.4, -3.);
+        let located = floor.rotation.transform_point3d(moved_viewer) + floor.translation;
+        assert_eq!(located, euclid::Point3D::new(2., 2., -3.));
+    }
+
+    #[test]
+    fn known_native_floor_preserves_its_full_calibration() {
+        let native = RigidTransform3D::new(
+            Rotation3D::around_y(Angle::radians(0.5)),
+            Vector3D::new(1., 2., 3.),
+        );
+        assert_eq!(local_floor_transform(Some(native)), native);
     }
 }

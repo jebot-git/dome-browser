@@ -171,7 +171,7 @@ impl XRFrameMethods<crate::DomTypeHolder> for XRFrame {
             return Err(Error::InvalidState(None));
         }
         self.ensure_pose_access()?;
-        if let Some(transform) = space.static_relative_pose(base_space) {
+        if let Some(transform) = space.static_relative_pose(base_space, &self.data) {
             return Ok(Some(XRPose::new(cx, self.global().as_window(), transform)));
         }
         let emulated = !space.shares_input_position(base_space) &&
