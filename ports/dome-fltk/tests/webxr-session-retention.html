@@ -1,0 +1,35 @@
+<!doctype html><meta charset="utf-8"><title>XR mock session cleanup</title>
+<script>
+const state=window.test={ready:true,finished:false,error:null,checks:[],frames:0};
+state.snapshot=()=>({...state,snapshot:undefined});
+const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const check=(passed,name,actual)=>state.checks.push({name,passed:!!passed,actual});
+const projection=[1,0,0,0,0,1,0,0,0,0,-1,-1,0,0,-.2,0];
+async function ended(mode){
+ let request;const start=()=>request=navigator.xr.requestSession(mode);
+ mode==='inline'?start():navigator.xr.test.simulateUserActivation(start);
+ let session=await request;const ref=new WeakRef(session);await session.end();session=null;return ref;
+}
+(async()=>{
+ check(typeof WeakRef==='function'&&!!navigator.servo,'Private collection control is available');
+ const device=await navigator.xr.test.simulateDeviceConnection({supportsImmersive:true,
+  supportedModes:['immersive-vr'],supportedFeatures:['local'],
+  views:['left','right'].map((eye,i)=>({eye,projectionMatrix:projection,
+   viewOffset:{position:[i?.03:-.03,0,0],orientation:[0,0,0,1]},resolution:{width:128,height:96}})),
+  viewerOrigin:{position:[0,0,0],orientation:[0,0,0,1]}});
+ const inline=[],immersive=[];
+ for(let i=0;i<8;i++){inline.push(await ended('inline'));immersive.push(await ended('immersive-vr'));}
+ await delay(100);
+ let counts;
+ for(let i=0;i<12;i++){
+  navigator.servo.garbageCollectAllContexts();await delay(40);
+  counts={inline:inline.filter(ref=>ref.deref()===undefined).length,
+          immersive:immersive.filter(ref=>ref.deref()===undefined).length};
+  if(counts.inline===8&&counts.immersive===8)break;
+  await delay(0);
+ }
+ check(counts.inline===8,'Ended inline-session control objects are collectible',counts);
+ check(counts.immersive===8,'Ended mock sessions release callback roots while the device stays available',counts);
+ await device.disconnect();state.finished=true;
+})().catch(error=>{state.error=String(error)+' '+error.stack;state.finished=true;});
+</script>

@@ -44,7 +44,7 @@ addEventListener('keydown',async e=>{
    let viewerError='';try{e.frame.getViewerPose(viewer);}catch(error){viewerError=error.name;}
    let pointerPose=null,poseError='';try{pointerPose=pose(e.frame,e.inputSource,viewer);}catch(error){poseError=error.name;}
    record('selection',{index,name,source:describe(e.inputSource),length:session.inputSources.length,pose:pointerPose,poseError,trusted:e.isTrusted,frameSession:e.frame.session===session,frameId:frameId(e.frame),viewerError,time:e.frame.predictedDisplayTime});
-   if(name==='selectstart'&&endOnStart&&index===0){endOnStart=false;Promise.all([session.end(),session.end()]).then(()=>record('reentrant-end',{index})).catch(failure);}
+   if(name==='selectstart'&&endOnStart&&index===0){endOnStart=false;Promise.allSettled([session.end(),session.end()]).then(results=>{if(results[0].status!=='fulfilled'||results[1].status!=='rejected'||results[1].reason.name!=='InvalidStateError')throw Error('Later end call must reject InvalidStateError');record('reentrant-end',{index});}).catch(failure);}
   });
   session.addEventListener('end',()=>record('ended',{index}));
   function tick(time,frame){

@@ -134,6 +134,7 @@ pub(crate) struct XRSession {
     end_promises: DomRefCell<Vec<TracedPromise>>,
     /// <https://immersive-web.github.io/webxr/#ended>
     ended: Cell<bool>,
+    shutdown_complete: Cell<bool>,
     #[no_trace]
     next_hit_test_id: Cell<HitTestId>,
     pending_hit_test_promises:
@@ -143,8 +144,11 @@ pub(crate) struct XRSession {
     outside_raf: Cell<bool>,
     #[no_trace]
     input_frames: DomRefCell<HashMap<InputId, InputFrame>>,
+    #[no_trace]
+    active_input_actions: DomRefCell<HashMap<InputId, u8>>,
     framerate: Cell<f32>,
-    update_framerate_promise: DomRefCell<Option<TracedPromise>>,
+    next_framerate_request_id: Cell<u64>,
+    update_framerate_promises: DomRefCell<HashMapTracedValues<u64, TracedPromise, FxBuildHasher>>,
     // Native weak references let short-lived offset spaces be collected.
     #[no_trace]
     reference_spaces: DomRefCell<Vec<ReferenceSpaceWeakRef>>,
@@ -178,9 +182,27 @@ impl XRSession {
 
     /// A document leaving the active browsing context must release its device,
     /// including when the document remains alive in session history.
-    pub(crate) fn end_for_document_deactivation(&self) {
-        if !self.ended.replace(true) {
+    pub(crate) fn end_for_document_deactivation(&self, cx: &mut JSContext) {
+        self.ended.set(true);
+        self.clear_pending_operations(cx);
+        // An earlier end() may still be waiting for a frame acknowledgement.
+        // A deactivated document cannot keep that render loop progressing.
+        if !self.shutdown_complete.get() {
             self.session.borrow_mut().abort_session();
+        }
+    }
+
+    fn clear_pending_operations(&self, cx: &mut JSContext) {
+        self.raf_callback_list.borrow_mut().clear();
+        self.pending_render_state.set(None);
+        // Keep the currently executing callback list intact. Its remaining
+        // callbacks and explicit cancellations still belong to this frame.
+        rooted!(&in(cx) let rates = self.update_framerate_promises.borrow_mut()
+            .drain().map(|(_, promise)| promise).collect::<Vec<_>>());
+        rooted!(&in(cx) let hit_tests = self.pending_hit_test_promises.borrow_mut()
+            .drain().map(|(_, promise)| promise).collect::<Vec<_>>());
+        for promise in rates.iter().chain(hit_tests.iter()) {
+            promise.reject_error(cx, Error::InvalidState(None));
         }
     }
 
@@ -208,12 +230,15 @@ impl XRSession {
             input_sources: Dom::from_ref(input_sources),
             end_promises: DomRefCell::new(vec![]),
             ended: Cell::new(false),
+            shutdown_complete: Cell::new(false),
             next_hit_test_id: Cell::new(HitTestId(0)),
             pending_hit_test_promises: DomRefCell::new(HashMapTracedValues::new_fx()),
             outside_raf: Cell::new(true),
             input_frames: DomRefCell::new(HashMap::new()),
+            active_input_actions: DomRefCell::new(HashMap::new()),
             framerate: Cell::new(0.0),
-            update_framerate_promise: DomRefCell::new(None),
+            next_framerate_request_id: Cell::new(0),
+            update_framerate_promises: DomRefCell::new(HashMapTracedValues::new_fx()),
             reference_spaces: DomRefCell::new(Vec::new()),
             reset_listener_spaces: DomRefCell::new(Vec::new()),
             inline_pointers: DomRefCell::new(HashMap::new()),
@@ -372,19 +397,28 @@ impl XRSession {
             .dom_manipulation_task_source()
             .queue(task!(session_initial_inputs: move |cx| {
                 let this = this.root();
+                if this.is_ended() {
+                    return;
+                }
                 this.input_sources.add_input_sources(cx, &this, &initial_inputs);
             }));
     }
 
     fn event_callback(&self, cx: &mut JSContext, event: XREvent) {
+        if self.shutdown_complete.get() {
+            return;
+        }
         match event {
             XREvent::SessionEnd => {
                 // https://immersive-web.github.io/webxr/#shut-down-the-session
                 // Step 2
                 self.ended.set(true);
+                self.shutdown_complete.set(true);
+                self.clear_pending_operations(cx);
                 self.cancel_inline_pointers(cx);
                 self.input_sources.clear(cx);
                 self.input_frames.borrow_mut().clear();
+                self.active_input_actions.borrow_mut().clear();
                 self.reference_spaces.borrow_mut().clear();
                 self.reset_listener_spaces.borrow_mut().clear();
                 // Step 3-4
@@ -393,13 +427,12 @@ impl XRSession {
                     .Navigator(cx)
                     .Xr(cx)
                     .end_session(self);
-                // Step 5: We currently do not have any such promises
                 // Step 6 is happening n the XR session
                 // https://immersive-web.github.io/webxr/#dom-xrsession-end step 3
-                for promise in self.end_promises.borrow().iter() {
+                rooted!(&in(cx) let promises = mem::take(&mut *self.end_promises.borrow_mut()));
+                for promise in promises.iter() {
                     promise.resolve_native(cx, &());
                 }
-                self.end_promises.safe_borrow_mut(cx.no_gc()).clear();
                 // Step 7
                 let event = XRSessionEvent::new(
                     cx,
@@ -421,6 +454,28 @@ impl XRSession {
                 let source = self.input_sources.find(input);
                 let atom_index = if kind == SelectKind::Squeeze { 1 } else { 0 };
                 if let Some(source) = source {
+                    let mask = 1 << atom_index;
+                    if ty == SelectEvent::Start {
+                        if self.is_ended() {
+                            return;
+                        }
+                        let mut actions = self.active_input_actions.borrow_mut();
+                        let active = actions.entry(input).or_default();
+                        if *active & mask != 0 {
+                            return;
+                        }
+                        *active |= mask;
+                    } else {
+                        let mut actions = self.active_input_actions.borrow_mut();
+                        let Some(active) = actions.get_mut(&input) else { return; };
+                        if *active & mask == 0 {
+                            return;
+                        }
+                        *active &= !mask;
+                        if *active == 0 {
+                            actions.remove(&input);
+                        }
+                    }
                     let frame = XRFrame::new(cx, self.global().as_window(), self, frame);
                     frame.set_active(true);
                     self.apply_frame_updates(cx, &frame);
@@ -436,7 +491,7 @@ impl XRSession {
                         );
                         event.upcast::<Event>().fire(cx, self.upcast());
                     } else {
-                        if ty == SelectEvent::Select {
+                        if ty == SelectEvent::Select && !self.is_ended() {
                             let event = XRInputSourceEvent::new(
                                 cx,
                                 self.global().as_window(),
@@ -471,14 +526,19 @@ impl XRSession {
                 self.change_visibility(cx, v);
             },
             XREvent::AddInput(info) => {
-                self.input_sources.add_input_sources(cx, self, &[info]);
+                if !self.is_ended() {
+                    self.input_sources.add_input_sources(cx, self, &[info]);
+                }
             },
             XREvent::RemoveInput(id) => {
+                self.active_input_actions.borrow_mut().remove(&id);
                 self.input_sources.remove_input_source(cx, self, id);
             },
             XREvent::UpdateInput(id, source) => {
-                self.input_sources
-                    .add_remove_input_source(cx, self, id, source);
+                self.active_input_actions.borrow_mut().remove(&id);
+                if !self.is_ended() {
+                    self.input_sources.add_remove_input_source(cx, self, id, source);
+                }
             },
             XREvent::InputChanged(id, frame) => {
                 self.input_frames.borrow_mut().insert(id, frame);
@@ -492,6 +552,12 @@ impl XRSession {
     /// <https://immersive-web.github.io/webxr/#xr-animation-frame>
     fn raf_callback(&self, cx: &mut JSContext, mut frame: Frame, time: CrossProcessInstant) {
         debug!("WebXR RAF callback {:?}", frame);
+        if self.is_ended() {
+            // Acknowledge already queued device frames so orderly teardown can
+            // finish, without applying pending state or retaining new callbacks.
+            self.session.borrow_mut().render_animation_frame();
+            return;
+        }
         // Inline frames share the exact callback timestamp. Backends without
         // explicit device-clock conversion use the observed frame time as an
         // estimate, never an opaque runtime epoch in a DOM timestamp.
@@ -946,9 +1012,15 @@ impl XRSessionMethods<crate::DomTypeHolder> for XRSession {
 
     /// <https://immersive-web.github.io/webxr/#dom-xrsession-requestanimationframe>
     fn RequestAnimationFrame(&self, callback: RootedCallback<XRFrameRequestCallback>) -> i32 {
+        if self.is_ended() {
+            return 0;
+        }
         // queue up RAF callback, obtain ID
-        let raf_id = self.next_raf_id.get();
-        self.next_raf_id.set(raf_id + 1);
+        let mut raf_id = self.next_raf_id.get().wrapping_add(1);
+        if raf_id == 0 {
+            raf_id = 1;
+        }
+        self.next_raf_id.set(raf_id);
         self.raf_callback_list
             .borrow_mut()
             .push((raf_id, Some(callback.to_traced())));
@@ -958,10 +1030,7 @@ impl XRSessionMethods<crate::DomTypeHolder> for XRSession {
 
     /// <https://immersive-web.github.io/webxr/#dom-xrsession-cancelanimationframe>
     fn CancelAnimationFrame(&self, frame: i32) {
-        let mut list = self.raf_callback_list.borrow_mut();
-        if let Some(pair) = list.iter_mut().find(|pair| pair.0 == frame) {
-            pair.1 = None;
-        }
+        self.raf_callback_list.borrow_mut().retain(|pair| pair.0 != frame);
 
         let mut list = self.current_raf_callback_list.borrow_mut();
         if let Some(pair) = list.iter_mut().find(|pair| pair.0 == frame) {
@@ -1041,20 +1110,7 @@ impl XRSessionMethods<crate::DomTypeHolder> for XRSession {
     fn End(&self, cx: &mut CurrentRealm) -> RootedPromise {
         let p = Promise::new_in_realm(cx);
         if self.ended.get() {
-            // If the session has completely ended and all end promises have been resolved,
-            // don't queue up more end promises
-            //
-            // We need to check for end_promises being empty because `ended` is set
-            // before everything has been completely shut down, and we do not want to
-            // prematurely resolve the promise then
-            //
-            // However, if end_promises is empty, then all end() promises have already resolved,
-            // so the session has completely shut down and we should not queue up more promises
-            if self.end_promises.borrow().is_empty() {
-                p.resolve_native(cx, &());
-            } else {
-                self.end_promises.borrow_mut().push(p.to_traced());
-            }
+            p.reject_error(cx, Error::InvalidState(None));
             return p;
         }
         self.end_promises.borrow_mut().push(p.to_traced());
@@ -1062,6 +1118,7 @@ impl XRSessionMethods<crate::DomTypeHolder> for XRSession {
         // happen ASAP for end() but can happen later if the device
         // shuts itself down
         self.ended.set(true);
+        self.clear_pending_operations(cx);
         self.cancel_inline_pointers(cx);
         self.global()
             .as_window()
@@ -1091,6 +1148,11 @@ impl XRSessionMethods<crate::DomTypeHolder> for XRSession {
             .any(|f| f == "hit-test")
         {
             p.reject_error(cx, Error::NotSupported(None));
+            return p;
+        }
+
+        if self.is_ended() {
+            p.reject_error(cx, Error::InvalidState(None));
             return p;
         }
 
@@ -1206,7 +1268,9 @@ impl XRSessionMethods<crate::DomTypeHolder> for XRSession {
             }
         }
 
-        *self.update_framerate_promise.borrow_mut() = Some(promise.to_traced());
+        let request_id = self.next_framerate_request_id.get();
+        self.next_framerate_request_id.set(request_id.wrapping_add(1));
+        self.update_framerate_promises.borrow_mut().insert(request_id, promise.to_traced());
 
         let this = Trusted::new(self);
         let global = self.global();
@@ -1219,10 +1283,21 @@ impl XRSessionMethods<crate::DomTypeHolder> for XRSession {
             let this = this.clone();
             task_source.queue(task!(update_session_framerate: move |cx| {
                 let session = this.root();
-                session.apply_nominal_framerate(cx, message.unwrap());
-                rooted!(&in(cx) let promise = session.update_framerate_promise.borrow_mut().take());
+                if !session.update_framerate_promises.borrow().contains_key(&request_id) {
+                    return;
+                }
+                if let Ok(rate) = message {
+                    // A rate-change listener can end the session and reject
+                    // this operation. Keep it registered until that event ends.
+                    session.apply_nominal_framerate(cx, rate);
+                }
+                rooted!(&in(cx) let promise = session.update_framerate_promises.borrow_mut().remove(&request_id));
                 if let Some(ref promise) = *promise {
-                    promise.resolve_native(cx, &());
+                    if message.is_ok() {
+                        promise.resolve_native(cx, &());
+                    } else {
+                        promise.reject_error(cx, Error::InvalidState(None));
+                    }
                 };
             }));
         })

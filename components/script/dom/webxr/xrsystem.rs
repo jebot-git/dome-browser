@@ -108,7 +108,7 @@ impl XRSystem {
         }
     }
 
-    pub(crate) fn end_sessions_for_document_deactivation(&self) {
+    pub(crate) fn end_sessions_for_document_deactivation(&self, cx: &mut JSContext) {
         let generation = self.session_request_generation.get();
         self.session_request_generation
             .set(generation.wrapping_add(1));
@@ -117,14 +117,15 @@ impl XRSystem {
             registry.cancel_document_sessions(self.pipeline, generation);
         }
         if let Some(session) = self.active_immersive_session.get() {
-            session.end_for_document_deactivation();
+            self.active_immersive_session.set(None);
+            session.end_for_document_deactivation(cx);
             session.dirty_layers();
         }
-        self.active_immersive_session.set(None);
-        for session in self.active_inline_sessions.borrow().iter() {
-            session.end_for_document_deactivation();
+        let sessions: Vec<_> = self.active_inline_sessions.borrow_mut().drain(..)
+            .map(|session| DomRoot::from_ref(&*session)).collect();
+        for session in sessions {
+            session.end_for_document_deactivation(cx);
         }
-        self.active_inline_sessions.borrow_mut().clear();
     }
 
     fn new_inherited(pipeline: PipelineId) -> XRSystem {

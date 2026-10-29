@@ -24,7 +24,9 @@ use crate::dom::bindings::codegen::Bindings::FakeXRDeviceBinding::{
     FakeXRBoundsPoint, FakeXRDeviceMethods, FakeXRRegionType, FakeXRRigidTransformInit,
     FakeXRViewInit, FakeXRWorldInit,
 };
-use crate::dom::bindings::codegen::Bindings::FakeXRInputControllerBinding::FakeXRInputSourceInit;
+use crate::dom::bindings::codegen::Bindings::FakeXRInputControllerBinding::{
+    FakeXRInputControllerMethods, FakeXRInputSourceInit,
+};
 use crate::dom::bindings::codegen::Bindings::XRInputSourceBinding::{
     XRHandedness, XRTargetRayMode,
 };
@@ -325,6 +327,8 @@ impl FakeXRDeviceMethods<crate::DomTypeHolder> for FakeXRDevice {
             hand_support: None,
         };
 
+        let selection_clicked = init.selectionClicked;
+        let selection_started = init.selectionStarted;
         let init = MockInputInit {
             source,
             pointer_origin,
@@ -336,6 +340,12 @@ impl FakeXRDeviceMethods<crate::DomTypeHolder> for FakeXRDevice {
         let _ = self.sender.send(MockDeviceMsg::AddInputSource(init));
 
         let controller = FakeXRInputController::new(cx, &global, self.sender.clone(), id);
+        if selection_clicked {
+            controller.SimulateSelect();
+        }
+        if selection_started {
+            controller.StartSelection();
+        }
 
         Ok(controller)
     }

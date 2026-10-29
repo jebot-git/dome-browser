@@ -1,0 +1,8 @@
+<!doctype html><script>
+(async()=>{
+ let request;navigator.xr.test.simulateUserActivation(()=>request=navigator.xr.requestSession('immersive-vr',{requiredFeatures:['hit-test']}));
+ const session=await request,space=await session.requestReferenceSpace('viewer');
+ const pending=[session.updateTargetFrameRate(72),session.requestHitTestSource({space})];
+ parent.childReady(session,pending);
+})().catch(error=>parent.childFailure(String(error)));
+</script>

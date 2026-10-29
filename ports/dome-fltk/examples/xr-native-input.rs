@@ -4,6 +4,8 @@
 // Reuse the shipping inline backend; this test has no immersive device or UI.
 #[path = "../src/xr/inline.rs"]
 mod inline;
+#[path = "xr-native-input/session_lifecycle_fixture.rs"]
+mod session_lifecycle_fixture;
 use euclid::RigidTransform3D;
 use webxr::SurfmanGL;
 use webxr_api::{
@@ -18,6 +20,9 @@ struct Registry;
 impl servo::webxr::WebXrRegistry for Registry {
     fn register(&self, registry: &mut servo::webxr::MainThreadRegistry) {
         registry.register(inline::Discovery);
+        if std::env::var_os("XR_INPUT_SESSION_LIFECYCLE_TEST").is_some() {
+            registry.register(session_lifecycle_fixture::Discovery);
+        }
         if std::env::var_os("XR_INPUT_MOCK_XR").is_some() {
             registry.register_mock(servo::webxr::HeadlessMockDiscovery::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true))));
         }

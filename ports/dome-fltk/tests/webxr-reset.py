@@ -134,7 +134,7 @@ try:
   command(select=False)
   page_command('remove-late');labels.remove('late');before=mark();command(reference_reset=None);validate_reset(before,None,labels,bases)
   page_command('end-on-reset');before=mark();command(reference_reset=None);wait(lambda:seen('ended') and seen('end-promises'))
-  check(not seen('error'),'Ending a session reentrantly from reset resolves repeated end requests')
+  check(not seen('error'),'Ending a session reentrantly from reset rejects later end calls and completes one shutdown')
   ended_at=seen('ended')[-1]['order'];command(reference_reset=None);time.sleep(.2)
   check(not [e for e in seen('reset') if e['order']>ended_at],'Ended sessions receive no further reset events')
   wayland.api('/api/action',{'op':'close','id':w.id});check(child.wait(timeout=10)==0,'Browser exits cleanly');child=None;completed=True

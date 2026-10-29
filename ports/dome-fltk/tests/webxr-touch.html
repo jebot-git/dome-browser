@@ -43,7 +43,7 @@ test.command=op=>{
   for(const name of ['selectstart','select','selectend'])s.addEventListener(name,e=>{
    let ray=null,error=null;try{ray=pose(e.frame,e.inputSource,v);}catch(ex){error=ex.name;}
    record(name,{index,source:describe(e.inputSource),frame:frameId(e.frame),ray,error,trusted:e.isTrusted,time:e.frame.predictedDisplayTime});
-   if(name==='selectstart'&&test.endOnStart&&index===0){test.endOnStart=false;Promise.all([s.end(),s.end()]).then(()=>record('ended',{index})).catch(e=>test.error=String(e));}
+   if(name==='selectstart'&&test.endOnStart&&index===0){test.endOnStart=false;Promise.allSettled([s.end(),s.end()]).then(results=>{if(results[0].status!=='fulfilled'||results[1].status!=='rejected'||results[1].reason.name!=='InvalidStateError')throw Error('Later end call must reject InvalidStateError');record('ended',{index});}).catch(e=>test.error=String(e));}
   });
   const frame=(time,f)=>{
    test.latest[index]={length:s.inputSources.length,rays:[...s.inputSources].map(src=>({id:id(src),ray:pose(f,src,v)})),retired:retired[index].map(src=>pose(f,src,v))};

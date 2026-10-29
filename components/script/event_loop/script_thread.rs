@@ -3465,7 +3465,7 @@ impl ScriptThread {
                 window.image_cache().clear();
 
                 debug!("{pipeline_id}: Clearing JavaScript runtime");
-                window.clear_js_runtime();
+                window.clear_js_runtime(cx);
             }
         }
 

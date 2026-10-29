@@ -2256,3 +2256,42 @@ Scoped validation totals are recorded in
 `docs/validation-reporting-delivery-2026-10-29.json`. Geolocation implementation
 and API tests are excluded. These checks do not establish whole-API or physical
 headset conformance.
+
+## XR session shutdown and callback lifetime
+
+Active animation callback handles begin at one; requests after shutdown return
+zero without retaining callbacks. Ending an already ended session rejects with
+`InvalidStateError`. The first `end()` promise still completes after platform
+teardown. Queued frame-rate and hit-test operations reject on shutdown, while
+each concurrent frame-rate request retains its own result. Document deactivation
+also releases a session whose explicit shutdown was waiting for a frame.
+
+Callbacks already executing retain their prescribed order and cancellation
+semantics. Input actions suppress new starts and selection after shutdown,
+retaining cancellation of an action already started. The private mock device
+honors both initial selection flags and releases ended sessions and their event
+callbacks while the device stays connected. This adds no shipping device or
+tracking capabilities.
+
+The private `xr-native-input` example supplies opt-in logical-device and collection
+controls. Run its regression drivers on isolated temporary profiles and a private
+compositor:
+
+```sh
+uv run --no-project --with python-xlib --with pillow --with dbus-next python \
+  ports/dome-fltk/tests/webxr-session-shutdown.py \
+  --binary /path/to/xr-native-input --output /tmp/xr-session-shutdown
+```
+
+Use `--logical` with a different output directory for pending rate/hit-test
+operations. `tests/webxr-session-retention.py` checks collection of ended inline
+and mock sessions; `tests/webxr-session-wpt.py` runs five original session suites
+with unchanged assertions and helpers through the local adapter. These fixtures
+require the test embedder, rather than the shipping browser.
+
+The scoped validation record is
+`docs/validation-xr-session-lifecycle-2026-10-29.json`. It distinguishes current
+WebXR units from retained network-unit results and unsupported optional cases.
+The broader WebXR goal remains active; the user-accepted limited DomeD immersive
+baseline is preserved. Geolocation implementation and API tests are excluded,
+and its existing disabled shipping default remains unchanged.

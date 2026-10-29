@@ -55,7 +55,7 @@ async function command(op){
   const value=spaces.get('late');value.space.removeEventListener('reset',callbacks.get('late'));callbacks.delete('late');spaces.delete('late');
  }
  if(op==='end-on-reset')spaces.get('local').space.addEventListener('reset',()=>{
-  Promise.all([session.end(),session.end()]).then(()=>report('end-promises')).catch(fail);
+  Promise.allSettled([session.end(),session.end()]).then(results=>{if(results[0].status!=='fulfilled'||results[1].status!=='rejected'||results[1].reason.name!=='InvalidStateError')throw Error('Later end call must reject InvalidStateError');report('end-promises');}).catch(fail);
  },{once:true});
  report('command',{op});
 }

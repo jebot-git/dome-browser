@@ -1,0 +1,146 @@
+{
+  "passed": true,
+  "runtime_checks": 4029,
+  "runtime_breakdown": {
+    "session-general": 43,
+    "session-logical": 12,
+    "session-retention": 5,
+    "xr-bounded": 21,
+    "xr-touch": 43,
+    "xr-inline-pointer": 38,
+    "xr-native-input": 60,
+    "xr-native-reset": 101,
+    "xr-inline": 35,
+    "xr-inline-lifecycle": 58,
+    "xr-inline-visibility": 77,
+    "reporting-delivery": 217,
+    "reporting-filtering": 11,
+    "reporting-filtering-allowlist": 11,
+    "cookie-policy": 149,
+    "cookie-file": 11,
+    "privacy-transports": 18,
+    "gamepad-policy": 749,
+    "webgl-xr-policy": 712,
+    "iframe-potentials": 1213,
+    "policy-reporting": 248,
+    "csp-observers": 69,
+    "history": 14,
+    "xr-enforced": 23,
+    "xr-report-only": 47,
+    "xr-pending": 14,
+    "xr-devicechange": 30
+  },
+  "regression_suites": 37,
+  "webxr_unit_tests": 19,
+  "ignored_unit_tests": 1,
+  "ignored_reason": "Unchanged shader source validation requires independent glslangValidator; ignored library test retained",
+  "retained_net_unit_tests": 322,
+  "net_unit_tests_rerun": false,
+  "new_lifecycle_api_checks": 51,
+  "new_collection_checks": 3,
+  "new_original_session_wpt_cases": 18,
+  "original_wpt_passed": 90,
+  "original_wpt_breakdown": {
+    "original-session": 18,
+    "original-layers": 22,
+    "original-dynamic-viewports": 24,
+    "original-secondary-views": 12,
+    "original-reset": 4,
+    "original-compatibility": 6,
+    "original-xr": 2,
+    "original-gamepad": 2
+  },
+  "optional_unsupported_cases": 4,
+  "original_assertions_and_helpers_unchanged": true,
+  "baseline_lifecycle_failures": 24,
+  "worker_shutdown_scenarios": 3,
+  "anonymous_live_samples": 2,
+  "visual_review": "Discord login and X landing/login visibly rendered at 30 seconds; both survived and closed cleanly. Accepted X QR overlap remains a non-bug.",
+  "geolocation_excluded": true,
+  "sessions_restarted": false,
+  "current_khronos_executions": 0,
+  "scope": "Scoped XR session callback/promise/collection and input lifecycle, native DomeD transport, rendering, reporting/privacy/cookie/history/worker regressions. Private synthetic devices and anonymous live pages; no whole-API, full WPT, physical-headset or GPU-reset conformance claim. Geolocation implementation and API tests excluded.",
+  "finished_utc": "2026-10-29T00:30:50.516574+00:00",
+  "build": "Optimized release; regular-user build with locked offline dependencies. Release check and build passed.",
+  "base_commit": "14117552449ca1c6a615d6acf59985885f18ae36",
+  "binary_sha256": {
+    "browser-candidate-r10": "4cfa4d970e1d31f0feb79ee34ff3da3e4e319bb87cb4a3ae8a87664d2d8a1764",
+    "test-embedder-r10": "861a07cb4643d7e97c83a1efc29d4e01e3d7590cc92398fbeba254566b0d6239"
+  },
+  "source_sha256": {
+    "components/script/dom/webxr/fakexrdevice.rs": "73d720b418d381466cfe662fb2bc4754d38b04eb20a7cae62ccea57ad549ff9c",
+    "components/script/dom/webxr/xrsession.rs": "0af0a38ddcdefa31cb418b86868600fe8b06a81b48f9605a7a67db3a9d419db8",
+    "components/script/dom/webxr/xrsystem.rs": "1626cdd3cdaf1671994afccfdd61887ac6dff3ede7e30364857ad2f5d2246f19",
+    "components/script/dom/window/window.rs": "bae7173ea404a6986c276b0a8f79fde75fe1e19ae49befe8991e3ab82a331b2d",
+    "components/script/event_loop/script_thread.rs": "15656d9a35436ca4ed4092a6aec55a6c54590d2242dce4e8a525d9608405dbe2",
+    "components/webxr/headless/mod.rs": "230ff9a6a342bb1f40c9fb328240955f4bf209d21a6cc4972fd1bd3134438e1b",
+    "ports/dome-fltk/examples/xr-native-input.rs": "04713ede716526474fd3b93bb827080091aabe7e0595fe2799ca2e0cc8ad8c56",
+    "ports/dome-fltk/tests/webxr-inline-pointer.html": "5076beeec7b1ce4b05dda33183981001b2553fd64de2e7ad3c0b7c30d35df054",
+    "ports/dome-fltk/tests/webxr-inline-pointer.py": "6cbc434efc173b75228973a03763a71a327e5ad9f0afd46ebd6ab9b0a8c78c22",
+    "ports/dome-fltk/tests/webxr-reset.html": "5e3a9881e66d64798813f5c128c5afb7e701abc7037cd33a3e22aa14e9107876",
+    "ports/dome-fltk/tests/webxr-touch.html": "d0c58a92bbb06a31a92f23b235c68041475e8b776036d0440ac201adb8a47e4e",
+    "ports/dome-fltk/examples/xr-native-input/session_lifecycle_fixture.rs": "ce6e048ab685cb823f90faf635f6948fa8381cc3ce16902b8c363de5c51f842d",
+    "Cargo.toml": "e9260f5e43822d8992eb6354549764ed9e8f68970424cf8e3d4451d91f707eb4",
+    "Cargo.lock": "e149f0b652379f7fd70669a574725ce7943308642b7096313178872f600db182"
+  },
+  "fixture_sha256": {
+    "ports/dome-fltk/tests/webxr-reset.html": "5e3a9881e66d64798813f5c128c5afb7e701abc7037cd33a3e22aa14e9107876",
+    "ports/dome-fltk/tests/webxr-reset.py": "df7ce56c758a325524130941eb27894c65670db8235087d3345d2aa650ee5c3d",
+    "ports/dome-fltk/tests/webxr-session-shutdown.py": "0c40c2adf765eb49396ebfda3c30c8042aa1d649ee7268c22d6bd7898945441d",
+    "ports/dome-fltk/tests/webxr-session-shutdown.html": "7a4f15621f18079fa15b4bb6ed527fae86df79d3f83f38793ce15118ea11e993",
+    "ports/dome-fltk/tests/webxr-session-shutdown-child.html": "358b27ea0958b5fef1251884e6e8de7b7294c85dcaa1864cecfd1e1a2d583c78",
+    "ports/dome-fltk/tests/webxr-session-wpt.py": "13ffa2c09be22637dcb11d015202edabf4ccdf62430fdf30ead5c5560416ad8a",
+    "ports/dome-fltk/tests/webxr-session-retention.py": "dc8810bcd595d201e67e26d3774cd4cacfa55de08a169d00a18c587e4f1b3a50",
+    "ports/dome-fltk/tests/webxr-session-retention.html": "3da5cd914fd1c4f3b13f254726e4fd7514cb4308c00cb0224d238223f4a375c3"
+  },
+  "baseline": {
+    "lifecycle_general": {
+      "passed": 22,
+      "total": 41
+    },
+    "lifecycle_logical": {
+      "passed": 5,
+      "total": 10
+    },
+    "original_session_cases": {
+      "passed": 16,
+      "failed": 2
+    },
+    "ended_session_collection": {
+      "inline": 8,
+      "mock": 0,
+      "total_each": 8
+    }
+  },
+  "candidate": {
+    "lifecycle_general": {
+      "passed": 41,
+      "total": 41
+    },
+    "lifecycle_logical": {
+      "passed": 10,
+      "total": 10
+    },
+    "original_session_cases": {
+      "passed": 18,
+      "failed": 0
+    },
+    "ended_session_collection": {
+      "inline": 8,
+      "mock": 8,
+      "total_each": 8
+    }
+  },
+  "references": [
+    "https://www.w3.org/TR/webxr/#shut-down-the-session",
+    "https://www.w3.org/TR/webxr/#dom-xrsession-requestanimationframe",
+    "https://www.w3.org/TR/webxr/#dom-xrsession-end",
+    "https://www.w3.org/TR/webxr-hit-test-1/#dom-xrsession-requesthittestsource",
+    "https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-simulateinputsourceconnection"
+  ],
+  "fixture_expectations": "Three owned reentrant-end fixtures now require the first promise to resolve and the subsequent call to reject InvalidStateError. Assertions were strengthened to the specification; original WPT assertions and setup helpers were not edited.",
+  "harness_interruption": "The first CSP observer attempt failed while opening its private Xvfb display, before browser launch. The unchanged suite passed on a fresh private display. All other suites completed successfully; the original infrastructure failure remains archived.",
+  "diagnostic_source_updates": "One existing diagnostic label and two new driver docstrings were corrected after broad validation. The exact replacement bytes were recorded; all three new packaged modes and the reset suite were rerun without assertion changes.",
+  "geolocation_shipping_default_unchanged": true,
+  "remaining": "Broader supported WebXR backend/device compliance and physical-device interoperability, followed by standards rendering and remaining scroll-indicator validation. Preserve the accepted limited immersive baseline. Geolocation remains excluded."
+}

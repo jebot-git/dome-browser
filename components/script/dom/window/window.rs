@@ -2539,10 +2539,10 @@ impl Window {
         self.paint_worklet.or_init(|| self.new_paint_worklet(cx))
     }
 
-    pub(crate) fn clear_js_runtime(&self) {
+    pub(crate) fn clear_js_runtime(&self, cx: &mut JSContext) {
         crate::runtime::script_runtime::cancel_wasm_streams_for_global(self.as_global_scope());
         #[cfg(feature = "webxr")]
-        self.end_xr_sessions_for_document_deactivation();
+        self.end_xr_sessions_for_document_deactivation(cx);
         self.stop_geolocation_watches();
         self.as_global_scope()
             .remove_web_messaging_and_dedicated_workers_infra();
@@ -3617,7 +3617,7 @@ impl Window {
 
     pub(crate) fn suspend(&self, cx: &mut JSContext) {
         #[cfg(feature = "webxr")]
-        self.end_xr_sessions_for_document_deactivation();
+        self.end_xr_sessions_for_document_deactivation(cx);
         // Suspend timer events.
         self.as_global_scope().suspend();
 
@@ -3796,11 +3796,11 @@ impl Window {
     }
 
     #[cfg(feature = "webxr")]
-    fn end_xr_sessions_for_document_deactivation(&self) {
+    fn end_xr_sessions_for_document_deactivation(&self, cx: &mut JSContext) {
         self.stop_xr_device_observation();
         if let Some(navigator) = self.navigator.get() {
             if let Some(xr) = navigator.xr() {
-                xr.end_sessions_for_document_deactivation();
+                xr.end_sessions_for_document_deactivation(cx);
             }
         }
     }

@@ -1,0 +1,172 @@
+<!doctype html><meta charset="utf-8"><title>XR session shutdown lifecycle</title>
+<p>Local XR session callback and promise lifecycle checks.</p>
+<script id="configuration" type="application/json">FIXTURE_CONFIGURATION</script>
+<script>
+const cfg = JSON.parse(document.getElementById('configuration').textContent);
+const state = window.test = {ready:true, finished:false, error:null, checks:[], frames:0};
+state.snapshot = () => ({...state, snapshot:undefined});
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+function check(passed, name, actual) { state.checks.push({name, passed:!!passed, actual}); }
+async function until(fn, ms=1200) {
+  const end = performance.now() + ms;
+  while (!fn()) { if (performance.now() > end) throw new Error('Fixture deadline'); await delay(10); }
+}
+async function outcomes(promises, ms=700) {
+  const rows = promises.map(() => 'pending');
+  promises.forEach((promise,i) => promise.then(() => rows[i]='fulfilled', error => rows[i]=error.name));
+  const end = performance.now() + ms;
+  while (rows.includes('pending') && performance.now() < end) await delay(10);
+  return rows;
+}
+async function scenario(name, body) {
+  try { await body(); } catch(error) { check(false, name+' completes', String(error)+' '+error.stack); }
+}
+const projection=[1,0,0,0,0,1,0,0,0,0,-1,-1,0,0,-.2,0];
+async function mock() {
+  return navigator.xr.test.simulateDeviceConnection({supportsImmersive:true,
+    supportedModes:['inline','immersive-vr'],supportedFeatures:['local','hit-test'],
+    views:['left','right'].map((eye,i)=>({eye,projectionMatrix:projection,
+      viewOffset:{position:[i?.03:-.03,0,0],orientation:[0,0,0,1]},resolution:{width:128,height:96}})),
+    viewerOrigin:{position:[0,0,0],orientation:[0,0,0,1]}});
+}
+async function open(mode, features=[]) {
+  let request;
+  const create=()=>request=navigator.xr.requestSession(mode,{requiredFeatures:features});
+  mode==='inline' ? create() : navigator.xr.test.simulateUserActivation(create);
+  return request;
+}
+async function layer(session) {
+  const canvas=document.createElement('canvas');canvas.width=128;canvas.height=96;document.body.append(canvas);
+  const gl=canvas.getContext('webgl',{xrCompatible:true});await gl.makeXRCompatible();
+  session.updateRenderState({baseLayer:new XRWebGLLayer(session,gl)});
+  return canvas;
+}
+async function general() {
+  const device=await mock();
+  for (const mode of ['inline','immersive-vr']) {
+    await scenario(mode+' RAF handles',async()=>{
+      const s=await open(mode);await layer(s);let cancelled=false, count=0, eventHandle=null;
+      const first=s.requestAnimationFrame(()=>cancelled=true);s.cancelAnimationFrame(first);
+      const called=new Promise(resolve=>{const second=s.requestAnimationFrame(()=>{count++;resolve();});
+        check(first===1&&second===2,mode+': active callback identifiers increment from one',[first,second]);});
+      await called;check(!cancelled&&count===1,mode+': cancellation preserves the live callback');
+      let ends=0;s.onend=()=>{ends++;eventHandle=s.requestAnimationFrame(()=>count++);};
+      await s.end();await until(()=>ends===1);
+      const handle=s.requestAnimationFrame(()=>count++);const again=s.requestAnimationFrame(()=>count++);
+      check(handle===0&&again===0&&eventHandle===0,mode+': ended callback requests return zero',[eventHandle,handle,again]);
+      await delay(60);check(count===1&&ends===1,mode+': ended session neither runs callbacks nor repeats end events');
+      const reference=await s.requestReferenceSpace('viewer');
+      check(reference instanceof XRReferenceSpace,mode+': reference-space construction keeps the specified support semantics');
+    });
+    await scenario(mode+' repeated end',async()=>{
+      const s=await open(mode);let ends=0;s.onend=()=>ends++;
+      const rows=await outcomes([s.end(),s.end(),s.end()]);
+      check(rows.join(',')==='fulfilled,InvalidStateError,InvalidStateError',mode+': only the first pending end resolves',rows);
+      const completed=await outcomes([s.end()]);
+      check(completed[0]==='InvalidStateError',mode+': end after completion rejects InvalidStateError',completed);
+      await delay(30);check(ends===1,mode+': repeated end calls do not duplicate the event');
+      let error=null;try{s.updateRenderState({depthNear:.2});}catch(e){error=e.name;}
+      check(error==='InvalidStateError',mode+': ended render-state updates retain their existing rejection');
+    });
+    await scenario(mode+' end inside RAF',async()=>{
+      const s=await open(mode);await layer(s);const calls=[];let ended, third, after;
+      const complete=new Promise(resolve=>{
+        s.requestAnimationFrame(()=>{calls.push('first');s.requestAnimationFrame(()=>calls.push('later'));ended=s.end();after=s.requestAnimationFrame(()=>calls.push('ended'));});
+        s.requestAnimationFrame(()=>{calls.push('second');s.cancelAnimationFrame(third);resolve();});
+        third=s.requestAnimationFrame(()=>calls.push('cancelled'));
+      });
+      await complete;await ended;await delay(60);
+      check(after===0,mode+': reentrant end stops new frame requests',after);
+      check(calls.join(',')==='first,second',mode+': shutdown preserves current callback order and cancellation',calls);
+    });
+  }
+  await scenario('device shutdown',async()=>{
+    const s=await open('immersive-vr');let ends=0;s.onend=()=>ends++;
+    await device.disconnect();await until(()=>ends===1);
+    check(s.requestAnimationFrame(()=>{})===0,'Device shutdown stops frame requests');
+    const rows=await outcomes([s.end()]);
+    check(rows[0]==='InvalidStateError','End after device shutdown rejects InvalidStateError',rows);
+    check(ends===1,'Device shutdown dispatches one end event');
+  });
+  for(const endOn of ['inputsourceschange','selectstart','select','selectend']) {
+    await scenario('native input end on '+endOn,async()=>{
+      const fresh=await mock(),s=await open('immersive-vr');await layer(s);const events=[];let ending;
+      for(const type of ['inputsourceschange','selectstart','select','selectend','end'])s.addEventListener(type,()=>{
+        events.push(type);if(type===endOn&&!ending)ending=s.end();
+      });
+      const controller=fresh.simulateInputSourceConnection({handedness:'right',targetRayMode:'tracked-pointer',
+        pointerOrigin:{position:[0,0,1],orientation:[0,0,0,1]},profiles:[]});controller.simulateSelect();
+      s.requestAnimationFrame(()=>{});await until(()=>events.includes('end'));await ending;await delay(30);
+      const expected=endOn==='inputsourceschange'?['inputsourceschange','end']:
+        endOn==='selectstart'?['inputsourceschange','selectstart','selectend','end']:
+        ['inputsourceschange','selectstart','select','selectend','end'];
+      check(events.join(',')===expected.join(','),'Ending on '+endOn+' preserves the specified input event sequence',events);
+      check(s.inputSources.length===0,'Input sources clear after ending on '+endOn);
+      await fresh.disconnect();
+    });
+  }
+  for(const flags of [{selectionClicked:false,selectionStarted:false},{selectionClicked:true,selectionStarted:false},
+                      {selectionClicked:false,selectionStarted:true},{selectionClicked:true,selectionStarted:true}]) {
+    const tag=JSON.stringify(flags);
+    await scenario('initial selection '+tag,async()=>{
+      const fresh=await mock();let s;
+      try {
+        s=await open('immersive-vr');await layer(s);const events=[];
+        for(const type of ['inputsourceschange','selectstart','select','selectend'])s.addEventListener(type,()=>events.push(type));
+        const controller=fresh.simulateInputSourceConnection({handedness:'right',targetRayMode:'tracked-pointer',
+          pointerOrigin:{position:[0,0,1],orientation:[0,0,0,1]},profiles:[],...flags});
+        await until(()=>events.length>0);await delay(60);
+        const expected=['inputsourceschange'];
+        if(flags.selectionClicked)expected.push('selectstart','select','selectend');
+        if(flags.selectionStarted)expected.push('selectstart');
+        check(events.join(',')===expected.join(','),'Initial selection flags preserve action order '+tag,[...events]);
+        if(flags.selectionStarted){controller.endSelection();expected.push('select','selectend');await delay(60);}
+        check(events.join(',')===expected.join(','),'Initial selection supports ordinary completion '+tag,[...events]);
+      }finally{if(s)await s.end().catch(error=>{if(error.name!=='InvalidStateError')throw error;});await fresh.disconnect();}
+    });
+  }
+}
+async function logical() {
+  await scenario('concurrent rates',async()=>{
+    const s=await open('immersive-vr');const events=[];s.onframeratechange=()=>events.push(s.frameRate);
+    check(Array.from(s.supportedFrameRates).join(',')==='72,90,120','Logical fixture advertises its controlled rates');
+    const rows=await outcomes([s.updateTargetFrameRate(72),s.updateTargetFrameRate(90),s.updateTargetFrameRate(120)]);
+    check(rows.every(row=>row==='fulfilled'),'Each concurrent rate operation settles its own promise',rows);
+    check(events.join(',')==='72,90,120','Rate completions preserve ordinary nominal-rate events',events);
+    await s.end();
+  });
+  await scenario('reentrant rate shutdown',async()=>{
+    const s=await open('immersive-vr');let end;
+    s.onframeratechange=()=>{end=s.end();};
+    const rate=s.updateTargetFrameRate(90);await until(()=>!!end);
+    const rows=await outcomes([rate,end]);
+    check(rows.join(',')==='InvalidStateError,fulfilled','Ending from rate-change rejects the still-pending operation',rows);
+  });
+  await scenario('pending shutdown',async()=>{
+    const s=await open('immersive-vr',['hit-test']);const space=await s.requestReferenceSpace('viewer');
+    const pending=[s.updateTargetFrameRate(72),s.updateTargetFrameRate(90),s.requestHitTestSource({space}),s.requestHitTestSource({space})];
+    const results=outcomes(pending);const end=s.end();const rows=await results;await end;
+    check(rows.every(row=>row==='InvalidStateError'),'Shutdown rejects every pending rate and hit-test operation',rows);
+    const after=await outcomes([s.updateTargetFrameRate(90),s.requestHitTestSource({space})]);
+    check(after.every(row=>row==='InvalidStateError'),'Ended operations reject without re-entering the backend',after);
+    check(s.requestAnimationFrame(()=>{})===0,'Logical shutdown stops frame requests');
+  });
+  await scenario('document deactivation',async()=>{
+    let saved, failure;
+    window.childReady=(session,pending)=>saved={session,results:outcomes(pending)};
+    window.childFailure=error=>failure=error;
+    const iframe=document.createElement('iframe');iframe.src='/child';document.body.append(iframe);
+    await until(()=>saved||failure);if(failure)throw new Error(failure);
+    iframe.remove();const rows=await saved.results;
+    check(rows.every(row=>row==='InvalidStateError'),'Document deactivation settles outstanding operations before runtime teardown',rows);
+    check(saved.session.requestAnimationFrame(()=>{})===0,'A retained deactivated session rejects new frame callbacks');
+    delete window.childReady;delete window.childFailure;
+  });
+  await scenario('feature precedence',async()=>{
+    const s=await open('immersive-vr');const space=await s.requestReferenceSpace('viewer');await s.end();
+    const rows=await outcomes([s.requestHitTestSource({space})]);
+    check(rows[0]==='NotSupportedError','Missing hit-test support keeps feature-check precedence',rows);
+  });
+}
+(cfg.logical?logical():general()).then(()=>state.finished=true).catch(error=>{state.error=String(error)+' '+error.stack;state.finished=true;});
+</script>

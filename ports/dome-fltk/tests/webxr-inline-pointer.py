@@ -147,7 +147,7 @@ try:
  command('end-on-start');move();before=mark();button(True);wait(lambda:seen('reentrant-end'));button(False);wait(lambda:selection(1,'selectend',before))
  wait(lambda:synced_heartbeat(selection(1,'selectend',before)[-1]['order']))
  check(len(selection(0,'selectend',before))==1 and not selection(0,'select',before),'Reentrant session end cancels once without selecting')
- check(len([e for e in seen('ended') if e['data']['index']==0])==1,'Repeated end calls resolve through one shutdown')
+ check(len([e for e in seen('ended') if e['data']['index']==0])==1,'Repeated end calls reject the later call and complete one shutdown')
  check(len(selection(1,'select',before))==1,'Other sessions sharing the canvas continue after one session ends')
  before=mark();move();button(True);wait(lambda:selection(1,'selectstart',before));command('remove');wait(lambda:selection(1,'selectend',before));button(False)
  wait(lambda:synced_heartbeat(selection(1,'selectend',before)[-1]['order']))

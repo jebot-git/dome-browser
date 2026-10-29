@@ -345,7 +345,16 @@ impl DeviceAPI for HeadlessDevice {
     }
 
     fn quit(&mut self) {
-        self.with_per_session(|s| s.events.callback(Event::SessionEnd))
+        let session = {
+            let mut data = self.data.lock().unwrap_or_else(|error| error.into_inner());
+            data.sessions.iter().position(|session| session.id == self.id)
+                .map(|index| data.sessions.swap_remove(index))
+        };
+        // Release the event destination and quitter when this session ends,
+        // rather than retaining its DOM roots until the whole mock disconnects.
+        if let Some(mut session) = session {
+            session.events.callback(Event::SessionEnd);
+        }
     }
 
     fn set_quitter(&mut self, quitter: Quitter) {
@@ -386,6 +395,12 @@ impl DeviceAPI for HeadlessDevice {
         } else {
             EnvironmentBlendMode::Opaque
         }
+    }
+}
+
+impl Drop for HeadlessDevice {
+    fn drop(&mut self) {
+        self.quit();
     }
 }
 
