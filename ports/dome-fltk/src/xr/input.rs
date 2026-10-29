@@ -21,6 +21,10 @@ pub(super) struct HostInput {
     supports_grip: bool,
     aim: Option<Pose>,
     grip: Option<Pose>,
+    #[serde(default)]
+    aim_emulated_position: bool,
+    #[serde(default)]
+    grip_emulated_position: bool,
     select: bool,
     squeeze: bool,
     #[serde(default = "active_by_default")]
@@ -141,8 +145,8 @@ impl HostInput {
         }
         InputFrame {
             id: InputId(self.id),
-            target_ray_emulated_position: false,
-            grip_emulated_position: false,
+            target_ray_emulated_position: self.aim_emulated_position,
+            grip_emulated_position: self.grip_emulated_position,
             target_ray_origin: self
                 .aim
                 .as_ref()
@@ -489,6 +493,39 @@ mod tests {
                 }
             })
             .collect()
+    }
+    #[test]
+    fn native_emulation_metadata_is_independent_and_legacy_poses_remain_tracked() {
+        let mut host = frame(1, false);
+        let input = &mut host.inputs[0];
+        let legacy = input.frame(RigidTransform3D::identity(), true);
+        assert!(!legacy.target_ray_emulated_position && !legacy.grip_emulated_position);
+        for (aim, grip) in [(true, false), (false, true), (true, true), (false, false)] {
+            input.aim_emulated_position = aim;
+            input.grip_emulated_position = grip;
+            let sample = input.frame(RigidTransform3D::identity(), true);
+            assert_eq!(sample.target_ray_emulated_position, aim);
+            assert_eq!(sample.grip_emulated_position, grip);
+            assert!(sample.target_ray_origin.is_some() && sample.grip_origin.is_some());
+            let hidden = input.frame(RigidTransform3D::identity(), false);
+            assert!(hidden.target_ray_origin.is_none() && hidden.grip_origin.is_none());
+        }
+    }
+    #[test]
+    fn historical_input_emulation_uses_action_metadata_instead_of_display_metadata() {
+        let initial = frame(1, false);
+        let mut state = State::new(&initial).unwrap();
+        let mut pressed = frame(2, true);
+        pressed.inputs[0].aim_emulated_position = true;
+        let mut released = frame(3, false);
+        released.inputs[0].grip_emulated_position = true;
+        let events = update(&mut state, frame(4, false), vec![pressed, released], false);
+        let samples: Vec<_> = events.iter().filter_map(|event| match event {
+            Event::Select(_, _, _, frame) => Some((frame.predicted_display_time,
+                frame.inputs[0].target_ray_emulated_position, frame.inputs[0].grip_emulated_position)),
+            _ => None,
+        }).collect();
+        assert_eq!(samples, [(20., true, false), (30., false, true)]);
     }
     #[test]
     fn press_and_release_between_frames_retain_event_poses_and_times() {

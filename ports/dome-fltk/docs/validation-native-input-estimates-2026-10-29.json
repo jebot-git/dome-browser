@@ -1,0 +1,46 @@
+{
+  "date": "2026-10-29",
+  "scope": "Native controller position-estimate metadata and bounded input history",
+  "behavior": [
+    "Report native aim and grip position estimates independently in animation and historical action frames.",
+    "Keep known same-controller ray/grip relationships non-emulated and preserve XRInputSource identity across estimate-quality changes.",
+    "Retain protocol-v1 compatibility: omitted metadata fields keep the legacy tracked-pose assumption.",
+    "Quality-only changes do not consume bounded transition-history capacity; action snapshots retain their own metadata."
+  ],
+  "validation": {
+    "regular_optimized_cargo_release": true,
+    "current_release_runtime_suites": 21,
+    "current_release_runtime_checks": 861,
+    "new_native_emulation_checks_per_clock": {
+      "runtime_clock": 37,
+      "legacy_clock": 37
+    },
+    "browser_release_xr_unit_tests": 38,
+    "production_dome_input_library_unit_tests": 7,
+    "production_native_controller_unit_tests": 7,
+    "domed_all_target_unit_tests_same_source": 311,
+    "domed_all_target_unit_tests_ignored_for_imported_assets": 2,
+    "worker_shutdown_scenarios": 3,
+    "live_samples": [
+      "Discord login: coherent layout, 30-second survival and clean close",
+      "X landing: accepted rendering baseline, 30-second survival and clean close"
+    ],
+    "metadata_baseline_failures_fixed": 6,
+    "quality_only_history_baseline": "198 quality-only updates consumed history; corrected unit test retains zero transitions before the actual press/release"
+  },
+  "standards": [
+    "https://immersive-web.github.io/webxr/",
+    "https://registry.khronos.org/OpenXR/specs/1.1/man/html/XrSpaceLocationFlagBits.html"
+  ],
+  "deployment": "Running sessions are preserved; the updated native producer loads when DomeD is next started.",
+  "limitations": [
+    "Synthetic native transport validation does not establish physical-device or complete API/WPT conformance.",
+    "Broader WebXR coverage and later standards-rendering work remain."
+  ],
+  "geolocation": {
+    "implementation": "out of scope",
+    "api_tests": "out of scope",
+    "shipping_default": "disabled and unchanged"
+  },
+  "full_goal_achieved": false
+}

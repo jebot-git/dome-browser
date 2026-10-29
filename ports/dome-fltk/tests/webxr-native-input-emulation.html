@@ -1,0 +1,33 @@
+<!doctype html><meta charset=utf-8><title>WebXR reference-space integration</title>
+<style>body{background:#202830;color:white;font:20px monospace}button{padding:20px;background:#305ac0;color:white}</style>
+<h1>Native input position estimates</h1><button id=start disabled>Start tracking test</button><button id=end disabled>End session</button><canvas id=canvas width=128 height=96></canvas>
+<script>
+'use strict';const start=document.getElementById('start'),end=document.getElementById('end'),canvas=document.getElementById('canvas');
+let order=0,frameCount=0,session=null,ended=false,lastFrame=null,busy=false,local,sourceChanges=0,nextSource=0;
+const sourceIds=new WeakMap(),report=(type,data={})=>fetch('/event',{method:'POST',body:JSON.stringify({order:++order,type,data})});
+const fail=e=>report('error',{message:String(e),stack:e?.stack});
+const pose=p=>p?{position:[p.transform.position.x,p.transform.position.y,p.transform.position.z],emulated:p.emulatedPosition}:null;
+function sample(frame,source=session.inputSources[0]){
+ if(!source)return {source:null,source_changes:sourceChanges,aim:null,grip:null,relative:null};
+ if(!sourceIds.has(source))sourceIds.set(source,++nextSource);
+ return {source:sourceIds.get(source),source_changes:sourceChanges,aim:pose(frame.getPose(source.targetRaySpace,local)),grip:source.gripSpace?pose(frame.getPose(source.gripSpace,local)):null,relative:source.gripSpace?pose(frame.getPose(source.targetRaySpace,source.gripSpace)):null};
+}
+const gl=canvas.getContext('webgl',{xrCompatible:true});
+gl.makeXRCompatible().then(()=>{start.disabled=false;report('ready',{start:start.getBoundingClientRect().toJSON(),end:end.getBoundingClientRect().toJSON(),viewport:[innerWidth,innerHeight],ratio:devicePixelRatio});}).catch(fail);
+start.onclick=async()=>{try{
+ session=await navigator.xr.requestSession('immersive-vr');start.disabled=true;end.disabled=false;
+ session.onend=()=>{ended=true;report('ended');};
+ session.oninputsourceschange=()=>sourceChanges++;
+ local=await session.requestReferenceSpace('local');
+ for(const name of ['selectstart','selectend','select'])session.addEventListener(name,e=>{try{report('input',{name,...sample(e.frame,e.inputSource)});}catch(e){fail(e);}});
+ const layer=new XRWebGLLayer(session,gl);session.updateRenderState({baseLayer:layer});
+ const frame=(time,f)=>{try{
+  lastFrame={frameCount:++frameCount,...sample(f)};
+  if(frameCount===2)report('running');if(frameCount%4===0)report('frame',lastFrame);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,layer.framebuffer);gl.clearColor(.1,.2,.4,1);gl.clear(gl.COLOR_BUFFER_BIT);session.requestAnimationFrame(frame);
+ }catch(e){fail(e);}};session.requestAnimationFrame(frame);
+}catch(e){fail(e);}};
+async function command(op){if(op==='end'){await session.end();end.disabled=true;}report('command',{op});}
+setInterval(async()=>{if(busy)return;busy=true;try{const op=await(await fetch('/command')).json();if(op)await command(op);}catch(e){fail(e);}finally{busy=false;}report('heartbeat',{frameCount,lastFrame,ended});},60);
+addEventListener('error',e=>fail(e.message));
+</script>
