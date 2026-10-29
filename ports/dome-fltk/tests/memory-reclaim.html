@@ -1,0 +1,29 @@
+<!doctype html><meta charset=utf-8><title>Native heap reuse fixture</title><style>body{font:16px monospace}</style><p>Bounded native heap reuse fixture</p><div id=host></div>
+<script>
+(async()=>{
+const pause=ms=>new Promise(r=>setTimeout(r,ms)),checks=[],stages=[];let anchors=[],frames=0,last=performance.now(),maxGap=0,active=true;
+function frame(now){maxGap=Math.max(maxGap,now-last);last=now;frames++;if(active)requestAnimationFrame(frame)}requestAnimationFrame(frame);
+async function stage(name){const row={name,elapsed:performance.now(),anchors:anchors.length,frames,maxGap};stages.push(row);await fetch('/stage',{method:'POST',body:JSON.stringify(row)});}
+try{
+ await pause(2000);await stage('baseline');
+ for(let cycle=0;cycle<4;cycle++){
+  let blocks=[];
+  // 128 MiB per cycle, with 8 MiB of interleaved live anchors. No
+  // pressure on the system, forced collection or engine-only JS hooks.
+  for(let i=0;i<8192;i++){
+   const block=new Uint8Array(16384);for(let at=0;at<block.length;at+=4096)block[at]=37;
+   blocks.push(block);if(i%256===255)await pause(0);
+  }
+  await stage('allocated-'+cycle);anchors=blocks.filter((_,index)=>index%16===0);blocks=null;
+  for(let round=0;round<30;round++){
+   const fragment=document.createDocumentFragment();for(let i=0;i<1024;i++){const node=document.createElement('span');node.textContent='Temporary native row '+i;fragment.append(node)}host.replaceChildren(fragment);host.getBoundingClientRect();await pause(0);
+  }
+  host.replaceChildren();await stage('released-'+cycle);await pause(1500);
+ }
+ await pause(65000);await stage('settled');
+ checks.push({name:'Interleaved live data survives reclamation',passed:anchors.length===512&&anchors.every(a=>a[0]===37&&a[4096]===37&&a[12288]===37)});
+ checks.push({name:'The bounded document releases its temporary nodes',passed:host.childElementCount===0});
+ checks.push({name:'Animation continues through allocation and recovery',passed:frames>100});
+}catch(error){checks.push({name:'Fixture completes',passed:false,error:String(error)})}
+active=false;await fetch('/report',{method:'POST',body:JSON.stringify({checks,stages,frames,maxGap})});
+})();</script>

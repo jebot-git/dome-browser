@@ -331,6 +331,12 @@ attribution. `tests/dom-lifetime.py` exercises 524,288 detached/connected span
 allocations and replacements; its reduced workload passes and shows normal GC.
 Neither diagnostic forces collection or changes the normal GC configuration.
 
+Linux/glibc builds now limit native allocator arenas and return unused heap
+pages on a background worker. A controlled allocation/release comparison uses
+`tests/memory-reclaim.py` with and without `--control`, measuring resident memory
+plus swap. See [native heap reclamation](docs/smallnet-views-and-memory.md) for
+the policy, diagnostic switches and validation limits.
+
 Standalone SVG titles now expose `SVGTitleElement` and update native tab/window
 titles after parser completion, text edits, removal, root replacement and atomic
 moves. `tests/svg-title.py` checks both SVG and HTML title semantics. Idle callbacks
@@ -1471,6 +1477,12 @@ than fresh reruns. See
 source-provenance limitations.
 
 ### Native protocols and navigation
+
+**Open Link in New View** uses a native, unrelated view for regular smallnet
+document links. Closing it returns to the source document. The smallnet document
+sandbox stays enabled; private input actions still belong to their original
+view. `tests/smallnet-new-view.py` verifies Gopher, Nex and Spartan on X11 and
+native Wayland. See [smallnet views and document policy](docs/smallnet-views-and-memory.md).
 
 The development source has initial native Gopher menus, text and search; Nex
 directories and text; finger retrieval; and Spartan loading with gemtext,

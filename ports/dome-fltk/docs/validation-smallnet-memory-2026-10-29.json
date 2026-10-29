@@ -1,0 +1,90 @@
+{
+  "validated_utc": "2026-10-29T20:18:51.633762+00:00",
+  "complete": true,
+  "optimized_release": true,
+  "candidate_sha256": "26ac80e4ff99fbf185908ff9f2d8b505216897e03a5dd4983afd11bca20212a1",
+  "implementation_source_sha256": {
+    "ports/dome-fltk/src/main.rs": "a1cb87d8bb40b70aee9c2b73d6991365e37d05275069fee94655b0218ce68da2",
+    "ports/dome-fltk/src/memory_reclaim.rs": "ee2d68ffd956e4038db8f3573e269350d88e3e0ab9fb31e6b28e3aa0569246ba"
+  },
+  "frontend_units_passed": 211,
+  "runtime_checks_passed": 116,
+  "runtime": [
+    {
+      "name": "smallnet-x11-r3",
+      "checks": 11,
+      "passed": true,
+      "report": "smallnet-x11-r3/report.json"
+    },
+    {
+      "name": "smallnet-wayland-r3",
+      "checks": 11,
+      "passed": true,
+      "report": "smallnet-wayland-r3/report.json"
+    },
+    {
+      "name": "memory-control-r1",
+      "checks": 7,
+      "passed": true,
+      "report": "memory-control-r1/report.json"
+    },
+    {
+      "name": "memory-enabled-r1",
+      "checks": 7,
+      "passed": true,
+      "report": "memory-enabled-r1/report.json"
+    },
+    {
+      "name": "adblock-progress-r1",
+      "checks": 5,
+      "passed": true,
+      "report": "adblock-progress-r1/report.json"
+    },
+    {
+      "name": "history-r1",
+      "checks": 13,
+      "passed": true,
+      "report": "history-r1/report.json"
+    },
+    {
+      "name": "adblock-session-r1",
+      "checks": 62,
+      "passed": true,
+      "report": "adblock-session-r1/report.json"
+    }
+  ],
+  "clean_worker_shutdown_scenarios": 3,
+  "anonymous_discord_seconds": 90,
+  "anonymous_discord_alive_and_clean_close": true,
+  "smallnet_document_sandbox_retained": true,
+  "smallnet_negative_control_reproduced": true,
+  "native_new_views_verified_on": [
+    "Wayland",
+    "X11"
+  ],
+  "memory_comparison": {
+    "same_executable_and_fixture": true,
+    "control_settled_resident_plus_swap_kib": 703524.0,
+    "enabled_settled_resident_plus_swap_kib": 477612.0,
+    "reduction_percent": 32.111484469612975,
+    "enabled_max_frame_gap_ms": 123.95999999999913,
+    "enabled_max_native_ping_ms": 5.2236400078982115,
+    "purge_duration_ms": [
+      10,
+      0
+    ],
+    "induced_swap_pressure": false,
+    "measured_swap_kib_max": {
+      "memory-control-r1": 56,
+      "memory-enabled-r1": 56
+    }
+  },
+  "dependencies_resolved": true,
+  "evidence_root": "artifacts/browser-smallnet-freeze-v1",
+  "limits": [
+    "Memory reduction is a bounded allocation/release result, not a live-heap limit or leak-free guarantee.",
+    "No induced swap-pressure test; memory retention was reduced, actual swap latency was not measured.",
+    "Discord authenticated-session periodic freezes remain unconfirmed; anonymous login testing is limited to 90 seconds.",
+    "Private input actions remain tied to their source view."
+  ]
+}

@@ -9,6 +9,7 @@ mod wallet;
 mod storage;
 mod cookie_settings;
 mod memory_diagnostics;
+mod memory_reclaim;
 mod graphics;
 mod native_touch;
 mod native_pen;
@@ -107,6 +108,7 @@ struct PageState {
     history_recorded: RefCell<String>,
     closed: Cell<bool>,
     pending: RefCell<Vec<servo::CreateNewWebViewRequest>>,
+    pending_native_view: RefCell<Option<Url>>,
     pending_external: RefCell<Option<(Url, Option<Url>)>>,
     pdf: RefCell<external_documents::Incoming>,
     tab: usize,
@@ -383,7 +385,20 @@ impl WebViewDelegate for PageState {
                 if let Some((_, action)) =
                     usize::try_from(selected).ok().and_then(|i| choices.get(i))
                 {
-                    if let Some(action) = action { menu.select(*action); }
+                    if let Some(action) = action {
+                        // An explicit browser command creates an unrelated
+                        // top-level view. It must not use the document's popup
+                        // path, which is deliberately disabled for smallnet.
+                        let native_link = (*action == servo::ContextMenuAction::OpenLinkInNewWebView)
+                            .then(|| view.url()).flatten()
+                            .filter(|url| smallnet::persistent_url(url).is_some())
+                            .and_then(|_| menu.element_info().link_url.as_ref())
+                            .filter(|url| storage::restorable(url.as_str()));
+                        if let Some(url) = native_link {
+                            *self.pending_native_view.borrow_mut() = Some(url.clone());
+                            menu.dismiss();
+                        } else { menu.select(*action); }
+                    }
                     else {
                         let (_, url, action) = &extra[selected as usize - native_start];
                         if *action == 2 { launch_external_player(&self.services, url.as_str()); }
@@ -461,6 +476,7 @@ fn state(id: usize, permissions: Rc<RefCell<std::collections::HashSet<String>>>,
         history_recorded: RefCell::new(String::new()),
         closed: Cell::new(false),
         pending: RefCell::new(Vec::new()),
+        pending_native_view: RefCell::new(None),
         pending_external: RefCell::new(None),
         pdf: RefCell::new(external_documents::Incoming::default()),
         tab: id,
@@ -617,6 +633,20 @@ fn restore(servo: &servo::Servo, saved: &storage::Session, software: bool,
     }
     Ok(tabs)
 }
+fn new_tab(servo: &servo::Servo, url: Url, software: bool,
+           permissions: Rc<RefCell<std::collections::HashSet<String>>>,
+           services: Rc<Services>, next_id: &mut usize) -> Result<Tab, Box<dyn std::error::Error>> {
+    let ctx = context(software)?;
+    let s = state(*next_id, permissions, services);
+    *s.url.borrow_mut() = url.to_string();
+    *next_id += 1;
+    let view = WebViewBuilder::new(servo, ctx.clone())
+        .user_content_manager(compatibility::manager(servo))
+        .clipboard_delegate(Rc::new(Clipboard))
+        .delegate(s.clone()).url(url).try_build()
+        .map_err(|error| format!("Cannot prepare new view: {error:?}"))?;
+    Ok(Tab { view, context: ctx, state: s, zoom: 1. })
+}
 fn launch_external_player(services: &Services, target: &str) {
     match services.external_player.launch(target) {
         Ok(()) => ui::status("Opened in external player"),
@@ -690,6 +720,7 @@ fn bookmark_action(kind: i32, profile: &std::path::Path, tab: &Tab) -> Result<Op
     Ok(None)
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    memory_reclaim::configure_allocator();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help") {
         println!(
@@ -869,6 +900,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cosmetic_refresh = false;
     let mut filter_update: Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>> = None;
     let mut smallnet_form: Option<(smallnet::Prompt, Vec<u8>)> = None;
+    let memory_reclaimer = memory_reclaim::Reclaimer::start();
     while running {
         let prompt_owner = format!("{:?}", tabs[active].view.id());
         if smallnet_form.as_ref().is_some_and(|(request, _)| request.is_closed() || !request.belongs_to(&prompt_owner)) {
@@ -993,35 +1025,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Err(error) => { ui::status(&error.to_string()); continue; },
                     };
                     if external_links::handles(&url) { services.external_links.launch(url); continue; }
-                    let ctx = match context(software) {
-                        Ok(context) => context,
+                    let tab = match new_tab(&servo, url, software, permissions.clone(), services.clone(), &mut next_id) {
+                        Ok(tab) => tab,
                         Err(error) => { ui::status("Cannot open another tab right now"); eprintln!("PAGE: {error}"); continue; },
                     };
-                    let s = state(next_id, permissions.clone(), services.clone());
-                    *s.url.borrow_mut() = url.to_string();
-                    next_id += 1;
-                    let view = WebViewBuilder::new(&servo, ctx.clone())
-                        .user_content_manager(compatibility::manager(&servo))
-                        .clipboard_delegate(Rc::new(Clipboard))
-                        .delegate(s.clone())
-                        .url(url)
-                        .try_build();
-                    let view = match view {
-                        Ok(view) => view,
-                        Err(error) => { ui::status("Cannot open another tab right now"); eprintln!("PAGE: {error:?}"); continue; },
-                    };
-                    tabs.push(Tab {
-                        view,
-                        context: ctx,
-                        state: s,
-                        zoom: 1.,
-                    });
+                    tabs.push(tab);
                     active = tabs.len() - 1;
                     activate(&tabs, active);
                 },
                 6 => {
                     if tabs.len() == 1 { running = false; break; }
                     tabs.remove(active);
+                    if let Some(reclaimer) = &memory_reclaimer { reclaimer.request(); }
                     if tabs.is_empty() {
                         running = false;
                         break;
@@ -1283,6 +1298,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if tabs.iter().any(|t| t.state.closed.get()) {
             let current = tabs[active].state.tab;
             tabs.retain(|t| !t.state.closed.get());
+            if let Some(reclaimer) = &memory_reclaimer { reclaimer.request(); }
             if tabs.is_empty() {
                 break;
             }
@@ -1291,6 +1307,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .position(|t| t.state.tab == current)
                 .unwrap_or_else(|| active.min(tabs.len() - 1));
             activate(&tabs, active);
+        }
+        let native_views: Vec<_> = tabs.iter().filter_map(|tab| tab.state.pending_native_view.take()).collect();
+        for url in native_views {
+            match new_tab(&servo, url, software, permissions.clone(), services.clone(), &mut next_id) {
+                Ok(tab) => { tabs.push(tab); active = tabs.len() - 1; activate(&tabs, active); },
+                Err(error) => { ui::status("Cannot open the requested view right now"); eprintln!("PAGE: {error}"); },
+            }
         }
         let requests: Vec<_> = tabs.iter().flat_map(|t| t.state.pending.take()).collect();
         for request in requests {
