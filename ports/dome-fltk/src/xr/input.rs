@@ -257,6 +257,7 @@ impl Source {
 }
 
 pub(super) struct State {
+    viewer_tracking: tracking::State,
     floor_transform: Option<RigidTransform3D<f32, Native, Floor>>,
     sources: Vec<Source>,
     cursor: u64,
@@ -265,6 +266,7 @@ impl State {
     pub fn new(frame: &HostFrame) -> Result<Self> {
         Self::validate(frame, 0)?;
         Ok(Self {
+            viewer_tracking: tracking::State::default(),
             floor_transform: None,
             sources: frame
                 .inputs
@@ -281,9 +283,13 @@ impl State {
     pub fn set_floor_transform(&mut self, floor: Option<RigidTransform3D<f32, Native, Floor>>) {
         self.floor_transform = floor;
     }
-    fn web_frame(&self, host: &HostFrame, anchor: RigidTransform3D<f32, Native, Native>,
+    pub fn set_viewer_tracking(&mut self, tracking: tracking::State) {
+        self.viewer_tracking = tracking;
+    }
+    fn web_frame(&mut self, host: &HostFrame, anchor: RigidTransform3D<f32, Native, Native>,
         clip: ClipPlanes, clock: &time::Clock) -> Frame {
-        let mut frame = host.web_frame(anchor, clip, clock);
+        self.viewer_tracking.retain_through(host.time);
+        let (mut frame, _) = host.tracked_frame(anchor, clip, clock, &mut self.viewer_tracking);
         frame.floor_transform = self.floor_transform;
         frame
     }
@@ -340,7 +346,8 @@ impl State {
         let batch = host.input_batch.as_ref().unwrap();
         let mut events = vec![];
         if batch.reset || reset_page {
-            events.extend(self.cancel(&self.web_frame(host, anchor, clip, clock)));
+            let frame = self.web_frame(host, anchor, clip, clock);
+            events.extend(self.cancel(&frame));
             self.observe(host, anchor, clip, clock, true, &mut events);
         } else {
             for update in &batch.updates {

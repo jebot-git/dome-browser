@@ -29,6 +29,7 @@ mod reference_space;
 mod inline;
 mod time;
 mod availability;
+mod tracking;
 
 #[derive(Clone, Copy, Default)]
 struct PageFocus {
@@ -217,12 +218,11 @@ struct Pose {
     orientation: [f32; 4],
 }
 impl Pose {
-    fn valid(&self) -> bool {
-        self.position
-            .iter()
-            .chain(self.orientation.iter())
-            .all(|x| x.is_finite())
-            && (self.orientation.iter().map(|x| x * x).sum::<f32>() - 1.).abs() < 0.02
+    fn valid(&self) -> bool { self.valid_components(3) }
+    fn valid_components(&self, flags: u64) -> bool {
+        (flags & 1 == 0 || (self.orientation.iter().all(|v| v.is_finite()) &&
+            (self.orientation.iter().map(|v| v*v).sum::<f32>() - 1.).abs() < 0.02)) &&
+        (flags & 2 == 0 || self.position.iter().all(|v| v.is_finite()))
     }
     fn transform<A, B>(&self) -> RigidTransform3D<f32, A, B> {
         RigidTransform3D::new(
@@ -288,43 +288,21 @@ impl HostFrame {
         clip: ClipPlanes,
         clock: &time::Clock,
     ) -> Frame {
-        let local = anchor.inverse();
-        let pose = if self.visible && self.head_flags & 3 == 3 && self.view_flags & 3 == 3 {
-            let view = |v: &Eye| View::<webxr_api::Viewer> {
-                transform: v.pose.transform::<webxr_api::Viewer, Native>().then(&local),
-                projection: fov_to_projection_matrix(
-                    v.fov.left,
-                    v.fov.right,
-                    v.fov.up,
-                    v.fov.down,
-                    clip,
-                ),
-            };
-            Some(ViewerPose {
-                emulated_position: false,
-                transform: self
-                    .head
-                    .transform::<webxr_api::Viewer, Native>()
-                    .then(&local),
-                views: Views::Stereo(
-                    view(&self.views[0]).cast_unit(),
-                    view(&self.views[1]).cast_unit(),
-                ),
-            })
-        } else {
-            None
-        };
-        Frame {
-            pose,
-            untracked_views: None,
+        self.tracked_frame(anchor, clip, clock, &mut tracking::State::default()).0
+    }
+    fn tracked_frame(&self, anchor: RigidTransform3D<f32, Native, Native>,
+        clip: ClipPlanes, clock: &time::Clock, tracking: &mut tracking::State)
+        -> (Frame, Option<ViewerPose>) {
+        let sample = tracking.sample(self, anchor, clip);
+        (Frame {
+            pose: sample.pose,
+            untracked_views: sample.untracked_views,
             floor_transform: None,
             inputs: input::frames(self, anchor),
-            events: vec![],
-            sub_images: vec![],
-            hit_test_results: vec![],
+            events: vec![], sub_images: vec![], hit_test_results: vec![],
             predicted_display_time: self.time as f64 / 1_000_000.,
             predicted_display_instant: clock.instant(self.time, self.monotonic_time),
-        }
+        }, sample.presentation)
     }
     fn valid(&self) -> bool {
         self.reference_space.is_none_or(|state| state.valid())
@@ -332,11 +310,11 @@ impl HostFrame {
             && self.time > 0
             && self.monotonic_time.is_none_or(|value| value > 0)
             && (!self.focused || self.visible)
-            && (self.head_flags & 3 != 3 || self.head.valid())
+            && self.head.valid_components(self.head_flags)
             && self
                 .views
                 .iter()
-                .all(|v| (self.view_flags & 3 != 3 || v.pose.valid()) && v.fov.valid())
+                .all(|v| v.pose.valid_components(self.view_flags) && v.fov.valid())
             && input::valid_inputs(&self.inputs)
     }
 }
@@ -537,7 +515,8 @@ struct BridgeDevice {
     layer_info: std::collections::HashMap<LayerId, LayerInfo>,
     submitted_viewports: std::collections::HashMap<LayerId, Viewports>,
     frame: Option<HostFrame>,
-    viewer_views: webxr_api::ViewerViews,
+    viewer_tracking: tracking::State,
+    presentation: Option<ViewerPose>,
     anchor: Option<RigidTransform3D<f32, Native, Native>>,
     clip: ClipPlanes,
     events: EventBuffer,
@@ -588,9 +567,9 @@ impl BridgeDevice {
         let initial_anchor = anchor(&initial.head);
         let mut clock = time::Clock::default();
         clock.observe(initial.time, initial.monotonic_time);
-        let initial_pose = initial.web_frame(initial_anchor, ClipPlanes::default(), &clock)
-            .pose.ok_or_else(|| backend("Initial view geometry is unavailable"))?;
-        let viewer_views = initial_pose.views.relative_to_viewer(initial_pose.transform);
+        let mut viewer_tracking = tracking::State::default();
+        let (initial_frame, presentation) = initial.tracked_frame(initial_anchor, ClipPlanes::default(), &clock, &mut viewer_tracking);
+        initial_frame.pose.ok_or_else(|| backend("Initial view geometry is unavailable"))?;
         let inputs = if hello.input_stream_version == 1 {
             Some(input::State::new(&initial).map_err(backend)?)
         } else {
@@ -650,7 +629,8 @@ impl BridgeDevice {
             submitted_viewports: std::collections::HashMap::new(),
             reference_spaces: reference_space::Tracker::new(initial.reference_space),
             frame: Some(initial),
-            viewer_views,
+            viewer_tracking,
+            presentation,
             anchor: Some(initial_anchor),
             clip: ClipPlanes::default(),
             events: EventBuffer::default(),
@@ -684,13 +664,17 @@ impl BridgeDevice {
                 json!({"op":"end_session","token":self.token}),
                 &[],
             );
+            let floor = self.floor_transform();
             if let (Some(inputs), Some(frame), Some(anchor)) =
                 (&mut self.inputs, &self.frame, self.anchor)
             {
-                for event in inputs.cancel(&frame.web_frame(anchor, self.clip, &self.clock)) {
-                    self.events.callback(event);
-                }
+                let mut history = self.viewer_tracking.clone();
+                let (mut snapshot, _) = frame.tracked_frame(anchor, self.clip, &self.clock, &mut history);
+                snapshot.floor_transform = floor;
+                for event in inputs.cancel(&snapshot) { self.events.callback(event); }
             }
+            self.viewer_tracking = tracking::State::default();
+            self.presentation = None;
             self.events.callback(Event::SessionEnd);
             eprintln!("WEBXR browser lease ended; DomeD session preserved");
         }
@@ -726,8 +710,8 @@ impl BridgeDevice {
         if layers.is_empty()
             || !frame.should_render
             || !frame.visible
-            || frame.head_flags & 3 != 3
-            || frame.view_flags & 3 != 3
+            || self.presentation.as_ref().zip(self.anchor)
+                .and_then(|(pose, anchor)| tracking::projection_eyes(pose, anchor, &frame.views)).is_none()
         {
             rpc(
                 &self.path,
@@ -796,7 +780,10 @@ impl BridgeDevice {
         if geometry.framebuffer_size.width != size.width || geometry.framebuffer_size.height != size.height {
             return Err("XR submitted surface differs from its allocation geometry".into());
         }
-        let views: Vec<_> = frame.views.iter().zip(&self.submitted_viewports.get(&layer).unwrap_or(&geometry.viewports).viewports).map(|(view, rect)| json!({
+        let projection = self.presentation.as_ref().zip(self.anchor)
+            .and_then(|(pose, anchor)| tracking::projection_eyes(pose, anchor, &frame.views))
+            .ok_or("XR projection geometry is unavailable")?;
+        let views: Vec<_> = projection.iter().zip(&self.submitted_viewports.get(&layer).unwrap_or(&geometry.viewports).viewports).map(|(view, rect)| json!({
             "rect":{"x":rect.origin.x,"y":size.height-rect.max_y(),"width":rect.size.width,"height":rect.size.height},
             "pose":view.pose,"fov":view.fov,
         })).collect();
@@ -903,9 +890,15 @@ impl DeviceAPI for BridgeDevice {
             Err(error) => { self.fail(error); return None; },
         };
         let origin_changed = !reset_events.is_empty();
+        for event in &reset_events {
+            if let webxr_api::FrameUpdateEvent::ReferenceSpaceChanged(webxr_api::BaseSpace::Local, delta) = event {
+                self.viewer_tracking.reset(delta.map(|delta| delta.cast_unit()));
+            }
+        }
         let floor_transform = self.floor_transform();
         if let Some(inputs) = &mut self.inputs {
             inputs.set_floor_transform(floor_transform);
+            inputs.set_viewer_tracking(self.viewer_tracking.clone());
             match inputs.update(
                 &frame,
                 anchor,
@@ -924,20 +917,9 @@ impl DeviceAPI for BridgeDevice {
                 },
             }
         }
-        let mut web_frame = frame.web_frame(anchor, self.clip, &self.clock);
-        web_frame.floor_transform = self.floor_transform();
-        if let Some(pose) = &web_frame.pose {
-            self.viewer_views = pose.views.relative_to_viewer(pose.transform);
-        } else {
-            let mut views = self.viewer_views.clone();
-            if let webxr_api::ViewerViews::List(descriptions) = &mut views {
-                for (view, eye) in descriptions.iter_mut().zip(&frame.views) {
-                    view.projection = fov_to_projection_matrix(eye.fov.left, eye.fov.right,
-                        eye.fov.up, eye.fov.down, self.clip);
-                }
-            }
-            web_frame.untracked_views = Some(views);
-        }
+        let (mut web_frame, presentation) = frame.tracked_frame(anchor, self.clip, &self.clock, &mut self.viewer_tracking);
+        self.presentation = presentation;
+        web_frame.floor_transform = floor_transform;
         web_frame.events.extend(reset_events);
         // An older host has no controller extension, even if a future transport
         // happens to include fields the legacy stereo client doesn't understand.

@@ -1,0 +1,43 @@
+{
+  "date": "2026-10-29",
+  "scope": "Native DomeD partial tracking and timestamp-consistent historical WebXR input",
+  "behavior": [
+    "Retain independently meaningful head orientation, position and calibrated viewer-relative eye geometry during partial tracking loss.",
+    "Report position emulation from validity/tracking flags and use the same meaningful calibrated eye poses for projection transport.",
+    "Preserve meaningful pose components when sanitizing OpenXR transport; unavailable components remain explicitly invalid.",
+    "Keep historical action poses from consuming later predicted world positions; preserve earlier estimates within the input batch.",
+    "Clear tracking state on shutdown and preserve origin-reset and visibility behavior."
+  ],
+  "validation": {
+    "runtime_suites": 51,
+    "runtime_checks": 4299,
+    "native_history_checks": 30,
+    "native_validity_checks": 24,
+    "native_projection_checks": 43,
+    "selected_original_wpt_passed": 137,
+    "unchanged_original_setup_failures": 4,
+    "optional_unsupported_cases": 4,
+    "browser_xr_unit_tests": 36,
+    "webxr_library_unit_tests": 19,
+    "webxr_library_unit_tests_ignored": 1,
+    "domed_all_target_unit_tests": 307,
+    "domed_unit_tests_ignored": 2,
+    "worker_shutdown_scenarios": 3,
+    "live_samples": [
+      "Discord login: 30 seconds and clean close",
+      "X landing: 30 seconds and clean close; accepted QR overlap unchanged"
+    ]
+  },
+  "limitations": [
+    "Synthetic native transport tests do not establish physical-device or complete API/WPT conformance.",
+    "The existing independent shader-validator test requires glslangValidator; two DomeD tests require imported original assets.",
+    "Broader WebXR coverage and later rendering work remain."
+  ],
+  "geolocation": {
+    "implementation": "out of scope",
+    "api_tests": "out of scope",
+    "shipping_default": "disabled and unchanged"
+  },
+  "full_goal_achieved": false,
+  "sessions_restarted": false
+}
