@@ -95,6 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     prefs.dom_webxr_openxr_enabled = false;
     prefs.dom_webxr_hands_enabled = false;
     prefs.dom_webxr_layers_enabled = false;
+    prefs.dom_webxr_sessionavailable = std::env::var_os("XR_INPUT_SESSIONAVAILABLE_TEST").is_some();
     prefs.dom_webgl2_enabled = true;
     if std::env::var_os("XR_INPUT_POLICY_TEST").is_some() {
         prefs.dom_permissions_enabled = true;
@@ -103,7 +104,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // keeps its normal consent and device-discovery configuration.
     if std::env::var_os("XR_INPUT_MOCK_XR").is_some() {
         prefs.dom_webxr_test = true;
-        prefs.dom_webxr_unsafe_assume_user_intent = true;
+        prefs.dom_webxr_unsafe_assume_user_intent =
+            std::env::var_os("XR_INPUT_STRICT_USER_ACTIVATION").is_none();
     }
     let servo = ServoBuilder::default()
         .opts(opts)

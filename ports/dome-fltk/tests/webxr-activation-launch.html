@@ -1,0 +1,20 @@
+<!doctype html><meta charset=utf-8><title>WebXR launch and simulated activation</title>
+<script>
+'use strict';const state=window.test={ready:true,finished:false,error:null,checks:[],frames:0};state.snapshot=()=>({...state,snapshot:undefined});
+const check=(ok,name)=>{if(!ok)throw Error(name);state.checks.push(name);};const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const launched=new Promise(resolve=>navigator.xr.addEventListener('sessionavailable',event=>resolve({trusted:event.isTrusted,time:performance.now()}),{once:true}));
+const matrix=[1,0,0,0,0,1,0,0,0,0,-1,-1,0,0,-.2,0];
+const connected=navigator.xr.test.simulateDeviceConnection({supportsImmersive:true,supportedModes:['inline','immersive-vr'],supportedFeatures:['local'],viewerOrigin:{position:[0,0,0],orientation:[0,0,0,1]},views:['left','right'].map((eye,i)=>({eye,projectionMatrix:matrix,viewOffset:{position:[i?.03:-.03,0,0],orientation:[0,0,0,1]},resolution:{width:128,height:96}}))});
+(async()=>{
+ const launch=await launched,device=await connected;check(launch.trusted,'Opt-in application launch is delivered as a trusted XR event');check(!navigator.userActivation.isActive&&!navigator.userActivation.hasBeenActive,'XR launch does not grant general HTML user activation');
+ const canvas=document.createElement('canvas');canvas.width=128;canvas.height=96;document.body.append(canvas);const gl=canvas.getContext('webgl',{xrCompatible:true});await gl.makeXRCompatible();
+ const run=async session=>{const local=await session.requestReferenceSpace('local');session.updateRenderState({baseLayer:new XRWebGLLayer(session,gl)});await new Promise((resolve,reject)=>session.requestAnimationFrame((time,frame)=>{try{state.frames++;check(!!frame.getViewerPose(local),'Activated session provides a valid viewer pose');resolve();}catch(error){reject(error);}}));await session.end();};
+ await pause(100);await run(await navigator.xr.requestSession('immersive-vr',{requiredFeatures:['local']}));check(true,'Deferred XR request is allowed during bounded application-launch intent');check(!navigator.userActivation.isActive,'Application-launch session does not create HTML activation');
+ while(performance.now()-launch.time<5500)await pause(50);
+ navigator.xr.dispatchEvent(new Event('sessionavailable'));
+ let expired='none';try{const session=await navigator.xr.requestSession('immersive-vr');await session.end();}catch(error){expired=error.name;}
+ check(expired==='SecurityError','Expired launch intent is not renewed by an author-dispatched event');
+ let request;navigator.xr.test.simulateUserActivation(()=>{check(navigator.userActivation.isActive,'Test activation uses the window transient-activation state');request=pause(100).then(()=>navigator.xr.requestSession('immersive-vr',{requiredFeatures:['local']}));});
+ await run(await request);check(true,'Deferred request after test activation follows the same window-state path');await device.disconnect();canvas.remove();check(true,'Launch and test-activation sessions close cleanly');state.finished=true;
+})().catch(error=>{state.error=String(error)+' '+error.stack;});
+</script>

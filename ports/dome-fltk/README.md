@@ -2358,3 +2358,27 @@ pose relationships and emulation are the next implementation task.
 The user-accepted limited DomeD immersive baseline is preserved. Broader WebXR
 and later rendering/scroll-indicator work remain. Geolocation implementation
 and API tests are excluded; its existing disabled shipping default is unchanged.
+
+
+## WebXR request activation timing
+
+Immersive session requests use the window's current transient activation state.
+Deferred requests within that lifetime still reach the native consent dialog;
+expiry, refusal and retry follow the same document/session lifecycle. The
+existing opt-in XR application-launch mode has bounded XR intent without
+establishing general HTML user activation, and document deactivation clears it.
+
+`tests/webxr-activation-native.py BROWSER FIXTURE OUTPUT` drives trusted input,
+consent, stereo frames and orderly shutdown in a private compositor/profile.
+`tests/webxr-activation-launch.py EMBEDDER OUTPUT` validates the opt-in launch
+path and canonical simulated activation with `XR_INPUT_SESSIONAVAILABLE_TEST=1`
+and `XR_INPUT_STRICT_USER_ACTIVATION=1`. These settings belong to the separate
+`xr-native-input` test embedder; normal browser defaults remain unchanged.
+
+Validation: 124 unit tests and 1,362 runtime checks, including nine original
+request-session and twelve original controller-action cases under strict
+activation settings, three worker shutdown scenarios and anonymous Discord/X
+smoke samples. Details are in
+`docs/validation-xr-activation-2026-10-29.json`. Broader WebXR and later rendering
+work remain; geolocation implementation and API testing are excluded and its
+default remains disabled.

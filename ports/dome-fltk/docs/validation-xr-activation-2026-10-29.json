@@ -1,0 +1,87 @@
+{
+  "change": "Align immersive WebXR requests with bounded window activation",
+  "base_commit": "3853b6b3e70b54763fff0546fc8a32f2c8b72ea7",
+  "behavior": [
+    "Use current Window transient activation rather than the legacy per-task interaction flag",
+    "Retain native consent, fully-active document and pending-session requirements",
+    "Keep opt-in XR application-launch intent bounded and independent from general HTML activation",
+    "Clear application-launch intent on document deactivation",
+    "Make test-only simulated activation establish the existing HTML activation state",
+    "Allow strict activation and opt-in launch validation in the separate test embedder; shipping test API and launch defaults remain unchanged"
+  ],
+  "optimized_release": true,
+  "compiled_source_sha256": {
+    "components/script/dom/webxr/xrsystem.rs": "1e0aac43644eeb6b189cb54f306af246a3daea9b4c5f5f3e4e4fc108a9ea80d3",
+    "components/script/dom/webxr/xrtest.rs": "eff0689030d88edc512c870f6185edc73a21aa601ef831302a14708513b1a4bf",
+    "ports/dome-fltk/examples/xr-native-input.rs": "e74f41acf76c43bdb47cfa889161d7f7b6b52cc823da18856d38ba5e7b5f0846",
+    "ports/dome-fltk/tests/webxr-activation-launch.html": "52c40117564547ab8080c2e9d5094f7ce2d54ed339ad70fa49268105af0e0d38",
+    "ports/dome-fltk/tests/webxr-activation-launch.py": "a84c10d6e7a94df26751cd85c70a4de36dde3d853f06d81ed50dfffa66a0c9c0",
+    "ports/dome-fltk/tests/webxr-activation-native.html": "6acefbbdf96d9f576c0b7d3bca399f7364ad4b6b31afd0592d76f8f5fc9a1c19",
+    "ports/dome-fltk/tests/webxr-activation-native.py": "34215c4f0bac87d531c8bc9b75fa93621fe9a11bbe2b5b5979bf7b7deed4a6df"
+  },
+  "binaries_sha256": {
+    "browser": "b178290ccaed11125a5fd15e7073566a37ff8abd93d1e1b996eca601cb1d8a48",
+    "embedder": "61158a448c15a78fc4645deeec0fc36fac2476001701975e0ff41e091fd7512b"
+  },
+  "unit_tests": {
+    "webxr_api": 53,
+    "webxr_library_with_headless": 28,
+    "frontend_xr": 43,
+    "total_unique_passed": 124,
+    "existing_ignored_shader_test": 1
+  },
+  "runtime_checks": 1362,
+  "main_runtime_checks": 1350,
+  "runtime_breakdown": {
+    "native-activation": 21,
+    "native-activation-legacy-clock": 21,
+    "launch-activation": 12,
+    "original-activation": 9,
+    "mock-actions": 39,
+    "floor-model": 33,
+    "native-floor": 35,
+    "native-floor-legacy-clock": 35,
+    "tracking-loss": 19,
+    "tracking-lifecycle": 27,
+    "xr-bounded": 21,
+    "native-validity": 24,
+    "native-history": 30,
+    "native-projection": 43,
+    "xr-native-reset": 101,
+    "xr-native-input": 61,
+    "xr-inline": 35,
+    "history": 14,
+    "input-emulation-controls": 21,
+    "gamepad-policy": 749
+  },
+  "strict_original_controller_action_cases": 12,
+  "strict_original_request_session_cases": 9,
+  "main_runtime_jobs": 22,
+  "additional_strict_original_action_job": 1,
+  "native_trusted_input_activation_checks_each_clock": 21,
+  "launch_and_simulated_activation_checks": 12,
+  "worker_shutdown_scenarios": 3,
+  "anonymous_discord_x_runs": 2,
+  "live_seconds_each": 30,
+  "live_samples_clean_close": true,
+  "visual_review_passed": true,
+  "adblock_enabled": true,
+  "system_library_preflight_passed": true,
+  "full_wpt_runner": false,
+  "physical_device_conformance_claim": false,
+  "whole_site_correctness_claim": false,
+  "geolocation_implementation_and_api_tests_excluded": true,
+  "geolocation_default_disabled": true,
+  "remaining": [
+    "Review and align inline requested-feature intent requirements against the current specification; older viewer-availability tests differ from current wording",
+    "Continue broader supported WebXR compatibility and later rendering/scroll-indicator checks",
+    "Complete pending system installation and post-install verification"
+  ],
+  "full_goal_achieved": false,
+  "references": [
+    "https://www.w3.org/TR/webxr/#immersiveness",
+    "https://www.w3.org/TR/webxr/#launching-a-web-application",
+    "https://immersive-web.github.io/webxr-test-api/#dom-xrtest-simulateuseractivation"
+  ],
+  "validated_utc": "2026-10-29T10:21:48.914775+00:00"
+}

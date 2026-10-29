@@ -1,0 +1,31 @@
+<!doctype html><meta charset=utf-8><title>WebXR activation timing integration</title>
+<style>body{background:#202830;color:white;font:20px monospace}button{padding:20px;background:#305ac0;color:white}canvas{display:block;margin-top:20px}</style>
+<h1>WebXR activation timing</h1><button id=start disabled>Run request</button><span id=status>Preparing</span><canvas id=canvas width=128 height=96></canvas>
+<script>
+'use strict';
+const start=document.getElementById('start'),status=document.getElementById('status'),canvas=document.getElementById('canvas');let order=0,mode='synthetic',session=null,frames=0,polling=false,syntheticDone;
+const active=()=>navigator.userActivation.isActive;
+const report=(type,data={})=>fetch('/event',{method:'POST',body:JSON.stringify({order:++order,type,data})});
+const fail=error=>report('error',{message:String(error),stack:error?.stack});
+const gl=canvas.getContext('webgl',{xrCompatible:true});
+async function attempt(kind,trusted,atClick){
+ start.disabled=true;status.textContent=kind;const atCall=active();report('attempt',{kind,trusted,atClick,atCall});
+ try{
+  const current=await navigator.xr.requestSession('immersive-vr',{requiredFeatures:['local']});session=current;frames=0;
+  current.onend=()=>{if(session===current)session=null;start.disabled=false;report('ended',{kind});};
+  const local=await current.requestReferenceSpace('local');current.updateRenderState({baseLayer:new XRWebGLLayer(current,gl)});
+  const animate=(time,frame)=>{try{frames++;const layer=current.renderState.baseLayer;gl.bindFramebuffer(gl.FRAMEBUFFER,layer.framebuffer);gl.clearColor(.1,.2,.4,1);gl.clear(gl.COLOR_BUFFER_BIT);if(frames===2){const pose=frame.getViewerPose(local);report('case_result',{kind,outcome:'fulfilled',trusted,atClick,atCall,pose:!!pose,eyes:pose?.views.map(view=>view.eye),frames});}current.requestAnimationFrame(animate);}catch(error){fail(error);}};current.requestAnimationFrame(animate);
+ }catch(error){start.disabled=false;report('case_result',{kind,outcome:'rejected',name:error.name,trusted,atClick,atCall});}
+ finally{if(kind==='synthetic'&&syntheticDone)syntheticDone();}
+}
+start.onclick=event=>{const kind=mode,atClick=active(),trusted=event.isTrusted;start.disabled=true;
+ if(kind==='timer')setTimeout(()=>attempt(kind,trusted,atClick),100);
+ else if(kind==='microtask')Promise.resolve().then(()=>attempt(kind,trusted,atClick));
+ else if(kind==='expired')(async()=>{while(active())await new Promise(resolve=>setTimeout(resolve,50));await attempt(kind,trusted,atClick);})().catch(fail);
+ else attempt(kind,trusted,atClick);
+};
+(async()=>{await attempt('startup',false,active());start.disabled=false;await new Promise(resolve=>{syntheticDone=resolve;start.click();});await gl.makeXRCompatible();gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.clearColor(.1,.2,.65,1);gl.clear(gl.COLOR_BUFFER_BIT);start.disabled=false;report('ready',{start:start.getBoundingClientRect().toJSON(),viewport:[innerWidth,innerHeight],ratio:devicePixelRatio});})().catch(fail);
+async function command(value){if(value==='end'){if(session)await session.end();}else if(value.startsWith('mode:')){mode=value.slice(5);start.disabled=false;}report('command',{value});}
+setInterval(async()=>{if(polling)return;polling=true;try{const value=await(await fetch('/command')).json();if(value)await command(value);report('heartbeat',{mode,session:!!session,frames,active:active()});}catch(error){fail(error);}finally{polling=false;}},60);
+addEventListener('error',event=>fail(event.message));
+</script>

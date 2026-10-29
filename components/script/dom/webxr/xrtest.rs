@@ -20,6 +20,7 @@ use webxr_api::{self, Error as XRError, MockDeviceInit, MockDeviceMsg};
 use crate::dom::RootedPromise;
 use crate::dom::bindings::callback::ExceptionHandling;
 use crate::dom::bindings::codegen::Bindings::FunctionBinding::Function;
+use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::codegen::Bindings::XRSystemBinding::XRSessionMode;
 use crate::dom::bindings::codegen::Bindings::XRTestBinding::{FakeXRDeviceInit, XRTestMethods};
 use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
@@ -28,6 +29,7 @@ use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::fakexrdevice::{FakeXRDevice, get_bounds_geometry, get_origin, get_views, get_world};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
+use crate::dom::types::UserActivation;
 use crate::event_loop::script_thread::ScriptThread;
 
 #[dom_struct]
@@ -201,6 +203,11 @@ impl XRTestMethods<crate::DomTypeHolder> for XRTest {
 
     /// <https://github.com/immersive-web/webxr-test-api/blob/master/explainer.md>
     fn SimulateUserActivation(&self, cx: &mut JSContext, f: RootedCallback<Function>) {
+        let global = self.global();
+        let document = global.as_window().Document();
+        if document.is_fully_active() {
+            UserActivation::handle_user_activation_notification(&document);
+        }
         let _guard = ScriptThread::user_interacting_guard();
         rooted!(&in(cx) let mut value: JSVal);
         let _ = f.Call__(cx, vec![], value.handle_mut(), ExceptionHandling::Rethrow);

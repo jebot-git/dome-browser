@@ -11,6 +11,7 @@ use js::realm::CurrentRealm;
 use profile_traits::generic_callback::GenericCallback as ProfileGenericCallback;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object;
+use servo_base::cross_process_instant::CrossProcessInstant;
 use servo_base::id::PipelineId;
 use servo_config::pref;
 use webxr_api::{Error as XRError, PendingSession, Session, SessionInit, SessionMode};
@@ -32,13 +33,14 @@ use crate::dom::promise::{Promise, RootedPromise};
 use crate::dom::window::Window;
 use crate::dom::xrsession::{InlinePointerAction, ScreenPointerSample, XRSession};
 use crate::dom::xrtest::XRTest;
-use crate::event_loop::script_thread::ScriptThread;
 
 #[dom_struct]
 pub(crate) struct XRSystem {
     eventtarget: EventTarget,
     gamepads: DomRefCell<Vec<Dom<Gamepad>>>,
     pending_immersive_session: Cell<bool>,
+    #[no_trace]
+    launched_at: Cell<Option<CrossProcessInstant>>,
     session_request_generation: Cell<u64>,
     device_change_listener_count: Cell<u32>,
     active_immersive_session: MutNullableDom<XRSession>,
@@ -109,6 +111,7 @@ impl XRSystem {
     }
 
     pub(crate) fn end_sessions_for_document_deactivation(&self, cx: &mut JSContext) {
+        self.launched_at.set(None);
         let generation = self.session_request_generation.get();
         self.session_request_generation
             .set(generation.wrapping_add(1));
@@ -133,6 +136,7 @@ impl XRSystem {
             eventtarget: EventTarget::new_inherited(),
             gamepads: DomRefCell::new(Vec::new()),
             pending_immersive_session: Cell::new(false),
+            launched_at: Cell::new(None),
             session_request_generation: Cell::new(1),
             device_change_listener_count: Cell::new(0),
             active_immersive_session: Default::default(),
@@ -152,6 +156,15 @@ impl XRSystem {
 
     pub(crate) fn pending_or_active_session(&self) -> bool {
         self.pending_immersive_session.get() || self.active_immersive_session.get().is_some()
+    }
+
+    fn has_launch_activation(&self) -> bool {
+        self.launched_at.get().is_some_and(|started| {
+            let now = CrossProcessInstant::now();
+            now >= started
+                && (now - started).whole_milliseconds()
+                    < i128::from(pref!(dom_transient_activation_duration_ms).max(0))
+        })
     }
 
     pub(crate) fn has_active_immersive_session(&self) -> bool {
@@ -275,7 +288,7 @@ impl XRSystemMethods<crate::DomTypeHolder> for XRSystem {
 
         let generation = self.session_request_generation.get();
         if mode != XRSessionMode::Inline {
-            if !ScriptThread::is_user_interacting() {
+            if !window.has_transient_activation() && !self.has_launch_activation() {
                 if pref!(dom_webxr_unsafe_assume_user_intent) {
                     warn!(
                         "The dom.webxr.unsafe-assume-user-intent preference assumes user intent to enter WebXR."
@@ -483,10 +496,16 @@ impl XRSystem {
             .task_manager()
             .dom_manipulation_task_source()
             .queue(task!(fire_sessionavailable_event: move |cx| {
-                // The sessionavailable event indicates user intent to enter an XR session
+                // Explicit XR application-launch mode provides bounded XR intent
+                // without granting general HTML user activation to the page.
                 let xr = xr.root();
-                    let _guard = ScriptThread::user_interacting_guard();
-                    xr.upcast::<EventTarget>().fire_bubbling_event(cx, atom!("sessionavailable"));
+                let global = xr.global();
+                let document = global.as_window().Document();
+                if !document.is_fully_active() {
+                    return;
+                }
+                xr.launched_at.set(Some(CrossProcessInstant::now()));
+                xr.upcast::<EventTarget>().fire_bubbling_event(cx, atom!("sessionavailable"));
             }));
     }
 }
