@@ -2436,3 +2436,31 @@ specification/test discrepancy remains recorded separately. See
 `docs/validation-xr-visibility-mask-2026-10-29.json`. Broader WebXR and later
 rendering work remain; geolocation implementation and API testing remain
 excluded and its default stays disabled.
+
+
+## Reproducible core WebXR audit
+
+`tests/webxr-core-wpt.py EMBEDDER OUTPUT` runs the local top-level core WPT pages
+with the separate optimized `xr-native-input` example in a private compositor,
+profile and bus. Run it with the same Python dependencies and compositor/library
+environment as the other XR test drivers. It preserves original assertion and
+helper bodies, real response policy headers, and original test paths. Only the
+vendor completion-reporting seam and transport are adapted. The command returns
+1 whenever original cases do not pass; harness completion is recorded separately
+and is never treated as a conformance pass.
+
+On the unchanged b8dafc84175 implementation, 86 original pages completed with
+262 reported passing cases and 16 non-passing cases: eight setup mismatches,
+two specification/test disagreements, two disabled OffscreenCanvas cases and
+four optional automatic viewport-hint cases. The WebDriver-dependent original
+visibility page is listed separately. Its native minimize/restore/workspace/XR
+visibility counterpart passes 77 checks, and no-headset inline rendering passes
+30 checks. The promoted command reproduces every original case outcome.
+
+See `docs/validation-xr-core-audit-2026-10-29.json` for the classification and
+limits. The unreturned watcher in the original sub-frame case remains an
+explicit evidence limitation; direct event-order and frame-lifetime checks are
+retained in the visibility-mask validation. Current-specification interface
+coverage, including tracked sources absent from the older local test snapshot,
+still needs review. OffscreenCanvas remains disabled, and geolocation
+implementation and API testing remain excluded with its default disabled.

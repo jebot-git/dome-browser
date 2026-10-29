@@ -1,0 +1,223 @@
+{
+  "change": "Add a reproducible current-candidate core WebXR audit",
+  "audited_browser_implementation_commit": "b8dafc84175e5298585b6ace2b03611c7843a654",
+  "production_browser_code_changed": false,
+  "optimized_artifacts": {
+    "browser": {
+      "path": "/home/blux/de-xr/artifacts/servo-rendering-goal/webxr-visibility-mask-v1/browser-candidate-r4",
+      "sha256": "67b7b1187154a5f04eb1e7f561820b8eb9efea621cff265c6970e0e90171dd30"
+    },
+    "embedder": {
+      "path": "/home/blux/de-xr/artifacts/servo-rendering-goal/webxr-visibility-mask-v1/embedder-candidate-r4",
+      "sha256": "213f09616c5e2696a3350adfb601652d99c5ccaf1073239cc9b0612b45b30f80"
+    }
+  },
+  "core_pages_in_snapshot": 87,
+  "original_pages_executed": 86,
+  "reported_original_cases_passed": 262,
+  "reported_nonpassing_cases": 16,
+  "failed_assertion_cases": 12,
+  "optional_not_implemented_cases": 4,
+  "nonpassing_suite_harness_statuses": {},
+  "classifications": [
+    {
+      "classification": "setup_mismatch",
+      "cases": 8,
+      "details": [
+        {
+          "suite": "render_state_vertical_fov_inline",
+          "cases": 2,
+          "reason": "The shared helper requires an immersive-compatible context with an inline-only device before the field-of-view assertions run. The current compatibility algorithm rejects that setup; native no-headset projection/FOV checks pass."
+        },
+        {
+          "suite": "xrFrame_getViewerPose_getPose_identities",
+          "cases": 2,
+          "reason": "Test device data omits the required orientation member of the rigid-transform dictionary."
+        },
+        {
+          "suite": "xrView_oneframeupdate",
+          "cases": 2,
+          "reason": "The fixture supplies a field of view that takes precedence over its conflicting projection matrix, then expects the supplied conflicting matrix."
+        },
+        {
+          "suite": "xrWebGLLayer_framebuffer_scale",
+          "cases": 2,
+          "reason": "The assertion reads a vendor-private defaultFramebufferScale_ property that the public test API does not require, yielding an undefined/NaN expected value."
+        }
+      ]
+    },
+    {
+      "classification": "specification_test_disagreement",
+      "cases": 2,
+      "details": [
+        {
+          "suite": "webxr_permissions_policy",
+          "cases": 1,
+          "reason": "The current makeXRCompatible algorithm resolves without enabling XR compatibility when policy disallows tracking; this assertion expects rejection."
+        },
+        {
+          "suite": "xrSession_viewer_availability",
+          "cases": 1,
+          "reason": "The current inline activation algorithm exempts inline-stereo only; this assertion additionally exempts explicitly requested viewer features."
+        }
+      ]
+    },
+    {
+      "classification": "disabled_optional_api",
+      "cases": 2,
+      "details": [
+        {
+          "suite": "webGLCanvasContext_create_xrcompatible",
+          "cases": 2,
+          "reason": "OffscreenCanvas is disabled by the current shipping and test-embedder defaults. Window-canvas compatibility cases pass; no enabled OffscreenCanvas support is claimed."
+        }
+      ]
+    },
+    {
+      "classification": "optional_not_implemented",
+      "cases": 4,
+      "details": [
+        {
+          "suite": "xr_viewport_scale",
+          "cases": 4,
+          "reason": "recommendedViewportScale is null; the specification permits the absence of an automatic recommendation heuristic. Explicit viewport-scale handling remains separately validated."
+        }
+      ]
+    }
+  ],
+  "excluded_original_page": {
+    "suite": "xrSession_visibilityState_inline",
+    "reason": "Requires WebDriver window-state commands",
+    "native_counterpart_checks_passed": 77,
+    "original_page_claimed_passed": false
+  },
+  "native_no_headset_inline_checks_passed": 30,
+  "native_checks_passed": 107,
+  "promoted_runner_reproduced_all_original_case_outcomes": true,
+  "command_exit_policy": "Exit 1 for any nonpassing original case, even when the harness completes; preserve original outcomes and classification separately",
+  "assertion_bodies_changed": false,
+  "setup_helpers_changed": false,
+  "original_policy_headers_preserved": true,
+  "transport": "Private loopback HTTP with original test paths and verbatim inline helper resources; vendor completion reporting adapter",
+  "source_sha256": {
+    "tests/wpt/tests/webxr/events_input_source_recreation.https.html": "413e6fc52e8e87445a1a078efab4fdd8d510d9b6758231b8c7927a3344b74517",
+    "tests/wpt/tests/resources/testharness.js": "7a108d7cfa98ac413ddb38f82fd509fb2037dfcc25ccf466567520cbb6bdf1fa",
+    "tests/wpt/tests/webxr/resources/webxr_util.js": "9b5e6e3608ac38ebf4e013fa95f19e44d9611864fe894c2838612938c3d286fd",
+    "tests/wpt/tests/webxr/resources/webxr_test_constants.js": "6fd216e2544b7a15cef6f9b07b5faaf806eacf176b35da067e457a3b1f19668d",
+    "tests/wpt/tests/webxr/events_input_sources_change.https.html": "b22e0c6e1bc932806704b92a29b4c5cfa48914bebfc69f9dc724da791a2d13a6",
+    "tests/wpt/tests/webxr/events_referenceSpace_reset_immersive.https.html": "7b163b7fb80fd28840d206970f8fe8eb283bee7cb442a9dabb6fd6d9b72ed11b",
+    "tests/wpt/tests/webxr/events_referenceSpace_reset_inline.https.html": "5bcb25c115fb9799e994d208c7ca6a5cdafc8b2504d60881aa37098f9426afac",
+    "tests/wpt/tests/webxr/events_session_select.https.html": "cba6c17143b47bdb04ffce34d34230766d68e342bddc66346becc89883aa84fb",
+    "tests/wpt/tests/webxr/events_session_select_subframe.https.html": "b269c8f6b511679caed26a36fd999817b2b3c6e3d1d131dec1fd9c77a836cb11",
+    "tests/wpt/tests/webxr/events_session_squeeze.https.html": "cf0e9fc6b2cee616f0f217e66214a1dcd4e8200a2930329f66a51c504735ac0a",
+    "tests/wpt/tests/webxr/exclusive_requestFrame_nolayer.https.html": "e582e67a1aa29a66e08b63bc66c8a43c7b5e5f865e4cb3023cfb663375b3badc",
+    "tests/wpt/tests/webxr/getInputPose_handedness.https.html": "e84f59ef3252f9f10f6d97108b7da17d8021fa51a0ad50de7b74f3c6a35b1025",
+    "tests/wpt/tests/webxr/getInputPose_pointer.https.html": "93c658edeef3e075b53ac07f55f14de6e3c7a0c38d59b785b84f62e1a3d64596",
+    "tests/wpt/tests/webxr/resources/webxr_test_asserts.js": "4b7a4722f49bb59fc6c28eb06854ce033c06241f143545aff9ee775e0df21274",
+    "tests/wpt/tests/webxr/getViewerPose_emulatedPosition.https.html": "bfe46d75048bbca23e16c06c5b2222e7035810e2252680eda969e95af023d834",
+    "tests/wpt/tests/webxr/navigator_xr_sameObject.https.html": "ee4c36a1f90257619114b178f3f532bfed047e9be9ffb8877c6a7511e4d24a92",
+    "tests/wpt/tests/webxr/render_state_update.https.html": "a914f74d925366f2a375174c220df579c86588163780d9410da8a9757313cec3",
+    "tests/wpt/tests/webxr/render_state_update_inline.https.html": "261b696cca9b9e5b00b46b3ee5bb9692dfb826ec23540e690eb5e427daca0e6b",
+    "tests/wpt/tests/webxr/render_state_vertical_fov_immersive.https.html": "c770ec33062eeadd80ac621cfbf10ec575b11d174072f791f1106838680f3da7",
+    "tests/wpt/tests/webxr/render_state_vertical_fov_inline.https.html": "b5794c48c9dbafe17de69ad504bf8c30c2c450791c129aedf47562a9f4a53726",
+    "tests/wpt/tests/webxr/webGLCanvasContext_create_xrcompatible.https.html": "da6d20dda077683993a51a4721b03bc54ae65b59ed623802c9c971f440081b64",
+    "tests/wpt/tests/webxr/webGLCanvasContext_makecompatible_contextlost.https.html": "bd63778603a2e9d0bbe61929a3a54dd61c9d2c402c7dba10442b197852909e90",
+    "tests/wpt/tests/webxr/webGLCanvasContext_makecompatible_reentrant.https.html": "dac799155ff76a6cc7c64cffbd11eecafc9e90a234340552ca474e10814bb116",
+    "tests/wpt/tests/webxr/webxr_permissions_policy.https.html": "b3d992c657377b061c9300e657235b9b4e91c0982da0c5911c26f4c85c1b2a18",
+    "tests/wpt/tests/webxr/webxr_permissions_policy.https.html.headers": "15df3dbdd30ea01a452cc97ac2c25a730a0444f27980cce536ef87f259d3d9bd",
+    "tests/wpt/tests/webxr/xrBoundedReferenceSpace_updates.https.html": "6cf4b41ab295549002ebc19ce84aa816a50e3cc1cfd89cd5d1e6a8deb0d0d8c2",
+    "tests/wpt/tests/webxr/xrDevice_disconnect_ends.https.html": "8f04148b24f9393ea41fcf446dccc8b6ec00d9a61123acabb19f466e50d137c8",
+    "tests/wpt/tests/webxr/xrDevice_isSessionSupported_immersive.https.html": "91ede1e47fb60a0968170af97a9662f6268dbdd69c0fe3b5c443faa4e2c00854",
+    "tests/wpt/tests/webxr/xrDevice_isSessionSupported_immersive_unsupported.https.html": "b752bf14dd44a9ae2902d6a720470d727e3061c58e6db219b4515d6a2e4d8675",
+    "tests/wpt/tests/webxr/xrDevice_isSessionSupported_inline.https.html": "9815a6d2678836e42467c1c3d0e4ea5a29498d282cb10b41bc5e2ef7fffbe892",
+    "tests/wpt/tests/webxr/xrDevice_requestSession_immersive.https.html": "f52ac22354019db88411982fbf580c1ed3bd238a7c42fbfc4ccbd8ee6f88a510",
+    "tests/wpt/tests/webxr/xrDevice_requestSession_immersive_no_gesture.https.html": "6dac9aa60bbcb775d2d26c9f8de3fc2cb568cd418c94541cffae60c09d252735",
+    "tests/wpt/tests/webxr/xrDevice_requestSession_immersive_unsupported.https.html": "013a546a427fe32a531fec5220947f700f50f7a3e1001324d7f033a708193fc6",
+    "tests/wpt/tests/webxr/xrDevice_requestSession_no_mode.https.html": "e4856dd0ecbf7037e33a80e5568200d2fa0ff41d2f67a6da306125a59fbba82c",
+    "tests/wpt/tests/webxr/xrDevice_requestSession_non_immersive_no_gesture.https.html": "aaa95ee5bad81db42a3e47f743bce6bf1ae6b2a92f22455009d2aafe5ace2f25",
+    "tests/wpt/tests/webxr/xrDevice_requestSession_optionalFeatures.https.html": "a2d8ea7dee4c02e20980c3d7b354881ee4ace2a8a69c14751519d015ca59e2ef",
+    "tests/wpt/tests/webxr/xrDevice_requestSession_requiredFeatures_unknown.https.html": "0cf0b8d492e8a6429eea335f8f17203d082102ce7d57c9001a1955f6606b797a",
+    "tests/wpt/tests/webxr/xrFrame_getPose.https.html": "7081fe1cc7015229578f0df42c1a16082d944c74941994a5a72be08e8be58bba",
+    "tests/wpt/tests/webxr/xrFrame_getViewerPose_getPose.https.html": "6a0fc696396140e807fe4ca4d0762699e1e9cadf01f9aa89b2366d580bf99a33",
+    "tests/wpt/tests/webxr/xrFrame_getViewerPose_getPose_identities.https.html": "6b67a90e58b1453bb6451c6b172f11693d6f48231c22bdd78c41da7c0dfb9d02",
+    "tests/wpt/tests/webxr/xrFrame_lifetime.https.html": "5ed970e5e1a01ed1bce7361ae1390074c8d87070bfddeddfbd25a5d62d62c77f",
+    "tests/wpt/tests/webxr/xrFrame_session_sameObject.https.html": "f23dcfa44594f2f656695cb0c8c5942d5520785a5316ee0ca9342330eec59188",
+    "tests/wpt/tests/webxr/xrInputSource_add_remove.https.html": "7d783dd7c0a5544a18c856882be26fc82e78c632e4daae78ee8d8b690c961353",
+    "tests/wpt/tests/webxr/xrInputSource_emulatedPosition.https.html": "e3640e02dd93cb39d23d1a6757ce10575dcc8631e24b5c89e9d000d82440cf01",
+    "tests/wpt/tests/webxr/xrInputSource_getPose_targetRay_grip.https.html": "a8c1dbde08754173da8e0534342ac5f09a3ace39fc4a7555249fc264dc5fb65d",
+    "tests/wpt/tests/webxr/xrInputSource_profiles.https.html": "49b97d4d3b122e260ddac081524ff23aca04723083e39ae55a957e3d1272e63e",
+    "tests/wpt/tests/webxr/xrInputSource_sameObject.https.html": "926589696c52cfc80756537a9c74d5f3936c7110e489471f5639226271f2ef56",
+    "tests/wpt/tests/webxr/xrPose_transform_sameObject.https.html": "3c1bba8a7c7ee0f783f03eb7566cc487ae9f54fd65f3fc599e042a95b709b8aa",
+    "tests/wpt/tests/webxr/xrReferenceSpace_originOffset.https.html": "edcca2d7e4d26cd77e348451659537954bc205b77bfd3f8d83043a4e06501164",
+    "tests/wpt/tests/webxr/xrReferenceSpace_originOffsetBounded.https.html": "28b7f870e5335d764aefd879203ba64cba08d85286c7375cebc5e00a91f42827",
+    "tests/wpt/tests/webxr/xrReferenceSpace_originOffset_viewer.https.html": "e15b7100c264ab9626afe9d680878981f784c1447cf972ee8af0223a07f235a6",
+    "tests/wpt/tests/webxr/xrReferenceSpace_relationships.https.html": "b51841668c82c3417390ab16f1006c4f33abbdd20879ebc591b0c885c180fc1f",
+    "tests/wpt/tests/webxr/xrRigidTransform_constructor.https.html": "052ce63f5f79bf46a44f3c05d8a79571b0d6f0a0f8dc7d47136b41af7abddf91",
+    "tests/wpt/tests/webxr/xrRigidTransform_inverse.https.html": "0ddc996aca0c1d75b8866051d9975cf967fbdcb468293f9fb335ff5c45473297",
+    "tests/wpt/tests/webxr/resources/webxr_math_utils.js": "aa4adceaec381f243590086f19b0e059b5690cc37e9e1e726b37097195b299f0",
+    "tests/wpt/tests/webxr/xrRigidTransform_matrix.https.html": "fbd8dbd8ef691eb0b1c44afda64a2ca876dc2fc20754d002a95fc1ce1af195b6",
+    "tests/wpt/tests/webxr/xrRigidTransform_sameObject.https.html": "79b69b27995f4cbaffbc9abeb7f66f8ca8a513c5d1e864ff25b84616679feec0",
+    "tests/wpt/tests/webxr/xrSession_cancelAnimationFrame.https.html": "fdc94621fa5041a43e3d08e4f32c3963fd821c297c3b8b93d3c37bcdc56bdaf0",
+    "tests/wpt/tests/webxr/xrSession_cancelAnimationFrame_invalidhandle.https.html": "e89d2cbfe1b8186847add7a43e7f4211a55a35111a6c78a7a74cc8fc85d6eea6",
+    "tests/wpt/tests/webxr/xrSession_enabledFeatures.https.html": "8ef8f85e7dc6bfd8622620a1ae484fab968e3be890fc96c6e9f7a7a2a2bf5e2c",
+    "tests/wpt/tests/webxr/xrSession_end.https.html": "943c41087cbf82b543a0ffbb1548534b904f6efac50775e636510220678a37d4",
+    "tests/wpt/tests/webxr/xrSession_features_deviceSupport.https.html": "afc415dc4036b30fc5e3ef629430544cdfd4a0b853d38ba47f2076859454011e",
+    "tests/wpt/tests/webxr/xrSession_input_events_end.https.html": "c532346cd2510d110f960f7b05fb060d7d114f25eb27be5fc3cb7b2f355a61b2",
+    "tests/wpt/tests/webxr/xrSession_prevent_multiple_exclusive.https.html": "05522215cb8d88988768448b06138cccc26d7f86bf876d8b2fb50bbd35c799c1",
+    "tests/wpt/tests/webxr/xrSession_requestAnimationFrame_callback_calls.https.html": "b04f38599c452e126139fa7670bc59b86515c443f2cc41845ae57f1413224b97",
+    "tests/wpt/tests/webxr/xrSession_requestAnimationFrame_data_valid.https.html": "ded3131c7a4eca28d0849c9c85ae7fafd7aa07895c3fe92be3ce64ad2b21d97a",
+    "tests/wpt/tests/webxr/xrSession_requestAnimationFrame_getViewerPose.https.html": "44dbbff0e1142b923dddf5ad07214e3f68bfee2b8b105a9da692030ded2591de",
+    "tests/wpt/tests/webxr/xrSession_requestAnimationFrame_timestamp.https.html": "527f0eff162240b6384ed4099bb8bb56e12a507c18d9d89f8b36976634b41e91",
+    "tests/wpt/tests/webxr/xrSession_requestReferenceSpace.https.html": "c57426d9a0d27cf121c1a936574c4cfeffbf1178b9fb8ae4c2ba464ce74f33c8",
+    "tests/wpt/tests/webxr/xrSession_requestReferenceSpace_features.https.html": "c5802d271f8318b0a11fca849f9fd62a0cdbcdc0852b2ba1b650f54d020cd03c",
+    "tests/wpt/tests/webxr/xrSession_requestSessionDuringEnd.https.html": "1ce05c754abec1b3eb7be43b5a09d93c6a18ae043cfd563857d4a018ec7dca61",
+    "tests/wpt/tests/webxr/xrSession_sameObject.https.html": "f8e1ca5c855c3944552540234b3a0a78b46c55ab3a7e462c7aa8cc7180cfe8cb",
+    "tests/wpt/tests/webxr/xrSession_viewer_availability.https.html": "2892b4e9c50800cbcb883619fa641d2169733e794b71ed7a2dfb05251fbc640a",
+    "tests/wpt/tests/webxr/xrSession_viewer_referenceSpace.https.html": "4855a1934411a8831ea20f758bed49f35253d08801f13172ea5944b9ca6217da",
+    "tests/wpt/tests/webxr/xrSession_visibilityState.https.html": "1b657024fbbcb0f4c24bb7cace0fae1bb30da1103e1c67934fcab68875029485",
+    "tests/wpt/tests/webxr/xrSession_visibilityState_inline.https.html": "dc94637c7283f86b28eb337dddfe9e9534f160a843e63923cf461170b2f91df8",
+    "tests/wpt/tests/webxr/xrStationaryReferenceSpace_floorlevel_updates.https.html": "681352b419d68cd4a4bd45292985fe02b8227ab2fefcf92ed34f0222e31ccdf0",
+    "tests/wpt/tests/webxr/xrView_eyes.https.html": "29345ba1c0b045f422b7f708b22bf7229c29a2df9910d5864da4260eb8e5a8b8",
+    "tests/wpt/tests/webxr/xrView_match.https.html": "5f49b063b66226b918eb086fc955e07697de4d24b9125691092fadc406d8aacb",
+    "tests/wpt/tests/webxr/xrView_oneframeupdate.https.html": "26d56b9402a47e37849966efb7ca2effe2dd7a2a6a4028def3f7839a3de8ced0",
+    "tests/wpt/tests/webxr/xrView_sameObject.https.html": "1ee029a485a89ff53f5af161fb400e3ed87e1f1cba20e8471e38f7062246bf52",
+    "tests/wpt/tests/webxr/xrView_visibility_mask_change.https.html": "4de22c118c7ac7d21f2429fde0ab5e5d627e424ce02062bacca645ee2688bb01",
+    "tests/wpt/tests/webxr/xrViewerPose_secondaryViews.https.html": "816b50fb1b37ffd60543788fcd38e4c87f83fdfce7b22e63143c3e7da42b208f",
+    "tests/wpt/tests/webxr/xrViewerPose_views_sameObject.https.html": "0cf0c12195fe488a527973839ea52e610e1f784c955fa31f88518e0d6f312cf1",
+    "tests/wpt/tests/webxr/xrViewport_valid.https.html": "7e5ebac15bd9f0421edda3c09c5e0b584e48e168201d36aae8069882f2701292",
+    "tests/wpt/tests/webxr/xrWebGLLayer_constructor.https.html": "ea1feb3b803c7b41baaad353674c75766e46e2ed9de4ad6761ddf49cd1b3a39b",
+    "tests/wpt/tests/webxr/xrWebGLLayer_framebuffer_draw.https.html": "46169d6bd7df288ef2de9617aea864ab54c3f2a0abaf3e3a43242cc5ba5cee4a",
+    "tests/wpt/tests/webxr/xrWebGLLayer_framebuffer_sameObject.https.html": "f069893900d43758eaa69d92e0a36cbbb975a77ba0065654ab082a6c6dc26fb0",
+    "tests/wpt/tests/webxr/xrWebGLLayer_framebuffer_scale.https.html": "b29a22a29896eb9ecbf3543e4ce4ba09a5d5cf665fc5113be4a215206e550b8a",
+    "tests/wpt/tests/webxr/xrWebGLLayer_opaque_framebuffer.https.html": "5afa4a415ab79e439156a84b6cfe0dcde720d2b1b7b40f402f55020af2ac7172",
+    "tests/wpt/tests/webxr/xrWebGLLayer_opaque_framebuffer_stencil.https.html": "34cb951e1682288e408ac4669f4b6ef90b0cf86963b04375f877163b0ef4b0be",
+    "tests/wpt/tests/webxr/xrWebGLLayer_viewports.https.html": "c97867d529a6ef58b9cb00ac9a56dc1d456c9e91c05b008e60332d5f40825aae",
+    "tests/wpt/tests/webxr/xr_viewport_scale.https.html": "2b3dce98f1da897b1de17178757949791b60125f70cfdd891d2f3c46aa098bb7",
+    "ports/dome-fltk/tests/webxr-core-wpt.py": "bd7c0239ecc38dd45b89f9066173eb76a2fde806c962a51355c04b9320d6dbd7",
+    "ports/dome-fltk/tests/webxr-bounded.py": "afa494252b6a38fee4c0cb899e8b039fdc0efd9d45a1780d7c2edab2eff26375",
+    "ports/dome-fltk/tests/private_wayland.py": "ad7aa65bd7c36a55ba33bdb62b87260e870446b57559ff8bf8622e128528ff38"
+  },
+  "subframe_source_caveat": "Two reported sub-frame passes do not independently prove event behavior because the source does not return its watcher promise. The prior visibility-mask validation contains direct observed event-order/frame-lifetime checks.",
+  "retained_unchanged_binary_validation": "validation-xr-visibility-mask-2026-10-29.json",
+  "retained_unit_and_1515_runtime_checks_rerun": false,
+  "full_wpt_runner": false,
+  "all_original_assertions_passed": false,
+  "whole_api_or_physical_conformance_claim": false,
+  "geolocation_implementation_and_api_tests_excluded": true,
+  "geolocation_default_disabled": true,
+  "remaining": [
+    "Compare the current core specification against interfaces absent from the older local test snapshot, beginning with trackedSources and trackedsourceschange",
+    "Keep disabled optional capabilities and specification/test disagreements explicit",
+    "Complete later rendering/scroll-indicator checks and pending system installation verification"
+  ],
+  "references": [
+    "https://www.w3.org/TR/webxr/#dom-webglrenderingcontextbase-makexrcompatible",
+    "https://www.w3.org/TR/webxr/#immersiveness",
+    "https://immersive-web.github.io/webxr-test-api/#dictdef-fakexrrigidtransforminit",
+    "https://immersive-web.github.io/webxr-test-api/#parse-a-view",
+    "https://www.w3.org/TR/webxr/#dom-xrview-recommendedviewportscale",
+    "https://www.w3.org/TR/webxr/#dom-xrsession-trackedsources"
+  ],
+  "full_goal_achieved": false,
+  "validated_utc": "2026-10-29T11:42:15.069727+00:00"
+}
