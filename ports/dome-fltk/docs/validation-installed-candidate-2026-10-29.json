@@ -1,0 +1,63 @@
+{
+  "verified_utc": "2026-10-29T14:59:48.459327+00:00",
+  "status": "Optimized release candidate installed and verified",
+  "implementation_commit": "78165f94ed1b6007e6981b4f052e9dfef69c834e",
+  "installed_file": {
+    "path": "/usr/local/libexec/dome-browser/dome-browser",
+    "sha256": "3e8fb85d8015a9846b41e982af1dd5d5e916cdb2e2c57ac3ad07c98e5cb9d187",
+    "owner_uid": 0,
+    "mode": "0755"
+  },
+  "version": "Dome Browser 0.1.0 / Servo 0.7.0 / FLTK 1.4.5",
+  "backup": "/var/backups/dome-browser/dome-browser-before-unique-xr-grants-20261029-8784b0ee7440",
+  "latest_installed_runtime_checks": 238,
+  "latest_installed_runtime_breakdown": {
+    "tracked-native": 40,
+    "tracked-native-ungranted": 35,
+    "history": 14,
+    "cookie-policy": 149
+  },
+  "latest_installed_worker_shutdown_scenarios": 3,
+  "predecessor_installed_runtime_checks": 238,
+  "predecessor_installed_worker_shutdown_scenarios": 3,
+  "candidate_validation": {
+    "targeted_unit_tests_passed": 138,
+    "runtime_checks_passed": 2319,
+    "sustained_enabled_adblock_seconds": 900,
+    "original_webxr_audit": {
+      "reported_passes": 260,
+      "classified_nonpassing": 18,
+      "original_assertions_changed": false
+    },
+    "default_wayland_gpu": "Intel Arc A770",
+    "scroll_indicator_acceptance_checks": 97,
+    "smallnet_and_handoff_integration_checks": 144,
+    "desktop_and_gpu_acceptance_checks": 131
+  },
+  "evidence": {
+    "latest_install": "webxr-feature-grants-v1/installation-verification-r5.json",
+    "latest_install_result": "webxr-feature-grants-v1/install-result-r5.json",
+    "predecessor_install": "webxr-tracked-sources-v1/installation-verification-r10.json",
+    "feature_and_stability": "webxr-feature-grants-v1/final-validation-r2.json",
+    "scroll_indicator": "scroll-indicator-acceptance-v2/acceptance-r7.json",
+    "protocol_and_handoff": "final-integration-acceptance-v1/acceptance-r1.json",
+    "desktop_gpu": "candidate-desktop-acceptance-v1/acceptance-r1.json",
+    "requirements_review": "requirements-review-v1/current-review-r3.json"
+  },
+  "no_missing_dependencies": true,
+  "backup_verified": true,
+  "installed_binary_matches_validated_candidate": true,
+  "wrapper_unchanged": true,
+  "xr_bridge_unchanged": true,
+  "active_desktop_session_preserved": true,
+  "sessions_restarted": false,
+  "implementation_source_unchanged_since_candidate_build": true,
+  "limits": [
+    "General rendering and provisional stability are assessed against the user-accepted scope and recorded workloads; no every-site or bounded-memory guarantee",
+    "Original WebXR audit retains 18 classified nonpassing cases; no full WebXR, optional API or all-headset conformance claim",
+    "Physical GPU reset and physical touchscreen coverage are not established by private fixtures",
+    "Native media playback and geolocation implementation/API tests remain excluded; geolocation stays disabled",
+    "Smallnet remains outside web cosmetic/privacy filtering; per-protocol documented optional-feature and interoperability limits remain",
+    "GPU rendering currently uses pixel readback for FLTK presentation, without a zero-copy presentation claim"
+  ]
+}

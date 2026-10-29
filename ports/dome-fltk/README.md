@@ -1,5 +1,25 @@
 # Dome Browser
 
+## Installed candidate — 29 October 2026
+
+The optimized release implementing `78165f94ed1b` is installed at
+`/usr/local/libexec/dome-browser/dome-browser`. Its bytes match the candidate
+validated by 138 targeted unit tests and 2,319 runtime checks. Installed-path
+verification also passes 238 checks: native WebXR input/provider behavior,
+paginated history and third-party cookie policy, plus three worker-shutdown
+scenarios. Dependencies resolve; the existing desktop and XR session remain
+intact. The predecessor update passed its own 238 checks and three shutdown
+scenarios before this update was installed.
+
+The latest evidence includes measured GPU acceleration, transient scroll-cue
+input/fade/scale checks, mixed sessions across all 22 supported native schemes,
+and mail/torrent/Misfin, PDF and external-player handoffs. General rendering and
+provisional stability retain the user's accepted scope. The original WebXR audit
+keeps 18 classified nonpassing cases; full API/device conformance is not claimed.
+Geolocation and native media playback remain excluded. Earlier dated records
+retain their original installation state; the current deployment record is
+[validation-installed-candidate-2026-10-29.json](docs/validation-installed-candidate-2026-10-29.json).
+
 The latest scoped native input and XR regression results are recorded in
 [the October 2026 validation report](docs/validation-2026-10-27.md).
 Native reset monitoring and delayed WebGL restoration results are recorded in
