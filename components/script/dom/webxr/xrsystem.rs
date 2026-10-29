@@ -21,7 +21,6 @@ use crate::conversions::Convert;
 use crate::dom::bindings::codegen::Bindings::XRSystemBinding::{
     XRSessionInit, XRSessionMode, XRSystemMethods,
 };
-use crate::dom::bindings::conversions::{ConversionResult, FromJSValConvertible};
 use crate::dom::bindings::error::Error;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
@@ -286,57 +285,43 @@ impl XRSystemMethods<crate::DomTypeHolder> for XRSystem {
             return promise;
         }
 
+        let mut required_features: Vec<String> = init.requiredFeatures
+            .as_ref()
+            .map(|features| features.iter().map(ToString::to_string).collect())
+            .unwrap_or_default();
+        let mut optional_features: Vec<String> = init.optionalFeatures
+            .as_ref()
+            .map(|features| features.iter().map(ToString::to_string).collect())
+            .unwrap_or_default();
+
+        // Check explicitly requested features before adding the implicit viewer
+        // feature or filtering unsupported/policy-denied optional features.
+        // https://www.w3.org/TR/webxr/#immersiveness
+        let requires_user_intent = mode != XRSessionMode::Inline
+            || required_features
+                .iter()
+                .chain(&optional_features)
+                .any(|feature| feature != "inline-stereo");
+        if requires_user_intent && !window.has_transient_activation() && !self.has_launch_activation()
+        {
+            if pref!(dom_webxr_unsafe_assume_user_intent) {
+                warn!(
+                    "The dom.webxr.unsafe-assume-user-intent preference assumes user intent to enter WebXR."
+                );
+            } else {
+                promise.reject_error(realm, Error::Security(None));
+                return promise;
+            }
+        }
+
         let generation = self.session_request_generation.get();
         if mode != XRSessionMode::Inline {
-            if !window.has_transient_activation() && !self.has_launch_activation() {
-                if pref!(dom_webxr_unsafe_assume_user_intent) {
-                    warn!(
-                        "The dom.webxr.unsafe-assume-user-intent preference assumes user intent to enter WebXR."
-                    );
-                } else {
-                    promise.reject_error(realm, Error::Security(None));
-                    return promise;
-                }
-            }
-
             if self.pending_or_active_session() {
                 promise.reject_error(realm, Error::InvalidState(None));
                 return promise;
             }
 
             self.set_pending();
-        }
-
-        let mut required_features = vec![];
-        let mut optional_features = vec![];
-
-        if let Some(ref r) = init.requiredFeatures {
-            for feature in r {
-                if let Ok(ConversionResult::Success(s)) =
-                    String::from_jsval(realm, feature.as_handle_value(), ())
-                {
-                    required_features.push(s)
-                } else {
-                    warn!("Unable to convert required feature to string");
-                    if mode != XRSessionMode::Inline {
-                        self.pending_immersive_session.set(false);
-                    }
-                    promise.reject_error(realm, Error::NotSupported(None));
-                    return promise;
-                }
-            }
-        }
-
-        if let Some(ref o) = init.optionalFeatures {
-            for feature in o {
-                if let Ok(ConversionResult::Success(s)) =
-                    String::from_jsval(realm, feature.as_handle_value(), ())
-                {
-                    optional_features.push(s)
-                } else {
-                    warn!("Unable to convert optional feature to string");
-                }
-            }
         }
 
         if !required_features.contains(&"viewer".to_string()) {

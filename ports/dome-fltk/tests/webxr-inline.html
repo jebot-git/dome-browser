@@ -41,10 +41,11 @@ function drawProjectedTriangle(projection){
 (async()=>{
  check(await navigator.xr.isSessionSupported('inline'),'Inline support is available without headset tracking');
  report('support',{immersive:await navigator.xr.isSessionSupported('immersive-vr')});
- inline=await navigator.xr.requestSession('inline',{optionalFeatures:['local-floor','unbounded']});
+ check(await rejects(()=>navigator.xr.requestSession('inline',{optionalFeatures:['local-floor','unbounded']}),'SecurityError'),'Optional inline tracking features require activation before capability filtering');
+ inline=await navigator.xr.requestSession('inline');
  check(inline.visibilityState==='visible'&&inline.inputSources.length===0,'Sensor-free inline session has no tracked input sources');
- check(inline.enabledFeatures.includes('viewer')&&!inline.enabledFeatures.includes('local-floor')&&!inline.enabledFeatures.includes('unbounded'),'Inline grants viewer and omits unsupported optional spatial features');
- check(await rejects(()=>navigator.xr.requestSession('inline',{requiredFeatures:['local']}),'NotSupportedError'),'Unsupported required spatial feature is rejected');
+ check(inline.enabledFeatures.includes('viewer')&&!inline.enabledFeatures.includes('local-floor')&&!inline.enabledFeatures.includes('unbounded'),'Default inline grants only sensor-free viewer features');
+ check(await rejects(()=>navigator.xr.requestSession('inline',{requiredFeatures:['local']}),'SecurityError'),'Required inline tracking features require activation before capability checks');
  check(await rejects(()=>inline.requestReferenceSpace('local'),'NotSupportedError'),'Inline does not expose a local tracking reference space');
  viewer=await inline.requestReferenceSpace('viewer');
  check(near(inline.renderState.inlineVerticalFieldOfView,Math.PI/2),'Inline render state starts with the standard vertical field of view');
@@ -88,6 +89,8 @@ function drawProjectedTriangle(projection){
  }
 })().catch(fail);
 start.onclick=async()=>{try{
+ const optional=await navigator.xr.requestSession('inline',{optionalFeatures:['local-floor','unbounded']});check(optional.enabledFeatures.includes('viewer')&&!optional.enabledFeatures.includes('local-floor')&&!optional.enabledFeatures.includes('unbounded'),'Activated inline request omits unsupported optional spatial features');await optional.end();
+ check(await rejects(()=>navigator.xr.requestSession('inline',{requiredFeatures:['local']}),'NotSupportedError'),'Activated inline request rejects unsupported required spatial features');
  immersive=await navigator.xr.requestSession('immersive-vr');start.disabled=true;
  const immersiveGL=immersiveCanvas.getContext('webgl');await immersiveGL.makeXRCompatible();
  const immersiveLayer=new XRWebGLLayer(immersive,immersiveGL);immersive.updateRenderState({baseLayer:immersiveLayer});

@@ -2382,3 +2382,30 @@ smoke samples. Details are in
 `docs/validation-xr-activation-2026-10-29.json`. Broader WebXR and later rendering
 work remain; geolocation implementation and API testing are excluded and its
 default remains disabled.
+
+
+## Inline WebXR requested-feature intent and conversion
+
+Default inline sessions remain available without activation. Explicit feature
+requests follow the current draft's inline activation rule, including its
+`inline-stereo` exception, before optional capabilities are filtered or implicit
+viewer defaults are added. Feature lists use WebIDL `DOMString` sequences so
+argument-conversion errors reject promises normally and leave later requests
+usable. Native consent and document/session lifecycle checks are retained.
+
+`XR_INPUT_STRICT_USER_ACTIVATION=1 tests/webxr-inline-intent.py EMBEDDER OUTPUT`
+checks default and explicit features, conversion failures, expiry, deferred calls
+and session recovery in the separate test embedder. The native `webxr-inline.py`
+fixture uses genuine trusted input for feature capability checks and retains
+its canvas projection, rendering, coexistence and shutdown assertions.
+
+Validation: 124 unit tests and 1,472 passing runtime checks, including 98 focused
+inline/conversion checks, 38 native inline checks, 18 original feature cases and
+12 original controller cases under strict activation settings. Three worker
+shutdown scenarios and anonymous Discord/X smoke samples also passed.
+The unchanged upstream viewer-availability case expects explicit `viewer`
+requests to bypass activation, while the current draft algorithm exempts only
+`inline-stereo`. This selected-suite discrepancy is recorded separately and is
+not counted as passing. See `docs/validation-xr-inline-intent-2026-10-29.json`.
+Broader WebXR and later rendering work remain; geolocation implementation and
+API testing remain excluded and its default stays disabled.

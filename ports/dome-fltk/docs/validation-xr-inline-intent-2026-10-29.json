@@ -1,0 +1,102 @@
+{
+  "change": "Align inline WebXR feature intent and typed feature-list conversion",
+  "base_commit": "26404a88f5e2be387d85c7354dc3ac90ce28f8d7",
+  "behavior": [
+    "Keep default/empty inline requests available without activation",
+    "Apply current draft activation rules to explicitly requested inline features before adding defaults or filtering optional capabilities",
+    "Preserve the inline-stereo exception and canonical window/application-launch intent checks",
+    "Use WebIDL DOMString sequences and normal promise rejection for argument-conversion errors",
+    "Retain native consent, feature capability checks, document lifecycle and successful session recovery",
+    "Refresh the native inline fixture to use trusted input for capability-specific requests while preserving rendering/coexistence assertions"
+  ],
+  "optimized_release": true,
+  "compiled_source_sha256": {
+    "components/script/dom/webxr/xrsystem.rs": "3c660d96a78a0a0db74a9034ac99511215ef868839570396da5f233c93c2f266",
+    "components/script_bindings/webidls/XRSystem.webidl": "8f299c8ed98d47920301603f1e03b684ea259610aaca04a404a4c9f02b7ab1ac",
+    "ports/dome-fltk/tests/webxr-inline-intent.html": "0466e08645357946788e848ee4bbe22fab054318537a043fe4332fca0e89a362",
+    "ports/dome-fltk/tests/webxr-inline-intent.py": "2261302d13188e3bf51cf952de4f0ca13917eb42dcc4177b6dae7dda6694c1ff"
+  },
+  "runtime_source_sha256": {
+    "components/script/dom/webxr/xrsystem.rs": "3c660d96a78a0a0db74a9034ac99511215ef868839570396da5f233c93c2f266",
+    "components/script_bindings/webidls/XRSystem.webidl": "8f299c8ed98d47920301603f1e03b684ea259610aaca04a404a4c9f02b7ab1ac",
+    "ports/dome-fltk/tests/webxr-inline.html": "1c32751bf79b925de0ad07d65bfc8a6ca918ec5805dbb86a0184b3e10a4f67ae",
+    "ports/dome-fltk/tests/webxr-inline-intent.html": "0466e08645357946788e848ee4bbe22fab054318537a043fe4332fca0e89a362",
+    "ports/dome-fltk/tests/webxr-inline-intent.py": "2261302d13188e3bf51cf952de4f0ca13917eb42dcc4177b6dae7dda6694c1ff"
+  },
+  "binaries_sha256": {
+    "browser": "c20f33c9b54f5700186713ede7e32db4ccf40d7f8c5749be8176804da0f8d267",
+    "embedder": "76346c37ad6d508126e03b3015fe1465d145e1af07f576690febd5434b026d3c"
+  },
+  "unit_tests": {
+    "webxr_api": 53,
+    "webxr_library_with_headless": 28,
+    "frontend_xr": 43,
+    "total_unique_passed": 124,
+    "existing_ignored_shader_test": 1
+  },
+  "runtime_checks_passed": 1472,
+  "runtime_breakdown": {
+    "inline-intent": 98,
+    "strict-actions": 12,
+    "native-activation": 21,
+    "native-activation-legacy-clock": 21,
+    "launch-activation": 12,
+    "original-inline-features": 18,
+    "mock-actions": 39,
+    "floor-model": 33,
+    "native-floor": 35,
+    "native-floor-legacy-clock": 35,
+    "tracking-loss": 19,
+    "tracking-lifecycle": 27,
+    "xr-bounded": 21,
+    "native-validity": 24,
+    "native-history": 30,
+    "native-projection": 43,
+    "xr-native-reset": 101,
+    "xr-native-input": 61,
+    "xr-inline": 38,
+    "history": 14,
+    "input-emulation-controls": 21,
+    "gamepad-policy": 749
+  },
+  "runtime_jobs": 24,
+  "focused_inline_and_conversion_checks": 98,
+  "strict_original_feature_cases_passed": 18,
+  "strict_original_controller_cases_passed": 12,
+  "selected_original_feature_suite_discrepancies": [
+    {
+      "suite": "xrSession_viewer_availability",
+      "case": "Inline viewer support with no device",
+      "passed": false,
+      "classification": "Standards/test discrepancy",
+      "detail": "The current draft inline request algorithm exempts inline-stereo only; the local and current upstream WPT assertion also exempts explicit viewer requests. Preserve original assertions and report this separately from passing cases."
+    }
+  ],
+  "native_inline_checks": 38,
+  "worker_shutdown_scenarios": 3,
+  "anonymous_discord_x_runs": 2,
+  "live_seconds_each": 30,
+  "live_samples_clean_close": true,
+  "visual_review_passed": true,
+  "adblock_enabled": true,
+  "system_library_preflight_passed": true,
+  "shipping_test_api_exposure_changed": false,
+  "full_wpt_runner": false,
+  "all_original_assertions_passed": false,
+  "physical_device_conformance_claim": false,
+  "whole_site_correctness_claim": false,
+  "geolocation_implementation_and_api_tests_excluded": true,
+  "geolocation_default_disabled": true,
+  "remaining": [
+    "Resolve the explicit-viewer specification/test discrepancy as specifications and tests evolve",
+    "Audit remaining supported core WebXR compatibility against the current candidate",
+    "Later rendering/scroll-indicator checks and pending installation verification"
+  ],
+  "references": [
+    "https://www.w3.org/TR/webxr/#immersiveness",
+    "https://www.w3.org/TR/webxr/#feature-dependencies",
+    "https://raw.githubusercontent.com/web-platform-tests/wpt/master/webxr/xrSession_viewer_availability.https.html"
+  ],
+  "full_goal_achieved": false,
+  "validated_utc": "2026-10-29T10:43:50.106683+00:00"
+}

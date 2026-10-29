@@ -1,0 +1,52 @@
+<!doctype html><meta charset=utf-8><title>WebXR inline requested-feature intent</title>
+<script>
+'use strict';
+const state=window.test={ready:true,finished:false,error:null,checks:[],frames:0,outcomes:[]};
+state.snapshot=()=>({...state,snapshot:undefined});
+const check=(passed,name)=>state.checks.push({name,passed:!!passed});
+const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function request(label,init,expected,exception=null,mode='inline'){
+ let result,kind='fulfilled',error=null,features=[];
+ try{result=navigator.xr.requestSession(mode,init);}catch(value){kind='threw';error=value;}
+ if(kind!=='threw'){
+  check(result instanceof Promise,label+': request returns a promise');
+  try{const session=await result;features=Array.from(session.enabledFeatures);await session.end();}
+  catch(value){kind='rejected';error=value;}
+ }
+ const pass=expected==='fulfilled'?kind==='fulfilled':kind==='rejected'&&(exception?error===exception:error?.name===expected);
+ check(pass,label+': '+expected);
+ state.outcomes.push({label,mode,expected,kind,error:error?.name,features});
+ return {kind,error,features};
+}
+(async()=>{
+ check(!navigator.userActivation.isActive,'Fresh fixture has no window activation');
+ for(const [label,init]of [['omitted',undefined],['empty dictionary',{}],['empty sequences',{requiredFeatures:[],optionalFeatures:[]}],['optional inline-stereo',{optionalFeatures:['inline-stereo']}],['duplicate inline-stereo',{optionalFeatures:['inline-stereo','inline-stereo']}],['stringified inline-stereo',{optionalFeatures:[{toString(){return 'inline-stereo';}}]}]]){
+  const result=await request('Unactivated '+label,init,'fulfilled');check(result.features.includes('viewer'),label+': implicit viewer feature remains available');
+ }
+ for(const [label,init]of [['required viewer',{requiredFeatures:['viewer']}],['optional viewer',{optionalFeatures:['viewer']}],['required spatial feature',{requiredFeatures:['local']}],['optional spatial feature',{optionalFeatures:['local']}],['unknown required feature',{requiredFeatures:['undefined-unicorns']}],['unknown optional feature',{optionalFeatures:['undefined-unicorns']}],['mixed stereo and viewer',{requiredFeatures:['inline-stereo'],optionalFeatures:['viewer']}],['case-sensitive feature',{optionalFeatures:['INLINE-STEREO']}],['stringified viewer',{optionalFeatures:[new String('viewer')]}],['undefined descriptor',{optionalFeatures:[undefined]}]])await request('Unactivated '+label,init,'SecurityError');
+ for(const mode of ['inline','immersive-vr'])for(const member of ['requiredFeatures','optionalFeatures']){
+  const sentinel=new Error(member+' conversion sentinel');await request(mode+' '+member+' throwing string conversion',{[member]:[{toString(){throw sentinel;}}]},'Error',sentinel,mode);
+  await request(mode+' '+member+' symbol conversion',{[member]:[Symbol('feature')]},'TypeError',null,mode);
+  await request(mode+' '+member+' noniterable sequence',{[member]:42},'TypeError',null,mode);
+ }
+ let activation;
+ navigator.xr.test.simulateUserActivation(()=>activation=navigator.userActivation.isActive);
+ check(activation,'Simulated activation establishes canonical window state');
+ for(const [label,init,expected]of [['required viewer',{requiredFeatures:['viewer']},'fulfilled'],['optional viewer',{optionalFeatures:['viewer']},'fulfilled'],['unknown optional',{optionalFeatures:['undefined-unicorns']},'fulfilled'],['unknown required',{requiredFeatures:['undefined-unicorns']},'NotSupportedError'],['unsupported spatial optional',{optionalFeatures:['local']},'fulfilled'],['unsupported spatial required',{requiredFeatures:['local']},'NotSupportedError']])await request('Activated '+label,init,expected);
+ let conversions=0;await request('String conversion occurs exactly once',{requiredFeatures:[{toString(){conversions++;return 'viewer';}}]},'fulfilled');check(conversions===1,'Feature DOMString conversion has no duplicate side effects');
+ await pause(100);await request('Deferred activated feature request',{requiredFeatures:['viewer']},'fulfilled');
+ while(navigator.userActivation.isActive)await pause(50);
+ await request('Expired feature request',{optionalFeatures:['viewer']},'SecurityError');
+ await request('Default inline after activation expiry',{},'fulfilled');
+ check(!navigator.userActivation.isActive,'Default inline creation does not establish activation');
+ const projection=[1,0,0,0,0,1,0,0,0,0,-1,-1,0,0,-.2,0];
+ const device=await navigator.xr.test.simulateDeviceConnection({supportsImmersive:true,supportedModes:['inline','immersive-vr'],supportedFeatures:['local'],viewerOrigin:{position:[0,0,0],orientation:[0,0,0,1]},views:['left','right'].map((eye,i)=>({eye,projectionMatrix:projection,viewOffset:{position:[i?.03:-.03,0,0],orientation:[0,0,0,1]},resolution:{width:128,height:96}}))});
+ navigator.xr.test.simulateUserActivation(()=>{});
+ for(const member of ['requiredFeatures','optionalFeatures']){
+  const sentinel=new Error('Activated '+member+' conversion sentinel');await request('Activated immersive '+member+' conversion failure',{[member]:[{toString(){throw sentinel;}}]},'Error',sentinel,'immersive-vr');
+  await request('Immersive recovery after '+member+' conversion failure',{requiredFeatures:['local']},'fulfilled',null,'immersive-vr');
+ }
+ await device.disconnect();check(true,'Device disconnects after conversion-error recovery');
+ state.finished=true;
+})().catch(error=>{state.error=String(error)+' '+error.stack;});
+</script>
