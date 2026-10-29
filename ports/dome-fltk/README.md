@@ -2513,3 +2513,33 @@ or counted as a pass because a harness completed. See
 Physical tracker compatibility and full WebXR conformance are not established.
 Further WebXR review and later rendering/scroll-indicator work remain.
 Geolocation implementation and API testing remain excluded and disabled.
+
+
+## Unique WebXR feature grants
+
+Feature negotiation now returns each granted descriptor once, preserving its
+first negotiated order. Required and optional repetitions share one grant;
+unsupported required features still reject the request and unsupported optional
+features remain omitted. Inline and immersive defaults retain their existing
+mode checks. Request dictionaries are not rewritten, and repeated DOMString
+conversions still occur before negotiation. The shared helper applies to the
+current native, inline, headless, OpenXR and window providers.
+
+`XR_INPUT_STRICT_USER_ACTIVATION=1 tests/webxr-feature-grants.py EMBEDDER OUTPUT`
+checks duplicate descriptors, supported/default grants, unsupported features,
+fresh frozen `enabledFeatures` arrays and conversion side effects. Validation
+passes 138 targeted unit tests and 1,947 runtime checks: 1,664 fast regression
+checks, five ended-session collection checks, and 278 checks in a 15-minute
+cosmetic/privacy filtering session using bundled lists. All eight inline and
+eight immersive session control objects were collected in the private explicit-GC
+fixture. Three worker-shutdown scenarios and reviewed anonymous Discord/X samples
+also pass with filtering enabled.
+
+The sustained session closed normally. RSS grew by 29,042 KiB from its early
+measurement window; later sampled medians were approximately flat. These timings
+and memory samples are diagnostics, not a whole-browser bounded-memory claim.
+The unchanged original core audit retains 260 reported passes and 18 classified
+nonpassing cases. See `docs/validation-xr-feature-grants-2026-10-29.json` for
+source, candidate and scope evidence. Further rendering/scroll-indicator
+acceptance and installed-path checks remain; full device conformance is not
+claimed. Geolocation implementation and API tests remain excluded and disabled.

@@ -88,13 +88,22 @@ impl SessionInit {
                 return Err(Error::UnsupportedFeature(f.into()));
             }
         }
-        let mut granted = self.required_features.clone();
+        // Feature descriptors form an ordered set. Preserve the first
+        // negotiated occurrence without repeating required/optional grants.
+        let mut granted = Vec::new();
+        for feature in &self.required_features {
+            if !granted.contains(feature) {
+                granted.push(feature.clone());
+            }
+        }
         for f in &self.optional_features {
             if f == "viewer"
                 || (f == "local" && mode != SessionMode::Inline)
                 || supported.contains(f)
             {
-                granted.push(f.clone());
+                if !granted.contains(f) {
+                    granted.push(f.clone());
+                }
             }
         }
 
@@ -106,6 +115,50 @@ impl SessionInit {
             .iter()
             .chain(self.optional_features.iter())
             .any(|x| *x == f)
+    }
+}
+
+#[cfg(test)]
+mod feature_tests {
+    use super::*;
+
+    fn init(required: &[&str], optional: &[&str]) -> SessionInit {
+        SessionInit {
+            origin: "https://example.test".into(), webview_id: None,
+            required_features: required.iter().map(|value| (*value).into()).collect(),
+            optional_features: optional.iter().map(|value| (*value).into()).collect(),
+            first_person_observer_view: false,
+        }
+    }
+
+    #[test]
+    fn feature_grants_are_unique_in_first_negotiated_order() {
+        let init = init(
+            &["local", "viewer", "tracked-sources", "local", "tracked-sources"],
+            &["viewer", "local-floor", "tracked-sources", "local-floor", "unsupported"],
+        );
+        let original = init.clone();
+        let granted = init.validate(SessionMode::ImmersiveVR,
+            &["tracked-sources".into(), "local-floor".into()]).unwrap();
+        assert_eq!(granted, ["local", "viewer", "tracked-sources", "local-floor"]);
+        assert_eq!(init, original);
+        assert!(init.feature_requested("local-floor"));
+    }
+
+    #[test]
+    fn unique_default_grants_respect_the_session_mode() {
+        let viewer = init(&["viewer", "viewer"], &["viewer", "local", "local"]);
+        assert_eq!(viewer.validate(SessionMode::Inline, &[]).unwrap(), ["viewer"]);
+        assert_eq!(viewer.validate(SessionMode::ImmersiveVR, &[]).unwrap(), ["viewer", "local"]);
+        assert_eq!(viewer.validate(SessionMode::ImmersiveAR, &[]).unwrap(), ["viewer", "local"]);
+        assert!(init(&["local", "local"], &[]).validate(SessionMode::Inline, &[]).is_err());
+    }
+
+    #[test]
+    fn duplicate_required_features_preserve_unsupported_rejection() {
+        let init = init(&["viewer", "unsupported", "unsupported"], &["local"]);
+        assert!(matches!(init.validate(SessionMode::ImmersiveVR, &[]),
+            Err(Error::UnsupportedFeature(feature)) if feature == "unsupported"));
     }
 }
 

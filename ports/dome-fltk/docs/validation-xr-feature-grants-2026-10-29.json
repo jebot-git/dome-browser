@@ -1,0 +1,189 @@
+{
+  "change": "Negotiate WebXR feature grants as a unique ordered set",
+  "base_commit": "d83a6f4852f61175de925b441b6f3b49ad2c707c",
+  "optimized_release": true,
+  "artifacts": {
+    "browser": {
+      "path": "/home/blux/de-xr/artifacts/servo-rendering-goal/webxr-feature-grants-v1/browser-candidate-r1",
+      "sha256": "3e8fb85d8015a9846b41e982af1dd5d5e916cdb2e2c57ac3ad07c98e5cb9d187"
+    },
+    "embedder": {
+      "path": "/home/blux/de-xr/artifacts/servo-rendering-goal/webxr-feature-grants-v1/embedder-candidate-r1",
+      "sha256": "43b3d343e50f0efc1915b1c3419e1b80d91d7c6da175dc707030bb9708781376"
+    }
+  },
+  "compiled_source_sha256": {
+    "components/shared/webxr/session.rs": "bfddfc02d4a837893711d40c4b71b781a29ec10f9c250d10b4930d37a5ed8160",
+    "ports/dome-fltk/tests/webxr-feature-grants.html": "1ecffcc4a7a7b1416812ee12168e495c24dea467e53089ead605e895ebc835a8",
+    "ports/dome-fltk/tests/webxr-feature-grants.py": "c814f8b85eced48276139cbd08709c2b9c9e7d1f9861c3cbbf7348b5ba60f77a"
+  },
+  "unit_tests": {
+    "api-units": 56,
+    "webxr-units": 35,
+    "frontend-units": 47
+  },
+  "unit_tests_total_passed": 138,
+  "existing_ignored_backend_test": 1,
+  "fast_runtime_checks_passed": 1664,
+  "fast_runtime_jobs": 32,
+  "fast_breakdown": {
+    "feature-grants": 9,
+    "input-end-lifecycle": 15,
+    "tracked-sources": 52,
+    "tracked-native": 40,
+    "tracked-native-ungranted": 35,
+    "visibility-mask": 41,
+    "original-mask": 2,
+    "inline-intent": 98,
+    "strict-actions": 10,
+    "native-activation": 21,
+    "native-activation-legacy-clock": 21,
+    "launch-activation": 12,
+    "original-inline-features": 18,
+    "mock-actions": 39,
+    "floor-model": 33,
+    "native-floor": 35,
+    "native-floor-legacy-clock": 35,
+    "tracking-loss": 19,
+    "tracking-lifecycle": 27,
+    "xr-bounded": 21,
+    "native-validity": 24,
+    "native-history": 30,
+    "native-projection": 43,
+    "xr-native-reset": 101,
+    "xr-native-input": 61,
+    "xr-inline": 38,
+    "history": 14,
+    "input-emulation-controls": 21,
+    "gamepad-policy": 749
+  },
+  "extended_runtime_checks_passed": 283,
+  "extended_breakdown": {
+    "xr-retention": 5,
+    "adblock-session": 278
+  },
+  "total_runtime_checks_passed": 1947,
+  "focused_feature_grant_checks_passed": 9,
+  "observed_feature_cases": [
+    {
+      "name": "duplicate descriptors",
+      "features": [
+        "local",
+        "tracked-sources",
+        "viewer",
+        "local-floor"
+      ]
+    },
+    {
+      "name": "converted duplicates",
+      "features": [
+        "local",
+        "viewer"
+      ],
+      "calls": 3
+    }
+  ],
+  "behavior": [
+    "Keep the first negotiated occurrence of each required or supported optional feature",
+    "Preserve required-feature validation and unsupported-required rejection",
+    "Preserve per-session defaults, unsupported optional filtering and unchanged request data",
+    "Apply through the shared negotiation helper used by current native, inline, headless, OpenXR and glwindow backends",
+    "Perform every DOMString conversion before negotiation, including repeated objects"
+  ],
+  "core_audit": {
+    "original_pages_executed": 86,
+    "reported_passes": 260,
+    "reported_nonpassing": 18,
+    "original_assertions_changed": false,
+    "outcomes_unchanged_from_tracked_source_baseline": true,
+    "all_original_cases_passed": false
+  },
+  "worker_shutdown_scenarios": 3,
+  "xr_retention": {
+    "checks": 5,
+    "ended_inline_collected": 8,
+    "ended_immersive_collected": 8,
+    "explicit_gc_control_only_in_private_test_embedder": true
+  },
+  "sustained_adblock_stability": {
+    "seconds": 900,
+    "checks": 278,
+    "all_checks_passed": true,
+    "adblock_enabled": true,
+    "bundled_lists_enabled": true,
+    "clean_exit": true,
+    "frames": 36236,
+    "median_frame_gap_ms": 20.09000000002561,
+    "p95_frame_gap_ms": 59.55999999999767,
+    "max_frame_gap_ms": 293.9,
+    "rss_growth_kib": 29042.0,
+    "rss_windows": [
+      {
+        "seconds": [
+          10,
+          20
+        ],
+        "median_rss_kib": 388954.0,
+        "min_rss_kib": 380512,
+        "max_rss_kib": 393312
+      },
+      {
+        "seconds": [
+          60,
+          180
+        ],
+        "median_rss_kib": 412396.0,
+        "min_rss_kib": 409040,
+        "max_rss_kib": 415096
+      },
+      {
+        "seconds": [
+          300,
+          450
+        ],
+        "median_rss_kib": 416336,
+        "min_rss_kib": 415016,
+        "max_rss_kib": 418644
+      },
+      {
+        "seconds": [
+          600,
+          750
+        ],
+        "median_rss_kib": 416796.0,
+        "min_rss_kib": 414900,
+        "max_rss_kib": 418740
+      },
+      {
+        "seconds": [
+          840,
+          900
+        ],
+        "median_rss_kib": 417264,
+        "min_rss_kib": 415280,
+        "max_rss_kib": 418888
+      }
+    ],
+    "bounded_memory_proven": false
+  },
+  "live_discord_x": {
+    "seconds_each": 30,
+    "alive_and_clean_close": true,
+    "rendered_and_reviewed": true,
+    "adblock_enabled": true
+  },
+  "all_required_change_regressions_passed": true,
+  "test_only_api_shipping_exposure_changed": false,
+  "media_playback_scope_unchanged": true,
+  "geolocation_implementation_and_api_tests_excluded": true,
+  "geolocation_default_disabled": true,
+  "no_physical_headset_conformance_claim": true,
+  "remaining_goal_work": [
+    "Finish accepted-pending system installation and installed-path checks without duplicating the existing sudo dialog",
+    "Reconcile the broader requirements evidence and complete remaining scroll-indicator native-scale, touch/input pass-through and appearance validation",
+    "Preserve the scoped limitations of original core tests and physical device coverage"
+  ],
+  "full_goal_achieved": false,
+  "goal_status": "active",
+  "validated_utc": "2026-10-29T13:50:41.321206+00:00"
+}

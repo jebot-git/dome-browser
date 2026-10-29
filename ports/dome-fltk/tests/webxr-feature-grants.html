@@ -1,0 +1,24 @@
+<!doctype html><meta charset=utf-8><title>WebXR granted-feature set</title><body>
+<script>
+'use strict';const state=window.test={ready:true,finished:false,error:null,checks:[],cases:[]};state.snapshot=()=>({...state,snapshot:undefined});
+const check=(ok,label)=>{if(!ok)throw Error(label);state.checks.push(label);};
+const origin={position:[0,0,0],orientation:[0,0,0,1]},projection=[1,0,0,0,0,1,0,0,0,0,-1,-1,0,0,-.2,0];
+const activate=init=>{let request;navigator.xr.test.simulateUserActivation(()=>request=navigator.xr.requestSession('immersive-vr',init));return request;};
+(async()=>{
+ const device=await navigator.xr.test.simulateDeviceConnection({supportsImmersive:true,supportedModes:['inline','immersive-vr'],supportedFeatures:['local','local-floor','tracked-sources'],viewerOrigin:origin,views:['left','right'].map(eye=>({eye,projectionMatrix:projection,viewOffset:origin,resolution:{width:64,height:64}}))});
+ const session=await activate({requiredFeatures:['local','tracked-sources','local','tracked-sources'],optionalFeatures:['viewer','local','tracked-sources','local-floor','local-floor','unsupported-local-test']});
+ const features=session.enabledFeatures;state.cases.push({name:'duplicate descriptors',features});
+ check(new Set(features).size===features.length,'Granted features contain each negotiated descriptor once');
+ check(['viewer','local','tracked-sources','local-floor'].every(feature=>features.includes(feature)),'Deduplication retains required, implicit and supported optional grants');
+ check(!features.includes('unsupported-local-test'),'Unsupported optional descriptors remain omitted');
+ check(Object.isFrozen(features)&&session.enabledFeatures!==features,'Each enabledFeatures read returns a fresh frozen array');
+ await session.end();
+ let calls=0;const converted={toString(){calls++;return 'local';}};
+ const second=await activate({requiredFeatures:[converted,converted],optionalFeatures:[converted]});state.cases.push({name:'converted duplicates',features:second.enabledFeatures,calls});
+ check(calls===3,'Every supplied DOMString conversion occurs once before negotiation');
+ check(second.enabledFeatures.filter(feature=>feature==='local').length===1,'Converted duplicate descriptors produce a single grant');await second.end();
+ let error;try{await activate({requiredFeatures:['unsupported-local-test','unsupported-local-test'],optionalFeatures:['local']});}catch(caught){error=caught.name;}
+ check(error==='NotSupportedError','Duplicate unsupported required features still reject the session');
+ await device.disconnect();state.finished=true;
+})().catch(error=>state.error=String(error)+' '+error.stack);
+</script>
