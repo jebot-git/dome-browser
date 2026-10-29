@@ -133,7 +133,7 @@ impl MockDiscoveryAPI<SurfmanGL> for HeadlessMockDiscovery {
             device_change_callback: None,
             world: init.world,
             next_id: 0,
-            bounds_geometry: vec![],
+            bounds_geometry: init.bounds_geometry,
         };
         let data = Arc::new(Mutex::new(data));
         let data_ = data.clone();

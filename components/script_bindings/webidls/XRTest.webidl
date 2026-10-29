@@ -33,8 +33,8 @@ dictionary FakeXRDeviceInit {
     sequence<DOMString> supportedFeatures;
     // Whether the space supports tracking in inline sessions
     boolean supportsTrackingInInline = true;
-    // The bounds coordinates. If null, bounded reference spaces are not supported.
-    sequence<FakeXRBoundsPoint> boundsCoodinates;
+    // Initial native bounds geometry, when provided.
+    sequence<FakeXRBoundsPoint> boundsCoordinates;
     // Eye level used for calculating floor-level spaces
     FakeXRRigidTransformInit floorOrigin;
     FakeXRRigidTransformInit viewerOrigin;

@@ -33,6 +33,8 @@ pub struct MockDeviceInit {
     pub secondary_views: MockViewsInit,
     pub supported_features: Vec<String>,
     pub world: Option<MockWorld>,
+    #[serde(default)]
+    pub bounds_geometry: Vec<Point2D<f32, Floor>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

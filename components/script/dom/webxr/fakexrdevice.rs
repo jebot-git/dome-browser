@@ -13,7 +13,7 @@ use script_bindings::reflector::{Reflector, reflect_dom_object};
 use script_bindings::cell::DomRefCell;
 use servo_base::generic_channel::GenericSender;
 use webxr_api::{
-    EntityType, Handedness, InputId, InputSource, MockDeviceMsg, MockInputInit, MockRegion,
+    EntityType, Floor, Handedness, InputId, InputSource, MockDeviceMsg, MockInputInit, MockRegion,
     MockViewInit, MockViewsInit, MockWorld, TargetRayMode, Triangle, Visibility,
 };
 
@@ -157,6 +157,27 @@ pub(crate) fn view<Eye>(view: &FakeXRViewInit) -> Fallible<MockViewInit<Eye>> {
 
 pub(crate) fn get_views(views: &[FakeXRViewInit]) -> Fallible<MockViewsInit> {
     views.iter().map(view).collect()
+}
+
+pub(crate) fn get_bounds_geometry(
+    bounds_coordinates: &[FakeXRBoundsPoint],
+) -> Fallible<Vec<Point2D<f32, Floor>>> {
+    if bounds_coordinates.len() < 3 {
+        return Err(Error::Type(
+            c"Bounds geometry must contain at least 3 points".into(),
+        ));
+    }
+    bounds_coordinates
+        .iter()
+        .map(|coordinate| {
+            let (Some(x), Some(z)) = (coordinate.x, coordinate.z) else {
+                return Err(Error::Type(
+                    c"Bounds points must have x and z coordinates".into(),
+                ));
+            };
+            Ok(Point2D::new(*x as f32, *z as f32))
+        })
+        .collect()
 }
 
 pub(crate) fn get_origin<T, U>(
@@ -372,20 +393,8 @@ impl FakeXRDeviceMethods<crate::DomTypeHolder> for FakeXRDevice {
     }
 
     /// <https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-setboundsgeometry>
-    fn SetBoundsGeometry(&self, bounds_coodinates: Vec<FakeXRBoundsPoint>) -> Fallible<()> {
-        if bounds_coodinates.len() < 3 {
-            return Err(Error::Type(
-                c"Bounds geometry must contain at least 3 points".into(),
-            ));
-        }
-        let coords = bounds_coodinates
-            .iter()
-            .map(|coord| {
-                let x = *coord.x.unwrap() as f32;
-                let y = *coord.z.unwrap() as f32;
-                Point2D::new(x, y)
-            })
-            .collect();
+    fn SetBoundsGeometry(&self, bounds_coordinates: Vec<FakeXRBoundsPoint>) -> Fallible<()> {
+        let coords = get_bounds_geometry(&bounds_coordinates)?;
         let _ = self.sender.send(MockDeviceMsg::SetBoundsGeometry(coords));
         Ok(())
     }

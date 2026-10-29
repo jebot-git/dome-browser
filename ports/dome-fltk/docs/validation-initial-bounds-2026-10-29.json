@@ -1,0 +1,53 @@
+{
+  "change": "Honor initial WebXR test-device boundary coordinates and validate boundary updates",
+  "base_commit": "eed7533bccf2ac8302b763ee2797ec0741c45470",
+  "source_sha256": {
+    "components/script/dom/webxr/fakexrdevice.rs": "4701734b78aba1e8bb27ae2d2353700235a77723bcbcc29ef610d75c6575a2f8",
+    "components/script/dom/webxr/xrtest.rs": "71db016da7956bd42061d4ff0d4ce30efb011cc7273a4302302abe71d5003e37",
+    "components/script_bindings/webidls/XRTest.webidl": "32ced383d78ead084f173c61fd7fbbb6541b5443f549a0d4f09d7420c6037e02",
+    "components/shared/webxr/mock.rs": "c6b19f052d79f54cbca1c3a11f24d4b3ce2e380c08d0a01a32a4918ff33a82ee",
+    "components/webxr/headless/mod.rs": "d70ec5552e1ea127659703c9c07c95747cc30ea35f79c174e3885c103e08d4f5",
+    "ports/dome-fltk/tests/webxr-bounds-initialization.html": "66b51adedf090900be45c972983fb77168f1863daf83fa89d2064a52ad8b5fec",
+    "ports/dome-fltk/tests/webxr-bounds-initialization.py": "524eb7f201a1522d535bdd6deb815bc0e7def2d0c71bedb62e6458c3a0f994e7"
+  },
+  "test_interface_exposure_changed": false,
+  "optimized_release": true,
+  "binaries_sha256": {
+    "browser": "00289607b64581937400d77de2e3364e3572877696eb8b3bdf3643462c9eec55",
+    "embedder": "59b7249a7ee2dbdd34e9f59885080db0d44e3e377d027611cfe5decc4258df07"
+  },
+  "unit_tests": {
+    "webxr_api": 51,
+    "webxr_library": 19,
+    "frontend_xr": 42,
+    "existing_ignored_shader_test": 1
+  },
+  "runtime": {
+    "initial_bounds_checks": 31,
+    "existing_bounded_checks": 21,
+    "original_spatial_suites": 16,
+    "original_spatial_passed_cases": 38,
+    "original_bounded_origin_cases_fixed": 2,
+    "history_checks": 14,
+    "worker_shutdown_scenarios": 3,
+    "anonymous_discord_x_runs": 2,
+    "live_sample_seconds_each": 30,
+    "live_samples_clean_close": true,
+    "live_samples_visual_reviewed": true,
+    "adblock_enabled": true
+  },
+  "original_nonpassing_projection_cases": {
+    "count": 2,
+    "reason": "Original field-of-view setup conflicts with its expected projection constant; independently derived projection and diagnostic setup pass. Original failures are retained.",
+    "renderer_projection_changed": false
+  },
+  "limits": [
+    "Selected original pages run with embedded original resources and a private mock embedder; not the full WPT runner",
+    "No whole-site or physical-device conformance claim",
+    "Initial floor estimation and other recorded compatibility follow-ups remain open"
+  ],
+  "reference": "https://immersive-web.github.io/webxr-test-api/#dom-xrtest-simulatedeviceconnection",
+  "geolocation_excluded": true,
+  "full_goal_achieved": false,
+  "validated_utc": "2026-10-29T08:19:30.367315+00:00"
+}

@@ -25,7 +25,7 @@ use crate::dom::bindings::codegen::Bindings::XRTestBinding::{FakeXRDeviceInit, X
 use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
-use crate::dom::fakexrdevice::{FakeXRDevice, get_origin, get_views, get_world};
+use crate::dom::fakexrdevice::{FakeXRDevice, get_bounds_geometry, get_origin, get_views, get_world};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
 use crate::event_loop::script_thread::ScriptThread;
@@ -113,6 +113,19 @@ impl XRTestMethods<crate::DomTypeHolder> for XRTest {
             Err(error) => { p.reject_error(cx, error); return p; },
         };
 
+        let bounds_geometry = match init
+            .boundsCoordinates
+            .as_deref()
+            .map(get_bounds_geometry)
+            .transpose()
+        {
+            Ok(bounds) => bounds.unwrap_or_default(),
+            Err(error) => {
+                p.reject_error(cx, error);
+                return p;
+            },
+        };
+
         let supported_features = if let Some(ref s) = init.supportedFeatures {
             s.iter().cloned().map(String::from).collect()
         } else {
@@ -154,6 +167,7 @@ impl XRTestMethods<crate::DomTypeHolder> for XRTest {
             floor_origin,
             supported_features,
             world,
+            bounds_geometry,
         };
 
         let global = self.global();

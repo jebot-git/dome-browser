@@ -1,0 +1,78 @@
+<!doctype html><meta charset=utf-8><title>Initial bounded reference spaces</title><canvas id=canvas width=128 height=96></canvas>
+<script>
+'use strict';
+const state=window.test={ready:false,finished:false,error:null,checks:[],frames:0};
+state.snapshot=()=>({ready:state.ready,finished:state.finished,error:state.error,checks:[...state.checks],frames:state.frames});
+const check=(ok,label)=>{if(!ok)throw Error(label);state.checks.push(label);};
+const close=(a,b)=>a.length===b.length&&a.every((x,i)=>Math.abs(x-b[i])<.0002);
+const xyz=points=>Array.from(points,p=>[p.x,p.y,p.z]);
+const wait=async predicate=>{for(let n=0;n<120;n++){if(predicate())return;await new Promise(r=>setTimeout(r,20));}throw Error('Bounded fixture condition timed out');};
+(async()=>{
+ check(!!navigator.xr.test,'Test-only XR device API is available in this embedder');
+ const projection=[1,0,0,0,0,1,0,0,0,0,-1,-1,0,0,-.2,0];
+ const views=width=>['left','right'].map((eye,i)=>({eye,projectionMatrix:projection,viewOffset:{position:[i?.03:-.03,0,0],orientation:[0,0,0,1]},resolution:{width,height:96}}));
+ const init={supportsImmersive:true,supportedModes:['inline','immersive-vr'],supportedFeatures:['local','local-floor','bounded-floor'],views:views(128),viewerOrigin:{position:[0,0,0],orientation:[0,0,0,1]},floorOrigin:{position:[0,-1.6,0],orientation:[0,0,0,1]}};
+ let raw=[{x:-2,z:-1},{x:2,z:-1},{x:2,z:1},{x:-2,z:1}];
+ for(let count=0;count<3;count++){
+  let rejected=false,unexpected;
+  try{unexpected=await navigator.xr.test.simulateDeviceConnection({...init,boundsCoordinates:raw.slice(0,count)});}catch(error){rejected=error instanceof TypeError;}
+  if(unexpected)await unexpected.disconnect();
+  check(rejected,`Initial bounds with ${count} points reject with TypeError`);
+ }
+ const triangle=await navigator.xr.test.simulateDeviceConnection({...init,boundsCoordinates:raw.slice(0,3)});
+ await triangle.disconnect();check(true,'Three initial boundary points are accepted');
+ const device=await navigator.xr.test.simulateDeviceConnection({...init,boundsCoordinates:raw});
+ const originalX=raw[0].x;raw[0].x=123;
+
+ const inline=await navigator.xr.requestSession('inline',{requiredFeatures:['local-floor']});
+ const inlineFloor=await inline.requestReferenceSpace('local-floor');let inlineResets=0;
+ inlineFloor.addEventListener('reset',()=>inlineResets++);
+ const inlineCanvas=document.createElement('canvas');document.body.appendChild(inlineCanvas);
+ inline.updateRenderState({baseLayer:new XRWebGLLayer(inline,inlineCanvas.getContext('webgl'))});
+ let request;navigator.xr.test.simulateUserActivation(()=>{request=navigator.xr.requestSession('immersive-vr',{requiredFeatures:['local-floor','bounded-floor']});});
+ const session=await request,gl=canvas.getContext('webgl',{xrCompatible:true});await gl.makeXRCompatible();
+ const layer=new XRWebGLLayer(session,gl);session.updateRenderState({baseLayer:layer});
+ const frame=(time,f)=>{state.frames++;session.requestAnimationFrame(frame);};session.requestAnimationFrame(frame);
+ const bounded=await session.requestReferenceSpace('bounded-floor'),floor=await session.requestReferenceSpace('local-floor'),local=await session.requestReferenceSpace('local');
+ check(bounded.boundsGeometry.length===4,'Initial boundary geometry is available when the reference space resolves');
+ check(bounded.boundsGeometry[0].x===originalX,'Initial boundary geometry is copied from the input dictionary');
+ raw[0].x=originalX;
+ const transform=new XRRigidTransform({x:1,y:2,z:3},{x:0,y:Math.SQRT1_2,z:0,w:Math.SQRT1_2});
+ const child=bounded.getOffsetReferenceSpace(transform),nested=child.getOffsetReferenceSpace(new XRRigidTransform({x:.5,z:-.5}));
+ check(child instanceof XRBoundedReferenceSpace&&nested instanceof XRBoundedReferenceSpace,'Offsets preserve the XRBoundedReferenceSpace subtype');
+ check(child!==bounded&&nested!==child,'Each bounded offset is a distinct reference-space object');
+ check(close(xyz(bounded.boundsGeometry).flat(),raw.flatMap(p=>[p.x,0,p.z])),'The base bounds retain their native floor coordinates');
+ check(close(xyz(child.boundsGeometry).flat(),[4,-2,-3,4,-2,1,2,-2,1,2,-2,-3]),'Bounds use the inverse translated and rotated origin offset');
+ check(close(xyz(nested.boundsGeometry).flat(),[3.5,-2,-2.5,3.5,-2,1.5,1.5,-2,1.5,1.5,-2,-2.5]),'Nested offsets compose when transforming bounds');
+ check(Object.isFrozen(child.boundsGeometry),'The bounds array is frozen');
+ const point=child.boundsGeometry[0],oldX=point.x;try{point.x=999;}catch(e){}check(point.x===oldX,'Bounds points are read-only');
+ for(const points of [[],raw.slice(0,2),[{x:1},{x:2,z:2},{x:3,z:3}]]){
+  let rejected=false;try{device.setBoundsGeometry(points);}catch(error){rejected=error instanceof TypeError;}
+  check(rejected,'Invalid boundary update is rejected without changing geometry');
+ }
+ check(close(xyz(bounded.boundsGeometry).flat(),raw.flatMap(p=>[p.x,0,p.z])),'Rejected boundary updates preserve the previous boundary');
+ const events=[];const listen=(space,name,property=false)=>{const callback=e=>events.push({name,space:e.referenceSpace===space,transform:e.transform?Array.from(e.transform.matrix):null,bounds:space instanceof XRBoundedReferenceSpace?xyz(space.boundsGeometry):null,trusted:e.isTrusted});if(property)space.onreset=callback;else space.addEventListener('reset',callback);};
+ listen(bounded,'bounded');listen(child,'child');listen(nested,'nested');listen(floor,'floor',true);listen(local,'local');
+ const lo=local.getOffsetReferenceSpace(new XRRigidTransform({x:2}));listen(lo,'local-offset');
+ let start=events.length;raw=[{x:-3,z:-2},{x:3,z:-2},{x:3,z:2},{x:-3,z:2}];device.setBoundsGeometry(raw);
+ await wait(()=>events.length>=start+3);let changed=events.slice(start);
+ check(changed.map(e=>e.name).sort().join(',')==='bounded,child,nested','Bounds changes reset every bounded offset and no other reference-space type');
+ check(changed.every(e=>e.space&&e.trusted&&close(e.transform,[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1])),'Bounds-only reset events preserve identity and use an identity transform');
+ check(close(changed.find(e=>e.name==='child').bounds.flat(),[5,-2,-4,5,-2,2,1,-2,2,1,-2,-4]),'Reset handlers observe updated bounds in offset coordinates');
+ start=events.length;device.setFloorOrigin({position:[0,-2,0],orientation:[0,0,0,1]});await wait(()=>events.length>=start+4);changed=events.slice(start);
+ check(changed.map(e=>e.name).sort().join(',')==='bounded,child,floor,nested','Floor-origin changes reset local-floor and bounded spaces with their offsets');
+ check(changed.every(e=>e.transform&&Math.abs(e.transform[13]+.4)<.0002),'Floor reset transforms retain the measured vertical delta');
+ await wait(()=>inlineResets===1);check(true,'Floor reset updates reach an independent paused inline session');
+ start=events.length;device.simulateResetPose();await wait(()=>events.length>=start+2);changed=events.slice(start);
+ check(changed.map(e=>e.name).sort().join(',')==='local,local-offset','A local reset reaches offset spaces without resetting floor spaces');
+ let late;local.addEventListener('reset',()=>{late=local.getOffsetReferenceSpace(new XRRigidTransform({z:1}));listen(late,'late');},{once:true});
+ start=events.length;device.simulateResetPose();await wait(()=>events.length>=start+2);check(events.slice(start).length===2,'A space created by a reset handler joins the next reset batch');
+ start=events.length;device.simulateResetPose();await wait(()=>events.length>=start+3);check(events.slice(start).map(e=>e.name).sort().join(',')==='late,local,local-offset','Reentrant offset creation remains registered for later resets');
+ const before=state.frames;device.setViews(views(256));await wait(()=>state.frames>before+2);
+ const resized=new XRWebGLLayer(session,gl);check(resized.framebufferWidth===512&&resized.framebufferHeight===96,'Viewport updates survive merging other frame events');
+ await session.end();
+ const inlineY=await new Promise(resolve=>inline.requestAnimationFrame((t,f)=>resolve(f.getViewerPose(inlineFloor).transform.position.y)));
+ check(Math.abs(inlineY-2)<.0002,'Each session applies the updated floor transform before resumed animation');
+ await inline.end();await device.disconnect();state.ready=true;state.finished=true;
+})().catch(e=>{state.error=String(e)+' '+e.stack;state.ready=true;});
+</script>
