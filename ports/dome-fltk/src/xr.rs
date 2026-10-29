@@ -25,6 +25,7 @@ use webxr_api::{
     SessionId, SessionInit, SessionMode, View, ViewerPose, Viewports, Views, Visibility,
 };
 mod input;
+mod frame_rate;
 mod reference_space;
 mod inline;
 mod time;
@@ -262,6 +263,8 @@ struct Eye {
 struct HostFrame {
     frame_id: u64,
     time: i64,
+    #[serde(default)]
+    period: Option<i64>,
     #[serde(default)]
     monotonic_time: Option<i64>,
     should_render: bool,
@@ -516,6 +519,7 @@ struct BridgeDevice {
     submitted_viewports: std::collections::HashMap<LayerId, Viewports>,
     frame: Option<HostFrame>,
     viewer_tracking: tracking::State,
+    nominal_rate: frame_rate::State,
     presentation: Option<ViewerPose>,
     anchor: Option<RigidTransform3D<f32, Native, Native>>,
     clip: ClipPlanes,
@@ -628,6 +632,7 @@ impl BridgeDevice {
             layer_info: std::collections::HashMap::new(),
             submitted_viewports: std::collections::HashMap::new(),
             reference_spaces: reference_space::Tracker::new(initial.reference_space),
+            nominal_rate: frame_rate::State::new(initial.period),
             frame: Some(initial),
             viewer_tracking,
             presentation,
@@ -921,6 +926,9 @@ impl DeviceAPI for BridgeDevice {
         self.presentation = presentation;
         web_frame.floor_transform = floor_transform;
         web_frame.events.extend(reset_events);
+        if let Some(rate) = self.nominal_rate.observe(frame.period) {
+            web_frame.events.push(webxr_api::FrameUpdateEvent::NominalFrameRateChanged(rate));
+        }
         // An older host has no controller extension, even if a future transport
         // happens to include fields the legacy stereo client doesn't understand.
         if self.inputs.is_none() {
@@ -973,6 +981,9 @@ impl DeviceAPI for BridgeDevice {
     }
     fn granted_features(&self) -> &[String] {
         &self.features
+    }
+    fn nominal_frame_rate(&self) -> Option<f32> {
+        self.nominal_rate.value()
     }
 }
 impl webxr::native_cleanup::CleanupOwner for BridgeDevice {

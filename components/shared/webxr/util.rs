@@ -7,6 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{FrameUpdateEvent, HitTestId, HitTestSource};
 
+/// A compositor's known cadence must be a positive finite value in hertz.
+pub fn valid_frame_rate(rate: f32) -> bool {
+    rate.is_finite() && rate > 0.0
+}
+
 /// Express a native-origin reset in a reference space with an origin offset.
 /// The transform maps the post-reset effective origin into pre-reset coordinates.
 pub fn offset_reference_space_reset(

@@ -1,0 +1,49 @@
+{
+  "date": "2026-10-29",
+  "scope": "WebXR nominal cadence reporting and target-rate lifecycle",
+  "behavior": [
+    "Initialize a known nominal frame rate before the XRSession request promise resolves.",
+    "Report DomeD runtime cadence independently of author-controlled target rates; inline and unknown rates remain null.",
+    "Apply meaningful compositor-rate changes before matching animation callbacks and while hidden callbacks are paused.",
+    "Suppress events caused only by nanosecond period quantization and retain known metadata through temporarily unavailable periods.",
+    "Keep historical action periods from replacing current compositor cadence.",
+    "Reject invalid backend rate responses while preserving metadata, concurrent promise ownership and reentrant shutdown behavior."
+  ],
+  "validation": {
+    "optimized_release": true,
+    "runtime_suites": 67,
+    "runtime_suite_executions": 69,
+    "runtime_checks_latest_per_suite": 4626,
+    "native_nominal_checks_per_clock": 48,
+    "native_controller_estimate_checks_per_clock": 37,
+    "logical_rate_cases": 12,
+    "webxr_api_units": 51,
+    "shared_webxr_units": 19,
+    "shared_webxr_units_ignored": 1,
+    "browser_xr_units": 42,
+    "selected_original_wpt_passed": 137,
+    "unchanged_original_setup_failures": 4,
+    "optional_unsupported_cases": 4,
+    "worker_shutdown_scenarios": 3,
+    "live_samples": [
+      "Discord login and X landing retain the accepted rendering baseline, survive 30 seconds and close cleanly"
+    ],
+    "historical_period_extension": "Only the two native cadence fixture runs were repeated after adding the historical-action case; compiled production sources stayed unchanged."
+  },
+  "standards": [
+    "https://immersive-web.github.io/webxr/#dom-xrsession-framerate",
+    "https://immersive-web.github.io/webxr/#apply-the-nominal-frame-rate"
+  ],
+  "deployment": "Uses the existing DomeD period field and preserves running desktop, browser and XR sessions.",
+  "limitations": [
+    "Portable OpenXR rate adapter methods type-check against locked OpenXR 0.21.1; Windows graphics and physical-device behavior were not exercised.",
+    "The independent shader-validator test remains ignored; broader supported API/backend/device coverage and later rendering work remain."
+  ],
+  "geolocation": {
+    "implementation": "out of scope",
+    "api_tests": "out of scope",
+    "shipping_default": "disabled and unchanged"
+  },
+  "full_goal_achieved": false,
+  "full_api_or_wpt_conformance_claim": false
+}

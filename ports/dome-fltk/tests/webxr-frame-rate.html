@@ -1,0 +1,61 @@
+<!doctype html><meta charset=utf-8><title>XR nominal frame-rate metadata</title>
+<p>Local nominal and target frame-rate lifecycle checks.</p>
+<script id=configuration type=application/json>FIXTURE_CONFIGURATION</script>
+<script>
+'use strict';
+const cfg=JSON.parse(document.getElementById('configuration').textContent);
+const state=window.test={ready:true,finished:false,error:null,checks:[],events:[]};
+state.snapshot=()=>({...state,snapshot:undefined});
+const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const check=(passed,name,actual)=>state.checks.push({passed:!!passed,name,actual});
+async function result(promise){try{await promise;return 'fulfilled';}catch(e){return e.name;}}
+async function until(fn){const end=performance.now()+1500;while(!fn()){if(performance.now()>end)throw Error('Fixture deadline');await delay(10);}}
+async function open(){let request;navigator.xr.test.simulateUserActivation(()=>request=navigator.xr.requestSession('immersive-vr'));return request;}
+async function run(){let session,ended=false;
+try{
+ session=await open();let ends=0;
+ session.onend=()=>{ended=true;ends++;};
+ const capture=e=>state.events.push({rate:session.frameRate,trusted:e.isTrusted,same:e.session===session,bubbles:e.bubbles,cancelable:e.cancelable});
+ session.onframeratechange=capture;
+ const unknown=cfg.case.startsWith('initial-');
+ check(session.frameRate===(unknown?null:120),'Initial nominal metadata is available when the session promise resolves',session.frameRate);
+ check(unknown?session.supportedFrameRates===null:Array.from(session.supportedFrameRates).join(',')==='72,90,120','Target rates require known nominal metadata and contain unique positive finite values',session.supportedFrameRates===null?null:Array.from(session.supportedFrameRates));
+ await delay(40);check(state.events.length===0,'Initial nominal metadata does not synthesize a change event');
+ if(unknown){
+  check(await result(session.updateTargetFrameRate(90))==='InvalidStateError','Unknown nominal metadata does not advertise target-rate control');
+ }else{
+  check(await result(session.updateTargetFrameRate(33))==='TypeError','An unadvertised target rate rejects TypeError');
+  check(state.events.length===0&&session.frameRate===120,'Unsupported target rates leave nominal state unchanged');
+  if(cfg.case.startsWith('response-invalid-')){
+   check(await result(session.updateTargetFrameRate(90))==='InvalidStateError','An invalid backend response rejects the pending target-rate operation');
+   check(session.frameRate===120&&state.events.length===0,'An invalid backend response preserves known cadence and emits no event');
+  }else if(cfg.case==='response-adjusted'){
+   check(await result(session.updateTargetFrameRate(90))==='fulfilled','A supported target hint can resolve at the compositor-selected rate');
+   check(session.frameRate===72&&state.events.map(e=>e.rate).join(',')==='72','The reported rate reflects the actual compositor response');
+  }else if(cfg.case==='rates-filtered'){
+   check(await result(session.updateTargetFrameRate(90))==='fulfilled'&&session.frameRate===90,'Filtered rate enumeration retains valid target-rate operations');
+  }else{
+   check(await result(session.updateTargetFrameRate(120))==='fulfilled','Requesting the current nominal rate settles normally');
+   check(state.events.length===0,'An unchanged nominal rate does not fire a duplicate event');
+   check(await result(session.updateTargetFrameRate(72))==='fulfilled','A new target rate settles normally');
+   const rows=await Promise.all([result(session.updateTargetFrameRate(90)),result(session.updateTargetFrameRate(120))]);
+   check(rows.join(',')==='fulfilled,fulfilled','Concurrent target-rate operations settle their own promises',rows);
+   check(state.events.map(e=>e.rate).join(',')==='72,90,120','Concurrent completions preserve nominal-change order',state.events);
+   let ending;session.onframeratechange=e=>{capture(e);ending=session.end();};
+   const rate=result(session.updateTargetFrameRate(90));await until(()=>!!ending);
+   check((await Promise.all([rate,result(ending)])).join(',')==='InvalidStateError,fulfilled','Reentrant rate-change shutdown rejects the pending operation and completes end');
+   check(session.frameRate===90,'Shutdown retains the rate applied before the listener');
+  }
+ }
+ check(state.events.every(e=>e.trusted&&e.same&&!e.bubbles&&!e.cancelable),'Nominal changes dispatch trusted XRSessionEvents with the owning session');
+ if(!ended)await session.end();await until(()=>ended);
+ const previous=session.frameRate,count=state.events.length;
+ check(await result(session.updateTargetFrameRate(72))==='InvalidStateError','Ended target-rate operations reject InvalidStateError');
+ await delay(40);check(session.frameRate===previous&&state.events.length===count&&ends===1,'Ended sessions retain metadata without further rate events or duplicate shutdown');
+ const inline=await navigator.xr.requestSession('inline');
+ check(inline.frameRate===null&&inline.supportedFrameRates===null,'Inline sessions do not inherit immersive rate metadata');
+ check(await result(inline.updateTargetFrameRate(90))==='InvalidStateError','Inline target-rate updates remain unsupported');
+ await inline.end();
+}catch(e){state.error=String(e)+' '+e.stack;}finally{if(session&&!ended)await session.end().catch(()=>{});state.finished=true;}}
+run();
+</script>

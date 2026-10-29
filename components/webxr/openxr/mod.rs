@@ -1565,10 +1565,8 @@ impl DeviceAPI for OpenXrDevice {
         if self.supports_updating_framerate {
             self.session
                 .request_display_refresh_rate(rate)
-                .expect("Failed to request display refresh rate");
-            self.session
-                .get_display_refresh_rate()
-                .expect("Failed to get display refresh rate")
+                .and_then(|()| self.session.get_display_refresh_rate())
+                .unwrap_or(-1.0)
         } else {
             -1.0
         }
@@ -1578,9 +1576,18 @@ impl DeviceAPI for OpenXrDevice {
         if self.supports_updating_framerate {
             self.session
                 .enumerate_display_refresh_rates()
-                .expect("Failed to enumerate display refresh rates")
+                .unwrap_or_default()
         } else {
             vec![]
+        }
+    }
+
+    fn nominal_frame_rate(&self) -> Option<f32> {
+        if self.supports_updating_framerate {
+            self.session.get_display_refresh_rate().ok()
+                .filter(|rate| webxr_api::util::valid_frame_rate(*rate))
+        } else {
+            None
         }
     }
 

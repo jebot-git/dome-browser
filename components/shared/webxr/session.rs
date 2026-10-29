@@ -170,6 +170,8 @@ pub struct Session {
     id: SessionId,
     supported_frame_rates: Vec<f32>,
     dynamic_viewport_scaling: bool,
+    #[serde(default)]
+    nominal_frame_rate: Option<f32>,
 }
 
 /// A session response that has not yet been adopted by a live document. Keep
@@ -313,6 +315,11 @@ impl Session {
 
     pub fn apply_event(&mut self, event: FrameUpdateEvent) {
         match event {
+            FrameUpdateEvent::NominalFrameRateChanged(rate) => {
+                if crate::util::valid_frame_rate(rate) {
+                    self.nominal_frame_rate = Some(rate);
+                }
+            },
             FrameUpdateEvent::UpdateFloorTransform(floor) => self.floor_transform = floor,
             FrameUpdateEvent::UpdateViewports(vp) => self.viewports = vp,
             FrameUpdateEvent::HitTestSourceAdded(_)
@@ -338,6 +345,10 @@ impl Session {
 
     pub fn supported_frame_rates(&self) -> &[f32] {
         &self.supported_frame_rates
+    }
+
+    pub fn nominal_frame_rate(&self) -> Option<f32> {
+        self.nominal_frame_rate.filter(|rate| crate::util::valid_frame_rate(*rate))
     }
 }
 
@@ -414,7 +425,18 @@ where
         let initial_inputs = self.device.initial_inputs();
         let environment_blend_mode = self.device.environment_blend_mode();
         let granted_features = self.device.granted_features().into();
-        let supported_frame_rates = self.device.supported_frame_rates();
+        let nominal_frame_rate = self.device.nominal_frame_rate()
+            .filter(|rate| crate::util::valid_frame_rate(*rate));
+        // Target-rate support requires a known nominal rate. Keep backend
+        // enumeration order while discarding invalid and duplicate entries.
+        let mut supported_frame_rates = Vec::new();
+        if nominal_frame_rate.is_some() {
+            for rate in self.device.supported_frame_rates() {
+                if crate::util::valid_frame_rate(rate) && !supported_frame_rates.contains(&rate) {
+                    supported_frame_rates.push(rate);
+                }
+            }
+        }
         Session {
             floor_transform,
             viewports,
@@ -424,6 +446,7 @@ where
             granted_features,
             id: self.id,
             supported_frame_rates,
+            nominal_frame_rate,
             dynamic_viewport_scaling: self.device.supports_dynamic_viewport_scaling(),
         }
     }

@@ -18,11 +18,23 @@ impl DiscoveryAPI<SurfmanGL> for Discovery {
             return Err(Error::NoMatchingDevice);
         }
         let features = init.validate(mode, &["local".into(), "hit-test".into()])?;
+        let nominal_rate = match std::env::var("XR_INPUT_NOMINAL_RATE") {
+            Ok(value) => value.parse::<f32>().ok(),
+            Err(_) => Some(120.),
+        };
+        let rates = std::env::var("XR_INPUT_SUPPORTED_RATES").ok()
+            .map(|value| value.split(',').filter_map(|part| part.parse::<f32>().ok()).collect())
+            .unwrap_or_else(|| vec![72., 90., 120.]);
+        let response = std::env::var("XR_INPUT_FRAME_RATE_RESPONSE").ok()
+            .and_then(|value| value.parse::<f32>().ok());
         builder.spawn(move |_| {
             Ok(Device {
                 features,
                 events: EventBuffer::default(),
                 ended: false,
+                nominal_rate,
+                rates,
+                response,
             })
         })
     }
@@ -31,6 +43,9 @@ struct Device {
     features: Vec<String>,
     events: EventBuffer,
     ended: bool,
+    nominal_rate: Option<f32>,
+    rates: Vec<f32>,
+    response: Option<f32>,
 }
 impl DeviceAPI for Device {
     fn create_layer(&mut self, _: ContextId, _: LayerInit) -> Result<LayerInfo, Error> {
@@ -82,12 +97,19 @@ impl DeviceAPI for Device {
         &self.features
     }
     fn supported_frame_rates(&self) -> Vec<f32> {
-        vec![72., 90., 120.]
+        self.rates.clone()
+    }
+    fn nominal_frame_rate(&self) -> Option<f32> {
+        self.nominal_rate
     }
     fn update_frame_rate(&mut self, rate: f32) -> f32 {
         // Make a response cross the calling script's shutdown boundary reliably.
         std::thread::sleep(Duration::from_millis(30));
-        rate
+        let actual = self.response.unwrap_or(rate);
+        if webxr_api::util::valid_frame_rate(actual) {
+            self.nominal_rate = Some(actual);
+        }
+        actual
     }
     fn request_hit_test(&mut self, _: HitTestSource) {
         // Deliberately pending platform operation, used to verify shutdown rejection.

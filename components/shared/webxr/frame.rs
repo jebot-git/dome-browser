@@ -51,6 +51,8 @@ pub enum FrameUpdateEvent {
     UpdateFloorTransform(Option<RigidTransform3D<f32, Native, Floor>>),
     UpdateViewports(Viewports),
     HitTestSourceAdded(HitTestId),
+    /// Applied before callbacks rendering at the new compositor cadence.
+    NominalFrameRateChanged(f32),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, MallocSizeOf)]

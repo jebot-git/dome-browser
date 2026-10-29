@@ -142,6 +142,11 @@ pub trait DeviceAPI: 'static {
         Vec::new()
     }
 
+    /// Known compositor cadence, independent of author-controlled target rates.
+    fn nominal_frame_rate(&self) -> Option<f32> {
+        None
+    }
+
     fn reference_space_bounds(&self) -> Option<Vec<Point2D<f32, Floor>>> {
         None
     }

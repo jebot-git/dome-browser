@@ -151,7 +151,7 @@ pub(crate) struct XRSession {
     input_frames: DomRefCell<HashMap<InputId, InputFrame>>,
     #[no_trace]
     active_input_actions: DomRefCell<HashMap<InputId, u8>>,
-    framerate: Cell<f32>,
+    framerate: Cell<Option<f32>>,
     next_framerate_request_id: Cell<u64>,
     update_framerate_promises: DomRefCell<HashMapTracedValues<u64, TracedPromise, FxBuildHasher>>,
     // Native weak references let short-lived offset spaces be collected.
@@ -218,6 +218,7 @@ impl XRSession {
         input_sources: &XRInputSourceArray,
         mode: XRSessionMode,
     ) -> XRSession {
+        let nominal_rate = if mode == XRSessionMode::Inline { None } else { session.nominal_frame_rate() };
         XRSession {
             eventtarget: EventTarget::new_inherited(),
             blend_mode: session.environment_blend_mode().convert(),
@@ -243,7 +244,7 @@ impl XRSession {
             outside_raf: Cell::new(true),
             input_frames: DomRefCell::new(HashMap::new()),
             active_input_actions: DomRefCell::new(HashMap::new()),
-            framerate: Cell::new(0.0),
+            framerate: Cell::new(nominal_rate),
             next_framerate_request_id: Cell::new(0),
             update_framerate_promises: DomRefCell::new(HashMapTracedValues::new_fx()),
             reference_spaces: DomRefCell::new(Vec::new()),
@@ -823,6 +824,9 @@ impl XRSession {
 
     fn handle_frame_event(&self, cx: &mut JSContext, event: FrameUpdateEvent) {
         match event {
+            FrameUpdateEvent::NominalFrameRateChanged(rate) => {
+                self.apply_nominal_framerate(cx, rate);
+            },
             FrameUpdateEvent::ReferenceSpaceChanged(base, transform) => {
                 self.fire_reference_space_reset(cx, base, transform);
             },
@@ -845,11 +849,14 @@ impl XRSession {
 
     /// <https://www.w3.org/TR/webxr/#apply-the-nominal-frame-rate>
     fn apply_nominal_framerate(&self, cx: &mut JSContext, rate: f32) {
-        if self.framerate.get() == rate || self.ended.get() {
+        if self.mode == XRSessionMode::Inline || self.ended.get() ||
+            !webxr_api::util::valid_frame_rate(rate) || self.framerate.get() == Some(rate)
+        {
             return;
         }
 
-        self.framerate.set(rate);
+        self.session.borrow_mut().apply_event(FrameUpdateEvent::NominalFrameRateChanged(rate));
+        self.framerate.set(Some(rate));
 
         let event = XRSessionEvent::new(
             cx,
@@ -1230,11 +1237,10 @@ impl XRSessionMethods<crate::DomTypeHolder> for XRSession {
 
     /// <https://www.w3.org/TR/webxr/#dom-xrsession-framerate>
     fn GetFrameRate(&self) -> Option<Finite<f32>> {
-        let session = self.session.borrow();
-        if self.mode == XRSessionMode::Inline || session.supported_frame_rates().is_empty() {
+        if self.mode == XRSessionMode::Inline {
             None
         } else {
-            Finite::new(self.framerate.get())
+            self.framerate.get().and_then(Finite::new)
         }
     }
 
@@ -1309,14 +1315,15 @@ impl XRSessionMethods<crate::DomTypeHolder> for XRSession {
                 if !session.update_framerate_promises.borrow().contains_key(&request_id) {
                     return;
                 }
-                if let Ok(rate) = message {
+                let rate = message.ok().filter(|rate| webxr_api::util::valid_frame_rate(*rate));
+                if let Some(rate) = rate {
                     // A rate-change listener can end the session and reject
                     // this operation. Keep it registered until that event ends.
                     session.apply_nominal_framerate(cx, rate);
                 }
                 rooted!(&in(cx) let promise = session.update_framerate_promises.borrow_mut().remove(&request_id));
                 if let Some(ref promise) = *promise {
-                    if message.is_ok() {
+                    if rate.is_some() {
                         promise.resolve_native(cx, &());
                     } else {
                         promise.reject_error(cx, Error::InvalidState(None));

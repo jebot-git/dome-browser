@@ -1,0 +1,43 @@
+<!doctype html><meta charset=utf-8><title>WebXR reference-space integration</title>
+<style>body{background:#202830;color:white;font:20px monospace}button{padding:20px;background:#305ac0;color:white}</style>
+<h1>Native nominal frame rate</h1><button id=start disabled>Start rate test</button><button id=end disabled>End session</button><canvas id=canvas width=128 height=96></canvas>
+<script>
+'use strict';const start=document.getElementById('start'),end=document.getElementById('end'),canvas=document.getElementById('canvas');
+let order=0,frameCount=0,session=null,ended=false,busy=false,local,rateSerial=0,endOnRate=false;
+const report=(type,data={})=>fetch('/event',{method:'POST',body:JSON.stringify({order:++order,type,data})});
+const fail=e=>report('error',{message:String(e),stack:e?.stack});
+const gl=canvas.getContext('webgl',{xrCompatible:true});
+async function rejected(promise){try{await promise;return null;}catch(e){return e.name;}}
+gl.makeXRCompatible().then(async()=>{
+ const inline=await navigator.xr.requestSession('inline');
+ const data={rate:inline.frameRate,supported:inline.supportedFrameRates,target:await rejected(inline.updateTargetFrameRate(90))};
+ await inline.end();report('inline',data);
+ start.disabled=false;report('ready',{start:start.getBoundingClientRect().toJSON(),end:end.getBoundingClientRect().toJSON(),viewport:[innerWidth,innerHeight],ratio:devicePixelRatio});
+}).catch(fail);
+start.onclick=async()=>{try{
+ session=await navigator.xr.requestSession('immersive-vr');start.disabled=true;end.disabled=false;
+ report('initial',{rate:session.frameRate,supported:session.supportedFrameRates});
+ session.onend=()=>{ended=true;report('ended',{rate:session.frameRate,rateSerial,frameCount});};
+ for(const name of ['selectstart','selectend','select'])session.addEventListener(name,()=>report('input-rate',{name,rate:session.frameRate,rateSerial}));
+ session.onframeratechange=e=>{
+  report('rate',{rate:session.frameRate,serial:++rateSerial,frameCount,visibility:session.visibilityState,trusted:e.isTrusted,sameSession:e.session===session,bubbles:e.bubbles,cancelable:e.cancelable});
+  if(endOnRate){endOnRate=false;session.end().then(()=>report('rate-end-settled',{rate:session.frameRate,frameCount})).catch(fail);}
+ };
+ local=await session.requestReferenceSpace('local');
+ const layer=new XRWebGLLayer(session,gl);session.updateRenderState({baseLayer:layer});
+ const frame=(time,f)=>{try{
+  frameCount++;const viewer=f.getViewerPose(local);
+  if(frameCount===2)report('running');
+  if(frameCount%4===0)report('frame',{frameCount,rate:session.frameRate,rateSerial,viewerX:viewer?.transform.position.x??null,visibility:session.visibilityState});
+  gl.bindFramebuffer(gl.FRAMEBUFFER,layer.framebuffer);gl.clearColor(.1,.2,.4,1);gl.clear(gl.COLOR_BUFFER_BIT);session.requestAnimationFrame(frame);
+ }catch(e){fail(e);}};session.requestAnimationFrame(frame);
+}catch(e){fail(e);}};
+async function command(op){
+ if(op==='end'){await session.end();end.disabled=true;}
+ if(op==='end-on-rate')endOnRate=true;
+ if(op==='probe-target')report('target',{error:await rejected(session.updateTargetFrameRate(90)),rate:session.frameRate});
+ report('command',{op});
+}
+setInterval(async()=>{if(busy)return;busy=true;try{const op=await(await fetch('/command')).json();if(op)await command(op);}catch(e){fail(e);}finally{busy=false;}report('heartbeat',{frameCount,rate:session?.frameRate??null,rateSerial,visibility:session?.visibilityState??null,ended});},60);
+addEventListener('error',e=>fail(e.message));
+</script>
