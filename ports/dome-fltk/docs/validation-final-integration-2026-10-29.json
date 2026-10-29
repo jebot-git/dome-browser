@@ -1,0 +1,92 @@
+{
+  "validated_utc": "2026-10-29T14:24:37.427659+00:00",
+  "source_commit": "2b8f4dd54e7535181f77f0f131b75482cdc5684a",
+  "candidate_built_from_commit": "78165f94ed1b6007e6981b4f052e9dfef69c834e",
+  "candidate_sha256": "3e8fb85d8015a9846b41e982af1dd5d5e916cdb2e2c57ac3ad07c98e5cb9d187",
+  "production_source_changed": false,
+  "runtime_checks_passed": 144,
+  "reports": [
+    {
+      "name": "mixed-smallnet-wayland-r1",
+      "exit_code": 0,
+      "report": "final-integration-acceptance-v1/mixed-smallnet-wayland-r1/report.json",
+      "passed": true,
+      "checks": 44,
+      "native_schemes": [
+        "cso",
+        "dict",
+        "finger",
+        "fsp",
+        "ftp",
+        "gemini",
+        "gopher",
+        "gopher+",
+        "gophers",
+        "guppy",
+        "mercury",
+        "news",
+        "nex",
+        "nntp",
+        "ph",
+        "rwhois",
+        "scorpion",
+        "scorpions",
+        "scroll",
+        "spartan",
+        "titan",
+        "whois"
+      ]
+    },
+    {
+      "name": "external-links-wayland-r1",
+      "exit_code": 0,
+      "report": "final-integration-acceptance-v1/external-links-wayland-r1/report.json",
+      "passed": true,
+      "checks": 63,
+      "native_schemes": null
+    },
+    {
+      "name": "pdf-handoff-wayland-r1",
+      "exit_code": 0,
+      "report": "final-integration-acceptance-v1/pdf-handoff-wayland-r1/report.json",
+      "passed": true,
+      "checks": 25,
+      "native_schemes": null
+    },
+    {
+      "name": "external-media-r1",
+      "exit_code": 0,
+      "report": "final-integration-acceptance-v1/external-media-r1/report.json",
+      "passed": true,
+      "checks": 12,
+      "native_schemes": null
+    }
+  ],
+  "protocol_source_continuity": {
+    "baseline": "whois-v1/source-manifest.json",
+    "same_files": 21,
+    "all_same": true,
+    "report": "requirements-review-v1/smallnet-source-continuity-r2.json"
+  },
+  "scope": [
+    "Mixed sessions, explicit/automatic restoration, bookmarks, address completion and orderly restarts across 22 native schemes",
+    "Private default mailto, magnet and Misfin handlers through explicit CLI/address/page navigation, with intact URI arguments",
+    "PDF responses reach the chosen private viewer with original complete bytes, redirects and POST handling; interrupted bodies are rejected",
+    "Unsupported media uses the explicitly configured private player, with settings persistence and clean shutdown"
+  ],
+  "test_driver_sha256": {
+    "ports/dome-fltk/tests/external-links.py": "17ae5dfc5edd030436995b5856491243725d0d33daa139c290f0ae23cb75008d",
+    "ports/dome-fltk/tests/external-media.py": "5d011e3816c8af9c1be54b30b71c632636b771a6be2a23d59dc90117ea84de98",
+    "ports/dome-fltk/tests/pdf-handoff.py": "e662af9c1fdee89079220119028f831a37c785a416cb41e9a071df91ab7f9fb3",
+    "ports/dome-fltk/tests/smallnet-profile.py": "e6bdd31fdb337010a1244bab383bcd617e3e9e699da34f69b1b261c86ccdabb1"
+  },
+  "limits": [
+    "Representative local profiles and private handlers; no blanket public-server or physical-device conformance claim",
+    "Titan restored preparation is tested without submitting data; earlier scoped submission/reference evidence is retained",
+    "This is development-candidate acceptance; actual system installation and installed-path checks still await the existing native sudo prompt",
+    "No new native media playback or geolocation work"
+  ],
+  "system_files_changed": false,
+  "desktop_sessions_restarted": false,
+  "full_goal_achieved": false
+}

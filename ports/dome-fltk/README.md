@@ -2574,3 +2574,18 @@ Wayland, FLTK and Servo dispatch through a private synthetic device. Physical
 touchscreen, GPU rendering and contrast on every background are not established
 by these checks. Production browser code is unchanged by this acceptance work.
 See `docs/validation-scroll-indicator-2026-10-29.json` for evidence and limits.
+
+
+## Current candidate integration acceptance
+
+The optimized feature-grant candidate also passes 144 fresh integration checks:
+44 for mixed native sessions across 22 schemes, 63 for default mail/torrent/Misfin
+handoffs, 25 for complete PDF response handoff, and 12 for the external player.
+All 21 native protocol source files match the previously accepted WHOIS/RWhois
+protocol milestone. Earlier scoped transport, reference-server and streaming
+evidence is retained; the new run checks their integration after the WebXR work.
+Titan restoration opens preparation without submitting data. Private handlers
+receive the test documents and links; no real mail, torrent or player action is
+performed. These are private fixture checks, not universal server conformance.
+See `docs/validation-final-integration-2026-10-29.json`. System installation and
+installed-path acceptance remain pending the existing native sudo dialog.
