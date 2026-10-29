@@ -92,6 +92,7 @@ pub enum MockInputMsg {
     Reconnect,
     SetSupportedButtons(Vec<MockButton>),
     UpdateButtonState(MockButton),
+    SetPrimaryAction(bool),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -67,7 +67,7 @@ impl XRInputSource {
             window,
             0,
             String::new(),
-            if layout.xr_standard && info.supports_grip && matches!(info.target_ray_mode, TargetRayMode::TrackedPointer) {
+            if info.primary_action && layout.xr_standard && info.supports_grip && matches!(info.target_ray_mode, TargetRayMode::TrackedPointer) {
                 "xr-standard".into()
             } else {
                 String::new()

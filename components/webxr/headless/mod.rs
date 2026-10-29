@@ -77,6 +77,7 @@ impl InputInfo {
 }
 
 struct HeadlessDevice {
+    initial_inputs: Vec<InputSource>,
     data: Arc<Mutex<HeadlessDeviceData>>,
     id: u32,
     hit_tests: HitTestList,
@@ -227,12 +228,17 @@ impl DiscoveryAPI<SurfmanGL> for HeadlessDiscovery {
                     .iter()
                     .any(|feature| feature == "secondary-views"),
         };
+        // Snapshot existing sources at the same lock boundary as registering
+        // the session. Later additions/changes are buffered as events exactly
+        // once, including while the session thread is being started.
+        let initial_inputs = d.initial_inputs();
         d.sessions.push(per_session);
 
         let layer_manager = None;
         drop(d);
         xr.spawn(move |grand_manager| {
             Ok(HeadlessDevice {
+                initial_inputs,
                 data,
                 id,
                 granted_features,
@@ -370,7 +376,7 @@ impl DeviceAPI for HeadlessDevice {
     }
 
     fn initial_inputs(&self) -> Vec<InputSource> {
-        vec![]
+        self.initial_inputs.clone()
     }
 
     fn set_event_dest(&mut self, dest: ProfileGenericCallback<Event>) {
@@ -446,6 +452,10 @@ macro_rules! with_all_sessions {
 }
 
 impl HeadlessDeviceData {
+    fn initial_inputs(&self) -> Vec<InputSource> {
+        self.inputs.iter().filter(|input| input.active).map(|input| input.source.clone()).collect()
+    }
+
     fn get_frame(&self, s: &PerSessionData, sub_images: Vec<SubImages>) -> Frame {
         let pose = self.viewer_origin.map(|transform| {
             let views = if s.mode == SessionMode::Inline {
@@ -477,8 +487,8 @@ impl HeadlessDeviceData {
                     grip_origin: i.grip,
                     target_ray_emulated_position: i.pointer_emulated,
                     grip_emulated_position: i.grip_emulated,
-                    pressed: i.clicking,
-                    squeezed: button_pressed.get(1).copied().unwrap_or(false),
+                    pressed: i.source.primary_action && i.clicking,
+                    squeezed: i.source.primary_action && button_pressed.get(1).copied().unwrap_or(false),
                     hand: None,
                     button_values,
                     button_pressed,
@@ -586,7 +596,7 @@ impl HeadlessDeviceData {
     }
 
     fn trigger_select(&mut self, id: InputId, kind: SelectKind, event: SelectEvent) {
-        if !self.inputs.iter().any(|input| input.source.id == id && input.active) {
+        if !self.inputs.iter().any(|input| input.source.id == id && input.active && input.source.primary_action) {
             return;
         }
         for i in 0..self.sessions.len() {
@@ -598,7 +608,7 @@ impl HeadlessDeviceData {
     }
 
     fn trigger_action(&mut self, id: InputId, kind: SelectKind, event: SelectEvent) {
-        let Some(index) = self.inputs.iter().position(|input| input.source.id == id) else { return; };
+        let Some(index) = self.inputs.iter().position(|input| input.source.id == id && input.source.primary_action) else { return; };
         let held = self.inputs[index].action_pressed(kind);
         match event {
             SelectEvent::Start if !held => {
@@ -627,7 +637,7 @@ impl HeadlessDeviceData {
     }
 
     fn cancel_actions(&mut self, id: InputId) {
-        let Some(input) = self.inputs.iter().find(|input| input.source.id == id && input.active) else { return; };
+        let Some(input) = self.inputs.iter().find(|input| input.source.id == id && input.active && input.source.primary_action) else { return; };
         let held = [input.action_pressed(SelectKind::Select), input.action_pressed(SelectKind::Squeeze)];
         if !held.iter().any(|held| *held) { return; }
         for index in 0..self.sessions.len() {
@@ -702,16 +712,27 @@ impl HeadlessDeviceData {
                     .callback(Event::AddInput(init.source.clone())))
             },
             MockDeviceMsg::MessageInputSource(id, msg) => {
+                if let MockInputMsg::SetPrimaryAction(primary) = &msg {
+                    if self.inputs.iter().find(|input| input.source.id == id)
+                        .is_none_or(|input| input.source.primary_action == *primary) { return true; }
+                }
+
                 // Source replacement/removal must end author interactions before
                 // the old XRInputSource is removed. Keep raw controller state so
                 // reconnecting does not manufacture a new button press.
                 if matches!(&msg, MockInputMsg::Disconnect | MockInputMsg::SetHandedness(_) |
                     MockInputMsg::SetProfiles(_) | MockInputMsg::SetTargetRayMode(_) |
-                    MockInputMsg::SetSupportedButtons(_)) {
+                    MockInputMsg::SetSupportedButtons(_) | MockInputMsg::SetPrimaryAction(_)) {
                     self.cancel_actions(id);
                 }
                 if let Some(ref mut input) = self.inputs.iter_mut().find(|i| i.source.id == id) {
                     match msg {
+                        MockInputMsg::SetPrimaryAction(primary) => {
+                            input.source.primary_action = primary;
+                            if input.active { with_all_sessions!(self, |session| {
+                                session.events.callback(Event::UpdateInput(id, input.source.clone()))
+                            }); }
+                        },
                         MockInputMsg::SetHandedness(h) => {
                             input.source.handedness = h;
                             if input.active { with_all_sessions!(self, |s| {
@@ -869,6 +890,7 @@ mod tests {
         device.sessions.push(session(SessionMode::ImmersiveVR, false));
         device.handle_msg(MockDeviceMsg::AddInputSource(webxr_api::MockInputInit {
             source: InputSource {
+                primary_action: true,
                 id, handedness: webxr_api::Handedness::None,
                 target_ray_mode: webxr_api::TargetRayMode::TrackedPointer,
                 supports_grip: true, hand_support: None, profiles: vec![],
@@ -892,6 +914,74 @@ mod tests {
             button_type: MockButtonType::Grip, pressed, touched: pressed,
             pressed_value: if pressed { 1. } else { 0. }, x_value: 0., y_value: 0.,
         })
+    }
+
+    #[test]
+    fn unchanged_or_absent_source_roles_keep_the_device_message_loop_running() {
+        let mut device = data();
+        let id = controller(&mut device);
+        assert!(device.handle_msg(MockDeviceMsg::MessageInputSource(id, MockInputMsg::SetPrimaryAction(true))));
+        assert!(device.handle_msg(MockDeviceMsg::MessageInputSource(InputId(999), MockInputMsg::SetPrimaryAction(false))));
+        assert!(drain_events(&mut device).is_empty());
+        assert!(device.handle_msg(MockDeviceMsg::MessageInputSource(id, MockInputMsg::SetPrimaryAction(false))));
+        assert!(matches!(drain_events(&mut device).as_slice(), [Event::UpdateInput(_, source)] if !source.primary_action));
+    }
+
+    #[test]
+    fn initial_source_snapshot_keeps_classification_and_excludes_disconnected_sources() {
+        let mut device = data();
+        let id = controller(&mut device);
+        let before = device.initial_inputs();
+        assert_eq!(before.len(), 1);
+        assert!(before[0].primary_action);
+        device.handle_msg(MockDeviceMsg::MessageInputSource(id, MockInputMsg::SetPrimaryAction(false)));
+        assert!(before[0].primary_action);
+        let after = device.initial_inputs();
+        assert!(!after[0].primary_action);
+        device.handle_msg(MockDeviceMsg::MessageInputSource(id, MockInputMsg::Disconnect));
+        assert!(device.initial_inputs().is_empty());
+        device.handle_msg(MockDeviceMsg::MessageInputSource(id, MockInputMsg::Reconnect));
+        assert!(!device.initial_inputs()[0].primary_action);
+    }
+
+    #[test]
+    fn source_role_change_cancels_actions_before_replacement_and_keeps_poses() {
+        let mut device = data();
+        let id = controller(&mut device);
+        device.trigger_action(id, SelectKind::Select, SelectEvent::Start);
+        device.handle_msg(MockDeviceMsg::MessageInputSource(id, grip(true)));
+        drain_events(&mut device);
+        device.handle_msg(MockDeviceMsg::MessageInputSource(id, MockInputMsg::SetPrimaryAction(false)));
+        let events = drain_events(&mut device);
+        assert!(matches!(events.as_slice(), [
+            Event::Select(_, SelectKind::Select, SelectEvent::End, _),
+            Event::Select(_, SelectKind::Squeeze, SelectEvent::End, _),
+            Event::UpdateInput(_, source),
+        ] if !source.primary_action));
+        let frame = device.get_frame(&device.sessions[0], vec![]);
+        assert!(frame.inputs[0].target_ray_origin.is_some() && frame.inputs[0].grip_origin.is_some());
+        assert!(!frame.inputs[0].pressed && !frame.inputs[0].squeezed);
+        device.trigger_action(id, SelectKind::Select, SelectEvent::Select);
+        device.handle_msg(MockDeviceMsg::MessageInputSource(id, grip(false)));
+        device.handle_msg(MockDeviceMsg::MessageInputSource(id, grip(true)));
+        device.handle_msg(MockDeviceMsg::MessageInputSource(id, MockInputMsg::SetPrimaryAction(false)));
+        assert!(drain_events(&mut device).is_empty());
+        device.handle_msg(MockDeviceMsg::MessageInputSource(id, MockInputMsg::SetPrimaryAction(true)));
+        assert!(matches!(drain_events(&mut device).as_slice(), [Event::UpdateInput(_, source)] if source.primary_action));
+    }
+
+    #[test]
+    fn disconnected_source_role_is_retained_without_replacement_events() {
+        let mut device = data();
+        let id = controller(&mut device);
+        device.handle_msg(MockDeviceMsg::MessageInputSource(id, MockInputMsg::Disconnect));
+        drain_events(&mut device);
+        device.handle_msg(MockDeviceMsg::MessageInputSource(id, MockInputMsg::SetPrimaryAction(false)));
+        device.trigger_action(id, SelectKind::Select, SelectEvent::Start);
+        assert!(drain_events(&mut device).is_empty());
+        device.handle_msg(MockDeviceMsg::MessageInputSource(id, MockInputMsg::Reconnect));
+        assert!(matches!(drain_events(&mut device).as_slice(), [Event::AddInput(source)] if !source.primary_action));
+        assert!(!device.get_frame(&device.sessions[0], vec![]).inputs[0].pressed);
     }
 
     #[test]

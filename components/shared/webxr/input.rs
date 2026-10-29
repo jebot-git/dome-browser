@@ -43,6 +43,10 @@ impl GamepadLayout {
 
 #[derive(Clone, Debug, Serialize, Deserialize, MallocSizeOf)]
 pub struct InputSource {
+    /// Whether the source can perform a primary action. Pose-only trackers are
+    /// exposed through the separately granted tracked-sources collection.
+    #[serde(default = "primary_action_by_default")]
+    pub primary_action: bool,
     pub handedness: Handedness,
     pub target_ray_mode: TargetRayMode,
     pub id: InputId,
@@ -52,6 +56,8 @@ pub struct InputSource {
     #[serde(default)]
     pub gamepad: Option<GamepadLayout>,
 }
+
+fn primary_action_by_default() -> bool { true }
 
 #[derive(Clone, Debug, Serialize, Deserialize, MallocSizeOf)]
 pub struct InputFrame {

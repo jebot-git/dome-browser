@@ -8,6 +8,8 @@
 
 [Exposed=Window, Pref="dom_webxr_test"]
 interface FakeXRInputController {
+  // Local test-only extension for current-core tracked-source classification.
+  undefined setPrimaryAction(boolean primaryAction);
   undefined setHandedness(XRHandedness handedness);
   undefined setTargetRayMode(XRTargetRayMode targetRayMode);
   undefined setProfiles(sequence<DOMString> profiles);
@@ -30,6 +32,8 @@ interface FakeXRInputController {
 };
 
 dictionary FakeXRInputSourceInit {
+  // Local test-only extension; the shipping browser does not expose this API.
+  boolean primaryAction = true;
   required XRHandedness handedness;
   required XRTargetRayMode targetRayMode;
   required FakeXRRigidTransformInit pointerOrigin;

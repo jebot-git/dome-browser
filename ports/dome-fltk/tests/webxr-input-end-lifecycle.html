@@ -1,0 +1,24 @@
+<!doctype html><meta charset=utf-8><title>WebXR end during source events</title>
+<body><script>
+'use strict';const state=window.test={ready:true,finished:false,error:null,checks:[],frames:0};state.snapshot=()=>({...state,snapshot:undefined});
+const check=(ok,name)=>{if(!ok)throw Error(name);state.checks.push(name);};
+const origin={position:[0,0,0],orientation:[0,0,0,1]},projection=[1,0,0,0,0,1,0,0,0,0,-1,-1,0,0,-.2,0];
+const activate=()=>{let request;navigator.xr.test.simulateUserActivation(()=>request=navigator.xr.requestSession('immersive-vr'));return request;};
+(async()=>{
+ const canvas=document.createElement('canvas');document.body.append(canvas);const gl=canvas.getContext('webgl',{xrCompatible:true});
+ for(const phase of ['inputsourceschange','selectstart','select','selectend']){
+  const device=await navigator.xr.test.simulateDeviceConnection({supportsImmersive:true,supportedModes:['inline','immersive-vr'],supportedFeatures:['local'],viewerOrigin:origin,views:['left','right'].map(eye=>({eye,projectionMatrix:projection,viewOffset:origin,resolution:{width:64,height:64}}))});
+  await gl.makeXRCompatible();const session=await activate(),events=[];let ended;const done=new Promise(resolve=>ended=resolve);
+  for(const type of ['inputsourceschange','selectstart','select','selectend','end'])session.addEventListener(type,event=>{events.push(event);if(type===phase)session.end().catch(error=>state.error=String(error));if(type==='end')ended();});
+  session.updateRenderState({baseLayer:new XRWebGLLayer(session,gl)});
+  device.simulateInputSourceConnection({handedness:'right',targetRayMode:'tracked-pointer',profiles:[],pointerOrigin:origin,selectionClicked:true});
+  await done;await new Promise(resolve=>setTimeout(resolve,60));
+  const expected=phase==='inputsourceschange'?['inputsourceschange','end']:phase==='selectstart'?['inputsourceschange','selectstart','selectend','end']:['inputsourceschange','selectstart','select','selectend','end'];
+  check(events.map(event=>event.type).join(',')===expected.join(','),'Ending from '+phase+' preserves required cancellation and completion order');
+  check(events.every(event=>event.isTrusted&&event.target===session),'Ending from '+phase+' retains trusted event ownership');
+  check(session.inputSources.length===0&&session.trackedSources.length===0,'Ending from '+phase+' clears both live source collections');
+  await device.disconnect();
+ }
+ canvas.remove();check(true,'Fresh simulated devices isolate all four shutdown phases');state.finished=true;
+})().catch(error=>state.error=String(error)+' '+error.stack);
+</script>

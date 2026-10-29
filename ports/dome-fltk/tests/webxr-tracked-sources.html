@@ -1,0 +1,109 @@
+<!doctype html><meta charset=utf-8><title>WebXR tracked-source grants and lifecycle</title>
+<script>
+'use strict';
+const state=window.test={ready:true,finished:false,error:null,checks:[],frames:0,events:[]};
+state.snapshot=()=>({...state,snapshot:undefined});
+const check=(ok,label)=>{if(!ok)throw Error(label);state.checks.push(label);};
+const origin=x=>({position:[x,0,-1],orientation:[0,0,0,1]});
+const grip=pressed=>({buttonType:'grip',pressed,touched:pressed,pressedValue:pressed?1:0});
+const activate=(mode,init)=>{let request;navigator.xr.test.simulateUserActivation(()=>request=navigator.xr.requestSession(mode,init));return request;};
+const delay=()=>new Promise(resolve=>setTimeout(resolve,30));
+(async()=>{
+ check('trackedSources'in XRSession.prototype,'Session exposes the current-core trackedSources interface');
+ check('ontrackedsourceschange'in XRSession.prototype,'Session exposes its tracked-source event handler');
+ if(location.pathname==='/blocked'){
+  let name;try{await activate('inline',{requiredFeatures:['tracked-sources']});}catch(error){name=error.name;}
+  check(name==='NotSupportedError','Policy blocks a required tracked-sources feature');
+  const inline=await activate('inline',{optionalFeatures:['tracked-sources']});
+  check(!inline.enabledFeatures.includes('tracked-sources')&&inline.trackedSources.length===0,'Policy removes an optional tracked-sources feature and keeps its collection empty');
+  await inline.end();parent.postMessage({trackedPolicy:true,checks:state.checks},location.origin);state.finished=true;return;
+ }
+ const projection=[1,0,0,0,0,1,0,0,0,0,-1,-1,0,0,-.2,0];
+ const device=await navigator.xr.test.simulateDeviceConnection({supportsImmersive:true,supportedModes:['inline','immersive-vr'],supportedFeatures:['local','tracked-sources'],viewerOrigin:origin(0),views:['left','right'].map(eye=>({eye,projectionMatrix:projection,viewOffset:origin(0),resolution:{width:64,height:64}}))});
+ const init={handedness:'right',targetRayMode:'tracked-pointer',profiles:['primary'],pointerOrigin:origin(1),gripOrigin:origin(2),supportedButtons:[grip(false)]};
+ const primary=device.simulateInputSourceConnection(init);
+ const tracker=device.simulateInputSourceConnection({...init,primaryAction:false,profiles:['tracker'],pointerOrigin:origin(3),gripOrigin:origin(4),supportedButtons:[]});
+ const canvas=document.createElement('canvas');document.body.append(canvas);const gl=canvas.getContext('webgl',{xrCompatible:true});await gl.makeXRCompatible();
+ const frame=(session,fn=()=>null)=>new Promise((resolve,reject)=>session.requestAnimationFrame((time,frame)=>{try{state.frames++;resolve(fn(frame));}catch(error){reject(error);}}));
+ const settle=async session=>{for(let i=0;i<4;i++)await frame(session);};
+ const setup=async granted=>{
+  const session=await activate('immersive-vr',{requiredFeatures:['local',...(granted?['tracked-sources']:[])]});
+  const events=[];let handlerCalls=0;
+  for(const type of ['inputsourceschange','trackedsourceschange'])session.addEventListener(type,event=>events.push(event));
+  session.ontrackedsourceschange=()=>handlerCalls++;
+  session.updateRenderState({baseLayer:new XRWebGLLayer(session,gl)});
+  const local=await session.requestReferenceSpace('local');await settle(session);
+  return {session,events,local,handlerCalls:()=>handlerCalls};
+ };
+ let {session,events,local}=await setup(false);
+ const empty=session.trackedSources;
+ check(empty===session.trackedSources&&empty!==session.inputSources&&empty.length===0,'Ungranted trackedSources is a distinct stable empty array');
+ check(!session.enabledFeatures.includes('tracked-sources')&&session.inputSources.length===1,'Tracking-only sources are absent from ungranted primary input');
+ check(events.length===1&&events[0].type==='inputsourceschange','Ungranted tracking-only sources produce no change events');
+ tracker.setPrimaryAction(true);await settle(session);check(session.inputSources.length===2&&empty.length===0,'An ungranted tracking-only source can become an ordinary primary source');
+ tracker.setPrimaryAction(false);await settle(session);check(session.inputSources.length===1&&empty.length===0&&events.every(event=>event.type==='inputsourceschange'),'Demotion without grant removes the primary source without exposing tracking');
+ await session.end();check(session.inputSources.length===0&&empty.length===0,'Ungranted session shutdown clears source collections');
+ let suite=await setup(true);({session,events,local}=suite);
+ const primaryArray=session.inputSources,trackedArray=session.trackedSources;
+ let input=primaryArray[0],tracked=trackedArray[0];
+ check(session.enabledFeatures.includes('tracked-sources'),'A supported required tracked-sources feature is granted');
+ check(primaryArray.length===1&&trackedArray.length===1&&trackedArray===session.trackedSources,'Granted sources populate independent live arrays with SameObject identity');
+ check(events.map(event=>event.type).join(',')==='inputsourceschange,trackedsourceschange','Initial primary additions precede initial tracked additions');
+ check(events[0].added[0]===input&&events[1].added[0]===tracked,'Initial change events expose each collection\'s exact source objects');
+ check(tracked.gamepad===null&&tracked.gripSpace!==null&&tracked.targetRayMode==='tracked-pointer','A pose-only tracker exposes its spaces without inventing a gamepad');
+ check(await frame(session,f=>f.getPose(tracked.targetRaySpace,local).transform.position.x===3&&f.getPose(tracked.gripSpace,local).transform.position.x===4),'Tracked target and grip spaces use provider poses');
+ const pose=source=>frame(session,f=>f.getPose(source.targetRaySpace,local));
+ let beforeLoss=events.length;tracker.clearGripOrigin();await settle(session);
+ check(trackedArray[0]===tracked&&events.length===beforeLoss&&await frame(session,f=>f.getPose(tracked.gripSpace,local)===null&&f.getPose(tracked.targetRaySpace,local)!==null),'Temporary grip tracking loss keeps source identity and independent target tracking');
+ tracker.setGripOrigin(origin(4),true);await settle(session);
+ check(await frame(session,f=>f.getPose(tracked.gripSpace,local)?.emulatedPosition===true),'Recovered tracked grip preserves provider emulation metadata');
+
+ let old=tracked,start=events.length;tracker.setProfiles(['updated-tracker']);await settle(session);tracked=trackedArray[0];
+ check(events.length===start+1&&events[start].type==='trackedsourceschange'&&events[start].removed[0]===old&&events[start].added[0]===tracked,'Tracked metadata replacement reports removed and added objects in one event');
+ check(old!==tracked&&tracked.profiles[0]==='updated-tracker','Tracked metadata replacement creates fresh source identity');
+ check(await pose(old)===null&&await pose(tracked)!==null,'Retained replaced tracker cannot regain a pose through the reused device ID');
+ start=events.length;tracker.setPrimaryAction(false);await settle(session);check(events.length===start&&trackedArray[0]===tracked,'Repeated source-role assignment is a no-op');
+ old=tracked;start=events.length;tracker.setPrimaryAction(true);await settle(session);let promoted=primaryArray[1];
+ check(events.slice(start).map(event=>event.type).join(',')==='inputsourceschange,trackedsourceschange','Promotion adds primary input before removing old tracked input');
+ check(events[start].added[0]===promoted&&events[start+1].removed[0]===old&&trackedArray.length===0,'Promotion moves membership using fresh source identity');
+ check(promoted!==old&&await pose(old)===null&&await pose(promoted)!==null,'Promotion disconnects old tracker spaces and preserves new source tracking');
+ tracker.setPrimaryAction(false);await settle(session);tracked=trackedArray[0];
+ const order=[];for(const type of ['selectstart','select','selectend','squeezestart','squeeze','squeezeend'])session.addEventListener(type,event=>order.push({type,source:event.inputSource}));
+ session.addEventListener('inputsourceschange',()=>order.push({type:'inputsourceschange'}));session.addEventListener('trackedsourceschange',()=>order.push({type:'trackedsourceschange'}));
+ primary.startSelection();primary.updateButtonState(grip(true));await settle(session);start=order.length;old=input;primary.setPrimaryAction(false);await settle(session);
+ check(order.slice(start).map(event=>event.type).join(',')==='selectend,squeezeend,inputsourceschange,trackedsourceschange','Demotion cancels held actions before primary removal and tracked addition');
+ check(order.slice(start,start+2).every(event=>event.source===old),'Cancellation retains the old primary source identity');
+ check(primaryArray.length===0&&trackedArray.length===2&&await pose(old)===null,'Demotion disconnects old input and leaves only granted trackers');
+ start=order.length;primary.simulateSelect();primary.endSelection();primary.updateButtonState(grip(false));primary.updateButtonState(grip(true));await settle(session);
+ check(order.length===start,'Tracking-only sources do not dispatch selection or squeeze events');
+ primary.setPrimaryAction(true);await settle(session);input=primaryArray[0];
+ start=order.length;primary.endSelection();primary.updateButtonState(grip(false));await settle(session);check(order.length===start,'Promotion does not manufacture successful actions from retained raw button state');
+ primary.simulateSelect();await settle(session);check(order.slice(start).map(event=>event.type).join(',')==='selectstart,select,selectend','Fresh primary actions still work after role changes');
+ old=tracked;start=events.length;tracker.disconnect();await settle(session);
+ check(trackedArray.length===0&&events.length===start+1&&events[start].removed[0]===old,'Tracker disconnect removes exactly the current source');
+ check(await pose(old)===null,'Disconnected tracker spaces return no pose');
+ start=events.length;tracker.setPrimaryAction(true);tracker.setProfiles(['offline-role']);await settle(session);check(events.length===start,'Disconnected role and metadata updates emit no source events');
+ tracker.reconnect();await settle(session);const reconnected=primaryArray[1];
+ check(primaryArray.length===2&&trackedArray.length===0&&reconnected.profiles[0]==='offline-role','Reconnect uses metadata and classification changed while disconnected');
+ check(reconnected!==old&&await pose(old)===null,'Reconnect cannot resurrect retained tracker identity');
+ tracker.setPrimaryAction(false);await settle(session);tracked=trackedArray[0];
+ // Trackers with auxiliary controls retain live gamepad data, without a primary-action mapping.
+ tracker.setSupportedButtons([grip(false)]);await settle(session);tracked=trackedArray[0];
+ check(tracked.gamepad!==null&&tracked.gamepad.mapping==='','Auxiliary tracker controls expose an unmapped gamepad when its layout qualifies');
+ start=order.length;tracker.updateButtonState(grip(true));await settle(session);
+ check(tracked.gamepad.buttons[1].pressed&&order.length===start,'Tracked auxiliary controls update live gamepad data without primary action events');
+ check(suite.handlerCalls()===events.filter(event=>event.type==='trackedsourceschange').length,'Tracked-source handler receives each tracked change once');
+ check(events.every(event=>event instanceof XRInputSourcesChangeEvent&&event.session===session&&event.target===session&&event.isTrusted&&!event.bubbles&&!event.cancelable),'Provider source changes have trusted session identity and standard noncancelable flags');
+ check(events.every(event=>Object.isFrozen(event.added)&&Object.isFrozen(event.removed)),'Source-change added and removed arrays are frozen snapshots');
+ const frozenEvent=events.find(event=>event.type==='trackedsourceschange');check(frozenEvent.added[0]===events[1].added[0],'Historical event snapshots retain their original source identity');
+ await session.end();check(primaryArray.length===0&&trackedArray.length===0,'Shutdown clears both existing live collection objects');
+ check(!input.gamepad.connected&&!tracked.gamepad.connected,'Shutdown disconnects retained primary and tracked gamepads');
+ start=events.length;tracker.setPrimaryAction(true);primary.setProfiles(['after-end']);await delay();await delay();check(events.length===start,'Ended sessions receive no late classification or metadata events');
+ const reentrant=await activate('immersive-vr',{requiredFeatures:['tracked-sources']});let ending;
+ reentrant.oninputsourceschange=()=>ending=reentrant.end();
+ for(let i=0;i<100&&!ending;i++)await delay();check(!!ending,'Initial primary event can synchronously end its session');await ending;
+ check(reentrant.inputSources.length===0&&reentrant.trackedSources.length===0,'Reentrant shutdown during primary delivery prevents later tracked additions');
+ const policy=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Policy child timed out')),15000);const child=document.createElement('iframe');const receive=event=>{if(event.source!==child.contentWindow||event.origin!==location.origin||!event.data.trackedPolicy)return;clearTimeout(timer);window.removeEventListener('message',receive);child.remove();if(event.data.error)reject(Error(event.data.error));else resolve(event.data);};window.addEventListener('message',receive);child.src='/blocked';document.body.append(child);});state.checks.push(...policy.checks);
+ await device.disconnect();canvas.remove();check(true,'Tracked-source sessions and provider close cleanly');state.finished=true;
+})().catch(error=>{state.error=String(error)+' '+error.stack;if(location.pathname==='/blocked')parent.postMessage({trackedPolicy:true,error:state.error},location.origin);});
+</script>

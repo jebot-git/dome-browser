@@ -33,6 +33,7 @@ interface XRSession : EventTarget {
   readonly attribute Float32Array? supportedFrameRates;
   [SameObject] readonly attribute XRRenderState renderState;
   [SameObject] readonly attribute XRInputSourceArray inputSources;
+  [SameObject] readonly attribute XRInputSourceArray trackedSources;
   readonly attribute /*FrozenArray<DOMString>*/ any enabledFeatures;
   readonly attribute boolean isSystemKeyboardSupported;
 
@@ -51,6 +52,7 @@ interface XRSession : EventTarget {
   attribute EventHandler onselect;
   attribute EventHandler onsqueeze;
   attribute EventHandler oninputsourceschange;
+  attribute EventHandler ontrackedsourceschange;
   attribute EventHandler onselectstart;
   attribute EventHandler onselectend;
   attribute EventHandler onsqueezestart;

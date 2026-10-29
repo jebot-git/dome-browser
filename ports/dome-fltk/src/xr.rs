@@ -103,6 +103,12 @@ fn endpoint() -> Result<PathBuf> {
     }
     Ok(runtime.join(format!("dome-webxr-{port}.sock")))
 }
+// Consent preparation and final session creation must negotiate the same
+// capabilities. Tracking-only sources are supplied by provider metadata.
+fn validate_features(mode: SessionMode, init: &SessionInit) -> std::result::Result<Vec<String>, Error> {
+    init.validate(mode, &["local-floor".into(), "tracked-sources".into()])
+}
+
 fn rpc(path: &std::path::Path, request: Value, rgba: &[u8]) -> Result<Value> {
     rpc_with_timeout(path, request, rgba, Duration::from_secs(2))
 }
@@ -438,7 +444,7 @@ impl DiscoveryAPI<SurfmanGL> for Discovery {
         }
         self.focus_settle = None;
         let _hello = Hello::parse(probe().map_err(backend)?).map_err(backend)?;
-        init.validate(mode, &["local-floor".into()])?;
+        validate_features(mode, init)?;
         let dialog = crate::ui::ConsentDialog::new("Enter immersive WebXR", &format!(
             "{}\n\nAllow this site to use headset tracking and display immersive content in DomeD's XR session?\n\nLeaving the page ends only this browser session.", init.origin
         )).ok_or_else(|| backend("WebXR consent window unavailable"))?;
@@ -473,10 +479,7 @@ impl DiscoveryAPI<SurfmanGL> for Discovery {
         let hello =
             Hello::parse(rpc(&path, json!({"op":"hello","version":1}), &[]).map_err(backend)?)
                 .map_err(backend)?;
-        let features = init.validate(
-            mode,
-            &["local-floor".into()],
-        )?;
+        let features = validate_features(mode, init)?;
         if init.origin == "null" || self.approved_request.take() != Some(builder.id()) {
             return Err(backend("WebXR requires an accepted live consent request"));
         }
@@ -1007,6 +1010,25 @@ impl Drop for BridgeDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn negotiated_native_features_include_required_and_optional_tracking_only_sources() {
+        let mut init = SessionInit {
+            origin: "https://example.test".into(), webview_id: None,
+            required_features: vec!["viewer".into(), "local".into(), "tracked-sources".into()],
+            optional_features: vec!["local-floor".into(), "unsupported-local-test".into()],
+            first_person_observer_view: false,
+        };
+        let granted = validate_features(SessionMode::ImmersiveVR, &init).unwrap();
+        assert!(granted.iter().any(|feature| feature == "tracked-sources"));
+        assert!(granted.iter().any(|feature| feature == "local-floor"));
+        assert!(!granted.iter().any(|feature| feature == "unsupported-local-test"));
+        init.required_features.retain(|feature| feature != "tracked-sources");
+        init.optional_features.push("tracked-sources".into());
+        assert!(validate_features(SessionMode::ImmersiveVR, &init).unwrap().iter().any(|feature| feature == "tracked-sources"));
+        init.required_features.push("unsupported-local-test".into());
+        assert!(validate_features(SessionMode::ImmersiveVR, &init).is_err());
+    }
+
     #[test]
     fn rejects_invalid_tracking() {
         assert!(

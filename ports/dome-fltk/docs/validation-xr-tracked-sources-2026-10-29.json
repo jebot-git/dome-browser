@@ -1,0 +1,140 @@
+{
+  "change": "Implement feature-gated WebXR tracked sources with provider capability, poses and lifecycle",
+  "base_commit": "d967a8af1d8f605bb991c37415e23fd879bd8aaa",
+  "optimized_release": true,
+  "artifacts": {
+    "browser": {
+      "path": "/home/blux/de-xr/artifacts/servo-rendering-goal/webxr-tracked-sources-v1/browser-candidate-r3",
+      "sha256": "8784b0ee7440019aa47b15f6dca2c61b6fd32144e30db5023c8fe8dcf83f3801"
+    },
+    "embedder": {
+      "path": "/home/blux/de-xr/artifacts/servo-rendering-goal/webxr-tracked-sources-v1/embedder-candidate-r3",
+      "sha256": "f75e3df404c4cd1d93d51ff4b6fe557543f3b80f8b5c746cc6e09d8acce6a468"
+    }
+  },
+  "compiled_source_sha256": {
+    "components/script/dom/webxr/fakexrdevice.rs": "a269d516e0456e45a7268d98f78898dc3955caf0e5632730bc02da03a688cb4f",
+    "components/script/dom/webxr/fakexrinputcontroller.rs": "7e2af1881db77e8e3b8ae9fecdd2f30f3547974c647ec03612305e84c5465117",
+    "components/script/dom/webxr/xrinputsource.rs": "5e9a58bc2b4c74c3abad671bd98962570e850186a1a1713606be2c320cc66080",
+    "components/script/dom/webxr/xrinputsourcearray.rs": "562f430977fc9906f81c514c07e5e7796d006e170a9b3d036b5311f2b9beea47",
+    "components/script/dom/webxr/xrsession.rs": "54fc0fe76d64ee88e7e028757be5d648617538efc0fe1b5c0aeece3dae1d784a",
+    "components/script/dom/webxr/xrsession/inline_input.rs": "ea021e720606e80f2a7a85cfb26cf4fec0c56eabdceca8306278cfc16eb94d6d",
+    "components/script/dom/webxr/xrsystem.rs": "905b8f3fe93188af9e5f8f8afb2b744d47474d5153cfbfcb51edf146167381ca",
+    "components/script_bindings/webidls/FakeXRInputController.webidl": "bbcd7266a6d1053a895afed0a1d9d25b76b749dbc7545fab57596d271401cf21",
+    "components/script_bindings/webidls/XRSession.webidl": "aa5d2e424f2832a077509b557d44f8f760a3f040f12087b94e79bce5eb217f09",
+    "components/shared/webxr/input.rs": "8013457d900fe67c52d0d14aeb2aec41ae9ef6e8cd8ce54d5c884ee8a5ba8e43",
+    "components/shared/webxr/mock.rs": "b3d61d680656b9a4a75a0274db9855b56f7e4b54092cd0a320639f777c161aed",
+    "components/webxr/headless/mod.rs": "ccbbfa007215e94578e4d073327e4506b407663ebc230cb3b763dca801579259",
+    "components/webxr/openxr/input.rs": "76751e7cd2a4f7a807ee6cd34a0675d4b013b8f0b9a8115e536e9190216e1d82",
+    "ports/dome-fltk/src/xr.rs": "572f72db79c24e06577fb2c5b23ccbde5c9028d6cfc2d2f98d42874bdfbc152f",
+    "ports/dome-fltk/src/xr/input.rs": "38dbd7df3afdd828743861dacca58ff6caf72d4e89b8007dcaf15bea9500c04d",
+    "ports/dome-fltk/tests/webxr-tracked-sources.html": "d64a748c4929a6b351831067cb2af91f5139da0895c4fd8546d576aef1ea2cd6",
+    "ports/dome-fltk/tests/webxr-tracked-sources.py": "3546c9691d6fc9e282045a86c0fcd16158d81d2d16797ac3d4096d77c8229b49"
+  },
+  "unit_tests": {
+    "webxr_api": 53,
+    "webxr_backend_with_headless": 35,
+    "frontend_xr": 47,
+    "total_unique_passed": 135,
+    "existing_ignored_backend_test": 1,
+    "unchanged_api_backend_evidence": "build-jobs-r2.json",
+    "current_frontend_and_release_evidence": "build-jobs-r3.json"
+  },
+  "runtime_checks_passed": 1655,
+  "runtime_breakdown": {
+    "tracked-sources": 52,
+    "tracked-native": 40,
+    "tracked-native-ungranted": 35,
+    "visibility-mask": 41,
+    "original-mask": 2,
+    "inline-intent": 98,
+    "strict-actions": 10,
+    "native-activation": 21,
+    "native-activation-legacy-clock": 21,
+    "launch-activation": 12,
+    "original-inline-features": 18,
+    "mock-actions": 39,
+    "floor-model": 33,
+    "native-floor": 35,
+    "native-floor-legacy-clock": 35,
+    "tracking-loss": 19,
+    "tracking-lifecycle": 27,
+    "xr-bounded": 21,
+    "native-validity": 24,
+    "native-history": 30,
+    "native-projection": 43,
+    "xr-native-reset": 101,
+    "xr-native-input": 61,
+    "xr-inline": 38,
+    "history": 14,
+    "input-emulation-controls": 21,
+    "gamepad-policy": 749,
+    "input-end-lifecycle": 15
+  },
+  "runtime_jobs": 30,
+  "tracked_source_focused_checks": 52,
+  "native_provider_granted_checks": 40,
+  "native_provider_ungranted_checks": 35,
+  "fresh_device_input_end_checks": 15,
+  "worker_shutdown_scenarios": 3,
+  "anonymous_live_samples": {
+    "initial_discord_and_x_seconds_each": 30,
+    "clean_closures": true,
+    "initial_discord_blank_due_to_asset_load_failure": true,
+    "fresh_discord_baseline_and_candidate_seconds_each": 30,
+    "fresh_discord_rendered_on_both": true,
+    "adblock_enabled": true,
+    "visual_review": "visual-review-r6.json"
+  },
+  "core_audit": {
+    "pages_executed": 86,
+    "reported_passes": 260,
+    "reported_nonpassing_cases": 18,
+    "all_suite_harness_statuses_zero": true,
+    "original_assertions_changed": false,
+    "all_original_cases_passed": false,
+    "prior_classifications_retained": 16,
+    "additional_setup_mismatch_cases": 2,
+    "additional_setup_review": "original-input-end-review-r4.json",
+    "report": "core-audit-r3/report.json"
+  },
+  "behavior": [
+    "Classify sources by provider primary-action capability, defaulting old native metadata to primary",
+    "Expose separate SameObject trackedSources and trackedsourceschange only populated with a tracked-sources grant",
+    "Preserve native and headless poses, independent gamepad auxiliary controls, source replacement and reconnection identity",
+    "Cancel held actions before demotion or removal without successful completion",
+    "Preserve current source membership ordering, policy filtering, reentrant shutdown and end cleanup",
+    "Snapshot existing mock sources atomically when registering each new session and retain the mock message loop on no-op role updates",
+    "Use the same native feature negotiation during consent preparation and final session creation"
+  ],
+  "provider_scope": "Native wire accepts optional primary_action=false metadata; headless provider supports an explicitly test-only capability control. Existing physical controllers keep their default primary role. No physical tracker or full-device conformance claim.",
+  "test_api_shipping_exposure_changed": false,
+  "smallnet_scope_unchanged": true,
+  "geolocation_implementation_and_api_tests_excluded": true,
+  "geolocation_default_disabled": true,
+  "all_required_change_regressions_passed": true,
+  "full_goal_achieved": false,
+  "goal_status": "active",
+  "remaining": [
+    "Review further supported WebXR behavior and provider/session initialization concurrency",
+    "Later standards rendering and remaining scroll-indicator validation",
+    "Install published candidate and verify installed paths"
+  ],
+  "validated_utc": "2026-10-29T12:41:01.399330+00:00",
+  "portable_test_source_sha256": {
+    "webxr-native-role-proxy.py": "9c7ca92c2b2fc98367e6ddfc473c6d8347393840673d37a11e44b9f2c1caad87",
+    "webxr-tracked-native.py": "1a7108fc138b063b936273f8eee858d80d7bfac2f06d6a13fe4bb14edcd14085",
+    "webxr-tracked-native.html": "f293580e06d38b12d1d1045c6ab566ccc38de5e3ea9ce276fad68a03936bce1f",
+    "webxr-input-end-lifecycle.py": "74a66ca3c3708310ae5f7ce599e6f0af3576f9ec1b48a597593e185116f83e46",
+    "webxr-input-end-lifecycle.html": "6448652085df850354e28e79b4c287b60bec90b56e163c07d3760679ad07e1c1"
+  },
+  "portable_path_refactor_revalidation_passed": true,
+  "portable_driver_revalidation_checks": 90,
+  "test_source_whitespace_normalization": {
+    "file": "ports/dome-fltk/tests/webxr-tracked-native.py",
+    "change": "Remove whitespace from a blank line",
+    "python_token_stream_unchanged": true,
+    "validated_source_sha256": "1a7108fc138b063b936273f8eee858d80d7bfac2f06d6a13fe4bb14edcd14085",
+    "published_source_sha256": "b13a73b0b6e927e61dbe8421636d2d9791998a4cc25ac27ea61f1379cbc11ba7"
+  }
+}

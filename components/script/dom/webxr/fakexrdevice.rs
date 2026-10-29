@@ -343,6 +343,7 @@ impl FakeXRDeviceMethods<crate::DomTypeHolder> for FakeXRDevice {
         }
 
         let source = InputSource {
+            primary_action: init.primaryAction,
             handedness,
             target_ray_mode,
             id,

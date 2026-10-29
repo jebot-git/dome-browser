@@ -1,0 +1,30 @@
+<!doctype html><meta charset=utf-8><title>WebXR reference-space integration</title>
+<style>body{background:#202830;color:white;font:20px monospace}button{padding:20px;background:#305ac0;color:white}</style>
+<h1>Native tracked-source lifecycle</h1><button id=start disabled>Start tracking test</button><button id=end disabled>End session</button><canvas id=canvas width=128 height=96></canvas>
+<script>
+'use strict';const start=document.getElementById('start'),end=document.getElementById('end'),canvas=document.getElementById('canvas');
+let order=0,frameCount=0,session,ended=false,lastFrame=null,busy=false,local,nextSource=0,all=[],grant=new URLSearchParams(location.search).get('grant')!=='0';
+const sourceIds=new WeakMap(),report=(type,data={})=>fetch('/event',{method:'POST',body:JSON.stringify({order:++order,type,data})});
+const fail=e=>report('error',{message:String(e),stack:e?.stack});
+const identity=source=>{if(!sourceIds.has(source)){sourceIds.set(source,++nextSource);all.push(source);}return sourceIds.get(source);};
+const pose=p=>p?{position:[p.transform.position.x,p.transform.position.y,p.transform.position.z],emulated:p.emulatedPosition}:null;
+function sample(frame,source){return {source:identity(source),profile:source.profiles[0],aim:pose(frame.getPose(source.targetRaySpace,local)),grip:source.gripSpace?pose(frame.getPose(source.gripSpace,local)):null,gamepad:source.gamepad?{connected:source.gamepad.connected,mapping:source.gamepad.mapping,pressed:source.gamepad.buttons.map(button=>button.pressed)}:null};}
+const gl=canvas.getContext('webgl',{xrCompatible:true});
+gl.makeXRCompatible().then(()=>{start.disabled=false;report('ready',{start:start.getBoundingClientRect().toJSON(),end:end.getBoundingClientRect().toJSON(),viewport:[innerWidth,innerHeight],ratio:devicePixelRatio});}).catch(fail);
+start.onclick=async()=>{try{
+ session=await navigator.xr.requestSession('immersive-vr',{requiredFeatures:grant?['tracked-sources']:[]});start.disabled=true;end.disabled=false;
+ session.onend=()=>{ended=true;report('ended',{primary:session.inputSources.length,tracked:session.trackedSources.length,connected:all.map(source=>source.gamepad?.connected??false)});};
+ for(const name of ['inputsourceschange','trackedsourceschange'])session.addEventListener(name,event=>report('change',{name,added:event.added.map(identity),removed:event.removed.map(identity),primary:Array.from(session.inputSources,identity),tracked:Array.from(session.trackedSources,identity),trusted:event.isTrusted,cancelable:event.cancelable}));
+ local=await session.requestReferenceSpace('local');
+ for(const name of ['selectstart','selectend','select','squeezestart','squeezeend','squeeze'])session.addEventListener(name,event=>{try{report('input',{name,...sample(event.frame,event.inputSource)});}catch(error){fail(error);}});
+ const layer=new XRWebGLLayer(session,gl);session.updateRenderState({baseLayer:layer});
+ const frame=(time,f)=>{try{
+  lastFrame={frameCount:++frameCount,enabled:session.enabledFeatures,primary:Array.from(session.inputSources,source=>sample(f,source)),tracked:Array.from(session.trackedSources,source=>sample(f,source)),retained:all.map(source=>sample(f,source))};
+  if(frameCount===2)report('running');if(frameCount%4===0)report('frame',lastFrame);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,layer.framebuffer);gl.clearColor(.1,.2,.4,1);gl.clear(gl.COLOR_BUFFER_BIT);session.requestAnimationFrame(frame);
+ }catch(error){fail(error);}};session.requestAnimationFrame(frame);
+}catch(error){fail(error);}};
+async function command(op){if(op==='end'){await session.end();end.disabled=true;}report('command',{op});}
+setInterval(async()=>{if(busy)return;busy=true;try{const op=await(await fetch('/command')).json();if(op)await command(op);}catch(error){fail(error);}finally{busy=false;}report('heartbeat',{frameCount,lastFrame,ended});},60);
+addEventListener('error',event=>fail(event.message));
+</script>

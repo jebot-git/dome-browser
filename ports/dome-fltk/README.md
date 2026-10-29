@@ -2464,3 +2464,52 @@ retained in the visibility-mask validation. Current-specification interface
 coverage, including tracked sources absent from the older local test snapshot,
 still needs review. OffscreenCanvas remains disabled, and geolocation
 implementation and API testing remain excluded with its default disabled.
+
+
+## WebXR tracked sources and provider classification
+
+`XRSession.trackedSources` is a separate live, SameObject collection, populated
+only with a `tracked-sources` grant. `trackedsourceschange` reports additions,
+removals and source replacements. Providers distinguish primary-action sources
+from tracking-only sources; existing native metadata defaults to primary. A
+native `HostInput` may supply `primary_action: false` to classify a tracker.
+Tracking and auxiliary gamepad data remain available independently of primary
+actions. Trackers with qualifying controls use an unmapped gamepad.
+
+Role changes replace source objects, cancel held primary actions before removal,
+and leave retained old spaces disconnected. Primary-source changes precede
+tracked-source changes. End cleanup clears both collections. Native consent
+preparation and session creation use the same feature negotiation. Headless
+sessions snapshot existing active sources when registering under the device
+lock; later changes remain buffered events. Repeated role assignments do not
+stop the mock-device message loop.
+
+`XR_INPUT_STRICT_USER_ACTIVATION=1 tests/webxr-tracked-sources.py EMBEDDER OUTPUT`
+validates grants, policy, pose identity, metadata and role replacement, auxiliary
+controls, disconnect/reconnect, cancellation and reentrant shutdown. Its
+`primaryAction` initialization option and `setPrimaryAction()` are local test-only
+extensions, guarded by the existing disabled shipping test-API preference.
+`tests/webxr-tracked-native.py BROWSER FIXTURE OUTPUT` exercises the real native
+backend using a synthetic host with a private metadata adapter. Set
+`DOME_TRACKED_GRANT=0` for the ungranted case. The adapter creates no DOM events
+and never connects to the desktop's XR socket. The focused
+`tests/webxr-input-end-lifecycle.py EMBEDDER OUTPUT` checks end calls during all
+four input-event phases using fresh devices.
+
+Validation: 135 unit tests, 1,655 passing runtime checks, three worker-shutdown
+scenarios, native granted/ungranted cases, and reviewed anonymous Discord/X
+samples. An initial Discord asset-load failure produced a blank page; fresh
+loads on both the baseline and candidate rendered the login form without those
+errors. Filtering and transport protections stayed enabled.
+
+The unchanged original core audit reports 260 passes and 18 nonpassing cases.
+Sixteen earlier classifications remain. Two additional cases in the original
+input-event shutdown fixture retain connected controllers across sessions but
+expect only newly connected sources to cause addition events. Proper initial
+source reporting exposes that setup assumption; these cases remain nonpassing.
+Independent fresh-device shutdown checks pass. No original assertion is changed
+or counted as a pass because a harness completed. See
+`docs/validation-xr-tracked-sources-2026-10-29.json` for evidence and limits.
+Physical tracker compatibility and full WebXR conformance are not established.
+Further WebXR review and later rendering/scroll-indicator work remain.
+Geolocation implementation and API testing remain excluded and disabled.

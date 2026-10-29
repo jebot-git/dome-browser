@@ -6,6 +6,7 @@ use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
+use stylo_atoms::Atom;
 use webxr_api::{InputId, InputSource};
 
 use crate::dom::bindings::codegen::Bindings::XRInputSourceArrayBinding::XRInputSourceArrayMethods;
@@ -21,19 +22,29 @@ use crate::dom::xrsession::XRSession;
 #[dom_struct]
 pub(crate) struct XRInputSourceArray {
     reflector_: Reflector,
+    tracked: bool,
     input_sources: DomRefCell<Vec<Dom<XRInputSource>>>,
 }
 
 impl XRInputSourceArray {
-    fn new_inherited() -> XRInputSourceArray {
+    fn new_inherited(tracked: bool) -> XRInputSourceArray {
         XRInputSourceArray {
             reflector_: Reflector::new(),
+            tracked,
             input_sources: DomRefCell::new(vec![]),
         }
     }
 
     pub(crate) fn new(cx: &mut JSContext, window: &Window) -> DomRoot<XRInputSourceArray> {
-        reflect_dom_object(cx, Box::new(XRInputSourceArray::new_inherited()), window)
+        reflect_dom_object(cx, Box::new(XRInputSourceArray::new_inherited(false)), window)
+    }
+
+    pub(crate) fn new_tracked(cx: &mut JSContext, window: &Window) -> DomRoot<Self> {
+        reflect_dom_object(cx, Box::new(Self::new_inherited(true)), window)
+    }
+
+    fn change_event_type(&self) -> Atom {
+        if self.tracked { Atom::from("trackedsourceschange") } else { atom!("inputsourceschange") }
     }
 
     pub(crate) fn add_input_sources(
@@ -45,6 +56,7 @@ impl XRInputSourceArray {
         let global = self.global();
         let window = global.as_window();
 
+        if inputs.is_empty() { return; }
         let mut added = vec![];
         for info in inputs {
             // This is quadratic, but won't be a problem for the only case
@@ -67,9 +79,9 @@ impl XRInputSourceArray {
         let event = XRInputSourcesChangeEvent::new(
             cx,
             window,
-            atom!("inputsourceschange"),
+            self.change_event_type(),
             false,
-            true,
+            false,
             session,
             &added,
             &[],
@@ -90,9 +102,9 @@ impl XRInputSourceArray {
         let event = XRInputSourcesChangeEvent::new(
             cx,
             window,
-            atom!("inputsourceschange"),
+            self.change_event_type(),
             false,
-            true,
+            false,
             session,
             &[],
             &removed,
@@ -134,9 +146,9 @@ impl XRInputSourceArray {
         let event = XRInputSourcesChangeEvent::new(
             cx,
             window,
-            atom!("inputsourceschange"),
+            self.change_event_type(),
             false,
-            true,
+            false,
             session,
             &added,
             removed,

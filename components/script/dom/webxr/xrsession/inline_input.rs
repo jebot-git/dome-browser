@@ -252,6 +252,7 @@ impl XRSession {
             );
             self.inline_pointer_canvas.set(Some(&sample.canvas));
             let info = InputSource {
+                primary_action: true,
                 id,
                 handedness: Handedness::None,
                 target_ray_mode: TargetRayMode::Screen,

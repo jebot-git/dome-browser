@@ -606,6 +606,7 @@ impl OpenXRInput {
             None
         };
         InputSource {
+            primary_action: true,
             handedness: self.handedness,
             id: self.id,
             target_ray_mode: TargetRayMode::TrackedPointer,

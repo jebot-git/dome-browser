@@ -15,6 +15,8 @@ enum Hand {
 
 #[derive(Clone, Deserialize)]
 pub(super) struct HostInput {
+    #[serde(default = "active_by_default")]
+    primary_action: bool,
     id: u32,
     handedness: Hand,
     profiles: Vec<String>,
@@ -68,7 +70,8 @@ impl HostInput {
                 .all(|v| v.is_finite() && (-1.0..=1.0).contains(v))
     }
     fn same_source(&self, other: &Self) -> bool {
-        self.id == other.id
+        self.primary_action == other.primary_action
+            && self.id == other.id
             && self.handedness == other.handedness
             && self.profiles == other.profiles
             && self.supports_grip == other.supports_grip
@@ -77,6 +80,7 @@ impl HostInput {
     }
     fn source(&self) -> InputSource {
         InputSource {
+            primary_action: self.primary_action,
             id: InputId(self.id),
             handedness: match self.handedness {
                 Hand::None => Handedness::None,
@@ -157,8 +161,8 @@ impl HostInput {
                 .as_ref()
                 .filter(|_| allowed)
                 .map(|p| p.transform::<webxr_api::Input, Native>().then(&local)),
-            pressed: allowed && self.select && self.select_active,
-            squeezed: allowed && self.squeeze && self.squeeze_active,
+            pressed: allowed && self.primary_action && self.select && self.select_active,
+            squeezed: allowed && self.primary_action && self.squeeze && self.squeeze_active,
             hand: None,
             button_values,
             button_pressed,
@@ -229,6 +233,7 @@ struct Source {
 }
 impl Source {
     fn new(info: HostInput, allowed: bool) -> Self {
+        let allowed = allowed && info.primary_action;
         Self {
             select: if allowed && info.select_active {
                 Gesture::baseline(info.select)
@@ -403,7 +408,7 @@ impl State {
                 source.select = baseline.select;
                 source.squeeze = baseline.squeeze;
             } else {
-                let allowed = host.input_allowed() && input.aim.is_some();
+                let allowed = host.input_allowed() && input.aim.is_some() && input.primary_action;
                 for (gesture, down, active, kind) in [
                     (
                         &mut source.select,
@@ -494,6 +499,51 @@ mod tests {
             })
             .collect()
     }
+    #[test]
+    fn tracked_source_classification_defaults_to_legacy_primary_and_preserves_poses() {
+        let mut host = frame(1, true);
+        assert!(host.inputs[0].source().primary_action);
+        host.inputs[0].primary_action = false;
+        let input = &host.inputs[0];
+        assert!(!input.source().primary_action);
+        let sample = input.frame(RigidTransform3D::identity(), true);
+        assert!(sample.target_ray_origin.is_some() && sample.grip_origin.is_some());
+        assert!(!sample.pressed && !sample.squeezed);
+        // Auxiliary button data remains available independently of primary actions.
+        assert!(sample.button_pressed[0]);
+        let mut state = State::new(&host).unwrap();
+        assert!(selects(&update(&mut state, host.clone(), vec![], false)).is_empty());
+    }
+
+    #[test]
+    fn native_source_role_replacement_cancels_before_metadata_and_requires_fresh_press() {
+        let mut state = State::new(&frame(1, false)).unwrap();
+        update(&mut state, frame(2, true), vec![], false);
+        let mut tracker = frame(3, true);
+        tracker.inputs[0].primary_action = false;
+        let events = update(&mut state, tracker.clone(), vec![], false);
+        assert!(matches!(events.as_slice(), [Event::Select(_, SelectKind::Select, SelectEvent::End, _),
+            Event::UpdateInput(_, source)] if !source.primary_action));
+        assert!(update(&mut state, tracker, vec![], false).is_empty());
+        let events = update(&mut state, frame(4, true), vec![], false);
+        assert!(matches!(events.as_slice(), [Event::UpdateInput(_, source)] if source.primary_action));
+        assert!(selects(&update(&mut state, frame(5, true), vec![], false)).is_empty());
+        assert!(selects(&update(&mut state, frame(6, false), vec![], false)).is_empty());
+        assert_eq!(selects(&update(&mut state, frame(7, true), vec![], false))[0].1, SelectEvent::Start);
+    }
+
+    #[test]
+    fn initially_tracked_sources_do_not_emit_actions_when_raw_controls_change() {
+        let mut initial = frame(1, false);
+        initial.inputs[0].primary_action = false;
+        let mut state = State::new(&initial).unwrap();
+        for down in [true, false, true, false] {
+            let mut sample = frame(2, down);
+            sample.inputs[0].primary_action = false;
+            assert!(selects(&update(&mut state, sample, vec![], false)).is_empty());
+        }
+    }
+
     #[test]
     fn native_emulation_metadata_is_independent_and_legacy_poses_remain_tracked() {
         let mut host = frame(1, false);

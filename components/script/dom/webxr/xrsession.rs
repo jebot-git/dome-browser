@@ -24,7 +24,7 @@ use servo_base::cross_process_instant::CrossProcessInstant;
 use stylo_atoms::Atom;
 use webxr_api::{
     self, ApiSpace, ContextId as WebXRContextId, Display, EntityTypes, EnvironmentBlendMode,
-    Event as XREvent, Frame, FrameUpdateEvent, HitTestId, HitTestSource, InputFrame, InputId, Ray,
+    Event as XREvent, Frame, FrameUpdateEvent, HitTestId, HitTestSource, InputFrame, InputId, InputSource, Ray,
     SelectEvent, SelectKind, Session, SessionId, View, Viewer, Visibility, util,
 };
 
@@ -136,6 +136,7 @@ pub(crate) struct XRSession {
     current_raf_callback_list:
         DomRefCell<Vec<(i32, Option<TracedCallback<XRFrameRequestCallback>>)>>,
     input_sources: Dom<XRInputSourceArray>,
+    tracked_sources: Dom<XRInputSourceArray>,
     // Any promises from calling end()
     end_promises: DomRefCell<Vec<TracedPromise>>,
     /// <https://immersive-web.github.io/webxr/#ended>
@@ -217,6 +218,7 @@ impl XRSession {
         session: Session,
         render_state: &XRRenderState,
         input_sources: &XRInputSourceArray,
+        tracked_sources: &XRInputSourceArray,
         mode: XRSessionMode,
     ) -> XRSession {
         let nominal_rate = if mode == XRSessionMode::Inline { None } else { session.nominal_frame_rate() };
@@ -237,6 +239,7 @@ impl XRSession {
             raf_callback_list: DomRefCell::new(vec![]),
             current_raf_callback_list: DomRefCell::new(vec![]),
             input_sources: Dom::from_ref(input_sources),
+            tracked_sources: Dom::from_ref(tracked_sources),
             end_promises: DomRefCell::new(vec![]),
             ended: Cell::new(false),
             shutdown_complete: Cell::new(false),
@@ -273,12 +276,14 @@ impl XRSession {
         };
         let render_state = XRRenderState::new(cx, window, 0.1, 1000.0, ivfov, None, Vec::new());
         let input_sources = XRInputSourceArray::new(cx, window);
+        let tracked_sources = XRInputSourceArray::new_tracked(cx, window);
         let ret = reflect_weak_referenceable_dom_object(
             cx,
             Rc::new(XRSession::new_inherited(
                 session,
                 &render_state,
                 &input_sources,
+                &tracked_sources,
                 mode,
             )),
             window,
@@ -392,6 +397,42 @@ impl XRSession {
         self.session.borrow_mut().set_event_dest(callback);
     }
 
+    fn has_tracked_sources_feature(&self) -> bool {
+        self.session.borrow().granted_features().iter().any(|feature| feature == "tracked-sources")
+    }
+
+    fn find_input_source(&self, id: InputId) -> Option<DomRoot<crate::dom::xrinputsource::XRInputSource>> {
+        self.input_sources.find(id).or_else(|| self.tracked_sources.find(id))
+    }
+
+    fn add_classified_sources(&self, cx: &mut JSContext, sources: &[InputSource]) {
+        if self.is_ended() { return; }
+        let primary: Vec<_> = sources.iter().filter(|source| source.primary_action).cloned().collect();
+        self.input_sources.add_input_sources(cx, self, &primary);
+        if self.is_ended() || !self.has_tracked_sources_feature() { return; }
+        let tracked: Vec<_> = sources.iter().filter(|source| !source.primary_action).cloned().collect();
+        self.tracked_sources.add_input_sources(cx, self, &tracked);
+    }
+
+    fn replace_classified_source(&self, cx: &mut JSContext, id: InputId, source: InputSource) {
+        if source.primary_action {
+            if self.input_sources.find(id).is_some() {
+                self.input_sources.add_remove_input_source(cx, self, id, source);
+            } else {
+                self.input_sources.add_input_sources(cx, self, &[source]);
+            }
+            if !self.is_ended() { self.tracked_sources.remove_input_source(cx, self, id); }
+        } else {
+            self.input_sources.remove_input_source(cx, self, id);
+            if self.is_ended() || !self.has_tracked_sources_feature() { return; }
+            if self.tracked_sources.find(id).is_some() {
+                self.tracked_sources.add_remove_input_source(cx, self, id, source);
+            } else {
+                self.tracked_sources.add_input_sources(cx, self, &[source]);
+            }
+        }
+    }
+
     // Must be called after the promise for session creation is resolved
     // https://github.com/immersive-web/webxr/issues/961
     //
@@ -416,7 +457,7 @@ impl XRSession {
                 if this.is_ended() {
                     return;
                 }
-                this.input_sources.add_input_sources(cx, &this, &initial_inputs);
+                this.add_classified_sources(cx, &initial_inputs);
             }));
     }
 
@@ -433,6 +474,7 @@ impl XRSession {
                 self.clear_pending_operations(cx);
                 self.cancel_inline_pointers(cx);
                 self.input_sources.clear(cx);
+                self.tracked_sources.clear(cx);
                 self.input_frames.borrow_mut().clear();
                 self.active_input_actions.borrow_mut().clear();
                 self.reference_spaces.borrow_mut().clear();
@@ -543,17 +585,18 @@ impl XRSession {
             },
             XREvent::AddInput(info) => {
                 if !self.is_ended() {
-                    self.input_sources.add_input_sources(cx, self, &[info]);
+                    self.add_classified_sources(cx, &[info]);
                 }
             },
             XREvent::RemoveInput(id) => {
                 self.active_input_actions.borrow_mut().remove(&id);
                 self.input_sources.remove_input_source(cx, self, id);
+                self.tracked_sources.remove_input_source(cx, self, id);
             },
             XREvent::UpdateInput(id, source) => {
                 self.active_input_actions.borrow_mut().remove(&id);
                 if !self.is_ended() {
-                    self.input_sources.add_remove_input_source(cx, self, id, source);
+                    self.replace_classified_source(cx, id, source);
                 }
             },
             XREvent::InputChanged(id, frame) => {
@@ -773,7 +816,7 @@ impl XRSession {
         let timestamp = *self.global().performance(cx).to_dom_high_res_time_stamp(CrossProcessInstant::now());
         // <https://www.w3.org/TR/webxr-gamepads-module-1/#xrframe-apply-gamepad-frame-updates>
         for (id, frame) in self.input_frames.borrow_mut().drain() {
-            let source = self.input_sources.find(id);
+            let source = self.find_input_source(id);
             if let Some(source) = source {
                 source.update_gamepad_state(&frame, timestamp);
             }
@@ -781,7 +824,7 @@ impl XRSession {
         // Frame data is authoritative, even when the backend didn't emit a
         // separate InputChanged event (or several events ran before this RAF).
         for input in frame.inputs() {
-            if let Some(source) = self.input_sources.find(input.id) {
+            if let Some(source) = self.find_input_source(input.id) {
                 source.update_gamepad_state(input, timestamp);
             }
         }
@@ -884,6 +927,7 @@ impl XRSession {
 impl XRSessionMethods<crate::DomTypeHolder> for XRSession {
     // https://immersive-web.github.io/webxr/#eventdef-xrsession-end
     event_handler!(end, GetOnend, SetOnend);
+    event_handler!(trackedsourceschange, GetOntrackedsourceschange, SetOntrackedsourceschange);
 
     // https://immersive-web.github.io/webxr/#eventdef-xrsession-select
     event_handler!(select, GetOnselect, SetOnselect);
@@ -1143,6 +1187,11 @@ impl XRSessionMethods<crate::DomTypeHolder> for XRSession {
         p
     }
 
+    /// <https://www.w3.org/TR/webxr/#dom-xrsession-trackedsources>
+    fn TrackedSources(&self) -> DomRoot<XRInputSourceArray> {
+        DomRoot::from_ref(&*self.tracked_sources)
+    }
+
     /// <https://immersive-web.github.io/webxr/#dom-xrsession-inputsources>
     fn InputSources(&self) -> DomRoot<XRInputSourceArray> {
         DomRoot::from_ref(&*self.input_sources)
@@ -1171,6 +1220,7 @@ impl XRSessionMethods<crate::DomTypeHolder> for XRSession {
         // IDs are device identifiers, not array indices. Keep sources reachable
         // until the device's cancellation events and SessionEnd have arrived.
         self.input_sources.disconnect_all();
+        self.tracked_sources.disconnect_all();
         p
     }
 

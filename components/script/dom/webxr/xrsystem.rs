@@ -344,6 +344,7 @@ impl XRSystemMethods<crate::DomTypeHolder> for XRSystem {
                     | "plane-detection"
                     | "mesh-detection"
                     | "hand-tracking"
+                    | "tracked-sources"
             )
         };
         // Viewer-only inline requests do not use spatial tracking. Optional
