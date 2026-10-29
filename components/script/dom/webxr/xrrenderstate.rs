@@ -11,6 +11,7 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 use webxr_api::SubImages;
 
+use crate::canvas_context::CanvasContext;
 use crate::dom::bindings::codegen::Bindings::XRRenderStateBinding::XRRenderStateMethods;
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::reflector::DomGlobal;
@@ -106,6 +107,17 @@ impl XRRenderState {
         let layers = self.layers.borrow();
         f(&layers)
     }
+    /// <https://www.w3.org/TR/webxr/#should-be-rendered>
+    pub(crate) fn should_render(&self, immersive: bool) -> bool {
+        if let Some(base_layer) = self.base_layer.get() {
+            // Inline sessions need an output canvas, supplied by the base layer.
+            return immersive || base_layer.context().canvas().is_some();
+        }
+        // The supported layer type is XRWebGLLayer, which has no destroyed flag.
+        // Composition layers will also need the Layers API's destroyed check.
+        immersive && !self.layers.borrow().is_empty()
+    }
+
     pub(crate) fn has_sub_images(&self, sub_images: &[SubImages]) -> bool {
         if let Some(base_layer) = self.base_layer.get() {
             match sub_images.len() {

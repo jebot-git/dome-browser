@@ -1,0 +1,40 @@
+<!doctype html><meta charset="utf-8"><title>Inline FOV without an immersive device</title>
+<script>
+const state=window.test={ready:true,finished:false,error:null,checks:[],frames:0};
+state.snapshot=()=>({...state,snapshot:undefined});
+const check=(passed,name,actual)=>state.checks.push({name,passed:!!passed,actual});
+const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function frame(session){return Promise.race([new Promise(resolve=>session.requestAnimationFrame((time,frame)=>{state.frames++;resolve(frame);})),delay(1800).then(()=>{throw Error('Frame deadline');})]);}
+async function rejection(promise){try{await promise;return 'fulfilled';}catch(error){return error.name;}}
+(async()=>{
+ check(!await navigator.xr.isSessionSupported('immersive-vr'),'No immersive device is available to this private fixture');
+ for(const kind of ['webgl','webgl2']){
+  let session,canvas;
+  try{
+   canvas=document.createElement('canvas');canvas.width=128;canvas.height=96;document.body.append(canvas);
+   const gl=canvas.getContext(kind);check(!!gl,kind+': context is available');
+   check(!gl.getContextAttributes().xrCompatible,kind+': context begins without immersive compatibility');
+   const result=await rejection(gl.makeXRCompatible());
+   check(result==='InvalidStateError',kind+': makeXRCompatible rejects without an immersive device',result);
+   check(!gl.isContextLost()&&!gl.getContextAttributes().xrCompatible,kind+': absent-device rejection preserves a live non-compatible context');
+   session=await navigator.xr.requestSession('inline');const layer=new XRWebGLLayer(session,gl);
+   check(layer instanceof XRWebGLLayer,kind+': inline layer accepts the ordinary context');
+   const initial=session.renderState;
+   check(Math.abs(initial.inlineVerticalFieldOfView-Math.PI/2)<1e-6,kind+': default inline FOV is pi over two',initial.inlineVerticalFieldOfView);
+   session.updateRenderState({baseLayer:layer,inlineVerticalFieldOfView:-10});
+   check(session.renderState===initial,kind+': state remains unchanged before the frame boundary');
+   await frame(session);let value=session.renderState.inlineVerticalFieldOfView;
+   check(value>0&&value<Math.PI&&Math.abs(value-Math.PI/2)>1e-6,kind+': negative FOV clamps within the permitted open interval',value);
+   session.updateRenderState({inlineVerticalFieldOfView:10});await frame(session);value=session.renderState.inlineVerticalFieldOfView;
+   check(value>0&&value<Math.PI&&Math.abs(value-Math.PI/2)>1e-6,kind+': excessive FOV clamps within the permitted open interval',value);
+   session.updateRenderState({inlineVerticalFieldOfView:1.5});await frame(session);value=session.renderState.inlineVerticalFieldOfView;
+   check(Math.abs(value-1.5)<1e-6,kind+': ordinary FOV is applied exactly',value);
+   const active=await rejection(gl.makeXRCompatible());await frame(session);
+   check(active==='InvalidStateError'&&session.renderState.baseLayer===layer,kind+': inline rendering continues after another absent-device rejection',active);
+   await session.end();session=null;
+  }catch(error){check(false,kind+': scenario completes',String(error)+' '+error.stack);}
+  finally{if(session)await session.end().catch(()=>{});if(canvas)canvas.remove();}
+ }
+ state.finished=true;
+})().catch(error=>{state.error=String(error)+' '+error.stack;state.finished=true;});
+</script>

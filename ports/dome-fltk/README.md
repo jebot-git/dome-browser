@@ -2295,3 +2295,34 @@ WebXR units from retained network-unit results and unsupported optional cases.
 The broader WebXR goal remains active; the user-accepted limited DomeD immersive
 baseline is preserved. Geolocation implementation and API tests are excluded,
 and its existing disabled shipping default remains unchanged.
+
+## XR frame rendering eligibility
+
+Animation callbacks wait until the session has a renderable layer. Inline
+sessions also require an output canvas. Removing the layer pauses queued
+callbacks; installing it resumes the uncancelled callbacks. An update made from
+a callback takes effect at the next frame boundary, preserving the rest of the
+current callback batch.
+
+Pending render-state changes continue to merge and apply while animation
+callbacks are paused. Native frames are still acknowledged so device events and
+shutdown remain responsive. Renderability is checked separately from matching
+the native frame's sub-images to the active layers.
+
+`tests/webxr-render-state.py` checks these transitions with the private
+`xr-native-input` example. It uses the same `--binary` and `--output` options as
+the session-shutdown driver. `tests/webxr-render-state-wpt.py` runs five original
+render-state suites with unchanged assertions and setup helpers, including both
+inline and immersive no-layer cases. Two older inline-FOV setup failures remain
+recorded: they call `makeXRCompatible()` with no immersive device, which the
+[current WebXR algorithm](https://www.w3.org/TR/webxr/#dom-webglrenderingcontextbase-makexrcompatible)
+requires to reject. `tests/webxr-inline-fov.py` checks
+that rejection and ordinary inline FOV/rendering without the call for WebGL 1
+and 2. Original assertions and failures are preserved. Use isolated temporary
+profiles and a private compositor for these tests.
+
+Scoped results and limitations are recorded in
+`docs/validation-xr-render-state-2026-10-29.json`. Broader WebXR coverage and later
+rendering work remain; these selected cases do not prove full conformance.
+Geolocation implementation and API tests remain excluded and its disabled
+shipping default is unchanged.

@@ -1,0 +1,137 @@
+{
+  "passed": true,
+  "runtime_checks": 4078,
+  "runtime_breakdown": {
+    "render-state": 24,
+    "session-general": 43,
+    "session-logical": 12,
+    "session-retention": 5,
+    "xr-bounded": 21,
+    "xr-touch": 43,
+    "xr-inline-pointer": 38,
+    "xr-native-input": 60,
+    "xr-native-reset": 101,
+    "xr-inline": 35,
+    "xr-inline-lifecycle": 58,
+    "xr-inline-visibility": 77,
+    "reporting-delivery": 217,
+    "reporting-filtering": 11,
+    "reporting-filtering-allowlist": 11,
+    "cookie-policy": 149,
+    "cookie-file": 11,
+    "privacy-transports": 18,
+    "gamepad-policy": 749,
+    "webgl-xr-policy": 712,
+    "iframe-potentials": 1213,
+    "policy-reporting": 248,
+    "csp-observers": 69,
+    "history": 14,
+    "xr-enforced": 23,
+    "xr-report-only": 47,
+    "xr-pending": 14,
+    "xr-devicechange": 30,
+    "inline-fov": 25
+  },
+  "regression_suites": 40,
+  "webxr_unit_tests": 19,
+  "ignored_unit_tests": 1,
+  "ignored_reason": "Unchanged shader validation requires independent glslangValidator; ignored library test retained",
+  "retained_net_unit_tests": 322,
+  "net_unit_tests_rerun": false,
+  "new_render_state_api_checks": 22,
+  "baseline_render_state_failures": 6,
+  "new_original_render_state_cases": 20,
+  "baseline_original_failures": 6,
+  "original_wpt_passed": 108,
+  "original_wpt_failed": 2,
+  "all_current_selected_original_assertions_passed": false,
+  "original_setup_mismatches": [
+    {
+      "name": "inlineVerticalFieldOfView is set appropriately on inline sessions - webgl",
+      "status": 1,
+      "message": "promise_test: Unhandled rejection with value: object \"InvalidStateError: The object is in an invalid state.\""
+    },
+    {
+      "name": "inlineVerticalFieldOfView is set appropriately on inline sessions - webgl2",
+      "status": 1,
+      "message": "promise_test: Unhandled rejection with value: object \"InvalidStateError: The object is in an invalid state.\""
+    }
+  ],
+  "setup_mismatch_reason": "The checked-in inline-FOV setup calls makeXRCompatible with only an inline device. Current WebXR requires InvalidStateError when no immersive device is selected. Direct checks validate that rejection and ordinary inline rendering/FOV without the call on both baseline and candidate. Original failures and assertions preserved.",
+  "setup_mismatch_reference": "https://www.w3.org/TR/webxr/#dom-webglrenderingcontextbase-makexrcompatible",
+  "inline_fov_api_checks": 23,
+  "resolved_original_layerless_cases": 4,
+  "original_wpt_breakdown": {
+    "original-session": 18,
+    "original-layers": 22,
+    "original-dynamic-viewports": 24,
+    "original-secondary-views": 12,
+    "original-reset": 4,
+    "original-compatibility": 6,
+    "original-xr": 2,
+    "original-gamepad": 2,
+    "original-render-state": 18
+  },
+  "optional_unsupported_cases": 4,
+  "original_assertions_and_helpers_unchanged": true,
+  "worker_shutdown_scenarios": 3,
+  "anonymous_live_samples": 2,
+  "geolocation_excluded": true,
+  "geolocation_shipping_default_unchanged": true,
+  "sessions_restarted": false,
+  "current_khronos_executions": 0,
+  "scope": "Scoped XR rendering eligibility, pending render-state and callback/input/collection lifecycle, native DomeD transport, reporting/privacy/cookie/history/worker regressions. Private synthetic devices and anonymous live pages; no whole-API, full WPT, physical-headset or GPU-reset conformance claim. Geolocation implementation and API tests excluded.",
+  "finished_utc": "2026-10-29T01:05:47.519247+00:00",
+  "base_commit": "dd7204ed58869134c9899117a4a79b6acf40c5c5",
+  "build": "Optimized release; regular-user build with locked offline dependencies. Release check and build passed.",
+  "binary_sha256": {
+    "browser-candidate-r3": "fe3dddf19d61fb9e85e7942989110113268807e0977a6b731fada7b58f46c6e9",
+    "test-embedder-r3": "46f0c13ada47ca16f6565d6c0ed18576655092c5376f8c2908bf4a58e14838d6"
+  },
+  "source_sha256": {
+    "components/script/dom/webxr/xrsession.rs": "07de0d113059ed045170f2706a0e71504bb5e3b594ab26bc2c36abc2ebfba7fd",
+    "components/script/dom/webxr/xrrenderstate.rs": "7d6125c1e3f8ed6d09cac3e4d2a77af1c9724e19315a542168b3ba640ea7645f",
+    "ports/dome-fltk/examples/xr-native-input.rs": "04713ede716526474fd3b93bb827080091aabe7e0595fe2799ca2e0cc8ad8c56",
+    "ports/dome-fltk/examples/xr-native-input/session_lifecycle_fixture.rs": "ce6e048ab685cb823f90faf635f6948fa8381cc3ce16902b8c363de5c51f842d",
+    "Cargo.toml": "e9260f5e43822d8992eb6354549764ed9e8f68970424cf8e3d4451d91f707eb4",
+    "Cargo.lock": "e149f0b652379f7fd70669a574725ce7943308642b7096313178872f600db182"
+  },
+  "new_fixture_sha256": {
+    "ports/dome-fltk/tests/webxr-render-state.py": "f68b14928ca55debccfab9d2d5cbc379a6987025bc9e1ec940188a5a5cbed156",
+    "ports/dome-fltk/tests/webxr-render-state.html": "073e8f4957b3aed62853be424900dbdb3edb951df9d3e5ff5cb4e9c41e58f4f7",
+    "ports/dome-fltk/tests/webxr-inline-fov.py": "7558e47ddf0f387c4ba01559459b6280c911a715871323e521d56dade45fe387",
+    "ports/dome-fltk/tests/webxr-inline-fov.html": "abe272004897e15ec270b6435122184176be813b4e369370ef291f533d660dd3",
+    "ports/dome-fltk/tests/webxr-render-state-wpt.py": "7c9678748a69049fc825b3318af16526f44e0790491d729b60dea9b67e0242ab"
+  },
+  "baseline": {
+    "local_checks": {
+      "passed": 16,
+      "failed": 6,
+      "total": 22
+    },
+    "original_cases": {
+      "passed": 14,
+      "failed": 6,
+      "total": 20
+    }
+  },
+  "candidate": {
+    "local_checks": {
+      "passed": 22,
+      "failed": 0,
+      "total": 22
+    },
+    "original_cases": {
+      "passed": 18,
+      "failed": 2,
+      "total": 20
+    }
+  },
+  "references": [
+    "https://www.w3.org/TR/webxr/#should-be-rendered",
+    "https://www.w3.org/TR/webxrlayers-1/#animation-frames-changes"
+  ],
+  "visual_review": "Anonymous Discord login form and X landing/login visibly rendered at 30 seconds. Both survived and closed cleanly. Accepted X QR overlap remains a non-bug. No whole-site correctness assertion.",
+  "original_transport": "Original resources embedded with completion reporting and sequential srcdoc aggregation. Assertions and setup helpers unchanged. This is a local adapter, not the full WPT runner.",
+  "remaining": "Broader supported WebXR API/backend/device coverage and physical-device interoperability, followed by standards rendering and remaining scroll-indicator DPI/zoom/contrast/input validation. Preserve the accepted limited DomeD immersive baseline. Geolocation excluded."
+}

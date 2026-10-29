@@ -1,0 +1,56 @@
+<!doctype html><meta charset="utf-8"><title>XR render state eligibility</title>
+<script>
+const state=window.test={ready:true,finished:false,error:null,checks:[],frames:0};
+state.snapshot=()=>({...state,snapshot:undefined});
+requestAnimationFrame(function heartbeat(){state.frames++;requestAnimationFrame(heartbeat);});
+const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const check=(passed,name,actual)=>state.checks.push({name,passed:!!passed,actual});
+async function until(fn){const end=performance.now()+2000;while(!fn()){if(performance.now()>end)throw Error('Fixture deadline');await delay(10);}}
+async function settled(){const before=state.frames;await delay(180);await until(()=>state.frames>=before+6);}
+const projection=[1,0,0,0,0,1,0,0,0,0,-1,-1,0,0,-.2,0];
+async function open(mode){let request;const start=()=>request=navigator.xr.requestSession(mode);mode==='inline'?start():navigator.xr.test.simulateUserActivation(start);return request;}
+(async()=>{
+ const device=await navigator.xr.test.simulateDeviceConnection({supportsImmersive:true,
+  supportedModes:['inline','immersive-vr'],supportedFeatures:['local'],
+  views:['left','right'].map((eye,i)=>({eye,projectionMatrix:projection,
+   viewOffset:{position:[i?.03:-.03,0,0],orientation:[0,0,0,1]},resolution:{width:128,height:96}})),
+  viewerOrigin:{position:[0,0,0],orientation:[0,0,0,1]}});
+ for(const mode of ['inline','immersive-vr']){
+  let session,canvas;
+  try{
+   session=await open(mode);
+   check(session.renderState.baseLayer===null&&session.renderState.layers.length===0,mode+': initial render state has no layer');
+   const old=session.renderState;session.updateRenderState({depthNear:.25});session.updateRenderState({depthFar:150});
+   check(session.renderState===old&&session.renderState.depthNear!==.25,mode+': pending changes preserve active state synchronously');
+   let first=0,firstLayer=null;const firstHandle=session.requestAnimationFrame(()=>{first++;firstLayer=session.renderState.baseLayer;});
+   check(firstHandle>0,mode+': live session accepts a queued callback');
+   await settled();
+   check(first===0,mode+': no callback runs before a renderable layer is installed',first);
+   check(session.renderState.depthNear===.25&&session.renderState.depthFar===150,mode+': pending state merges and applies while callbacks are paused',[session.renderState.depthNear,session.renderState.depthFar]);
+   canvas=document.createElement('canvas');canvas.width=128;canvas.height=96;document.body.append(canvas);
+   const gl=canvas.getContext('webgl',{xrCompatible:true});await gl.makeXRCompatible();
+   const layer=new XRWebGLLayer(session,gl);session.updateRenderState({baseLayer:layer});
+   let positive=0;session.requestAnimationFrame(()=>positive++);await until(()=>positive===1);
+   check(first===1&&firstLayer===layer,mode+': callback queued without a layer runs after layer installation',{first,correctLayer:firstLayer===layer});
+   check(session.renderState.baseLayer===layer,mode+': installed layer becomes active');
+   let current=0;await new Promise(resolve=>{
+    session.requestAnimationFrame(()=>{current++;session.updateRenderState({baseLayer:null});});
+    session.requestAnimationFrame(()=>{current++;resolve();});
+   });
+   check(current===2,mode+': removing the layer preserves the current callback batch',current);
+   await until(()=>session.renderState.baseLayer===null);
+   let cancelled=0,resumed=0;
+   const cancelledHandle=session.requestAnimationFrame(()=>cancelled++);session.cancelAnimationFrame(cancelledHandle);
+   session.requestAnimationFrame(()=>resumed++);session.updateRenderState({depthNear:.5});
+   await settled();
+   check(cancelled===0&&resumed===0,mode+': layer removal pauses queued callbacks and preserves cancellation',{cancelled,resumed});
+   check(session.renderState.depthNear===.5,mode+': pending updates apply after layer removal',session.renderState.depthNear);
+   session.updateRenderState({baseLayer:layer});let positiveAgain=0;session.requestAnimationFrame(()=>positiveAgain++);await until(()=>positiveAgain===1);
+   check(resumed===1&&cancelled===0,mode+': reinstalling the layer resumes only the uncancelled callback',{cancelled,resumed});
+   await session.end();session=null;
+  }catch(error){check(false,mode+': scenario completes',String(error)+' '+error.stack);}
+  finally{if(session)await session.end().catch(()=>{});if(canvas)canvas.remove();}
+ }
+ await device.disconnect();state.finished=true;
+})().catch(error=>{state.error=String(error)+' '+error.stack;state.finished=true;});
+</script>

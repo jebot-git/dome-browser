@@ -600,6 +600,14 @@ impl XRSession {
             return;
         }
 
+        // Pending state has already been applied, even when no layer can render.
+        // Keep queued callbacks until an output layer becomes available; frames
+        // still need acknowledgement for native events and orderly shutdown.
+        if !self.active_render_state.get().should_render(self.is_immersive()) {
+            self.session.borrow_mut().render_animation_frame();
+            return;
+        }
+
         // Step 4
         // TODO: what should this check be?
         // This is checking that the new render state has the same
