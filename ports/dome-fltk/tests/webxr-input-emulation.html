@@ -1,0 +1,35 @@
+<!doctype html><meta charset=utf-8><title>Input pose emulation</title>
+<script>
+const state=window.test={ready:true,finished:false,error:null,checks:[],frames:0};state.snapshot=()=>({...state,snapshot:undefined});
+const check=(passed,name,actual)=>state.checks.push({name,passed:!!passed,actual});
+const origin=p=>({position:p,orientation:[0,0,0,1]});const projection=[1,0,0,0,0,1,0,0,0,0,-1,-1,0,0,-.2,0];
+let session;const inspect=fn=>new Promise((resolve,reject)=>session.requestAnimationFrame((time,frame)=>{state.frames++;try{fn(frame);resolve();}catch(e){reject(e);}}));const settle=async()=>{for(let i=0;i<6;i++)await inspect(()=>{});};
+const emulated=(frame,a,b)=>frame.getPose(a,b)?.emulatedPosition;
+(async()=>{
+const device=await navigator.xr.test.simulateDeviceConnection({supportsImmersive:true,supportedModes:['immersive-vr'],supportedFeatures:['local'],viewerOrigin:origin([0,1,0]),views:[{eye:'none',projectionMatrix:projection,viewOffset:origin([0,0,0]),resolution:{width:128,height:96}}]});
+let request;navigator.xr.test.simulateUserActivation(()=>request=navigator.xr.requestSession('immersive-vr'));session=await request;
+const canvas=document.createElement('canvas');document.body.append(canvas);const gl=canvas.getContext('webgl',{xrCompatible:true});await gl.makeXRCompatible();session.updateRenderState({baseLayer:new XRWebGLLayer(session,gl)});
+const local=await session.requestReferenceSpace('local'),viewer=await session.requestReferenceSpace('viewer');
+const init=handedness=>({handedness,targetRayMode:'tracked-pointer',profiles:[],pointerOrigin:origin([1,2,3]),gripOrigin:origin([1,2,2])});
+const controller=device.simulateInputSourceConnection(init('right')),otherController=device.simulateInputSourceConnection(init('left'));await settle();
+const source=Array.from(session.inputSources).find(s=>s.handedness==='right'),other=Array.from(session.inputSources).find(s=>s.handedness==='left');
+check(!!source?.gripSpace&&!!other?.gripSpace,'Both connected controller fixtures expose grip spaces');
+await inspect(f=>{check(emulated(f,source.gripSpace,local)===false,'Tracked grip position starts non-emulated');check(emulated(f,source.targetRaySpace,local)===false,'Tracked ray position starts non-emulated');});
+controller.setGripOrigin(origin([1,2,2]),true);await settle();
+await inspect(f=>{
+ check(emulated(f,source.gripSpace,local)===true,'Grip-to-world reports source emulation');check(emulated(f,local,source.gripSpace)===true,'World-to-grip reports reliance on source emulation');
+ check(emulated(f,source.gripSpace,source.gripSpace)===false,'Grip self relationship remains statically known');
+ check(emulated(f,source.gripSpace,source.targetRaySpace)===false,'Grip-to-ray on one controller remains non-emulated');
+ check(emulated(f,source.targetRaySpace,source.gripSpace)===false,'Ray-to-grip on one controller remains non-emulated');
+ check(emulated(f,source.targetRaySpace,local)===false,'Grip flag does not change independent ray-to-world status');
+ check(emulated(f,other.gripSpace,source.gripSpace)===true,'Different-controller relation relies on the estimated world position');
+ const p=f.getPose(source.gripSpace,local);check(p&&p.linearVelocity===null&&p.angularVelocity===null,'Emulated grip reports no measured velocity');
+});
+controller.setPointerOrigin(origin([1,2,3]),true);await settle();
+await inspect(f=>{check(emulated(f,source.targetRaySpace,local)===true,'Ray-to-world reports source emulation');check(emulated(f,viewer,source.targetRaySpace)===true,'Viewer-to-ray reports reliance on the ray estimate');check(emulated(f,source.gripSpace,source.targetRaySpace)===false,'Common-controller relation stays non-emulated with both origins emulated');});
+controller.clearGripOrigin();await settle();await inspect(f=>{check(f.getPose(source.gripSpace,local)===null,'Cleared grip world pose stays unavailable');check(f.getPose(source.gripSpace,source.targetRaySpace)===null,'A missing grip transform is not reconstructed from a ray');});
+controller.setGripOrigin(origin([1,2,2]));controller.setPointerOrigin(origin([1,2,3]));await settle();await inspect(f=>{check(emulated(f,source.gripSpace,local)===false&&emulated(f,source.targetRaySpace,local)===false,'Default setters restore non-emulated tracking flags');});
+controller.disconnect();await settle();await inspect(f=>{check(f.getPose(source.gripSpace,local)===null,'Disconnected input cannot expose a cached world pose');check(f.getPose(source.gripSpace,source.gripSpace)===null,'Disconnected input visibility guard precedes static self relation');});
+await session.end();await device.disconnect();canvas.remove();state.finished=true;
+})().catch(error=>{state.error=String(error)+' '+error.stack;state.finished=true;});
+</script>

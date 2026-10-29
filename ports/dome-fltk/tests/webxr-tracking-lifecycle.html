@@ -1,0 +1,54 @@
+<!doctype html><meta charset="utf-8"><title>Tracking lifecycle and calibration</title>
+<script>
+const state=window.test={ready:true,finished:false,error:null,checks:[],frames:0};
+state.snapshot=()=>({...state,snapshot:undefined});
+const check=(passed,name,actual)=>state.checks.push({name,passed:!!passed,actual});
+const origin=position=>({position,orientation:[0,0,0,1]});
+const pos=p=>p&&[p.transform.position.x,p.transform.position.y,p.transform.position.z];
+const near=(a,b)=>a&&a.length===b.length&&a.every((v,i)=>Math.abs(v-b[i])<1e-5);
+const identity=p=>p&&near(pos(p),[0,0,0])&&near([p.transform.orientation.x,p.transform.orientation.y,p.transform.orientation.z,p.transform.orientation.w],[0,0,0,1]);
+const projection=[1,0,0,0,0,1,0,0,0,0,-1,-1,0,0,-.2,0];
+const views=(sep=.03)=>['left','right'].map((eye,i)=>({eye,projectionMatrix:projection,viewOffset:origin([i?sep:-sep,0,0]),resolution:{width:128,height:96},fieldOfView:{upDegrees:45,downDegrees:45,leftDegrees:45,rightDegrees:45}}));
+let session,canvas,gl,layer;
+const inspect=fn=>new Promise((resolve,reject)=>session.requestAnimationFrame((time,frame)=>{state.frames++;try{fn(frame);resolve();}catch(e){reject(e);}}));
+const settle=async()=>{for(let i=0;i<6;i++)await inspect(()=>{});};
+async function start(){let request;navigator.xr.test.simulateUserActivation(()=>request=navigator.xr.requestSession('immersive-vr',{requiredFeatures:['local','local-floor']}));session=await request;canvas=document.createElement('canvas');document.body.append(canvas);gl=canvas.getContext('webgl',{xrCompatible:true});await gl.makeXRCompatible();layer=new XRWebGLLayer(session,gl);session.updateRenderState({baseLayer:layer});return Promise.all(['viewer','local','local-floor'].map(x=>session.requestReferenceSpace(x)));}
+(async()=>{
+const device=await navigator.xr.test.simulateDeviceConnection({supportsImmersive:true,supportedModes:['immersive-vr'],supportedFeatures:['local','local-floor'],views:views(),floorOrigin:origin([0,0,0])});
+let [viewer,local,floor]=await start();
+await inspect(frame=>{
+ check(frame.getViewerPose(local)===null,'Never-tracked world viewer pose stays unknown');
+ check(frame.getPose(viewer,local)===null,'Never-tracked ordinary world pose stays unknown');
+ const self=frame.getViewerPose(viewer);check(identity(self)&&!self.emulatedPosition,'Never-tracked viewer origin is statically known');
+ check(self&&self.views.length===2,'Known stereo calibration is available before world tracking');
+ check(identity(frame.getPose(viewer,viewer)),'Never-tracked viewer self relationship is identity');
+ if(self){check(near(pos(self.views[0]),[-.03,0,0])&&near(pos(self.views[1]),[.03,0,0]),'Eye offsets use known calibration without world tracking');check(self.views.map(v=>v.eye).join(',')==='left,right','Eye ordering survives absence of world tracking');}
+ else {check(false,'Eye offsets use known calibration without world tracking');check(false,'Eye ordering survives absence of world tracking');}
+});
+device.setViewerOrigin(origin([1,3,-2]),true);await settle();
+await inspect(frame=>{
+ const p=frame.getViewerPose(local);check(p&&p.emulatedPosition&&near(pos(p),[1,3,-2]),'Source emulated position reaches viewer pose',p&&{emulated:p.emulatedPosition,position:pos(p)});
+ check(p&&p.linearVelocity===null&&p.angularVelocity===null,'Source emulation never reports measured velocity');
+ const forward=frame.getPose(viewer,local),reverse=frame.getPose(local,viewer);
+ check(forward&&forward.emulatedPosition,'Ordinary viewer-to-world pose reports source emulation');
+ check(reverse&&reverse.emulatedPosition,'World-to-viewer relation reports reliance on emulation');
+ const self=frame.getViewerPose(viewer);check(identity(self)&&!self.emulatedPosition,'Viewer self relation is non-emulated with emulated world tracking');
+ const ordinary=frame.getPose(viewer,viewer);check(identity(ordinary)&&!ordinary.emulatedPosition,'Ordinary static relation is non-emulated with emulated world tracking');
+});
+device.setViewerOrigin(origin([1,3,-2]),false);await settle();
+await inspect(frame=>{check(frame.getViewerPose(local)?.emulatedPosition===false,'Source emulation flag clears on restoration');check(near(pos(frame.getViewerPose(floor)),[1,3,-2]),'Tracked floor pose is calibrated');});
+device.clearViewerOrigin();await settle();
+await inspect(frame=>{check(frame.getViewerPose(local)?.emulatedPosition===true,'Tracked origin can fall back after loss');check(frame.getPose(viewer,local)===null,'Loss does not enable ordinary world pose fallback');});
+device.setViews(views(.06));session.updateRenderState({depthNear:.25,depthFar:50});await settle();
+await inspect(frame=>{
+ const p=frame.getViewerPose(viewer);check(p&&near(pos(p.views[0]),[-.06,0,0])&&near(pos(p.views[1]),[.06,0,0]),'Eye calibration updates during world tracking loss');
+ check(p&&p.views.every(v=>layer.getViewport(v)!==null),'View identities remain usable for layer viewports during loss');
+ check(p&&Math.abs(p.views[0].projectionMatrix[14]-(-2*50*.25/(50-.25)))<1e-5,'Projection honors changed clipping planes during loss',p&&p.views[0].projectionMatrix[14]);
+});
+let resets=0;floor.onreset=()=>resets++;device.setFloorOrigin(origin([0,1,0]));await settle();
+await inspect(frame=>{const p=frame.getViewerPose(floor);check(resets===1,'A known floor-origin change emits one reset per floor space',resets);check(p&&p.emulatedPosition&&near(pos(p),[1,2,-2]),'Cached viewer pose follows a known floor-origin reset',p&&pos(p));check(near(pos(frame.getViewerPose(local)),[1,3,-2]),'Floor-origin reset preserves the independent local cache');});
+await session.end();canvas.remove();[viewer,local,floor]=await start();
+await inspect(frame=>{check(frame.getViewerPose(local)===null,'New session cannot inherit ended-session world tracking');check(identity(frame.getViewerPose(viewer)),'New session retains only statically known viewer geometry');});
+await session.end();await device.disconnect();canvas.remove();state.finished=true;
+})().catch(error=>{state.error=String(error)+' '+error.stack;state.finished=true;});
+</script>

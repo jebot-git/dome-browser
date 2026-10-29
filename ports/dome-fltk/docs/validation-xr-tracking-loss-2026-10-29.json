@@ -1,0 +1,111 @@
+{
+  "milestone": "WebXR tracking-loss pose continuity and position-emulation metadata",
+  "validated_utc": "2026-10-29T03:28:27.103926+00:00",
+  "base_revision": "6f0537d382bc6876f1614c17370e108c8624c6eb",
+  "changes": [
+    "Keep viewer-relative eye geometry independently of world tracking, preserving IDs, eyes, projections and capture metadata.",
+    "Resolve statically known native-origin relationships with active-frame, same-session, realm, visibility and connected-input guards intact.",
+    "Force-emulate only previously meaningful viewer/world relationships; ordinary world pose queries remain unavailable during total tracking loss.",
+    "Snapshot native floor bases and viewer state per frame. Historical input frames do not advance animation pose caches. Rebase or invalidate caches on origin reset and clear them on session shutdown.",
+    "Propagate supplied viewer, grip and target-ray emulation flags through native frame data and expose emulatedPosition. Statically known self/common-controller relationships remain non-emulated.",
+    "Native input regression requires retained emulated viewer position without restoring controller tracking or reporting measured velocity."
+  ],
+  "validation": {
+    "regression_suites": 48,
+    "runtime_checks": 4202,
+    "focused_tracking_loss_checks": 67,
+    "focused_controller_checks": 19,
+    "original_emulation_cases_passed": 4,
+    "original_wpt_passed": 137,
+    "optional_unsupported_cases": 4,
+    "webxr_unit_tests": 19,
+    "ignored_unit_tests": 1,
+    "ignored_reason": "Existing independent shader-validator test requires glslangValidator",
+    "worker_shutdown_scenarios": 3,
+    "anonymous_live_samples": 2
+  },
+  "original_setup_failures_preserved": [
+    {
+      "name": "XRFrame getViewerPose(viewerSpace) & getPose(space, space) return identity even during tracking loss - webgl",
+      "status": 1,
+      "message": "promise_test: Unhandled rejection with value: object \"TypeError: Missing required member \"orientation\".\""
+    },
+    {
+      "name": "XRFrame getViewerPose(viewerSpace) & getPose(space, space) return identity even during tracking loss - webgl2",
+      "status": 1,
+      "message": "promise_test: Unhandled rejection with value: object \"TypeError: Missing required member \"orientation\".\""
+    },
+    {
+      "name": "inlineVerticalFieldOfView is set appropriately on inline sessions - webgl",
+      "status": 1,
+      "message": "promise_test: Unhandled rejection with value: object \"InvalidStateError: The object is in an invalid state.\""
+    },
+    {
+      "name": "inlineVerticalFieldOfView is set appropriately on inline sessions - webgl2",
+      "status": 1,
+      "message": "promise_test: Unhandled rejection with value: object \"InvalidStateError: The object is in an invalid state.\""
+    }
+  ],
+  "baselines": {
+    "tracking_loss": {
+      "before": 10,
+      "after": 17,
+      "total": 17
+    },
+    "tracking_lifecycle": {
+      "before": 10,
+      "after": 25,
+      "total": 25
+    },
+    "native_tracking": {
+      "before": 15,
+      "after": 25,
+      "total": 25
+    },
+    "controller_emulation": {
+      "before": 14,
+      "after": 19,
+      "total": 19
+    },
+    "original_viewer_controller_emulation": {
+      "before": 0,
+      "after": 4,
+      "total": 4
+    }
+  },
+  "binaries": {
+    "browser": {
+      "sha256": "33b08848016ab9c512b3379c390839139c48c221fb87747d38e1d0d30ba2ed1e",
+      "size": 176786888
+    },
+    "embedder": {
+      "sha256": "b97a335a367c2ac38db021c4a61627278dccce4811774640e9d33211000b7903",
+      "size": 166245496
+    }
+  },
+  "visual_review": {
+    "reviewed": true,
+    "seconds_per_sample": 30,
+    "clean_closes": 2,
+    "new_crashes": 0,
+    "accepted_non_bug": "X/QR overlap remains accepted by the user."
+  },
+  "network_units_retained_not_rerun": 322,
+  "remaining_work": [
+    "Separate native validity baseline on the preceding tracking candidate passed 16/24 checks, with eight gaps in independent head/view validity, valid-but-untracked position metadata and orientation-only tracking. Native code for these cases remains unimplemented.",
+    "Coordinate native pose queries, calibrated projection submission and DomeD per-component pose sanitization before claiming immersive partial-tracking support.",
+    "Continue broader supported WebXR core/backend/device coverage, then later standards rendering and remaining scroll-indicator DPI/zoom/contrast/input validation."
+  ],
+  "references": [
+    "https://www.w3.org/TR/webxr/#populate-the-pose",
+    "https://www.w3.org/TR/webxr/#dom-xrframe-getviewerpose",
+    "https://registry.khronos.org/OpenXR/specs/1.1-khr/html/xrspec.html#XrSpaceLocationFlagBits"
+  ],
+  "geolocation_excluded": true,
+  "geolocation_shipping_default_unchanged": true,
+  "media_playback_out_of_scope": true,
+  "physical_device_conformance_claim": false,
+  "full_wpt_conformance_claim": false,
+  "sessions_restarted": false,
+  "overall_goal_complete": false
+}

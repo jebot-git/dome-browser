@@ -25,7 +25,7 @@ use crate::dom::xrjointpose::XRJointPose;
 use crate::dom::xrjointspace::XRJointSpace;
 use crate::dom::xrpose::XRPose;
 use crate::dom::xrreferencespace::XRReferenceSpace;
-use crate::dom::xrsession::{ApiPose, XRSession};
+use crate::dom::xrsession::{ApiPose, XRSession, ViewerFrameState, BaseSpace};
 use crate::dom::xrspace::XRSpace;
 use crate::dom::xrviewerpose::XRViewerPose;
 
@@ -35,16 +35,20 @@ pub(crate) struct XRFrame {
     session: Dom<XRSession>,
     #[no_trace]
     data: Frame,
+    #[no_trace]
+    viewer_state: ViewerFrameState,
     active: Cell<bool>,
     animation_frame: Cell<bool>,
 }
 
 impl XRFrame {
-    fn new_inherited(session: &XRSession, data: Frame) -> XRFrame {
+    fn new_inherited(session: &XRSession, data: Frame, animation: bool) -> XRFrame {
+        let viewer_state = session.viewer_frame_state(&data, animation);
         XRFrame {
             reflector_: Reflector::new(),
             session: Dom::from_ref(session),
             data,
+            viewer_state,
             active: Cell::new(false),
             animation_frame: Cell::new(false),
         }
@@ -58,7 +62,14 @@ impl XRFrame {
     ) -> DomRoot<XRFrame> {
         let instant = data.predicted_display_instant.unwrap_or_else(servo_base::cross_process_instant::CrossProcessInstant::now);
         data.predicted_display_time = *window.as_global_scope().performance(cx).to_dom_high_res_time_stamp(instant);
-        reflect_dom_object(cx, Box::new(XRFrame::new_inherited(session, data)), window)
+        reflect_dom_object(cx, Box::new(XRFrame::new_inherited(session, data, false)), window)
+    }
+
+    pub(crate) fn new_animation(cx: &mut JSContext, window: &Window,
+        session: &XRSession, mut data: Frame) -> DomRoot<XRFrame> {
+        let instant = data.predicted_display_instant.unwrap_or_else(servo_base::cross_process_instant::CrossProcessInstant::now);
+        data.predicted_display_time = *window.as_global_scope().performance(cx).to_dom_high_res_time_stamp(instant);
+        reflect_dom_object(cx, Box::new(XRFrame::new_inherited(session, data, true)), window)
     }
 
     /// <https://immersive-web.github.io/webxr/#xrframe-active>
@@ -67,7 +78,7 @@ impl XRFrame {
     }
 
     pub(crate) fn view_ids(&self) -> Option<Vec<u64>> {
-        self.data.pose.as_ref().map(|pose| pose.views.identities())
+        self.viewer_state.views.as_ref().map(|views| views.identities())
     }
 
     pub(crate) fn is_active(&self) -> bool {
@@ -131,23 +142,18 @@ impl XRFrameMethods<crate::DomTypeHolder> for XRFrame {
         }
 
         self.ensure_pose_access()?;
-        let to_base = if let Some(to_base) = reference.get_base_transform(&self.data) {
-            to_base
-        } else {
-            return Ok(None);
-        };
-        let viewer_pose = if let Some(pose) = self.data.pose.as_ref() {
-            pose
-        } else {
-            return Ok(None);
-        };
+        let space = reference.space();
+        let Some(located) = self.viewer_state.locate(space.base) else { return Ok(None); };
+        let Some(views) = &self.viewer_state.views else { return Ok(None); };
+        let viewer_to_base = located.transform.then(&space.offset.inverse()).cast_unit::<webxr_api::Viewer, BaseSpace>();
         Ok(Some(XRViewerPose::new(
             cx,
             self.global().as_window(),
             &self.session,
             self,
-            to_base,
-            viewer_pose,
+            viewer_to_base,
+            views,
+            located.emulated,
         )))
     }
 
@@ -165,6 +171,11 @@ impl XRFrameMethods<crate::DomTypeHolder> for XRFrame {
             return Err(Error::InvalidState(None));
         }
         self.ensure_pose_access()?;
+        if let Some(transform) = space.static_relative_pose(base_space) {
+            return Ok(Some(XRPose::new(cx, self.global().as_window(), transform)));
+        }
+        let emulated = !space.shares_input_position(base_space) &&
+            (space.origin_is_emulated(&self.data) || base_space.origin_is_emulated(&self.data));
         let space = if let Some(space) = self.get_pose(space) {
             space
         } else {
@@ -176,7 +187,7 @@ impl XRFrameMethods<crate::DomTypeHolder> for XRFrame {
             return Ok(None);
         };
         let pose = space.then(&base_space.inverse());
-        Ok(Some(XRPose::new(cx, self.global().as_window(), pose)))
+        Ok(Some(XRPose::new_with_emulation(cx, self.global().as_window(), pose, emulated)))
     }
 
     /// <https://immersive-web.github.io/webxr/#dom-xrframe-getpose>

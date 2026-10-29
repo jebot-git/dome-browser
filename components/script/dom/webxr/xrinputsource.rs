@@ -95,6 +95,10 @@ impl XRInputSource {
         source
     }
 
+    pub(crate) fn has_controller_native_origin(&self) -> bool {
+        matches!(self.info.target_ray_mode, TargetRayMode::TrackedPointer)
+    }
+
     pub(crate) fn id(&self) -> InputId {
         self.info.id
     }

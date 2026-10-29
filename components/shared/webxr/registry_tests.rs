@@ -49,6 +49,8 @@ impl DeviceAPI for Device {
         self.frames -= 1;
         Some(Frame {
             pose: None,
+            untracked_views: None,
+            floor_transform: None,
             inputs: vec![],
             events: vec![],
             sub_images: vec![],

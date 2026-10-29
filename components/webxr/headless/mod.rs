@@ -45,6 +45,8 @@ struct InputInfo {
     active: bool,
     pointer: Option<RigidTransform3D<f32, Input, Native>>,
     grip: Option<RigidTransform3D<f32, Input, Native>>,
+    pointer_emulated: bool,
+    grip_emulated: bool,
     clicking: bool,
     buttons: Vec<MockButton>,
 }
@@ -78,6 +80,7 @@ struct HeadlessView {
 struct HeadlessDeviceData {
     floor_transform: Option<RigidTransform3D<f32, Native, Floor>>,
     viewer_origin: Option<RigidTransform3D<f32, Viewer, Native>>,
+    viewer_emulated: bool,
     supported_features: Vec<String>,
     views: Vec<HeadlessView>,
     secondary_views: Vec<HeadlessView>,
@@ -119,7 +122,7 @@ impl MockDiscoveryAPI<SurfmanGL> for HeadlessMockDiscovery {
         let data = HeadlessDeviceData {
             floor_transform,
             viewer_origin,
-            supported_features: init.supported_features,
+            viewer_emulated: false,            supported_features: init.supported_features,
             views,
             secondary_views,
             next_view_id,
@@ -429,7 +432,7 @@ impl HeadlessDeviceData {
                         .collect(),
                 )
             };
-            ViewerPose { transform, views }
+            ViewerPose { transform, views, emulated_position: self.viewer_emulated }
         });
         let inputs = self
             .inputs
@@ -442,6 +445,8 @@ impl HeadlessDeviceData {
                     id: i.source.id,
                     target_ray_origin: i.pointer,
                     grip_origin: i.grip,
+                    target_ray_emulated_position: i.pointer_emulated,
+                    grip_emulated_position: i.grip_emulated,
                     pressed: i.clicking,
                     squeezed: button_pressed.get(1).copied().unwrap_or(false),
                     hand: None,
@@ -453,7 +458,26 @@ impl HeadlessDeviceData {
                 }
             })
             .collect();
+        let untracked_views = pose.is_none().then(|| {
+            if s.mode == SessionMode::Inline {
+                webxr_api::ViewerViews::Inline
+            } else {
+                webxr_api::ViewerViews::List(self.active_views(s).map(|entry| {
+                    let projection = if let Some((l, r, t, b)) = entry.init.fov {
+                        util::fov_to_projection_matrix(l, r, t, b, s.clip_planes)
+                    } else { entry.init.projection };
+                    webxr_api::ViewerView {
+                        id: entry.id, eye: entry.init.eye,
+                        transform: entry.init.transform.inverse(),
+                        projection,
+                        is_first_person_observer: entry.init.is_first_person_observer,
+                    }
+                }).collect())
+            }
+        });
         Frame {
+            untracked_views,
+            floor_transform: self.floor_transform,
             pose,
             inputs,
             events: vec![],
@@ -518,8 +542,9 @@ impl HeadlessDeviceData {
         match msg {
             MockDeviceMsg::SetWorld(w) => self.world = Some(w),
             MockDeviceMsg::ClearWorld => self.world = None,
-            MockDeviceMsg::SetViewerOrigin(viewer_origin) => {
+            MockDeviceMsg::SetViewerOrigin(viewer_origin, emulated) => {
                 self.viewer_origin = viewer_origin;
+                self.viewer_emulated = emulated;
             },
             MockDeviceMsg::SetFloorOrigin(floor_origin) => {
                 let delta = self
@@ -552,6 +577,8 @@ impl HeadlessDeviceData {
                     source: init.source.clone(),
                     pointer: init.pointer_origin,
                     grip: init.grip_origin,
+                    pointer_emulated: false,
+                    grip_emulated: false,
                     active: true,
                     clicking: false,
                     buttons: init.supported_buttons,
@@ -584,8 +611,14 @@ impl HeadlessDeviceData {
                                     .callback(Event::UpdateInput(id, input.source.clone()))
                             });
                         },
-                        MockInputMsg::SetPointerOrigin(p) => input.pointer = p,
-                        MockInputMsg::SetGripOrigin(p) => input.grip = p,
+                        MockInputMsg::SetPointerOrigin(p, emulated) => {
+                            input.pointer = p;
+                            input.pointer_emulated = emulated;
+                        },
+                        MockInputMsg::SetGripOrigin(p, emulated) => {
+                            input.grip = p;
+                            input.grip_emulated = emulated;
+                        },
                         MockInputMsg::TriggerSelect(kind, event) => {
                             if !input.active {
                                 return true;
@@ -736,6 +769,7 @@ mod secondary_views_tests {
         HeadlessDeviceData {
             floor_transform: None,
             viewer_origin: Some(RigidTransform3D::identity()),
+            viewer_emulated: false,
             supported_features: vec!["secondary-views".into()],
             views: primary()
                 .into_iter()

@@ -3,13 +3,13 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use dom_struct::dom_struct;
-use euclid::RigidTransform3D;
+use euclid::{RigidTransform3D, Transform3D};
 use js::context::JSContext;
 use js::typedarray::{Float32, HeapFloat32Array};
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 use script_bindings::trace::RootedTraceableBox;
 use std::cell::Cell;
-use webxr_api::{ApiSpace, View};
+use webxr_api::{ApiSpace, Display, ViewEye, Viewer, ViewerView};
 
 use crate::dom::bindings::buffer_source::HeapBufferSource;
 use crate::dom::bindings::codegen::Bindings::XRViewBinding::{XREye, XRViewMethods};
@@ -18,7 +18,7 @@ use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::window::Window;
 use crate::dom::xrframe::XRFrame;
 use crate::dom::xrrigidtransform::XRRigidTransform;
-use crate::dom::xrsession::{BaseSpace, BaseTransform, XRSession, cast_transform};
+use crate::dom::xrsession::{BaseSpace, XRSession, cast_transform};
 
 #[dom_struct]
 pub(crate) struct XRView {
@@ -31,7 +31,7 @@ pub(crate) struct XRView {
     #[ignore_malloc_size_of = "mozjs"]
     proj: HeapBufferSource<Float32>,
     #[no_trace]
-    view: View<ApiSpace>,
+    projection: Transform3D<f32, ApiSpace, Display>,
     transform: Dom<XRRigidTransform>,
     frame: Dom<XRFrame>,
 }
@@ -43,7 +43,7 @@ impl XRView {
         transform: &XRRigidTransform,
         eye: XREye,
         viewport_index: usize,
-        view: View<ApiSpace>,
+        projection: Transform3D<f32, ApiSpace, Display>,
     ) -> XRView {
         XRView {
             reflector_: Reflector::new(),
@@ -53,37 +53,33 @@ impl XRView {
             view_id: Cell::new(viewport_index as u64),
             is_first_person_observer: Cell::new(false),
             proj: HeapBufferSource::default(),
-            view,
+            projection,
             transform: Dom::from_ref(transform),
             frame: Dom::from_ref(frame),
         }
     }
 
-    pub(crate) fn new<V: Copy>(
+    pub(crate) fn new(
         cx: &mut JSContext,
         window: &Window,
         session: &XRSession,
         frame: &XRFrame,
-        view: &View<V>,
-        eye: XREye,
+        view: &ViewerView,
         viewport_index: usize,
-        to_base: &BaseTransform,
+        viewer_to_base: &RigidTransform3D<f32, Viewer, BaseSpace>,
     ) -> DomRoot<XRView> {
-        let transform: RigidTransform3D<f32, V, BaseSpace> = view.transform.then(to_base);
+        let transform = view.transform.then(viewer_to_base);
         let transform = XRRigidTransform::new(cx, window, cast_transform(transform));
-
-        reflect_dom_object(
-            cx,
-            Box::new(XRView::new_inherited(
-                session,
-                frame,
-                &transform,
-                eye,
-                viewport_index,
-                view.cast_unit(),
-            )),
-            window,
-        )
+        let eye = match view.eye {
+            ViewEye::None => XREye::None,
+            ViewEye::Left => XREye::Left,
+            ViewEye::Right => XREye::Right,
+        };
+        let result = reflect_dom_object(cx, Box::new(XRView::new_inherited(
+            session, frame, &transform, eye, viewport_index, view.projection,
+        )), window);
+        result.describe(view.id, view.is_first_person_observer);
+        result
     }
 
     pub(crate) fn session(&self) -> &XRSession {
@@ -122,7 +118,7 @@ impl XRViewMethods<crate::DomTypeHolder> for XRView {
     fn ProjectionMatrix(&self, cx: &mut JSContext) -> RootedTraceableBox<HeapFloat32Array> {
         if !self.proj.is_initialized() {
             // row_major since euclid uses row vectors
-            let proj = self.view.projection.to_array();
+            let proj = self.projection.to_array();
             self.proj
                 .set_data(cx, &proj)
                 .expect("Failed to set projection matrix.")

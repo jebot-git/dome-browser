@@ -26,7 +26,7 @@ start.onclick=async()=>{try{
   if(session.visibilityState==='hidden'){
    report('unexpected_hidden_frame',{frameCount});session.requestAnimationFrame(frame);return;
   }
-  const sources=Array.from(session.inputSources);const retired=retained.filter(s=>!sources.includes(s)).map(s=>f.getPose(s.targetRaySpace,space)===null);const snapshot=sources.map(s=>({input:info(s),pose:f.getPose(s.targetRaySpace,space)?.transform.position.x??null,viewer:f.getViewerPose(space)!==null,timestamp:s.gamepad?.timestamp??null}));
+  const viewer=f.getViewerPose(space);const sources=Array.from(session.inputSources);const retired=retained.filter(s=>!sources.includes(s)).map(s=>f.getPose(s.targetRaySpace,space)===null);const snapshot=sources.map(s=>({input:info(s),pose:f.getPose(s.targetRaySpace,space)?.transform.position.x??null,viewer:viewer!==null,viewer_emulated:viewer?.emulatedPosition??null,viewer_position:viewer?[viewer.transform.position.x,viewer.transform.position.y,viewer.transform.position.z]:null,viewer_has_velocity:viewer?viewer.linearVelocity!==null||viewer.angularVelocity!==null:null,timestamp:s.gamepad?.timestamp??null}));
   const state=JSON.stringify({snapshot,retired});if(state!==last){last=state;report('snapshot',{sources:snapshot,retired});}
   gl.bindFramebuffer(gl.FRAMEBUFFER,layer.framebuffer);gl.clearColor(.1,.2,.4,1);gl.clear(gl.COLOR_BUFFER_BIT);
   if(frameCount===2)report('running',{now:performance.now(),callbackTime:t,predictedDisplayTime:f.predictedDisplayTime});session.requestAnimationFrame(frame);

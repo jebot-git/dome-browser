@@ -102,9 +102,11 @@ try:
   check(len(seen('select'))==1 and not seen('selectend')[-1]['data']['input']['gamepad']['buttons'][0]['pressed'],'Runtime action deactivation cancels and neutralizes the primary control')
   command(select_active=True);time.sleep(.2);check(len(seen('selectstart'))==starts+1,'Runtime action reactivation does not synthesize a held press');command(select=False);time.sleep(.1)
   starts=len(seen('selectstart'));command(select=True);wait(lambda:len(seen('selectstart'))==starts+1)
-  command(head_valid=False);wait(lambda:len(seen('selectend'))==starts+1);wait(lambda:latest() and latest()['pose'] is None and latest()['viewer'] is False)
+  last_tracked_viewer=latest()['viewer_position']
+  command(head_valid=False);wait(lambda:len(seen('selectend'))==starts+1);wait(lambda:latest() and latest()['pose'] is None and latest()['viewer'] is True and latest()['viewer_emulated'] is True)
+  check(latest()['viewer_position'] is not None and max(abs(a-b)for a,b in zip(latest()['viewer_position'],last_tracked_viewer))<.0001 and latest()['viewer_has_velocity'] is False,'Viewer force emulation retains its known position without restoring controller tracking or reporting measured velocity')
   check(len(seen('select'))==1,'Headset tracking loss cancels input and keeps the browser session running')
-  command(head_valid=True,select=False);wait(lambda:latest() and latest()['viewer'] is True)
+  command(head_valid=True,select=False);wait(lambda:latest() and latest()['viewer'] is True and latest()['viewer_emulated'] is False)
   command(visible=False);hidden=wait(lambda:next((e for e in reversed(seen('visibility')) if e['data']['state']=='hidden'),None));wait(lambda:seen('hidden_sample'))
   check(seen('hidden_sample')[-1]['data']['frameCount']==hidden['data']['frameCount'] and not seen('unexpected_hidden_frame'),'Hidden XR sessions suspend animation callbacks until visibility returns')
   visibility_count=len(seen('visibility'));command(visible=True,focused=True)

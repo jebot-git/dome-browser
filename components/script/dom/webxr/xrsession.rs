@@ -76,6 +76,9 @@ use crate::dom::xrsessionevent::XRSessionEvent;
 use crate::dom::xrspace::XRSpace;
 
 mod inline_input;
+mod viewer_state;
+pub(crate) use viewer_state::ViewerFrameState;
+use viewer_state::ViewerCache;
 pub(crate) use inline_input::{InlinePointerAction, ScreenPointerSample};
 use inline_input::InlinePointer;
 
@@ -122,6 +125,8 @@ pub(crate) struct XRSession {
     /// Cached projection matrix for inline sessions
     #[no_trace]
     inline_projection_matrix: DomRefCell<Transform3D<f32, Viewer, Display>>,
+    #[no_trace]
+    viewer_cache: DomRefCell<ViewerCache>,
 
     next_raf_id: Cell<i32>,
     #[ignore_malloc_size_of = "closures are hard"]
@@ -193,6 +198,7 @@ impl XRSession {
     }
 
     fn clear_pending_operations(&self, cx: &mut JSContext) {
+        *self.viewer_cache.borrow_mut() = ViewerCache::default();
         self.raf_callback_list.borrow_mut().clear();
         self.pending_render_state.set(None);
         // Keep the currently executing callback list intact. Its remaining
@@ -223,6 +229,7 @@ impl XRSession {
             pending_render_state: MutNullableDom::new(None),
             active_render_state: MutDom::new(render_state),
             inline_projection_matrix: Default::default(),
+            viewer_cache: DomRefCell::new(ViewerCache::default()),
 
             next_raf_id: Cell::new(0),
             raf_callback_list: DomRefCell::new(vec![]),
@@ -289,6 +296,13 @@ impl XRSession {
 
     pub(crate) fn is_ended(&self) -> bool {
         self.ended.get()
+    }
+
+    pub(crate) fn viewer_frame_state(&self, frame: &Frame, advance: bool) -> ViewerFrameState {
+        if self.is_ended() || !advance {
+            return self.viewer_cache.borrow().clone().observe(frame);
+        }
+        self.viewer_cache.borrow_mut().observe(frame)
     }
 
     pub(crate) fn update_inline_visibility(&self, cx: &mut JSContext, hidden: bool) {
@@ -640,7 +654,7 @@ impl XRSession {
             .global()
             .performance(cx)
             .to_dom_high_res_time_stamp(time);
-        let frame = XRFrame::new(cx, self.global().as_window(), self, frame);
+        let frame = XRFrame::new_animation(cx, self.global().as_window(), self, frame);
 
         if let Some(ids) = frame.view_ids() {
             let mut scales = self.viewport_scales.borrow_mut();
@@ -790,6 +804,7 @@ impl XRSession {
     fn fire_reference_space_reset(&self, cx: &mut JSContext, base: webxr_api::BaseSpace,
         transform: Option<ApiRigidTransform>) {
         if self.is_ended() { return; }
+        self.viewer_cache.borrow_mut().reset(base, transform);
         // Author handlers may create offset spaces, request more spaces or end
         // the session. Snapshot roots and release all list borrows before JS.
         let spaces: Vec<_> = self.reference_spaces.borrow().iter().filter_map(ReferenceSpaceWeakRef::root)

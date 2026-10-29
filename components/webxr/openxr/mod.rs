@@ -1424,7 +1424,9 @@ impl DeviceAPI for OpenXrDevice {
         let right_input_changed = right.frame.input_changed;
 
         let frame = Frame {
-            pose: Some(ViewerPose { transform, views }),
+            pose: Some(ViewerPose { transform, views, emulated_position: false }),
+            untracked_views: None,
+            floor_transform: self.floor_transform(),
             inputs: vec![right.frame, left.frame],
             events: vec![],
             sub_images,

@@ -301,6 +301,7 @@ impl HostFrame {
                 ),
             };
             Some(ViewerPose {
+                emulated_position: false,
                 transform: self
                     .head
                     .transform::<webxr_api::Viewer, Native>()
@@ -315,6 +316,8 @@ impl HostFrame {
         };
         Frame {
             pose,
+            untracked_views: None,
+            floor_transform: None,
             inputs: input::frames(self, anchor),
             events: vec![],
             sub_images: vec![],
@@ -534,6 +537,7 @@ struct BridgeDevice {
     layer_info: std::collections::HashMap<LayerId, LayerInfo>,
     submitted_viewports: std::collections::HashMap<LayerId, Viewports>,
     frame: Option<HostFrame>,
+    viewer_views: webxr_api::ViewerViews,
     anchor: Option<RigidTransform3D<f32, Native, Native>>,
     clip: ClipPlanes,
     events: EventBuffer,
@@ -584,6 +588,9 @@ impl BridgeDevice {
         let initial_anchor = anchor(&initial.head);
         let mut clock = time::Clock::default();
         clock.observe(initial.time, initial.monotonic_time);
+        let initial_pose = initial.web_frame(initial_anchor, ClipPlanes::default(), &clock)
+            .pose.ok_or_else(|| backend("Initial view geometry is unavailable"))?;
+        let viewer_views = initial_pose.views.relative_to_viewer(initial_pose.transform);
         let inputs = if hello.input_stream_version == 1 {
             Some(input::State::new(&initial).map_err(backend)?)
         } else {
@@ -643,6 +650,7 @@ impl BridgeDevice {
             submitted_viewports: std::collections::HashMap::new(),
             reference_spaces: reference_space::Tracker::new(initial.reference_space),
             frame: Some(initial),
+            viewer_views,
             anchor: Some(initial_anchor),
             clip: ClipPlanes::default(),
             events: EventBuffer::default(),
@@ -895,7 +903,9 @@ impl DeviceAPI for BridgeDevice {
             Err(error) => { self.fail(error); return None; },
         };
         let origin_changed = !reset_events.is_empty();
+        let floor_transform = self.floor_transform();
         if let Some(inputs) = &mut self.inputs {
+            inputs.set_floor_transform(floor_transform);
             match inputs.update(
                 &frame,
                 anchor,
@@ -915,6 +925,19 @@ impl DeviceAPI for BridgeDevice {
             }
         }
         let mut web_frame = frame.web_frame(anchor, self.clip, &self.clock);
+        web_frame.floor_transform = self.floor_transform();
+        if let Some(pose) = &web_frame.pose {
+            self.viewer_views = pose.views.relative_to_viewer(pose.transform);
+        } else {
+            let mut views = self.viewer_views.clone();
+            if let webxr_api::ViewerViews::List(descriptions) = &mut views {
+                for (view, eye) in descriptions.iter_mut().zip(&frame.views) {
+                    view.projection = fov_to_projection_matrix(eye.fov.left, eye.fov.right,
+                        eye.fov.up, eye.fov.down, self.clip);
+                }
+            }
+            web_frame.untracked_views = Some(views);
+        }
         web_frame.events.extend(reset_events);
         // An older host has no controller extension, even if a future transport
         // happens to include fields the legacy stereo client doesn't understand.

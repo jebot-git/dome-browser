@@ -17,13 +17,19 @@ use crate::dom::xrsession::ApiRigidTransform;
 pub(crate) struct XRPose {
     reflector_: Reflector,
     transform: Dom<XRRigidTransform>,
+    emulated_position: bool,
 }
 
 impl XRPose {
     pub(crate) fn new_inherited(transform: &XRRigidTransform) -> XRPose {
+        Self::new_inherited_with_emulation(transform, false)
+    }
+
+    pub(crate) fn new_inherited_with_emulation(transform: &XRRigidTransform, emulated_position: bool) -> XRPose {
         XRPose {
             reflector_: Reflector::new(),
             transform: Dom::from_ref(transform),
+            emulated_position,
         }
     }
 
@@ -34,6 +40,12 @@ impl XRPose {
     ) -> DomRoot<XRPose> {
         let transform = XRRigidTransform::new(cx, window, transform);
         reflect_dom_object(cx, Box::new(XRPose::new_inherited(&transform)), window)
+    }
+
+    pub(crate) fn new_with_emulation(cx: &mut JSContext, window: &Window,
+        transform: ApiRigidTransform, emulated: bool) -> DomRoot<XRPose> {
+        let transform = XRRigidTransform::new(cx, window, transform);
+        reflect_dom_object(cx, Box::new(Self::new_inherited_with_emulation(&transform, emulated)), window)
     }
 }
 
@@ -57,8 +69,6 @@ impl XRPoseMethods<crate::DomTypeHolder> for XRPose {
 
     /// <https://www.w3.org/TR/webxr/#dom-xrpose-emulatedposition>
     fn EmulatedPosition(&self) -> bool {
-        // There are currently no instances in which we would need to rely
-        // on emulation for reporting pose, so return false.
-        false
+        self.emulated_position
     }
 }

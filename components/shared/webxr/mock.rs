@@ -52,7 +52,7 @@ pub type MockViewsInit = Vec<MockViewInit<ApiSpace>>;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum MockDeviceMsg {
-    SetViewerOrigin(Option<RigidTransform3D<f32, Viewer, Native>>),
+    SetViewerOrigin(Option<RigidTransform3D<f32, Viewer, Native>>, bool),
     SetFloorOrigin(Option<RigidTransform3D<f32, Floor, Native>>),
     SetViews(MockViewsInit, Option<MockViewsInit>),
     AddInputSource(MockInputInit),
@@ -78,8 +78,8 @@ pub enum MockInputMsg {
     SetHandedness(Handedness),
     SetTargetRayMode(TargetRayMode),
     SetProfiles(Vec<String>),
-    SetPointerOrigin(Option<RigidTransform3D<f32, Input, Native>>),
-    SetGripOrigin(Option<RigidTransform3D<f32, Input, Native>>),
+    SetPointerOrigin(Option<RigidTransform3D<f32, Input, Native>>, bool),
+    SetGripOrigin(Option<RigidTransform3D<f32, Input, Native>>, bool),
     /// Note: SelectEvent::Select here refers to a complete Select event,
     /// not just the end event, i.e. it refers to
     /// <https://immersive-web.github.io/webxr-test-api/#dom-fakexrinputcontroller-simulateselect>

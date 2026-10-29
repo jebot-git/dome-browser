@@ -169,10 +169,7 @@ impl XRReferenceSpace {
                 Some(RigidTransform3D::identity())
             },
             XRReferenceSpaceType::Local_floor | XRReferenceSpaceType::Bounded_floor => {
-                let native_to_floor = self
-                    .upcast::<XRSpace>()
-                    .session()
-                    .with_session(|s| s.floor_transform())?;
+                let native_to_floor = base_pose.floor_transform?;
                 Some(cast_transform(native_to_floor.inverse()))
             },
             XRReferenceSpaceType::Viewer => {

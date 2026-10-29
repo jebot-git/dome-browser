@@ -576,6 +576,8 @@ impl OpenXRInput {
 
         let input_frame = InputFrame {
             target_ray_origin,
+            target_ray_emulated_position: false,
+            grip_emulated_position: false,
             id: self.id,
             pressed,
             squeezed,

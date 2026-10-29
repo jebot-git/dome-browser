@@ -106,6 +106,8 @@ impl XRSession {
         let inputs = self.inline_pointer_frames(pose.as_ref());
         Frame {
             pose,
+            untracked_views: None,
+            floor_transform: None,
             inputs,
             events: vec![],
             sub_images: vec![],
@@ -143,6 +145,8 @@ impl XRSession {
                     id: pointer.id,
                     target_ray_origin: Some(ray.then(&pose.transform)),
                     grip_origin: None,
+                    target_ray_emulated_position: pose.emulated_position,
+                    grip_emulated_position: false,
                     pressed: pointer.pressed,
                     hand: None,
                     squeezed: false,

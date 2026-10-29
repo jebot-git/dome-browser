@@ -141,6 +141,8 @@ impl HostInput {
         }
         InputFrame {
             id: InputId(self.id),
+            target_ray_emulated_position: false,
+            grip_emulated_position: false,
             target_ray_origin: self
                 .aim
                 .as_ref()
@@ -255,6 +257,7 @@ impl Source {
 }
 
 pub(super) struct State {
+    floor_transform: Option<RigidTransform3D<f32, Native, Floor>>,
     sources: Vec<Source>,
     cursor: u64,
 }
@@ -262,6 +265,7 @@ impl State {
     pub fn new(frame: &HostFrame) -> Result<Self> {
         Self::validate(frame, 0)?;
         Ok(Self {
+            floor_transform: None,
             sources: frame
                 .inputs
                 .iter()
@@ -273,6 +277,15 @@ impl State {
                 .collect(),
             cursor: frame.input_batch.as_ref().unwrap().through,
         })
+    }
+    pub fn set_floor_transform(&mut self, floor: Option<RigidTransform3D<f32, Native, Floor>>) {
+        self.floor_transform = floor;
+    }
+    fn web_frame(&self, host: &HostFrame, anchor: RigidTransform3D<f32, Native, Native>,
+        clip: ClipPlanes, clock: &time::Clock) -> Frame {
+        let mut frame = host.web_frame(anchor, clip, clock);
+        frame.floor_transform = self.floor_transform;
+        frame
     }
     pub fn cursor(&self) -> u64 {
         self.cursor
@@ -327,7 +340,7 @@ impl State {
         let batch = host.input_batch.as_ref().unwrap();
         let mut events = vec![];
         if batch.reset || reset_page {
-            events.extend(self.cancel(&host.web_frame(anchor, clip, clock)));
+            events.extend(self.cancel(&self.web_frame(host, anchor, clip, clock)));
             self.observe(host, anchor, clip, clock, true, &mut events);
         } else {
             for update in &batch.updates {
@@ -347,7 +360,7 @@ impl State {
         reset: bool,
         events: &mut Vec<Event>,
     ) {
-        let frame = host.web_frame(anchor, clip, clock);
+        let frame = self.web_frame(host, anchor, clip, clock);
         let mut retained = vec![];
         for mut source in self.sources.drain(..) {
             if !host.inputs.iter().any(|i| i.id == source.info.id) {

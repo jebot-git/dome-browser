@@ -7,7 +7,7 @@ use malloc_size_of_derive::MallocSizeOf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ApiSpace, BaseSpace, Floor, HitTestId, HitTestResult, InputFrame, Native, SubImages, Viewer, Viewports, Views,
+    ApiSpace, BaseSpace, Floor, HitTestId, HitTestResult, InputFrame, Native, SubImages, Viewer, ViewerViews, Viewports, Views,
 };
 
 /// The per-frame data that is provided by the device.
@@ -17,6 +17,12 @@ use crate::{
 pub struct Frame {
     /// The pose information of the viewer
     pub pose: Option<ViewerPose>,
+    /// Calibrated eye geometry can remain available without a world pose.
+    #[serde(default)]
+    pub untracked_views: Option<ViewerViews>,
+    /// Floor basis captured with this frame, rather than read from a later session state.
+    #[serde(default)]
+    pub floor_transform: Option<RigidTransform3D<f32, Native, Floor>>,
     /// Frame information for each connected input source
     pub inputs: Vec<InputFrame>,
 
@@ -54,6 +60,8 @@ pub struct ViewerPose {
     /// This is equivalent to the pose of the viewer in native coordinates.
     /// This is the inverse of the view matrix.
     pub transform: RigidTransform3D<f32, Viewer, Native>,
+    #[serde(default)]
+    pub emulated_position: bool,
 
     // The various views
     pub views: Views,

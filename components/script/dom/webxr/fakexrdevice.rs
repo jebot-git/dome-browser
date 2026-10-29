@@ -243,17 +243,17 @@ impl FakeXRDeviceMethods<crate::DomTypeHolder> for FakeXRDevice {
     fn SetViewerOrigin(
         &self,
         origin: &FakeXRRigidTransformInit,
-        _emulated_position: bool,
+        emulated_position: bool,
     ) -> Fallible<()> {
         let _ = self
             .sender
-            .send(MockDeviceMsg::SetViewerOrigin(Some(get_origin(origin)?)));
+            .send(MockDeviceMsg::SetViewerOrigin(Some(get_origin(origin)?), emulated_position));
         Ok(())
     }
 
     /// <https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-clearviewerorigin>
     fn ClearViewerOrigin(&self) {
-        let _ = self.sender.send(MockDeviceMsg::SetViewerOrigin(None));
+        let _ = self.sender.send(MockDeviceMsg::SetViewerOrigin(None, false));
     }
 
     /// <https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-clearfloororigin>

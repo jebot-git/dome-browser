@@ -15,7 +15,7 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::xrinputsource::XRInputSource;
 use crate::dom::xrjointspace::XRJointSpace;
 use crate::dom::xrreferencespace::XRReferenceSpace;
-use crate::dom::xrsession::{ApiPose, XRSession, cast_transform};
+use crate::dom::xrsession::{ApiPose, ApiRigidTransform, XRSession, cast_transform};
 
 #[dom_struct]
 pub(crate) struct XRSpace {
@@ -85,6 +85,41 @@ impl XRSpace {
 }
 
 impl XRSpace {
+    pub(crate) fn origin_is_emulated(&self, frame: &Frame) -> bool {
+        match self.space().base {
+            BaseSpace::Viewer => frame.pose.as_ref().is_some_and(|pose| pose.emulated_position),
+            BaseSpace::Grip(id) => frame.inputs.iter().find(|input| input.id == id)
+                .is_some_and(|input| input.grip_emulated_position),
+            BaseSpace::TargetRay(id) => frame.inputs.iter().find(|input| input.id == id)
+                .is_some_and(|input| input.target_ray_emulated_position),
+            _ => false,
+        }
+    }
+
+    /// A tracked pointer and grip on one controller share its position estimate.
+    /// Their relationship does not rely on the controller's estimated world pose.
+    pub(crate) fn shares_input_position(&self, other: &XRSpace) -> bool {
+        let Some(source) = self.input_source.get() else { return false; };
+        let Some(other_source) = other.input_source.get() else { return false; };
+        source.id() == other_source.id() && source.has_controller_native_origin() &&
+            matches!((self.space().base, other.space().base),
+                (BaseSpace::Grip(_), BaseSpace::TargetRay(_)) |
+                (BaseSpace::TargetRay(_), BaseSpace::Grip(_)))
+    }
+
+    pub(crate) fn static_relative_pose(&self, base: &XRSpace) -> Option<ApiRigidTransform> {
+        if (self.input_source.get().is_some() && !self.input_pose_visible()) ||
+            (base.input_source.get().is_some() && !base.input_pose_visible()) {
+            return None;
+        }
+        let space = self.space();
+        let base = base.space();
+        let same_floor = matches!((space.base, base.base),
+            (BaseSpace::Floor, BaseSpace::BoundedFloor) | (BaseSpace::BoundedFloor, BaseSpace::Floor));
+        (space.base == base.base || same_floor)
+            .then(|| space.offset.then(&base.offset.inverse()))
+    }
+
     /// Gets pose represented by this space
     ///
     /// The reference origin used is common between all

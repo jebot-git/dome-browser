@@ -59,8 +59,11 @@ impl DeviceAPI for Device {
         Some(Frame {
             pose: Some(ViewerPose {
                 transform: RigidTransform3D::identity(),
+                emulated_position: false,
                 views: Views::Inline,
             }),
+            untracked_views: None,
+            floor_transform: self.floor_transform(),
             inputs: vec![],
             events: vec![],
             sub_images: vec![],

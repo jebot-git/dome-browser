@@ -58,6 +58,11 @@ pub struct InputFrame {
     pub id: InputId,
     pub target_ray_origin: Option<RigidTransform3D<f32, Input, Native>>,
     pub grip_origin: Option<RigidTransform3D<f32, Input, Native>>,
+    /// Whether locating the origin in native space relies on estimated position.
+    #[serde(default)]
+    pub target_ray_emulated_position: bool,
+    #[serde(default)]
+    pub grip_emulated_position: bool,
     pub pressed: bool,
     pub hand: Option<Box<Hand<JointFrame>>>,
     pub squeezed: bool,

@@ -175,6 +175,81 @@ impl Views {
     }
 }
 
+/// Eye geometry relative to the viewer, independent of world tracking.
+#[derive(Clone, Debug, Serialize, Deserialize, MallocSizeOf)]
+pub struct ViewerView {
+    pub id: u64,
+    pub eye: ViewEye,
+    pub transform: RigidTransform3D<f32, ApiSpace, Viewer>,
+    pub projection: Transform3D<f32, ApiSpace, Display>,
+    pub is_first_person_observer: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, MallocSizeOf)]
+pub enum ViewerViews {
+    Inline,
+    List(Vec<ViewerView>),
+}
+
+impl ViewerViews {
+    pub fn identities(&self) -> Vec<u64> {
+        match self {
+            Self::Inline => vec![0],
+            Self::List(views) => views.iter().map(|view| view.id).collect(),
+        }
+    }
+}
+
+impl Views {
+    pub fn relative_to_viewer(
+        &self,
+        viewer_to_native: RigidTransform3D<f32, Viewer, Native>,
+    ) -> ViewerViews {
+        if matches!(self, Self::Inline) {
+            return ViewerViews::Inline;
+        }
+        let native_to_viewer = viewer_to_native.inverse();
+        let mut views = Vec::new();
+        let mut push = |id, eye, observer, view: View<ApiSpace>| {
+            views.push(ViewerView {
+                id,
+                eye,
+                transform: view.transform.then(&native_to_viewer),
+                projection: view.projection,
+                is_first_person_observer: observer,
+            });
+        };
+        match self {
+            Self::Inline => unreachable!(),
+            Self::List(descriptions) => {
+                for description in descriptions {
+                    push(description.id, description.eye,
+                        description.is_first_person_observer, description.view.clone());
+                }
+            },
+            Self::Mono(view) => push(0, ViewEye::None, false, view.cast_unit()),
+            Self::Stereo(left, right) => {
+                push(0, ViewEye::Left, false, left.cast_unit());
+                push(1, ViewEye::Right, false, right.cast_unit());
+            },
+            Self::StereoCapture(left, right, capture) => {
+                push(0, ViewEye::Left, false, left.cast_unit());
+                push(1, ViewEye::Right, false, right.cast_unit());
+                push(2, ViewEye::None, true, capture.cast_unit());
+            },
+            Self::Cubemap(front, left, right, top, bottom, back) => {
+                push(0, ViewEye::None, false, front.cast_unit());
+                push(1, ViewEye::None, false, left.cast_unit());
+                push(2, ViewEye::None, false, right.cast_unit());
+                push(3, ViewEye::None, false, top.cast_unit());
+                push(4, ViewEye::None, false, bottom.cast_unit());
+                push(5, ViewEye::None, false, back.cast_unit());
+            },
+        }
+        ViewerViews::List(views)
+    }
+}
+
 /// A list of viewports per-eye in the order of fields in Views.
 ///
 /// Not all must be in active use.

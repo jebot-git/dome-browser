@@ -68,20 +68,20 @@ impl FakeXRInputController {
 
 impl FakeXRInputControllerMethods<crate::DomTypeHolder> for FakeXRInputController {
     /// <https://immersive-web.github.io/webxr-test-api/#dom-fakexrinputcontroller-setpointerorigin>
-    fn SetPointerOrigin(&self, origin: &FakeXRRigidTransformInit, _emulated: bool) -> Fallible<()> {
-        self.send_message(MockInputMsg::SetPointerOrigin(Some(get_origin(origin)?)));
+    fn SetPointerOrigin(&self, origin: &FakeXRRigidTransformInit, emulated: bool) -> Fallible<()> {
+        self.send_message(MockInputMsg::SetPointerOrigin(Some(get_origin(origin)?), emulated));
         Ok(())
     }
 
     /// <https://immersive-web.github.io/webxr-test-api/#dom-fakexrinputcontroller-setgriporigin>
-    fn SetGripOrigin(&self, origin: &FakeXRRigidTransformInit, _emulated: bool) -> Fallible<()> {
-        self.send_message(MockInputMsg::SetGripOrigin(Some(get_origin(origin)?)));
+    fn SetGripOrigin(&self, origin: &FakeXRRigidTransformInit, emulated: bool) -> Fallible<()> {
+        self.send_message(MockInputMsg::SetGripOrigin(Some(get_origin(origin)?), emulated));
         Ok(())
     }
 
     /// <https://immersive-web.github.io/webxr-test-api/#dom-fakexrinputcontroller-cleargriporigin>
     fn ClearGripOrigin(&self) {
-        self.send_message(MockInputMsg::SetGripOrigin(None))
+        self.send_message(MockInputMsg::SetGripOrigin(None, false))
     }
 
     /// <https://immersive-web.github.io/webxr-test-api/#dom-fakexrinputcontroller-disconnect>

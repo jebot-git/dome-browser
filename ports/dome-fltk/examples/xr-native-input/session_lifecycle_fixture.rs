@@ -48,6 +48,8 @@ impl DeviceAPI for Device {
     fn begin_animation_frame(&mut self, _: &[(ContextId, LayerId)]) -> Option<Frame> {
         (!self.ended).then(|| Frame {
             pose: None,
+            untracked_views: None,
+            floor_transform: None,
             inputs: vec![],
             events: vec![],
             sub_images: vec![],

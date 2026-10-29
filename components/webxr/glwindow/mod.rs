@@ -231,8 +231,11 @@ impl DeviceAPI for GlWindowDevice {
         Some(Frame {
             pose: Some(ViewerPose {
                 transform,
+                emulated_position: false,
                 views: self.views(transform, viewport_size),
             }),
+            untracked_views: None,
+            floor_transform: self.floor_transform(),
             inputs: vec![],
             events: vec![],
             sub_images,
