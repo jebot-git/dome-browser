@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Measure scaled native document-position cues on isolated X11/Wayland pages."""
 from pathlib import Path
-import os,sys,subprocess,tempfile,time,select,json,threading,queue,hashlib,argparse
+import os,sys,subprocess,tempfile,time,select,json,threading,queue,hashlib,argparse,re
 from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
 from PIL import Image,ImageChops
 from Xlib import display,X,XK,protocol
 from Xlib.ext import xtest
 from private_wayland import PrivateWayland
-p=argparse.ArgumentParser();p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--backend',choices=['wayland','x11'],default='wayland');p.add_argument('--scale',type=float,default=1.0);p.add_argument('--dark',action='store_true');p.add_argument('--zoom-steps',type=int,default=0);a=p.parse_args();assert 0<=a.zoom_steps<=3;assert 1<=a.scale<=2;out=a.output.resolve()
+p=argparse.ArgumentParser();p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--backend',choices=['wayland','x11'],default='wayland');p.add_argument('--scale',type=float,default=1.0);p.add_argument('--dark',action='store_true');p.add_argument('--hardware',action='store_true',help='Use default accelerated browser rendering and verify the actual renderer');p.add_argument('--zoom-steps',type=int,default=0);a=p.parse_args();assert 0<=a.zoom_steps<=3;assert 1<=a.scale<=2;out=a.output.resolve()
 if os.environ.get('DOME_SCROLL_BUS')!='1':os.execvpe('dbus-run-session',['dbus-run-session','--',sys.executable,*sys.argv],{**os.environ,'DOME_SCROLL_BUS':'1'})
 out.mkdir(exist_ok=False)
 def fingerprint(path):
@@ -47,10 +47,12 @@ try:
  with tempfile.TemporaryDirectory(prefix='dome-scroll-browser-')as tmp:
   rd,wr=os.pipe();xvfb=subprocess.Popen(['Xvfb','-displayfd',str(wr),'-screen','0','3600x2400x24','-nolisten','tcp'],pass_fds=[wr],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);os.close(wr);screen=':'+os.read(rd,128).decode().strip();os.close(rd);connection=display.Display(screen)
   if a.backend=='wayland':
-   wayland=PrivateWayland(connection,screen,Path(tmp),out);wayland.host.configure(width=3400,height=2250);connection.sync();time.sleep(.3)
+   wayland=PrivateWayland(connection,screen,Path(tmp),out,hardware=a.hardware);wayland.host.configure(width=3400,height=2250);connection.sync();time.sleep(.3)
   env={**os.environ,'DISPLAY':screen,'FLTK_BACKEND':'x11','FLTK_SCALING_FACTOR':str(a.scale),'LIBGL_ALWAYS_SOFTWARE':'1','HOME':tmp,'XDG_RUNTIME_DIR':tmp,'XDG_CONFIG_HOME':tmp+'/config','XDG_DATA_HOME':tmp+'/data','XDG_CACHE_HOME':tmp+'/cache','LD_LIBRARY_PATH':'/opt/fltk-vr/toolkit/lib:/opt/fltk-vr/lib:/opt/fltk-vr/lib/bitmap'};env.pop('WAYLAND_DISPLAY',None);env.pop('WAYLAND_SOCKET',None)
+  env['RUST_LOG']='warn,webrender::device::gl=info'
+  if a.hardware:env.pop('LIBGL_ALWAYS_SOFTWARE',None)
   if wayland:env.update(FLTK_BACKEND='wayland',WAYLAND_DISPLAY=wayland.socket);env.pop('DISPLAY',None)
-  log=(out/'browser.log').open('w');app=subprocess.Popen([str(a.binary.resolve()),'--software','--no-restore','--profile',tmp+'/profile',f'http://127.0.0.1:{server.server_port}/'],env=env,stdout=log,stderr=log)
+  log=(out/'browser.log').open('w');app=subprocess.Popen([str(a.binary.resolve()),*([]if a.hardware else['--software']),'--no-restore','--profile',tmp+'/profile',f'http://127.0.0.1:{server.server_port}/'],env=env,stdout=log,stderr=log)
   baseline=None;previous=None;window=None;scale=None;initial_dpr=None
   while True:
    try:data,ack=phases.get(timeout=20)
@@ -106,7 +108,10 @@ try:
    atom=connection.intern_atom('WM_PROTOCOLS');delete=connection.intern_atom('WM_DELETE_WINDOW');window.send_event(protocol.event.ClientMessage(window=window,client_type=atom,data=(32,[delete,X.CurrentTime,0,0,0])));connection.flush()
   app.wait(timeout=10);assert app.returncode==0
   assert fingerprint(a.binary.resolve())==binary_sha256,'Candidate binary changed during runtime validation'
-  report={'passed':True,'binary_sha256':binary_sha256,'script_sha256':fingerprint(Path(__file__)), 'backend':a.backend,'requested_ui_scale':a.scale,'zoom_steps':a.zoom_steps,'dark_page':a.dark,'cases':reports,'browser_exit_code':app.returncode,'binary':str(a.binary.resolve()),'scope':'Actual Servo metrics and native overlay at verified UI scale, isolated native/software browser, local pages and native wheel/keyboard input','desktop_sessions_restarted':False};(out/'report.json').write_text(json.dumps(report,indent=2)+'\n')
+  log.flush()
+  renderers=sorted(set(re.findall(r'Renderer: ([^\r\n]+)',(out/'browser.log').read_text())))
+  assert renderers and all(any(token in name.lower()for token in ['llvmpipe','softpipe','software rasterizer'])==(not a.hardware)for name in renderers),('Actual renderer does not match requested graphics mode',renderers,a.hardware)
+  report={'passed':True,'binary_sha256':binary_sha256,'script_sha256':fingerprint(Path(__file__)), 'backend':a.backend,'hardware':a.hardware,'renderers':renderers,'requested_ui_scale':a.scale,'zoom_steps':a.zoom_steps,'dark_page':a.dark,'cases':reports,'browser_exit_code':app.returncode,'binary':str(a.binary.resolve()),'scope':'Actual Servo metrics and native overlay at verified UI scale, isolated browser with verified graphics mode, local pages and native wheel/keyboard input','desktop_sessions_restarted':False};(out/'report.json').write_text(json.dumps(report,indent=2)+'\n')
 finally:
  server.shutdown()
  if app and app.poll() is None:app.terminate();app.wait(timeout=5)

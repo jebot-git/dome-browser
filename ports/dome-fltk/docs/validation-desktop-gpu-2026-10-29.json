@@ -1,0 +1,120 @@
+{
+  "validated_utc": "2026-10-29T14:35:40.045314+00:00",
+  "base_commit": "92678dfdd91c5e683480d4fe8677fa8a9a4fbeaf",
+  "production_candidate_commit": "78165f94ed1b6007e6981b4f052e9dfef69c834e",
+  "candidate_sha256": {
+    "browser": "3e8fb85d8015a9846b41e982af1dd5d5e916cdb2e2c57ac3ad07c98e5cb9d187",
+    "embedder": "43b3d343e50f0efc1915b1c3419e1b80d91d7c6da175dc707030bb9708781376"
+  },
+  "production_source_changed": false,
+  "runtime_checks_passed": 131,
+  "reports": [
+    {
+      "name": "gpu-wayland-scale2-r1",
+      "exit_code": 0,
+      "passed": true,
+      "checks": 9,
+      "report": "candidate-desktop-acceptance-v1/gpu-wayland-scale2-r1/report.json",
+      "graphics": [
+        "Mesa Intel(R) Arc(tm) A770 Graphics (DG2)"
+      ]
+    },
+    {
+      "name": "software-x11-scale1p5-r1",
+      "exit_code": 0,
+      "passed": true,
+      "checks": 9,
+      "report": "candidate-desktop-acceptance-v1/software-x11-scale1p5-r1/report.json",
+      "graphics": [
+        "llvmpipe (LLVM 22.1.8, 256 bits)"
+      ]
+    },
+    {
+      "name": "renderer-gpu-webgl1-r1",
+      "exit_code": 0,
+      "passed": true,
+      "checks": 28,
+      "report": "candidate-desktop-acceptance-v1/renderer-gpu-webgl1-r1/report.json",
+      "graphics": [
+        "Mesa Intel(R) Arc(tm) A770 Graphics (DG2)",
+        "Mesa Intel(R) UHD Graphics 770 (ADL-S GT1)"
+      ]
+    },
+    {
+      "name": "renderer-gpu-webgl2-r1",
+      "exit_code": 0,
+      "passed": true,
+      "checks": 28,
+      "report": "candidate-desktop-acceptance-v1/renderer-gpu-webgl2-r1/report.json",
+      "graphics": [
+        "Mesa Intel(R) Arc(tm) A770 Graphics (DG2)",
+        "Mesa Intel(R) UHD Graphics 770 (ADL-S GT1)"
+      ]
+    },
+    {
+      "name": "cookie-editor-r1",
+      "exit_code": 0,
+      "passed": true,
+      "checks": 11,
+      "report": "candidate-desktop-acceptance-v1/cookie-editor-r1/report.json",
+      "graphics": null
+    },
+    {
+      "name": "application-integration-r1",
+      "exit_code": 0,
+      "passed": true,
+      "checks": 46,
+      "report": "candidate-desktop-acceptance-v1/application-integration-r1/checks.json",
+      "graphics": null,
+      "exit_evidence": "Original short-circuit evaluation reached generator at line 22; a nonzero child status could not reach this expression. Raw traceback retained."
+    }
+  ],
+  "shipping_default_gpu": {
+    "backend": "wayland",
+    "software_flag_present": false,
+    "renderer": "Mesa Intel(R) Arc(tm) A770 Graphics (DG2)",
+    "measured_ui_scale": 2.0,
+    "page_zoom": 1.2100000381469727,
+    "native_wheel_and_keyboard": true,
+    "clean_close": true
+  },
+  "renderer_recovery": {
+    "embedder": "Separate optimized testing embedder built with current engine sources",
+    "webgl_versions": [
+      1,
+      2
+    ],
+    "cycles_per_version": 3,
+    "actual_renderers": [
+      "Mesa Intel(R) Arc(tm) A770 Graphics (DG2)",
+      "Mesa Intel(R) UHD Graphics 770 (ADL-S GT1)"
+    ],
+    "state_and_visible_content_preserved": true,
+    "physical_gpu_reset_requested": false
+  },
+  "cookie_editor_checks": 11,
+  "application_integration_checks": 46,
+  "driver_sha256": {
+    "ports/dome-fltk/tests/browser.py": "6010c95ddac48ee88181e43f649e57585649311c7d2420f127aeb41c13310246",
+    "ports/dome-fltk/tests/cookies.py": "3edb115b66e25e4e2363f665ce193df7497c0cd431f1151f8bdf2317e254998a",
+    "ports/dome-fltk/tests/renderer-recovery.html": "b76cb2327cf865718529a78a7810b9fec775442fc5012b0d162581f46a427afe",
+    "ports/dome-fltk/tests/renderer-recovery.py": "eec1c0059db4542ba1de7e512c7267ceead77e012229f0eeea0fd6e6166f2ec3",
+    "ports/dome-fltk/tests/scroll-indicator-scale.py": "2bc822e7e57bc6059eaf4b67d1a4ac53ad67ebfac7a2c76d096d745071a36729"
+  },
+  "visual_review": [
+    "candidate-desktop-acceptance-v1/gpu-wayland-scale2-r1/middle.png",
+    "candidate-desktop-acceptance-v1/renderer-gpu-webgl2-r1/after-2.png"
+  ],
+  "controller_report_schema_correction": "candidate-desktop-acceptance-v1/report-schema-recovery-r1.json",
+  "limits": [
+    "Default Servo/WebRender rendering is GPU accelerated; the current FLTK presentation path reads rendered pixels back to a native image and is not a zero-copy GPU presentation path",
+    "Controlled tests retire only their owned contexts; no physical GPU reset or system compositor restart was requested",
+    "A private Vulkan compositor presents test windows; this does not claim all compositor backends, adapters or physical devices conform",
+    "System installation and installed-path acceptance still await the existing native sudo dialog; candidate evidence is not deployment evidence"
+  ],
+  "system_files_changed": false,
+  "desktop_sessions_restarted": false,
+  "geolocation_excluded": true,
+  "media_playback_excluded": true,
+  "full_goal_achieved": false
+}

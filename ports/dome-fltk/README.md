@@ -2589,3 +2589,24 @@ receive the test documents and links; no real mail, torrent or player action is
 performed. These are private fixture checks, not universal server conformance.
 See `docs/validation-final-integration-2026-10-29.json`. System installation and
 installed-path acceptance remain pending the existing native sudo dialog.
+
+
+## Current GPU and desktop acceptance
+
+`tests/scroll-indicator-scale.py --hardware` uses the shipping browser's default
+accelerated renderer and rejects software fallback by checking the actual
+WebRender renderer. The current optimized candidate passes native Wayland
+2× scaling, page zoom and input checks on the Intel Arc A770. The software
+control separately identifies llvmpipe. The FLTK frontend currently reads the
+rendered pixels back to a native image; this is GPU rendering with image
+presentation, not a zero-copy presentation path.
+
+The same engine build passes three owned-context reconstruction cycles each
+for WebGL 1 and 2, with native Intel Arc A770 and UHD 770 renderer evidence,
+preserved documents and visible content. These use the separate test embedder;
+no physical GPU reset is requested. Eleven native cookie-file/editor checks
+and 46 application integration checks also pass, covering universal menus,
+live appearance, keybindings, notifications, activation and session restoration.
+The six test runs total 131 checks. Private displays and profiles leave the
+active desktop session intact. System installation still awaits the existing
+native sudo dialog. See `docs/validation-desktop-gpu-2026-10-29.json`.
