@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
@@ -32,17 +34,22 @@ pub(crate) struct FakeXRInputController {
     sender: GenericSender<MockDeviceMsg>,
     #[no_trace]
     id: InputId,
+    supported_buttons: Cell<u8>,
 }
 
 impl FakeXRInputController {
     pub(crate) fn new_inherited(
         sender: GenericSender<MockDeviceMsg>,
         id: InputId,
+        supported_buttons: &[MockButton],
     ) -> FakeXRInputController {
         FakeXRInputController {
             reflector: Reflector::new(),
             sender,
             id,
+            supported_buttons: Cell::new(supported_buttons.iter().fold(0, |mask, button| {
+                mask | button_type_mask(button.button_type.clone())
+            })),
         }
     }
 
@@ -51,10 +58,11 @@ impl FakeXRInputController {
         global: &GlobalScope,
         sender: GenericSender<MockDeviceMsg>,
         id: InputId,
+        supported_buttons: &[MockButton],
     ) -> DomRoot<FakeXRInputController> {
         reflect_dom_object(
             cx,
-            Box::new(FakeXRInputController::new_inherited(sender, id)),
+            Box::new(FakeXRInputController::new_inherited(sender, id, supported_buttons)),
             global,
         )
     }
@@ -148,6 +156,9 @@ impl FakeXRInputControllerMethods<crate::DomTypeHolder> for FakeXRInputControlle
     /// <https://immersive-web.github.io/webxr-test-api/#dom-fakexrinputcontroller-setsupportedbuttons>
     fn SetSupportedButtons(&self, supported_buttons: Vec<FakeXRButtonStateInit>) {
         let supported = init_to_mock_buttons(&supported_buttons);
+        self.supported_buttons.set(supported.iter().fold(0, |mask, button| {
+            mask | button_type_mask(button.button_type.clone())
+        }));
         self.send_message(MockInputMsg::SetSupportedButtons(supported));
     }
 
@@ -159,6 +170,10 @@ impl FakeXRInputControllerMethods<crate::DomTypeHolder> for FakeXRInputControlle
         }
         if *button_state.pressedValue < 0.0 {
             return Err(Error::Type(c"Pressed value must be non-negative".into()));
+        }
+
+        if self.supported_buttons.get() & button_type_mask(button_state.buttonType.convert()) == 0 {
+            return Err(Error::NotFound(None));
         }
 
         let state = init_to_mock_buttons(std::slice::from_ref(button_state));
@@ -184,8 +199,15 @@ impl Convert<MockButtonType> for FakeXRButtonType {
 
 /// <https://immersive-web.github.io/webxr-test-api/#parse-supported-buttons>
 pub(crate) fn init_to_mock_buttons(buttons: &[FakeXRButtonStateInit]) -> Vec<MockButton> {
+    let mut seen = 0;
     let supported: Vec<MockButton> = buttons
         .iter()
+        .filter(|button| {
+            let mask = button_type_mask(button.buttonType.convert());
+            let first = seen & mask == 0;
+            seen |= mask;
+            first
+        })
         .map(|b| MockButton {
             button_type: b.buttonType.convert(),
             pressed: b.pressed,
@@ -196,4 +218,14 @@ pub(crate) fn init_to_mock_buttons(buttons: &[FakeXRButtonStateInit]) -> Vec<Moc
         })
         .collect();
     supported
+}
+
+fn button_type_mask(kind: MockButtonType) -> u8 {
+    match kind {
+        MockButtonType::Grip => 1,
+        MockButtonType::Touchpad => 2,
+        MockButtonType::Thumbstick => 4,
+        MockButtonType::OptionalButton => 8,
+        MockButtonType::OptionalThumbstick => 16,
+    }
 }

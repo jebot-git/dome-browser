@@ -358,9 +358,9 @@ impl FakeXRDeviceMethods<crate::DomTypeHolder> for FakeXRDevice {
         };
 
         let global = self.global();
+        let controller = FakeXRInputController::new(cx, &global, self.sender.clone(), id,
+            &init.supported_buttons);
         let _ = self.sender.send(MockDeviceMsg::AddInputSource(init));
-
-        let controller = FakeXRInputController::new(cx, &global, self.sender.clone(), id);
         if selection_clicked {
             controller.SimulateSelect();
         }

@@ -15,7 +15,7 @@ use webxr_api::{
     ApiSpace, BaseSpace, ContextId, DeviceAPI, DiscoveryAPI, EnvironmentBlendMode, Error, Event,
     EventBuffer, Floor, Frame, FrameUpdateEvent, HitTestId, HitTestResult, HitTestSource, Input,
     InputFrame, InputId, InputSource, LayerGrandManager, LayerId, LayerInfo, LayerInit,
-    LayerManager, MockButton, MockDeviceInit, MockDeviceMsg, MockDiscoveryAPI, MockInputMsg,
+    LayerManager, MockButton, MockButtonType, MockDeviceInit, MockDeviceMsg, MockDiscoveryAPI, MockInputMsg,
     MockViewInit, MockViewsInit, MockWorld, Native, Quitter, Ray, SelectEvent, SelectKind, Session,
     SessionBuilder, SessionInit, SessionMode, Space, SubImages, View, ViewDescription, Viewer,
     ViewerPose, Viewports, Views,
@@ -49,6 +49,31 @@ struct InputInfo {
     grip_emulated: bool,
     clicking: bool,
     buttons: Vec<MockButton>,
+}
+
+impl InputInfo {
+    fn action_pressed(&self, kind: SelectKind) -> bool {
+        match kind {
+            SelectKind::Select => self.clicking,
+            SelectKind::Squeeze => self.buttons.iter()
+                .find(|button| button.button_type == MockButtonType::Grip)
+                .is_some_and(|button| button.pressed),
+        }
+    }
+
+    fn set_action_pressed(&mut self, kind: SelectKind, pressed: bool) -> bool {
+        match kind {
+            SelectKind::Select => self.clicking = pressed,
+            SelectKind::Squeeze => {
+                let Some(button) = self.buttons.iter_mut()
+                    .find(|button| button.button_type == MockButtonType::Grip) else { return false; };
+                button.pressed = pressed;
+                button.touched = pressed;
+                button.pressed_value = if pressed { 1. } else { 0. };
+            },
+        }
+        true
+    }
 }
 
 struct HeadlessDevice {
@@ -530,11 +555,66 @@ impl HeadlessDeviceData {
     }
 
     fn trigger_select(&mut self, id: InputId, kind: SelectKind, event: SelectEvent) {
+        if !self.inputs.iter().any(|input| input.source.id == id && input.active) {
+            return;
+        }
         for i in 0..self.sessions.len() {
             let frame = self.get_frame(&self.sessions[i], Vec::new());
             self.sessions[i]
                 .events
                 .callback(Event::Select(id, kind, event, frame));
+        }
+    }
+
+    fn trigger_action(&mut self, id: InputId, kind: SelectKind, event: SelectEvent) {
+        let Some(index) = self.inputs.iter().position(|input| input.source.id == id) else { return; };
+        let held = self.inputs[index].action_pressed(kind);
+        match event {
+            SelectEvent::Start if !held => {
+                if self.inputs[index].set_action_pressed(kind, true) {
+                    self.trigger_select(id, kind, SelectEvent::Start);
+                }
+            },
+            SelectEvent::End if held => {
+                self.inputs[index].set_action_pressed(kind, false);
+                self.trigger_select(id, kind, SelectEvent::Select);
+            },
+            SelectEvent::Select => {
+                if !held {
+                    if !self.inputs[index].set_action_pressed(kind, true) { return; }
+                    self.trigger_select(id, kind, SelectEvent::Start);
+                }
+                self.inputs[index].set_action_pressed(kind, false);
+                self.trigger_select(id, kind, SelectEvent::Select);
+                if held {
+                    self.inputs[index].set_action_pressed(kind, true);
+                    self.trigger_select(id, kind, SelectEvent::Start);
+                }
+            },
+            _ => {},
+        }
+    }
+
+    fn cancel_actions(&mut self, id: InputId) {
+        let Some(input) = self.inputs.iter().find(|input| input.source.id == id && input.active) else { return; };
+        let held = [input.action_pressed(SelectKind::Select), input.action_pressed(SelectKind::Squeeze)];
+        if !held.iter().any(|held| *held) { return; }
+        for index in 0..self.sessions.len() {
+            let mut frame = self.get_frame(&self.sessions[index], Vec::new());
+            if let Some(input) = frame.inputs.iter_mut().find(|input| input.id == id) {
+                input.pressed = false;
+                input.squeezed = false;
+                for button in 0..2 {
+                    if let Some(value) = input.button_values.get_mut(button) { *value = 0.; }
+                    if let Some(value) = input.button_pressed.get_mut(button) { *value = false; }
+                    if let Some(value) = input.button_touched.get_mut(button) { *value = false; }
+                }
+            }
+            for (kind, held) in [SelectKind::Select, SelectKind::Squeeze].into_iter().zip(held) {
+                if held {
+                    self.sessions[index].events.callback(Event::Select(id, kind, SelectEvent::End, frame.clone()));
+                }
+            }
         }
     }
 
@@ -591,28 +671,36 @@ impl HeadlessDeviceData {
                     .callback(Event::AddInput(init.source.clone())))
             },
             MockDeviceMsg::MessageInputSource(id, msg) => {
+                // Source replacement/removal must end author interactions before
+                // the old XRInputSource is removed. Keep raw controller state so
+                // reconnecting does not manufacture a new button press.
+                if matches!(&msg, MockInputMsg::Disconnect | MockInputMsg::SetHandedness(_) |
+                    MockInputMsg::SetProfiles(_) | MockInputMsg::SetTargetRayMode(_) |
+                    MockInputMsg::SetSupportedButtons(_)) {
+                    self.cancel_actions(id);
+                }
                 if let Some(ref mut input) = self.inputs.iter_mut().find(|i| i.source.id == id) {
                     match msg {
                         MockInputMsg::SetHandedness(h) => {
                             input.source.handedness = h;
-                            with_all_sessions!(self, |s| {
+                            if input.active { with_all_sessions!(self, |s| {
                                 s.events
                                     .callback(Event::UpdateInput(id, input.source.clone()))
-                            });
+                            }); }
                         },
                         MockInputMsg::SetProfiles(p) => {
                             input.source.profiles = p;
-                            with_all_sessions!(self, |s| {
+                            if input.active { with_all_sessions!(self, |s| {
                                 s.events
                                     .callback(Event::UpdateInput(id, input.source.clone()))
-                            });
+                            }); }
                         },
                         MockInputMsg::SetTargetRayMode(t) => {
                             input.source.target_ray_mode = t;
-                            with_all_sessions!(self, |s| {
+                            if input.active { with_all_sessions!(self, |s| {
                                 s.events
                                     .callback(Event::UpdateInput(id, input.source.clone()))
-                            });
+                            }); }
                         },
                         MockInputMsg::SetPointerOrigin(p, emulated) => {
                             input.pointer = p;
@@ -623,27 +711,7 @@ impl HeadlessDeviceData {
                             input.grip_emulated = emulated;
                         },
                         MockInputMsg::TriggerSelect(kind, event) => {
-                            if !input.active {
-                                return true;
-                            }
-                            let clicking = input.clicking;
-                            input.clicking = event == SelectEvent::Start;
-                            match event {
-                                SelectEvent::Start => {
-                                    self.trigger_select(id, kind, event);
-                                },
-                                SelectEvent::End => {
-                                    if clicking {
-                                        self.trigger_select(id, kind, SelectEvent::Select);
-                                    } else {
-                                        self.trigger_select(id, kind, SelectEvent::End);
-                                    }
-                                },
-                                SelectEvent::Select => {
-                                    self.trigger_select(id, kind, SelectEvent::Start);
-                                    self.trigger_select(id, kind, SelectEvent::Select);
-                                },
-                            }
+                            self.trigger_action(id, kind, event);
                         },
                         MockInputMsg::Disconnect => {
                             if input.active {
@@ -651,7 +719,6 @@ impl HeadlessDeviceData {
                                     .events
                                     .callback(Event::RemoveInput(input.source.id)));
                                 input.active = false;
-                                input.clicking = false;
                             }
                         },
                         MockInputMsg::Reconnect => {
@@ -666,18 +733,27 @@ impl HeadlessDeviceData {
                             input.buttons = buttons;
                             input.source.gamepad =
                                 Some(webxr_api::mock_gamepad_layout(&input.buttons));
-                            with_all_sessions!(self, |s| s.events.callback(Event::UpdateInput(
+                            if input.active { with_all_sessions!(self, |s| s.events.callback(Event::UpdateInput(
                                 input.source.id,
                                 input.source.clone()
-                            )));
+                            ))); }
                         },
                         MockInputMsg::UpdateButtonState(state) => {
+                            let squeeze = state.button_type == MockButtonType::Grip;
+                            let pressed = state.pressed;
+                            let active = input.active;
+                            let mut changed = false;
                             if let Some(button) = input
                                 .buttons
                                 .iter_mut()
                                 .find(|b| b.button_type == state.button_type)
                             {
+                                changed = button.pressed != pressed;
                                 *button = state;
+                            }
+                            if squeeze && changed && active {
+                                self.trigger_select(id, SelectKind::Squeeze,
+                                    if pressed { SelectEvent::Start } else { SelectEvent::Select });
                             }
                         },
                     }
@@ -752,6 +828,123 @@ mod tests {
     use super::*;
     use euclid::{Rect, Size2D, Transform3D, Vector3D};
     use webxr_api::{LayerGeometry, ViewEye};
+
+    fn controller(device: &mut HeadlessDeviceData) -> InputId {
+        let id = InputId(12);
+        let buttons = vec![MockButton {
+            button_type: MockButtonType::Grip, pressed: false, touched: false,
+            pressed_value: 0., x_value: 0., y_value: 0.,
+        }];
+        device.sessions.push(session(SessionMode::ImmersiveVR, false));
+        device.handle_msg(MockDeviceMsg::AddInputSource(webxr_api::MockInputInit {
+            source: InputSource {
+                id, handedness: webxr_api::Handedness::None,
+                target_ray_mode: webxr_api::TargetRayMode::TrackedPointer,
+                supports_grip: true, hand_support: None, profiles: vec![],
+                gamepad: Some(webxr_api::mock_gamepad_layout(&buttons)),
+            },
+            pointer_origin: Some(RigidTransform3D::identity()),
+            grip_origin: Some(RigidTransform3D::identity()),
+            supported_buttons: buttons,
+        }));
+        drain_events(device);
+        id
+    }
+
+    fn drain_events(device: &mut HeadlessDeviceData) -> Vec<Event> {
+        let EventBuffer::Buffered(events) = &mut device.sessions[0].events else { panic!("Buffered test events expected") };
+        std::mem::take(events)
+    }
+
+    fn grip(pressed: bool) -> MockInputMsg {
+        MockInputMsg::UpdateButtonState(MockButton {
+            button_type: MockButtonType::Grip, pressed, touched: pressed,
+            pressed_value: if pressed { 1. } else { 0. }, x_value: 0., y_value: 0.,
+        })
+    }
+
+    #[test]
+    fn interleaved_primary_and_grip_events_have_independent_button_snapshots() {
+        let mut device = data();
+        let id = controller(&mut device);
+        for message in [
+            MockInputMsg::TriggerSelect(SelectKind::Select, SelectEvent::Start),
+            grip(true),
+            MockInputMsg::TriggerSelect(SelectKind::Select, SelectEvent::End),
+            grip(false),
+        ] { device.handle_msg(MockDeviceMsg::MessageInputSource(id, message)); }
+        let events = drain_events(&mut device);
+        assert_eq!(events.len(), 4);
+        for (event, (kind, transition, primary, squeezed)) in events.iter().zip([
+            (SelectKind::Select, SelectEvent::Start, true, false),
+            (SelectKind::Squeeze, SelectEvent::Start, true, true),
+            (SelectKind::Select, SelectEvent::Select, false, true),
+            (SelectKind::Squeeze, SelectEvent::Select, false, false),
+        ]) {
+            let Event::Select(_, actual_kind, actual_transition, frame) = event else { panic!("Action event expected") };
+            assert_eq!((*actual_kind, *actual_transition), (kind, transition));
+            let input = &frame.inputs[0];
+            assert_eq!((input.pressed, input.squeezed), (primary, squeezed));
+            assert_eq!(input.button_pressed, [primary, squeezed]);
+        }
+    }
+
+    #[test]
+    fn simulated_primary_click_restores_a_held_action_without_releasing_grip() {
+        let mut device = data();
+        let id = controller(&mut device);
+        device.handle_msg(MockDeviceMsg::MessageInputSource(id, grip(true)));
+        device.trigger_action(id, SelectKind::Select, SelectEvent::Start);
+        drain_events(&mut device);
+        device.trigger_action(id, SelectKind::Select, SelectEvent::Start);
+        assert!(drain_events(&mut device).is_empty());
+        device.trigger_action(id, SelectKind::Select, SelectEvent::Select);
+        let events = drain_events(&mut device);
+        assert_eq!(events.len(), 2);
+        for (event, (transition, pressed)) in events.iter().zip([(SelectEvent::Select, false), (SelectEvent::Start, true)]) {
+            let Event::Select(_, SelectKind::Select, actual, frame) = event else { panic!("Primary event expected") };
+            assert_eq!(*actual, transition);
+            assert_eq!((frame.inputs[0].pressed, frame.inputs[0].squeezed), (pressed, true));
+        }
+    }
+
+    #[test]
+    fn disconnected_input_updates_are_retained_without_emitting_input_events() {
+        let mut device = data();
+        let id = controller(&mut device);
+        device.handle_msg(MockDeviceMsg::MessageInputSource(id, MockInputMsg::Disconnect));
+        drain_events(&mut device);
+        device.trigger_action(id, SelectKind::Select, SelectEvent::Start);
+        device.handle_msg(MockDeviceMsg::MessageInputSource(id, grip(true)));
+        device.handle_msg(MockDeviceMsg::MessageInputSource(id, MockInputMsg::SetProfiles(vec!["pending".into()])));
+        assert!(drain_events(&mut device).is_empty());
+        assert!(device.get_frame(&device.sessions[0], vec![]).inputs.is_empty());
+        device.handle_msg(MockDeviceMsg::MessageInputSource(id, MockInputMsg::Reconnect));
+        let events = drain_events(&mut device);
+        assert!(matches!(events.as_slice(), [Event::AddInput(source)] if source.profiles == ["pending"]));
+        let frame = device.get_frame(&device.sessions[0], vec![]);
+        assert!(frame.inputs[0].pressed && frame.inputs[0].squeezed);
+    }
+
+    #[test]
+    fn source_removal_cancels_both_actions_before_removal_with_released_snapshots() {
+        let mut device = data();
+        let id = controller(&mut device);
+        device.trigger_action(id, SelectKind::Select, SelectEvent::Start);
+        device.handle_msg(MockDeviceMsg::MessageInputSource(id, grip(true)));
+        drain_events(&mut device);
+        device.handle_msg(MockDeviceMsg::MessageInputSource(id, MockInputMsg::Disconnect));
+        let events = drain_events(&mut device);
+        assert_eq!(events.len(), 3);
+        for (event, expected) in events[..2].iter().zip([SelectKind::Select, SelectKind::Squeeze]) {
+            let Event::Select(_, kind, SelectEvent::End, frame) = event else { panic!("Cancellation event expected") };
+            assert_eq!(*kind, expected);
+            assert!(!frame.inputs[0].pressed && !frame.inputs[0].squeezed);
+            assert_eq!(frame.inputs[0].button_pressed, [false, false]);
+        }
+        assert!(matches!(events[2], Event::RemoveInput(removed) if removed == id));
+        assert!(device.inputs[0].clicking && device.inputs[0].action_pressed(SelectKind::Squeeze));
+    }
 
     fn init(eye: ViewEye, width: i32, height: i32, observer: bool) -> MockViewInit<ApiSpace> {
         MockViewInit {
