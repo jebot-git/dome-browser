@@ -46,7 +46,13 @@ dictionary FakeXRViewInit {
   required FakeXRDeviceResolution resolution;
 
   FakeXRFieldOfViewInit fieldOfView;
+  FakeXRVisibilityMask visibilityMask;
   boolean isFirstPersonObserver = false;
+};
+
+dictionary FakeXRVisibilityMask {
+  required sequence<float> vertices;
+  required sequence<unsigned long> indices;
 };
 
 // https://immersive-web.github.io/webxr/#xrviewport

@@ -1,0 +1,52 @@
+<!doctype html><meta charset=utf-8><title>WebXR visibility mask lifecycle</title>
+<script>
+'use strict';const state=window.test={ready:true,finished:false,error:null,checks:[],frames:0};state.snapshot=()=>({...state,snapshot:undefined});
+const check=(ok,name)=>{if(!ok)throw Error(name);state.checks.push(name);};
+const same=(a,b)=>a.length===b.length&&a.every((value,i)=>Math.abs(value-b[i])<.00001);
+const projection=[1,0,0,0,0,1,0,0,0,0,-1,-1,0,0,-.2,0],origin={position:[0,0,0],orientation:[0,0,0,1]};
+const maskA={vertices:[0,0,0,1,1,0],indices:[0,1,2]},maskB={vertices:[-1,-1,-1,1,1,1],indices:[2,1,0]};
+const view=(eye,visibilityMask)=>({eye,projectionMatrix:projection,viewOffset:origin,resolution:{width:64,height:64},...(visibilityMask?{visibilityMask}: {})});
+const views=(left,right)=>[view('left',left),view('right',right)];
+const activate=(mode,features)=>{let request;navigator.xr.test.simulateUserActivation(()=>request=navigator.xr.requestSession(mode,features));return request;};
+(async()=>{
+ check(typeof XRVisibilityMaskChangeEvent==='function','Visibility-mask event interface is exposed with WebXR');
+ const device=await navigator.xr.test.simulateDeviceConnection({supportsImmersive:true,supportedModes:['inline','immersive-vr'],supportedFeatures:['local','secondary-views'],viewerOrigin:origin,views:views(maskA),secondaryViews:[view('none',maskB)]});
+ const session=await activate('immersive-vr',{requiredFeatures:['local']});
+ const events=[];let handlerCalls=0;const listen=target=>target.addEventListener('visibilitymaskchange',event=>events.push(event));listen(session);session.onvisibilitymaskchange=()=>handlerCalls++;
+ check('onvisibilitymaskchange'in session,'Session event-handler attribute is available');
+ const vertices=new Float32Array(maskA.vertices),indices=new Uint32Array(maskA.indices);
+ const authored=new XRVisibilityMaskChangeEvent('authored',{session,eye:'right',index:3,vertices,indices,bubbles:true,cancelable:true});
+ check(authored instanceof Event&&authored.session===session&&authored.eye==='right'&&authored.index===3,'Constructor preserves required event metadata');
+ check(authored.vertices===vertices&&authored.indices===indices&&authored.vertices===authored.vertices&&authored.indices===authored.indices,'Constructor typed arrays retain supplied identity and SameObject semantics');
+ check(authored.bubbles&&authored.cancelable&&!authored.isTrusted,'Authored event preserves EventInit and remains untrusted');
+ const derived=class extends XRVisibilityMaskChangeEvent{};check(new derived('derived',{session,eye:'none',index:0,vertices,indices})instanceof derived,'Derived event construction retains its prototype');
+ for(const member of ['session','eye','index','vertices','indices']){const init={session,eye:'left',index:0,vertices,indices};delete init[member];let name;try{new XRVisibilityMaskChangeEvent('missing',init);}catch(error){name=error.name;}check(name==='TypeError','Constructor requires '+member);}
+ for(const [member,value]of [['vertices',[]],['indices',new Float32Array(3)]]){let name;try{new XRVisibilityMaskChangeEvent('wrong',{session,eye:'left',index:0,vertices,indices,[member]:value});}catch(error){name=error.name;}check(name==='TypeError','Constructor validates '+member+' typed-array type');}
+ const canvas=document.createElement('canvas');document.body.append(canvas);const gl=canvas.getContext('webgl',{xrCompatible:true});await gl.makeXRCompatible();
+ const attach=target=>target.updateRenderState({baseLayer:new XRWebGLLayer(target,gl)});attach(session);
+ const frame=target=>new Promise((resolve,reject)=>target.requestAnimationFrame((time,frame)=>{try{state.frames++;resolve(frame);}catch(error){reject(error);}}));
+ const settle=async(target,predicate)=>{for(let i=0;i<20&&!predicate();i++)await frame(target);check(predicate(),'Mask update completes at a coherent frame boundary');};
+ await settle(session,()=>events.length>=1);check(events.length===1&&events[0].index===0&&events[0].eye==='left','Initial mask is delivered for the enabled primary view only');
+ const initial=events[0];check(initial instanceof XRVisibilityMaskChangeEvent&&initial.session===session&&initial.target===session&&initial.isTrusted&&!initial.bubbles&&!initial.cancelable,'Provider mask uses a trusted session event with standard flags');
+ check(initial.vertices instanceof Float32Array&&initial.indices instanceof Uint32Array&&same(initial.vertices,maskA.vertices)&&same(initial.indices,maskA.indices),'Provider mask preserves geometry in correctly typed arrays');
+ check(initial.vertices===initial.vertices&&initial.indices===initial.indices,'Provider event getters preserve SameObject identity');
+ await frame(session);await frame(session);check(events.length===1,'Unchanged frames do not duplicate mask events');
+ initial.vertices[0]=999;device.setViews(views(maskB,maskA));await settle(session,()=>events.length>=3);
+ check(events.length===3&&events[1].index===0&&events[1].eye==='left'&&events[2].index===1&&events[2].eye==='right','Updated masks retain active-view order and eye labels');
+ check(same(events[1].vertices,maskB.vertices)&&same(events[2].vertices,maskA.vertices),'Each view receives its new mask geometry');
+ check(initial.vertices[0]===999&&events[1].vertices!==initial.vertices&&events[2].vertices!==initial.vertices,'Mutating an older event does not change provider state or later snapshots');
+ device.setViews(views(undefined,{vertices:[],indices:[]}));await settle(session,()=>events.length>=5);check(events.slice(3).every(event=>event.vertices.length===0&&event.indices.length===0),'Removing or emptying a mask restores full-view drawing');
+ check(handlerCalls===events.length,'Event-handler attribute receives each provider update once');
+ const inputEvents=[];for(const type of ['selectstart','select','selectend'])session.addEventListener(type,event=>{inputEvents.push({type,source:event.inputSource,frame:event.frame,trusted:event.isTrusted,activePose:!!event.frame.getPose(event.inputSource.targetRaySpace,local)});});
+ const local=await session.requestReferenceSpace('local');const input=device.simulateInputSourceConnection({handedness:'right',targetRayMode:'tracked-pointer',profiles:['generic-trigger'],pointerOrigin:origin,supportedButtons:[{buttonType:'grip',pressed:false,touched:false,pressedValue:0}]});
+ for(let i=0;i<4;i++)await frame(session);input.simulateSelect();await settle(session,()=>inputEvents.length===3);
+ check(inputEvents.map(event=>event.type).join(',')==='selectstart,select,selectend','Sub-frame primary action dispatches the specified event order');
+ check(inputEvents.every(event=>event.source===session.inputSources[0]&&event.frame.session===session&&event.trusted&&event.activePose),'Sub-frame action events expose the current source and active event frame');
+ for(const event of inputEvents){let name;try{event.frame.getPose(event.source.targetRaySpace,local);}catch(error){name=error.name;}check(name==='InvalidStateError','Input event frame expires after dispatch');}
+ await session.end();const stopped=events.length;
+ const second=await activate('immersive-vr',{requiredFeatures:['local'],optionalFeatures:['secondary-views']});const secondEvents=[];second.addEventListener('visibilitymaskchange',event=>secondEvents.push(event));attach(second);await settle(second,()=>secondEvents.length>=2);check(secondEvents.some(event=>event.index===2&&event.eye==='none'&&same(event.vertices,maskB.vertices)),'Granted secondary views receive masks at their active-view index');
+ device.setViews(views(maskA,maskA));await settle(second,()=>secondEvents.length>=4);check(secondEvents.length===4,'Unchanged secondary mask is not repeated when primary views change');check(events.length===stopped,'Ended sessions receive no mask updates from later device changes');await second.end();
+ const inline=await activate('inline',{optionalFeatures:['viewer']});const inlineEvents=[];inline.addEventListener('visibilitymaskchange',event=>inlineEvents.push(event));attach(inline);for(let i=0;i<4;i++)await frame(inline);check(inlineEvents.length===0,'Sensor-free inline views do not expose unused device masks');await inline.end();
+ await device.disconnect();canvas.remove();check(true,'Mask sessions and device close cleanly');state.finished=true;
+})().catch(error=>{state.error=String(error)+' '+error.stack;});
+</script>

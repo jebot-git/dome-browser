@@ -53,7 +53,7 @@ pub use space::{ApiSpace, BaseSpace, Space};
 pub use view::{
     CUBE_BACK, CUBE_BOTTOM, CUBE_LEFT, CUBE_RIGHT, CUBE_TOP, Capture, CubeBack, CubeBottom,
     CubeLeft, CubeRight, CubeTop, Display, Floor, Input, LEFT_EYE, LeftEye, Native, RIGHT_EYE,
-    RightEye, SomeEye, VIEWER, View, ViewDescription, ViewEye, Viewer, ViewerView, ViewerViews, Viewport, Viewports, Views,
+    RightEye, SomeEye, VIEWER, View, ViewDescription, ViewEye, Viewer, ViewerView, ViewerViews, Viewport, Viewports, Views, VisibilityMask,
 };
 
 pub mod deferred_cleanup;

@@ -94,6 +94,8 @@ struct PerSessionData {
     needs_vp_update: bool,
     frame_events: Vec<FrameUpdateEvent>,
     secondary_views_enabled: bool,
+    visibility_masks: Vec<(u64, webxr_api::ViewEye, Option<webxr_api::VisibilityMask>)>,
+    needs_mask_update: bool,
 }
 
 #[derive(Clone)]
@@ -218,6 +220,8 @@ impl DiscoveryAPI<SurfmanGL> for HeadlessDiscovery {
             events: Default::default(),
             needs_vp_update: false,
             frame_events: vec![],
+            visibility_masks: vec![],
+            needs_mask_update: true,
             secondary_views_enabled: mode != SessionMode::Inline
                 && granted_features
                     .iter()
@@ -336,6 +340,7 @@ impl DeviceAPI for HeadlessDevice {
         }
         let per_session = data.sessions.iter_mut().find(|s| s.id == self.id).unwrap();
         frame.events.append(&mut per_session.frame_events);
+        frame.events.extend(data.update_visibility_masks(self.id));
         frame.events.extend(self.hit_tests.commit_tests());
 
         if let Some(ref world) = data.world {
@@ -539,6 +544,31 @@ impl HeadlessDeviceData {
         Viewports { viewports }
     }
 
+    fn update_visibility_masks(&mut self, id: u32) -> Vec<FrameUpdateEvent> {
+        let session = self.sessions.iter().find(|session| session.id == id).unwrap();
+        if !session.needs_mask_update { return vec![]; }
+        let current: Vec<_> = if session.mode == SessionMode::Inline {
+            vec![]
+        } else {
+            self.active_views(session).map(|view|
+                (view.id, view.init.eye, view.init.visibility_mask.clone())).collect()
+        };
+        let session = self.sessions.iter_mut().find(|session| session.id == id).unwrap();
+        session.needs_mask_update = false;
+        let previous = &mut session.visibility_masks;
+        let mut events = vec![];
+        for (index, view) in current.iter().enumerate() {
+            let old = previous.get(index);
+            if old != Some(view) && (view.2.is_some() || old.is_some_and(|old| old.2.is_some())) {
+                events.push(FrameUpdateEvent::VisibilityMaskChanged {
+                    index: index as u32, eye: view.1, mask: view.2.clone().unwrap_or_default(),
+                });
+            }
+        }
+        *previous = current;
+        events
+    }
+
     fn replace_views(&mut self, primary: MockViewsInit, secondary: Option<MockViewsInit>) {
         let mut identify = |init| {
             let id = self.next_view_id;
@@ -551,6 +581,7 @@ impl HeadlessDeviceData {
         }
         for session in &mut self.sessions {
             session.needs_vp_update = true;
+            session.needs_mask_update = true;
         }
     }
 
@@ -954,6 +985,7 @@ mod tests {
             fov: None,
             eye,
             is_first_person_observer: observer,
+            visibility_mask: None,
         }
     }
     fn primary() -> MockViewsInit {
@@ -1028,6 +1060,8 @@ mod tests {
             events: Default::default(),
             needs_vp_update: false,
             frame_events: vec![],
+            visibility_masks: vec![],
+            needs_mask_update: true,
             secondary_views_enabled: secondary && mode != SessionMode::Inline,
         }
     }
@@ -1121,4 +1155,51 @@ mod tests {
             vec![4, 5, 6, 2, 3]
         );
     }
+    fn mask() -> webxr_api::VisibilityMask {
+        webxr_api::VisibilityMask { vertices: vec![0., 0., 0., 1., 1., 0.], indices: vec![0, 1, 2] }
+    }
+
+    #[test]
+    fn visibility_masks_are_initial_and_change_only() {
+        let mut d = data();
+        d.views[0].init.visibility_mask = Some(mask());
+        d.sessions.push(session(SessionMode::ImmersiveVR, false));
+        let events = d.update_visibility_masks(0);
+        assert!(matches!(&events[..], [FrameUpdateEvent::VisibilityMaskChanged { index: 0, eye: ViewEye::Left, mask: m }] if *m == mask()));
+        assert!(d.update_visibility_masks(0).is_empty());
+        let mut views = primary(); views[0].visibility_mask = Some(mask());
+        d.replace_views(views, None);
+        assert_eq!(d.update_visibility_masks(0).len(), 1);
+        assert!(d.update_visibility_masks(0).is_empty());
+    }
+
+    #[test]
+    fn clearing_masks_uses_empty_geometry_without_stale_view_indices() {
+        let mut d = data();
+        for view in &mut d.views { view.init.visibility_mask = Some(mask()); }
+        d.sessions.push(session(SessionMode::ImmersiveVR, false));
+        assert_eq!(d.update_visibility_masks(0).len(), 2);
+        d.replace_views(vec![init(ViewEye::Left, 64, 64, false)], None);
+        let events = d.update_visibility_masks(0);
+        assert!(matches!(&events[..], [FrameUpdateEvent::VisibilityMaskChanged { index: 0, eye: ViewEye::Left, mask }] if mask.vertices.is_empty() && mask.indices.is_empty()));
+    }
+
+    #[test]
+    fn visibility_masks_follow_each_sessions_secondary_view_grant() {
+        let mut d = data();
+        d.views[0].init.visibility_mask = Some(mask());
+        d.secondary_views[0].init.visibility_mask = Some(mask());
+        let first = session(SessionMode::ImmersiveVR, false);
+        let mut second = session(SessionMode::ImmersiveVR, true); second.id = 1;
+        let mut inline = session(SessionMode::Inline, true); inline.id = 2;
+        d.sessions.extend([first, second, inline]);
+        assert_eq!(d.update_visibility_masks(0).len(), 1);
+        let events = d.update_visibility_masks(1);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[1], FrameUpdateEvent::VisibilityMaskChanged { index: 2, eye: ViewEye::None, .. }));
+        assert!(d.update_visibility_masks(2).is_empty());
+        assert!(d.update_visibility_masks(0).is_empty());
+        assert!(d.update_visibility_masks(1).is_empty());
+    }
+
 }

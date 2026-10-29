@@ -73,6 +73,7 @@ use crate::dom::xrreferencespaceevent::XRReferenceSpaceEvent;
 use crate::dom::xrrenderstate::XRRenderState;
 use crate::dom::xrrigidtransform::XRRigidTransform;
 use crate::dom::xrsessionevent::XRSessionEvent;
+use crate::dom::xrvisibilitymaskchangeevent::XRVisibilityMaskChangeEvent;
 use crate::dom::xrspace::XRSpace;
 
 mod inline_input;
@@ -824,6 +825,16 @@ impl XRSession {
 
     fn handle_frame_event(&self, cx: &mut JSContext, event: FrameUpdateEvent) {
         match event {
+            FrameUpdateEvent::VisibilityMaskChanged { index, eye, mask } => {
+                if self.is_ended() || !self.is_immersive() { return; }
+                match XRVisibilityMaskChangeEvent::new(cx, self.global().as_window(), self, eye, index, &mask) {
+                    Ok(event) => { event.upcast::<Event>().fire(cx, self.upcast()); },
+                    Err(_) => {
+                        let mut realm = crate::realms::enter_auto_realm(cx, self);
+                        crate::dom::bindings::error::report_pending_exception(&mut realm.current_realm());
+                    },
+                }
+            },
             FrameUpdateEvent::NominalFrameRateChanged(rate) => {
                 self.apply_nominal_framerate(cx, rate);
             },
@@ -908,6 +919,7 @@ impl XRSessionMethods<crate::DomTypeHolder> for XRSession {
 
     // https://www.w3.org/TR/webxr/#dom-xrsession-onframeratechange
     event_handler!(frameratechange, GetOnframeratechange, SetOnframeratechange);
+    event_handler!(visibilitymaskchange, GetOnvisibilitymaskchange, SetOnvisibilitymaskchange);
 
     /// <https://immersive-web.github.io/webxr/#dom-xrsession-renderstate>
     fn RenderState(&self) -> DomRoot<XRRenderState> {

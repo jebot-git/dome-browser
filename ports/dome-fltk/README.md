@@ -2409,3 +2409,30 @@ requests to bypass activation, while the current draft algorithm exempts only
 not counted as passing. See `docs/validation-xr-inline-intent-2026-10-29.json`.
 Broader WebXR and later rendering work remain; geolocation implementation and
 API testing remain excluded and its default stays disabled.
+
+
+## WebXR visibility-mask events
+
+`XRVisibilityMaskChangeEvent` exposes the session, eye, active-view index and
+`Float32Array`/`Uint32Array` geometry, including constructor and SameObject
+semantics. Provider events carry independent snapshots. The generic frame-update
+path and headless provider deliver changed masks at coherent view boundaries,
+respect secondary-view grants, and send empty geometry when a mask is removed.
+Unchanged frames avoid duplicate events and geometry copies. Existing physical
+DomeD providers report no masks and continue full-view rendering.
+
+`XR_INPUT_STRICT_USER_ACTIVATION=1 tests/webxr-visibility-mask.py EMBEDDER OUTPUT`
+checks event construction, array identity, snapshots, mask updates/removal,
+secondary-view indices, inline/end behavior, and observed sub-frame input events.
+The original visibility-mask suite passes under WebGL 1 and WebGL 2. The original
+sub-frame suite remains unchanged, but its harness completion is not counted as
+input-event proof because it does not return its watcher promise. The focused
+fixture waits for every input event and verifies the current specified order,
+source identity, active event-frame poses and expiry after dispatch.
+
+Validation: 127 unit tests and 1,515 passing runtime checks, three worker shutdown
+scenarios and reviewed anonymous Discord/X samples. The prior explicit-viewer
+specification/test discrepancy remains recorded separately. See
+`docs/validation-xr-visibility-mask-2026-10-29.json`. Broader WebXR and later
+rendering work remain; geolocation implementation and API testing remain
+excluded and its default stays disabled.

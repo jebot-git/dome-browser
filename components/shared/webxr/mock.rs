@@ -46,6 +46,8 @@ pub struct MockViewInit<Eye> {
     pub fov: Option<(f32, f32, f32, f32)>,
     pub eye: ViewEye,
     pub is_first_person_observer: bool,
+    #[serde(default)]
+    pub visibility_mask: Option<crate::VisibilityMask>,
 }
 
 /// Mock devices accept ordered lists, including more than two primary views

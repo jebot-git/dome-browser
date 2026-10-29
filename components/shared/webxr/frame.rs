@@ -53,6 +53,12 @@ pub enum FrameUpdateEvent {
     HitTestSourceAdded(HitTestId),
     /// Applied before callbacks rendering at the new compositor cadence.
     NominalFrameRateChanged(f32),
+    /// Geometry corresponds to the active view list of this frame.
+    VisibilityMaskChanged {
+        index: u32,
+        eye: crate::ViewEye,
+        mask: crate::VisibilityMask,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, MallocSizeOf)]

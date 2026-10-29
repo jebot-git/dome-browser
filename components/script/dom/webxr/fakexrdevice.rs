@@ -152,6 +152,10 @@ pub(crate) fn view<Eye>(view: &FakeXRViewInit) -> Fallible<MockViewInit<Eye>> {
         fov,
         eye: match view.eye { XREye::None => webxr_api::ViewEye::None, XREye::Left => webxr_api::ViewEye::Left, XREye::Right => webxr_api::ViewEye::Right },
         is_first_person_observer: view.isFirstPersonObserver,
+        visibility_mask: view.visibilityMask.as_ref().map(|mask| webxr_api::VisibilityMask {
+            vertices: mask.vertices.iter().map(|value| **value).collect(),
+            indices: mask.indices.clone(),
+        }),
     })
 }
 

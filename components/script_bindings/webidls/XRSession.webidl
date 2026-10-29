@@ -57,6 +57,7 @@ interface XRSession : EventTarget {
   attribute EventHandler onsqueezeend;
   attribute EventHandler onvisibilitychange;
   attribute EventHandler onframeratechange;
+  attribute EventHandler onvisibilitymaskchange;
 
   // AR Module
   // Attributes

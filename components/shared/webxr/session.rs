@@ -323,7 +323,8 @@ impl Session {
             FrameUpdateEvent::UpdateFloorTransform(floor) => self.floor_transform = floor,
             FrameUpdateEvent::UpdateViewports(vp) => self.viewports = vp,
             FrameUpdateEvent::HitTestSourceAdded(_)
-            | FrameUpdateEvent::ReferenceSpaceChanged(..) => (),
+            | FrameUpdateEvent::ReferenceSpaceChanged(..)
+            | FrameUpdateEvent::VisibilityMaskChanged { .. } => (),
         }
     }
 

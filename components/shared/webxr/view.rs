@@ -132,6 +132,14 @@ pub enum ViewEye {
     Right,
 }
 
+/// Visible-region geometry in view coordinates (implicit Z = -1).
+/// Empty arrays mean that the entire view should be drawn.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, MallocSizeOf)]
+pub struct VisibilityMask {
+    pub vertices: Vec<f32>,
+    pub indices: Vec<u32>,
+}
+
 /// Description of an active view with a stable identity within its session.
 /// Replacing a view must give it a new ID, even if its geometry is identical.
 #[derive(Clone, Debug, Serialize, Deserialize, MallocSizeOf)]
