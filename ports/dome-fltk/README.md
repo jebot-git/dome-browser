@@ -2326,3 +2326,35 @@ Scoped results and limitations are recorded in
 rendering work remain; these selected cases do not prove full conformance.
 Geolocation implementation and API tests remain excluded and its disabled
 shipping default is unchanged.
+
+## XR transform values and transferable matrices
+
+Transform positions, normalized orientations, inverses and reference-space
+composition retain double precision until conversion to a native backend.
+Quaternion normalization checks every component consistently and rejects a
+non-normalizable result. The public matrix remains a 16-element `Float32Array`.
+After its buffer is transferred, the next getter reconstructs the matrix from
+the transform; repeated getters keep returning the attached cached array.
+
+`tests/webxr-transform-values.py` checks value precision, normalization, inverse
+identity, repeated matrix transfer and offset composition using the private
+`xr-native-input` example. `tests/webxr-transform-core-wpt.py` adds twelve
+original transform/pose/frame suites with unchanged assertions and setup
+helpers. The older `tests/webxr-transform-wpt.py` remains a separate adapted
+inline-setup regression; its results are not counted as original WPT cases.
+These drivers accept `--binary` and `--output` and require isolated temporary
+profiles and a private compositor.
+
+The scoped record is `docs/validation-xr-transforms-2026-10-29.json`. Four
+original setup failures remain explicitly recorded, including the two earlier
+inline-FOV cases and two cases initialized with a null viewer-origin dictionary.
+They are not counted as passing assertions. The valid tracking-loss diagnostic,
+`tests/webxr-tracking-loss.py`, still reports seven genuine compatibility gaps
+out of seventeen checks on both the prior candidate and this one. It uses
+`clearViewerOrigin()` after valid initialization and checks restoration as well
+as lost tracking. This diagnostic currently exits unsuccessfully; tracking-loss
+pose relationships and emulation are the next implementation task.
+
+The user-accepted limited DomeD immersive baseline is preserved. Broader WebXR
+and later rendering/scroll-indicator work remain. Geolocation implementation
+and API tests are excluded; its existing disabled shipping default is unchanged.

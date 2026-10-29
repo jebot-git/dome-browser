@@ -1,0 +1,43 @@
+<!doctype html><meta charset="utf-8"><title>XR transform value semantics</title>
+<script>
+const state=window.test={ready:true,finished:false,error:null,checks:[],frames:0};
+state.snapshot=()=>({...state,snapshot:undefined});
+const check=(passed,name,actual)=>state.checks.push({name,passed:!!passed,actual});
+function scenario(name,fn){try{fn();}catch(error){check(false,name+' completes',String(error));}}
+const near=(a,b,t=1e-13)=>Math.abs(a-b)<=t;
+function components(q){return [q.x,q.y,q.z,q.w];}
+(async()=>{
+ scenario('position precision',()=>{
+  const position={x:1+2**-40,y:Math.PI,z:16777217};const t=new XRRigidTransform(position);
+  check(t.position.x===position.x&&t.position.y===position.y&&t.position.z===position.z,'Position getters retain the supplied double values',[t.position.x,t.position.y,t.position.z]);
+  const inverse=t.inverse;check(inverse.position.x===-position.x&&inverse.position.y===-position.y&&inverse.position.z===-position.z,'Translation inverse retains double precision',[inverse.position.x,inverse.position.y,inverse.position.z]);
+  check(inverse.inverse===t&&t.position===t.position&&t.orientation===t.orientation,'Precision changes preserve inverse and point object identities');
+ });
+ for(const scale of [1,1e20,1e-30])scenario('normalized orientation '+scale,()=>{
+  let q=null,error=null;try{q=components(new XRRigidTransform({}, {x:scale,y:2*scale,z:3*scale,w:4*scale}).orientation);}catch(e){error=e.name;}
+  const expected=[1,2,3,4].map(x=>x/Math.sqrt(30));
+  check(q&&q.every((v,i)=>near(v,expected[i])),'Normalization retains double components at scale '+scale,{q,error});
+  check(q&&near(Math.hypot(...q),1),'Orientation has unit length at scale '+scale,{length:q&&Math.hypot(...q),error});
+ });
+ for(const axis of ['x','y','z','w'])scenario('non-normalizable '+axis,()=>{
+  let error='none';try{new XRRigidTransform({}, {x:0,y:0,z:0,w:0,[axis]:Number.MAX_VALUE});}catch(e){error=e.name;}
+  check(error==='InvalidStateError','Non-normalizable finite orientation rejects on '+axis,error);
+ });
+ scenario('matrix transfer',()=>{
+  const t=new XRRigidTransform({x:1.25,y:-2.5,z:3.75});const first=t.matrix,expected=Array.from(first);
+  check(first===t.matrix&&first.length===16,'An attached transform matrix retains its identity');
+  const moved=structuredClone(first,{transfer:[first.buffer]});check(first.length===0&&moved.length===16,'The matrix buffer can be transferred normally');
+  const second=t.matrix;check(second!==first&&second.length===16&&expected.every((v,i)=>second[i]===v),'A detached matrix is regenerated from the immutable transform',{length:second.length,sameObject:second===first});
+  check(second===t.matrix&&second.length===16,'The regenerated attached matrix is cached');
+  const movedAgain=second.length===16?structuredClone(second,{transfer:[second.buffer]}):null;const third=t.matrix;
+  check(third.length===16&&third!==second&&expected.every((v,i)=>third[i]===v)&&movedAgain?.length===16,'Repeated matrix transfers preserve the transform value',{length:third.length});
+ });
+ const session=await navigator.xr.requestSession('inline');const viewer=await session.requestReferenceSpace('viewer');
+ const canvas=document.createElement('canvas');canvas.width=128;canvas.height=96;document.body.append(canvas);const gl=canvas.getContext('webgl');session.updateRenderState({baseLayer:new XRWebGLLayer(session,gl)});
+ const offset=viewer.getOffsetReferenceSpace(new XRRigidTransform({x:16777217})).getOffsetReferenceSpace(new XRRigidTransform({x:-16777216}));
+ await new Promise(resolve=>session.requestAnimationFrame((time,frame)=>{
+  state.frames++;const pose=frame.getPose(offset,viewer);check(!!pose&&pose.transform.position.x===1,'Reference-space offset composition retains precision until the backend boundary',pose?.transform.position.x);resolve();
+ }));
+ await session.end();canvas.remove();state.finished=true;
+})().catch(error=>{state.error=String(error)+' '+error.stack;state.finished=true;});
+</script>

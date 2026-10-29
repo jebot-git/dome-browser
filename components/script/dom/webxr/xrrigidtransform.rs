@@ -10,6 +10,7 @@ use js::typedarray::{Float32, HeapFloat32Array};
 use script_bindings::cformat;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_proto};
 use script_bindings::trace::RootedTraceableBox;
+use webxr_api::ApiSpace;
 
 use crate::dom::bindings::buffer_source::HeapBufferSource;
 use crate::dom::bindings::codegen::Bindings::DOMPointBinding::DOMPointInit;
@@ -21,20 +22,23 @@ use crate::dom::dompointreadonly::DOMPointReadOnly;
 use crate::dom::window::Window;
 use crate::dom::xrsession::ApiRigidTransform;
 
+// DOMPointInit uses doubles. Keep them until a native backend needs floats.
+type DomRigidTransform = RigidTransform3D<f64, ApiSpace, ApiSpace>;
+
 #[dom_struct]
 pub(crate) struct XRRigidTransform {
     reflector_: Reflector,
     position: MutNullableDom<DOMPointReadOnly>,
     orientation: MutNullableDom<DOMPointReadOnly>,
     #[no_trace]
-    transform: ApiRigidTransform,
+    transform: DomRigidTransform,
     inverse: MutNullableDom<XRRigidTransform>,
     #[ignore_malloc_size_of = "defined in mozjs"]
     matrix: HeapBufferSource<Float32>,
 }
 
 impl XRRigidTransform {
-    fn new_inherited(transform: ApiRigidTransform) -> XRRigidTransform {
+    fn new_inherited(transform: DomRigidTransform) -> XRRigidTransform {
         XRRigidTransform {
             reflector_: Reflector::new(),
             position: MutNullableDom::default(),
@@ -50,6 +54,21 @@ impl XRRigidTransform {
         window: &Window,
         transform: ApiRigidTransform,
     ) -> DomRoot<XRRigidTransform> {
+        let rotation = transform.rotation;
+        let translation = transform.translation;
+        let transform = RigidTransform3D::new(
+            Rotation3D::quaternion(
+                rotation.i.into(),
+                rotation.j.into(),
+                rotation.k.into(),
+                rotation.r.into(),
+            ),
+            Vector3D::new(
+                translation.x.into(),
+                translation.y.into(),
+                translation.z.into(),
+            ),
+        );
         Self::new_with_proto(cx, window, None, transform)
     }
 
@@ -57,7 +76,7 @@ impl XRRigidTransform {
         cx: &mut JSContext,
         window: &Window,
         proto: Option<HandleObject>,
-        transform: ApiRigidTransform,
+        transform: DomRigidTransform,
     ) -> DomRoot<XRRigidTransform> {
         reflect_dom_object_with_proto(
             cx,
@@ -109,19 +128,21 @@ impl XRRigidTransformMethods<crate::DomTypeHolder> for XRRigidTransform {
             ));
         }
 
-        let translate = Vector3D::new(position.x as f32, position.y as f32, position.z as f32);
-        let rotate = Rotation3D::unit_quaternion(
-            orientation.x as f32,
-            orientation.y as f32,
-            orientation.z as f32,
-            orientation.w as f32,
-        );
-
-        if !rotate.i.is_finite() {
-            // if quaternion has zero norm, we'll get an infinite or NaN
-            // value for each element. This is preferable to checking for zero.
+        let length = (orientation.x * orientation.x +
+            orientation.y * orientation.y +
+            orientation.z * orientation.z +
+            orientation.w * orientation.w)
+            .sqrt();
+        if length == 0.0 || !length.is_finite() {
             return Err(Error::InvalidState(None));
         }
+        let translate = Vector3D::new(position.x, position.y, position.z);
+        let rotate = Rotation3D::quaternion(
+            orientation.x / length,
+            orientation.y / length,
+            orientation.z / length,
+            orientation.w / length,
+        );
         let transform = RigidTransform3D::new(rotate, translate);
         Ok(XRRigidTransform::new_with_proto(
             cx, window, proto, transform,
@@ -132,7 +153,7 @@ impl XRRigidTransformMethods<crate::DomTypeHolder> for XRRigidTransform {
     fn Position(&self, cx: &mut JSContext) -> DomRoot<DOMPointReadOnly> {
         self.position.or_init(|| {
             let t = &self.transform.translation;
-            DOMPointReadOnly::new(cx, &self.global(), t.x.into(), t.y.into(), t.z.into(), 1.0)
+            DOMPointReadOnly::new(cx, &self.global(), t.x, t.y, t.z, 1.0)
         })
     }
     /// <https://immersive-web.github.io/webxr/#dom-xrrigidtransform-orientation>
@@ -142,27 +163,32 @@ impl XRRigidTransformMethods<crate::DomTypeHolder> for XRRigidTransform {
             DOMPointReadOnly::new(
                 cx,
                 &self.global(),
-                r.i.into(),
-                r.j.into(),
-                r.k.into(),
-                r.r.into(),
+                r.i,
+                r.j,
+                r.k,
+                r.r,
             )
         })
     }
     /// <https://immersive-web.github.io/webxr/#dom-xrrigidtransform-inverse>
     fn Inverse(&self, cx: &mut JSContext) -> DomRoot<XRRigidTransform> {
         self.inverse.or_init(|| {
-            let transform =
-                XRRigidTransform::new(cx, self.global().as_window(), self.transform.inverse());
+            let transform = XRRigidTransform::new_with_proto(
+                cx,
+                self.global().as_window(),
+                None,
+                self.transform.inverse(),
+            );
             transform.inverse.set(Some(self));
             transform
         })
     }
     /// <https://immersive-web.github.io/webxr/#dom-xrrigidtransform-matrix>
     fn Matrix(&self, cx: &mut JSContext) -> RootedTraceableBox<HeapFloat32Array> {
-        if !self.matrix.is_initialized() {
+        if !self.matrix.is_initialized() || self.matrix.is_detached_buffer(cx) {
+            let data = self.transform.to_transform().to_array().map(|value| value as f32);
             self.matrix
-                .set_data(cx, &self.transform.to_transform().to_array())
+                .set_data(cx, &data)
                 .expect("Failed to set on data on transform's internal matrix.")
         }
 
@@ -175,6 +201,29 @@ impl XRRigidTransformMethods<crate::DomTypeHolder> for XRRigidTransform {
 impl XRRigidTransform {
     /// <https://immersive-web.github.io/webxr/#dom-xrpose-transform>
     pub(crate) fn transform(&self) -> ApiRigidTransform {
-        self.transform
+        let rotation = self.transform.rotation;
+        let translation = self.transform.translation;
+        RigidTransform3D::new(
+            Rotation3D::quaternion(
+                rotation.i as f32,
+                rotation.j as f32,
+                rotation.k as f32,
+                rotation.r as f32,
+            ),
+            Vector3D::new(
+                translation.x as f32,
+                translation.y as f32,
+                translation.z as f32,
+            ),
+        )
+    }
+
+    pub(crate) fn then(&self, cx: &mut JSContext, next: &Self) -> DomRoot<Self> {
+        Self::new_with_proto(
+            cx,
+            self.global().as_window(),
+            None,
+            self.transform.then(&next.transform),
+        )
     }
 }

@@ -1,0 +1,51 @@
+<!doctype html><meta charset="utf-8"><title>WebXR tracking loss</title>
+<script>
+const state=window.test={ready:true,finished:false,error:null,checks:[],frames:0};
+state.snapshot=()=>({...state,snapshot:undefined});
+const check=(passed,name,actual)=>state.checks.push({name,passed:!!passed,actual});
+const identity=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
+const isIdentity=p=>p&&p.transform.matrix.every((v,i)=>Math.abs(v-identity[i])<1e-5);
+const position=p=>p&&[p.transform.position.x,p.transform.position.y,p.transform.position.z];
+const near=(a,b)=>a&&a.every((v,i)=>Math.abs(v-b[i])<1e-5);
+const projection=[1,0,0,0,0,1,0,0,0,0,-1,-1,0,0,-.2,0];
+let session;
+function inspect(fn){return new Promise((resolve,reject)=>session.requestAnimationFrame((time,frame)=>{
+ state.frames++;try{fn(frame);resolve();}catch(error){reject(error);}
+}));}
+(async()=>{
+ const device=await navigator.xr.test.simulateDeviceConnection({supportsImmersive:true,supportedModes:['immersive-vr'],supportedFeatures:['local','local-floor'],
+  views:['left','right'].map((eye,i)=>({eye,projectionMatrix:projection,viewOffset:{position:[i?.03:-.03,0,0],orientation:[0,0,0,1]},resolution:{width:128,height:96}})),
+  viewerOrigin:{position:[1.5,2,-3],orientation:[0,0,0,1]},floorOrigin:{position:[0,0,0],orientation:[0,0,0,1]}});
+ let request;navigator.xr.test.simulateUserActivation(()=>request=navigator.xr.requestSession('immersive-vr',{requiredFeatures:['local','local-floor']}));session=await request;
+ const [viewer,viewer2,local,local2,floor,floor2]=await Promise.all(['viewer','viewer','local','local','local-floor','local-floor'].map(x=>session.requestReferenceSpace(x)));
+ const offset=new XRRigidTransform({x:1});const offsetViewer=viewer.getOffsetReferenceSpace(offset),offsetLocal=local.getOffsetReferenceSpace(offset);
+ const canvas=document.createElement('canvas');canvas.width=128;canvas.height=96;document.body.append(canvas);const gl=canvas.getContext('webgl',{xrCompatible:true});await gl.makeXRCompatible();session.updateRenderState({baseLayer:new XRWebGLLayer(session,gl)});
+ let bad='none';try{device.setViewerOrigin(null);}catch(error){bad=error.name;}check(bad==='TypeError','The non-nullable viewer-origin setter rejects null',bad);
+ let saved;
+ await inspect(frame=>{
+  const pose=frame.getViewerPose(local);check(pose&&!pose.emulatedPosition&&near(position(pose),[1.5,2,-3]),'Tracked viewer pose reports the real mock origin',position(pose));
+  check(isIdentity(frame.getViewerPose(viewer)),'Tracked viewer-relative viewer pose is identity');saved=frame;
+ });
+ device.clearViewerOrigin();for(let i=0;i<6;i++)await inspect(()=>{});
+ await inspect(frame=>{
+  const regular=frame.getPose(viewer,local);check(regular===null,'Ordinary getPose does not invent a cross-origin pose during loss',position(regular));
+  const fallback=frame.getViewerPose(local);check(fallback&&fallback.emulatedPosition&&near(position(fallback),[1.5,2,-3]),'Viewer-pose force emulation retains the last known relative pose',fallback&&{position:position(fallback),emulated:fallback.emulatedPosition});
+  check(fallback&&fallback.linearVelocity===null&&fallback.angularVelocity===null,'Emulated viewer pose reports no measured velocity');
+  const self=frame.getViewerPose(viewer);check(isIdentity(self)&&!self.emulatedPosition,'Viewer-relative viewer pose remains statically known during loss',self&&{position:position(self),emulated:self.emulatedPosition});
+  check(self&&self.views.length===2,'Viewer-relative pose retains the known stereo view descriptions during loss',self?.views.length);
+  check(isIdentity(frame.getPose(viewer,viewer)),'A viewer space remains identity relative to itself during loss');
+  check(isIdentity(frame.getPose(viewer,viewer2)),'Distinct spaces sharing the viewer origin remain related during loss');
+  const shifted=frame.getPose(offsetViewer,viewer);check(near(position(shifted),[1,0,0]),'Viewer offset remains statically known during tracking loss',position(shifted));
+  check(isIdentity(frame.getPose(local,local2)),'Distinct local spaces retain their static relationship during loss');
+  check(near(position(frame.getPose(offsetLocal,local)),[1,0,0]),'Local offsets retain their static relationship during loss');
+  check(isIdentity(frame.getPose(floor,floor2)),'Distinct floor spaces retain their static relationship during loss');
+ });
+ let inactive='none';try{saved.getPose(viewer,viewer);}catch(error){inactive=error.name;}check(inactive==='InvalidStateError','Static relationships still require an active frame',inactive);
+ device.setViewerOrigin({position:[.75,2,-4],orientation:[0,0,0,1]});for(let i=0;i<6;i++)await inspect(()=>{});
+ await inspect(frame=>{
+  const pose=frame.getViewerPose(local);check(pose&&!pose.emulatedPosition&&near(position(pose),[.75,2,-4]),'Restored tracking replaces emulation with the current pose',pose&&{position:position(pose),emulated:pose.emulatedPosition});
+  check(near(position(frame.getPose(viewer,local)),[.75,2,-4]),'Ordinary pose queries resume after tracking restoration');
+ });
+ await session.end();await device.disconnect();canvas.remove();state.finished=true;
+})().catch(error=>{state.error=String(error)+' '+error.stack;state.finished=true;});
+</script>

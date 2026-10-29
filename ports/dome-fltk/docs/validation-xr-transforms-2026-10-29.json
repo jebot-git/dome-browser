@@ -1,0 +1,191 @@
+{
+  "change_regressions_passed": true,
+  "full_goal_achieved": false,
+  "runtime_checks": 4109,
+  "runtime_breakdown": {
+    "transform-values": 21,
+    "adapted-transforms": 10,
+    "inline-fov": 25,
+    "render-state": 24,
+    "session-general": 43,
+    "session-logical": 12,
+    "session-retention": 5,
+    "xr-bounded": 21,
+    "xr-touch": 43,
+    "xr-inline-pointer": 38,
+    "xr-native-input": 60,
+    "xr-native-reset": 101,
+    "xr-inline": 35,
+    "xr-inline-lifecycle": 58,
+    "xr-inline-visibility": 77,
+    "reporting-delivery": 217,
+    "reporting-filtering": 11,
+    "reporting-filtering-allowlist": 11,
+    "cookie-policy": 149,
+    "cookie-file": 11,
+    "privacy-transports": 18,
+    "gamepad-policy": 749,
+    "webgl-xr-policy": 712,
+    "iframe-potentials": 1213,
+    "policy-reporting": 248,
+    "csp-observers": 69,
+    "history": 14,
+    "xr-enforced": 23,
+    "xr-report-only": 47,
+    "xr-pending": 14,
+    "xr-devicechange": 30
+  },
+  "regression_suites": 43,
+  "webxr_unit_tests": 19,
+  "ignored_unit_tests": 1,
+  "ignored_reason": "Unchanged shader validation requires independent glslangValidator; ignored library test retained",
+  "retained_net_unit_tests": 322,
+  "net_unit_tests_rerun": false,
+  "new_transform_api_checks": 19,
+  "baseline_transform_failures": 15,
+  "new_original_transform_cases": 27,
+  "original_wpt_passed": 133,
+  "original_wpt_breakdown": {
+    "original-transforms": 25,
+    "original-render-state": 18,
+    "original-session": 18,
+    "original-layers": 22,
+    "original-dynamic-viewports": 24,
+    "original-secondary-views": 12,
+    "original-reset": 4,
+    "original-compatibility": 6,
+    "original-xr": 2,
+    "original-gamepad": 2
+  },
+  "original_wpt_failed": 4,
+  "original_setup_mismatches": [
+    {
+      "name": "XRFrame getViewerPose(viewerSpace) & getPose(space, space) return identity even during tracking loss - webgl",
+      "status": 1,
+      "message": "promise_test: Unhandled rejection with value: object \"TypeError: Missing required member \"orientation\".\""
+    },
+    {
+      "name": "XRFrame getViewerPose(viewerSpace) & getPose(space, space) return identity even during tracking loss - webgl2",
+      "status": 1,
+      "message": "promise_test: Unhandled rejection with value: object \"TypeError: Missing required member \"orientation\".\""
+    },
+    {
+      "name": "inlineVerticalFieldOfView is set appropriately on inline sessions - webgl",
+      "status": 1,
+      "message": "promise_test: Unhandled rejection with value: object \"InvalidStateError: The object is in an invalid state.\""
+    },
+    {
+      "name": "inlineVerticalFieldOfView is set appropriately on inline sessions - webgl2",
+      "status": 1,
+      "message": "promise_test: Unhandled rejection with value: object \"InvalidStateError: The object is in an invalid state.\""
+    }
+  ],
+  "all_current_selected_original_assertions_passed": false,
+  "optional_unsupported_cases": 4,
+  "original_assertions_and_helpers_unchanged": true,
+  "adapted_upstream_runtime_checks": 10,
+  "adapted_setup_distinct_from_original_wpt": true,
+  "worker_shutdown_scenarios": 3,
+  "anonymous_live_samples": 2,
+  "geolocation_excluded": true,
+  "geolocation_shipping_default_unchanged": true,
+  "sessions_restarted": false,
+  "current_khronos_executions": 0,
+  "scope": "Transform precision, normalization, offset composition and matrix-transfer regressions with existing XR/input/collection/layer/native DomeD/reporting/privacy/cookie/history/worker checks. Private synthetic devices and anonymous live pages. Four original setup failures preserved separately. Seven genuine tracking-loss gaps remain in the installed-base follow-up baseline; the goal is not complete. No whole-API/full WPT/physical-headset/GPU-reset conformance claim. Geolocation excluded.",
+  "finished_utc": "2026-10-29T01:42:39.849810+00:00",
+  "base_commit": "dbd5151828bc6e833f5567d436d026d921b81997",
+  "build": "Optimized release; regular-user build with locked offline dependencies. Release check and build passed.",
+  "binary_sha256": {
+    "browser-candidate-r5": "dd5a250b57af235221dc38af015418b8885a970f2526c11601411620d06c5409",
+    "test-embedder-r5": "2b858324ae7a1ef1a57ef5b2e57e88a3aff7bcbade44c2dbc94aec4c9f3049aa"
+  },
+  "source_sha256": {
+    "components/script/dom/webxr/xrrigidtransform.rs": "c2b01c3149f29f3cb19fb485391abe929216ac85acd3ac896c7ade00e43c4cd7",
+    "components/script/dom/webxr/xrreferencespace.rs": "ed297bcabb945af89351748df0b7faf193d646b452b5ad105c04f05f1207b191",
+    "ports/dome-fltk/examples/xr-native-input.rs": "04713ede716526474fd3b93bb827080091aabe7e0595fe2799ca2e0cc8ad8c56",
+    "ports/dome-fltk/examples/xr-native-input/session_lifecycle_fixture.rs": "ce6e048ab685cb823f90faf635f6948fa8381cc3ce16902b8c363de5c51f842d",
+    "Cargo.toml": "e9260f5e43822d8992eb6354549764ed9e8f68970424cf8e3d4451d91f707eb4",
+    "Cargo.lock": "e149f0b652379f7fd70669a574725ce7943308642b7096313178872f600db182"
+  },
+  "new_fixture_sha256": {
+    "ports/dome-fltk/tests/webxr-transform-values.py": "e6aab9de702e2ce73ecea7badbf8425e5105ae8f4fd5a8a470fbafa309126612",
+    "ports/dome-fltk/tests/webxr-transform-values.html": "d71ef7f77148eca9a16f0abd6a7067ccd3ffe3b06af26b5ba947cae072b27bbf",
+    "ports/dome-fltk/tests/webxr-transform-core-wpt.py": "1d96cc2880dbff9bef281d216152f2abe238d79618adfe6286a53c7da92ad883",
+    "ports/dome-fltk/tests/webxr-tracking-loss.py": "70be9af734042f092463b66275ef8a3f4e6f84cdbf4590871b23f4789ddc6340",
+    "ports/dome-fltk/tests/webxr-tracking-loss.html": "a96efbf966538746486f9bbf271cdfa170686969c2b88a8fd7aeb38cefa0e60e"
+  },
+  "baseline_value_checks": {
+    "passed": 4,
+    "failed": 15,
+    "total": 19
+  },
+  "candidate_value_checks": {
+    "passed": 19,
+    "failed": 0,
+    "total": 19
+  },
+  "original_transform_group": {
+    "passed": 25,
+    "failed": 2,
+    "total": 27
+  },
+  "known_tracking_loss": {
+    "baseline": {
+      "passed": 10,
+      "failed": 7,
+      "total": 17,
+      "clean_exit": true
+    },
+    "candidate": {
+      "passed": 10,
+      "failed": 7,
+      "total": 17,
+      "clean_exit": true
+    },
+    "same_outcomes": true,
+    "failed_checks": [
+      {
+        "name": "Viewer-pose force emulation retains the last known relative pose",
+        "passed": false,
+        "actual": null
+      },
+      {
+        "name": "Emulated viewer pose reports no measured velocity",
+        "passed": false
+      },
+      {
+        "name": "Viewer-relative viewer pose remains statically known during loss",
+        "passed": false,
+        "actual": null
+      },
+      {
+        "name": "Viewer-relative pose retains the known stereo view descriptions during loss",
+        "passed": false
+      },
+      {
+        "name": "A viewer space remains identity relative to itself during loss",
+        "passed": false
+      },
+      {
+        "name": "Distinct spaces sharing the viewer origin remain related during loss",
+        "passed": false
+      },
+      {
+        "name": "Viewer offset remains statically known during tracking loss",
+        "passed": false,
+        "actual": null
+      }
+    ],
+    "valid_setup": "Initialize a valid private mock, use clearViewerOrigin to lose tracking and setViewerOrigin to restore it. Only supported local/local-floor/viewer spaces are requested.",
+    "remaining_work": "Statically known viewer relationships and last-known viewer-pose emulation; ordinary unknown cross-origin getPose remains null, inactive frames still reject, and restored tracking resumes correctly."
+  },
+  "references": [
+    "https://www.w3.org/TR/webxr/#xrrigidtransform-interface",
+    "https://www.w3.org/TR/webxr/#normalization",
+    "https://www.w3.org/TR/webxr/#dom-webglrenderingcontextbase-makexrcompatible",
+    "https://immersive-web.github.io/webxr-test-api/#dictdef-fakexrdeviceinit",
+    "https://www.w3.org/TR/webxr/#populate-the-pose"
+  ],
+  "visual_review": "Anonymous Discord login and X landing/login visibly rendered at 30 seconds. Both survived and closed cleanly. Accepted X QR overlap remains a non-bug. No whole-site correctness assertion.",
+  "remaining": "Implement standards-correct tracking-loss relationships/emulation, then expand supported WebXR core/backend/device coverage. Later standards rendering and remaining scroll-indicator DPI/zoom/contrast/input checks remain. The overall goal is active. Geolocation excluded."
+}

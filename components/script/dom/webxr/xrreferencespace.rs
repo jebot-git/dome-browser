@@ -119,8 +119,7 @@ impl XRReferenceSpace {
 impl XRReferenceSpaceMethods<crate::DomTypeHolder> for XRReferenceSpace {
     /// <https://immersive-web.github.io/webxr/#dom-xrreferencespace-getoffsetreferencespace>
     fn GetOffsetReferenceSpace(&self, cx: &mut JSContext, new: &XRRigidTransform) -> DomRoot<Self> {
-        let offset = new.transform().then(&self.offset.transform());
-        let offset = XRRigidTransform::new(cx, self.global().as_window(), offset);
+        let offset = new.then(cx, &self.offset);
         let session = self.upcast::<XRSpace>().session();
         if self.is::<XRBoundedReferenceSpace>() {
             let bounded = XRBoundedReferenceSpace::new_offset(cx, &self.global(), session, &offset);
