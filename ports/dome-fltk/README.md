@@ -2543,3 +2543,34 @@ nonpassing cases. See `docs/validation-xr-feature-grants-2026-10-29.json` for
 source, candidate and scope evidence. Further rendering/scroll-indicator
 acceptance and installed-path checks remain; full device conformance is not
 claimed. Geolocation implementation and API tests remain excluded and disabled.
+
+
+## Transient document-position cue acceptance
+
+The native trailing-edge cue remains painted over the page, with no separate
+scrollbar widget. New portable regressions validate actual 1.5× and 2× UI scale,
+page zoom, document geometry, nested scrolling, dynamic content and short pages.
+Native Wayland checks place mouse, wheel and touch input directly inside the
+painted cue: trusted DOM events still reach the underlying page, wheel and
+touch dragging scroll the document, and taps retain their compatibility click.
+Light and dark captures show intermediate fade opacity and complete disappearance
+after motion stops. All five private cases close normally; 97 checks pass.
+
+```
+uv run --no-project --with python-xlib --with pillow --with dbus-next python tests/scroll-indicator-scale.py \
+  --binary /absolute/path/to/candidate --output /new/private/scale-output \
+  --backend wayland --scale 2 --dark --zoom-steps 2
+uv run --no-project --with python-xlib --with pillow --with dbus-next python tests/scroll-indicator-input.py \
+  --binary /absolute/path/to/candidate --compositor /private/input-fixture-compositor \
+  --output /new/private/input-output --dark
+```
+
+Set `DOME_COMPOSITOR` for the scale fixture when the private compositor is not
+in the default sibling checkout. The input fixture requires a nested DomeD
+build with `input-test-fixture`; normal compositor builds expose no input
+fixture endpoint. These tests use temporary profiles, buses and displays, and
+do not attach to or restart the desktop session. The touch route uses actual
+Wayland, FLTK and Servo dispatch through a private synthetic device. Physical
+touchscreen, GPU rendering and contrast on every background are not established
+by these checks. Production browser code is unchanged by this acceptance work.
+See `docs/validation-scroll-indicator-2026-10-29.json` for evidence and limits.

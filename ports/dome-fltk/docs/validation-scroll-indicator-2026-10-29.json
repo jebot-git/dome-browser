@@ -1,0 +1,89 @@
+{
+  "validated_utc": "2026-10-29T14:20:46.680788+00:00",
+  "acceptance_scope": "Transient native document-position cue on the optimized existing candidate: measured UI scale, page zoom, dynamic geometry, nested scrollers, short documents, native input pass-through and rendered fade on light/dark pages",
+  "base_commit": "78165f94ed1b6007e6981b4f052e9dfef69c834e",
+  "candidate_sha256": "3e8fb85d8015a9846b41e982af1dd5d5e916cdb2e2c57ac3ad07c98e5cb9d187",
+  "production_source_changed": false,
+  "rebuild_required": false,
+  "rebuild_reason": "Only portable tests and validation documentation added; candidate production sources are unchanged",
+  "runtime_checks_passed": 97,
+  "reports": [
+    {
+      "name": "portable-input-light-r7",
+      "exit_code": 0,
+      "passed": true,
+      "checks": 35,
+      "report": "scroll-indicator-acceptance-v2/portable-input-light-r7/report.json",
+      "script_sha256": "bccaed1168eac0aa37b2a11889a5e73aa88b297fd89c7c65a66af1becd3d0ca9"
+    },
+    {
+      "name": "portable-input-dark-r7",
+      "exit_code": 0,
+      "passed": true,
+      "checks": 35,
+      "report": "scroll-indicator-acceptance-v2/portable-input-dark-r7/report.json",
+      "script_sha256": "bccaed1168eac0aa37b2a11889a5e73aa88b297fd89c7c65a66af1becd3d0ca9"
+    },
+    {
+      "name": "portable-x11-scale2-r7",
+      "exit_code": 0,
+      "passed": true,
+      "checks": 9,
+      "report": "scroll-indicator-acceptance-v2/portable-x11-scale2-r7/report.json",
+      "script_sha256": "3ae5ed255151dbd1e306ed9f6ec1ae83e4b6b2139864d585db43a3ecc3893f50"
+    },
+    {
+      "name": "portable-x11-scale1p5-dark-zoom-r7",
+      "exit_code": 0,
+      "passed": true,
+      "checks": 9,
+      "report": "scroll-indicator-acceptance-v2/portable-x11-scale1p5-dark-zoom-r7/report.json",
+      "script_sha256": "3ae5ed255151dbd1e306ed9f6ec1ae83e4b6b2139864d585db43a3ecc3893f50"
+    },
+    {
+      "name": "portable-wayland-scale2-dark-zoom-r7",
+      "exit_code": 0,
+      "passed": true,
+      "checks": 9,
+      "report": "scroll-indicator-acceptance-v2/portable-wayland-scale2-dark-zoom-r7/report.json",
+      "script_sha256": "3ae5ed255151dbd1e306ed9f6ec1ae83e4b6b2139864d585db43a3ecc3893f50"
+    }
+  ],
+  "driver_sha256": {
+    "ports/dome-fltk/tests/scroll-indicator-input.py": "bccaed1168eac0aa37b2a11889a5e73aa88b297fd89c7c65a66af1becd3d0ca9",
+    "ports/dome-fltk/tests/scroll-indicator-scale.py": "3ae5ed255151dbd1e306ed9f6ec1ae83e4b6b2139864d585db43a3ecc3893f50"
+  },
+  "behavior_verified": [
+    "Trailing-edge cue geometry follows actual root document position",
+    "Nested-only scrolling and dynamic expansion without document movement do not create the cue",
+    "Short documents and navigation clear the cue",
+    "2x X11 and Wayland UI scales are measured from native surface and page metrics; 1.5x X11 also verified",
+    "Page zoom from native Ctrl+plus is measured at 1.21x in dark-page Wayland and X11 cases",
+    "Trusted click/wheel/touch events at a measured point inside the painted cue reach the underlying page",
+    "Default native wheel and touch drag scroll the document beneath the cue; taps retain compatibility clicks",
+    "Light/dark captures have intermediate fade opacity followed by zero visible cue at 0.9s and 1.15s after the initial capture",
+    "All five private browser cases close with exit code zero"
+  ],
+  "visual_review": [
+    "scroll-indicator-acceptance-v2/portable-input-light-r7/fade.png",
+    "scroll-indicator-acceptance-v2/portable-input-dark-r7/fade.png",
+    "scroll-indicator-acceptance-v2/wayland-scale2-dark-zoom-r6/middle.png"
+  ],
+  "harness_corrections_preserved": [
+    "First prototype compared stale pre-resize metrics with a new surface size; removed unnecessary resize at verified 1x",
+    "Second prototype included the native mouse cursor in the edge crop and requested repeated identical scroll positions; park the cursor outside the crop and request distinct positions before each motion phase",
+    "Earlier scale prototype uses documented private desktop_resize to establish measured 2x Wayland geometry; no scale assertion weakened"
+  ],
+  "limits": [
+    "Software-rendered private displays and local flat light/dark fixtures; no all-page contrast or hardware rendering claim",
+    "Native touch fixture traverses real Wayland/FLTK/Servo routes; physical touchscreen validation is not claimed",
+    "These 97 checks are separate from the 1947 WebXR/stability checks on the same candidate",
+    "System installation remains queued behind the existing native sudo prompt; no duplicate prompt started",
+    "Overall browser objective remains active; no full WebXR conformance or every-site stability claim"
+  ],
+  "system_files_changed": false,
+  "desktop_sessions_restarted": false,
+  "geolocation_excluded": true,
+  "media_playback_excluded": true,
+  "full_goal_achieved": false
+}
