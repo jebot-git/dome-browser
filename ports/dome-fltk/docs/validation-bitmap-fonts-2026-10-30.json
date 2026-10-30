@@ -35,6 +35,7 @@
     "x86_64",
     "i686"
   ],
-  "candidate_sha256": "6ce7cc0a92621363459188e218ece37008cedf30c220203c86adacc7663ab11b",
-  "sessions_restarted": false
+  "candidate_sha256": "a71db9768b2ab8b506ec12d5cdb71d8f0184d09cdae31560d370454c90023259",
+  "sessions_restarted": false,
+  "font_alias_export": "passed"
 }

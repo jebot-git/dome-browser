@@ -279,7 +279,7 @@ inline std::vector<Face> discover(bool force = false) {
     // must not be reparsed or offered as user-selectable native faces.
     auto parent = std::filesystem::path(file).parent_path();
     auto cache_root = std::filesystem::path(cache_home ? cache_home : user_home ? std::string(user_home)+"/.cache" : "/tmp") / "de-xr";
-    if (parent == cache_root/"bdf2x-v1" || parent == cache_root/"bdf-qt-v1" || parent == cache_root/"bdf-media-v1") continue;
+    if (parent == cache_root/"bdf2x-v1" || parent == cache_root/"bdf-qt-v1" || parent == cache_root/"bdf-media-v1" || parent == cache_root/"bdf-qt-v2" || parent == cache_root/"bdf-media-v2" || parent == cache_root/"bdf-browser-v2") continue;
     std::error_code error;
     auto modified = std::filesystem::last_write_time(file, error);
     if (error) continue;
@@ -290,7 +290,7 @@ inline std::vector<Face> discover(bool force = false) {
 
     }
     Face f = found->second.face;
-    if (found->second.valid && f.family.rfind("Dome 2x ", 0) != 0 && f.family.rfind("Dome Qt BDF ", 0) != 0 && f.family.rfind("Dome Media BDF ", 0) != 0) {
+    if (found->second.valid && f.family.rfind("Dome 2x ", 0) != 0 && f.family.rfind("Dome Qt BDF ", 0) != 0 && f.family.rfind("Dome Media BDF ", 0) != 0 && f.family.rfind("Dome Browser Bitmap ", 0) != 0) {
       faces.push_back(f);
     }
   }
@@ -384,6 +384,8 @@ inline std::string export_config() {
   directories.insert((cache/"bdf2x-v1").string());
   std::filesystem::create_directories(cache/"bdf-media-v1");
   directories.insert((cache/"bdf-media-v1").string());
+  std::filesystem::create_directories(cache/"bdf-media-v2");
+  directories.insert((cache/"bdf-media-v2").string());
   std::string xml = "<?xml version=\"1.0\"?><!DOCTYPE fontconfig SYSTEM \"urn:fontconfig:fonts.dtd\"><fontconfig>";
 #ifdef DOME_OUTLINE_FONTS
   xml += "<include ignore_missing=\"yes\">"+escape(inherited)+"</include>";
