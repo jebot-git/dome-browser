@@ -16,7 +16,7 @@ use fontconfig_sys::{
     FcChar8, FcConfigGetCurrent, FcConfigGetFonts, FcConfigSubstitute, FcDefaultSubstitute,
     FcFontMatch, FcFontSetDestroy, FcFontSetList, FcMatchPattern, FcNameParse, FcObjectSetAdd,
     FcObjectSetCreate, FcObjectSetDestroy, FcPattern, FcPatternAddString, FcPatternCreate,
-    FcPatternDestroy, FcPatternGetInteger, FcPatternGetString, FcResultMatch, FcSetSystem,
+    FcPatternDestroy, FcPatternGetInteger, FcPatternGetString, FcResultMatch, FcSetSystem, FcSetApplication,
 };
 use fonts_traits::{FontTemplate, FontTemplateDescriptor, LocalFontIdentifier};
 use icu_locale_core::subtags::language;
@@ -41,7 +41,9 @@ where
 {
     unsafe {
         let config = FcConfigGetCurrent();
-        let font_set = FcConfigGetFonts(config, FcSetSystem);
+        for set in [FcSetSystem, FcSetApplication] {
+        let font_set = FcConfigGetFonts(config, set);
+        if font_set.is_null() { continue; }
         for i in 0..((*font_set).nfont as isize) {
             let font = (*font_set).fonts.offset(i);
             let mut family: *mut FcChar8 = ptr::null_mut();
@@ -53,11 +55,15 @@ where
                 continue;
             }
 
-            // Skip bitmap fonts. They aren't supported by FreeType.
+            // The policy checks Fontconfig's decoded format; FreeType repeats
+            // the validation when opening the actual file.
             let fontformat = CStr::from_ptr(format as *const c_char);
+            #[cfg(feature = "outline-fonts")]
             if !matches!(fontformat.to_bytes(), b"TrueType" | b"CFF" | b"Type 1") {
                 continue;
             }
+            #[cfg(not(feature = "outline-fonts"))]
+            if !matches!(fontformat.to_bytes(), b"BDF" | b"PCF") { continue; }
 
             while FcPatternGetString(*font, FC_FAMILY.as_ptr() as *mut c_char, v, &mut family) ==
                 FcResultMatch
@@ -75,6 +81,7 @@ where
                 v += 1;
             }
         }
+        }
     }
 }
 
@@ -84,8 +91,8 @@ where
 {
     unsafe {
         let config = FcConfigGetCurrent();
-        let mut font_set = FcConfigGetFonts(config, FcSetSystem);
-        let font_set_array_ptr = &mut font_set;
+        let mut font_sets = [FcConfigGetFonts(config, FcSetSystem), FcConfigGetFonts(config, FcSetApplication)];
+        let font_set_array_ptr = font_sets.as_mut_ptr();
         let pattern = FcPatternCreate();
         debug_assert!(!pattern.is_null());
         if pattern.is_null() {
@@ -120,7 +127,7 @@ where
         FcObjectSetAdd(object_set, FC_SLANT.as_ptr() as *mut c_char);
         FcObjectSetAdd(object_set, FC_WIDTH.as_ptr() as *mut c_char);
 
-        let matches = FcFontSetList(config, font_set_array_ptr, 1, pattern, object_set);
+        let matches = FcFontSetList(config, font_set_array_ptr, 2, pattern, object_set);
         debug!("Found {} variations for {}", (*matches).nfont, family_name);
 
         for variation_index in 0..((*matches).nfont as isize) {
@@ -175,6 +182,16 @@ where
 }
 
 // Based on gfxPlatformGtk::GetCommonFallbackFonts() in Gecko
+#[cfg(not(feature = "outline-fonts"))]
+pub fn fallback_font_families(_: FallbackFontSelectionOptions) -> Vec<&'static str> {
+    if servo_config::pref!(fonts_default_size) >= 32 {
+        vec!["Dome 2x Unifont", "Dome 2x Unifont Upper", "Unifont", "Unifont Upper"]
+    } else {
+        vec!["Unifont", "Unifont Upper", "Dome 2x Unifont", "Dome 2x Unifont Upper"]
+    }
+}
+
+#[cfg(feature = "outline-fonts")]
 pub fn fallback_font_families(options: FallbackFontSelectionOptions) -> Vec<&'static str> {
     let mut families = Vec::new();
     if options.presentation_preference == EmojiPresentationPreference::Emoji {

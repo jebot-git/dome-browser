@@ -38,6 +38,7 @@ unsafe extern "C" {
     pub fn browser_ui_page_focused() -> i32;
     pub fn browser_ui_visible() -> i32;
     pub fn browser_ui_wake();
+    pub fn browser_ui_font_settings() -> *const c_char;
     pub fn browser_ui_close();
     pub fn browser_ui_scroll_metrics(tab: u64, generation: u64, offset: f32, visible: f32, total: f32);
     pub fn browser_ui_frame(pixels: *const u8, width: u32, height: u32);

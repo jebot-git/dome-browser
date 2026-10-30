@@ -29,6 +29,14 @@ use harfbuzz_sys::{
 use num_traits::Zero;
 use read_fonts::types::Tag;
 
+#[cfg(not(feature = "outline-fonts"))]
+unsafe extern "C" { fn hb_dome_bitmap_only() -> c_int; }
+
+#[cfg(not(feature = "outline-fonts"))]
+unsafe extern "C" fn destroy_native_bdf_data(data: *mut c_void) {
+    unsafe { drop(Box::from_raw(data.cast::<crate::FontData>())); }
+}
+
 use super::{GlyphShapingResult, ShapedGlyph, unicode_script_to_iso15924_tag};
 use crate::platform::font::FontTable;
 use crate::{
@@ -190,11 +198,26 @@ impl Drop for Shaper {
 impl Shaper {
     pub(crate) fn new(font: &Font) -> Shaper {
         unsafe {
+            #[cfg(feature = "outline-fonts")]
             let hb_face: *mut hb_face_t = hb_face_create_for_tables(
                 Some(font_table_func),
                 font as *const Font as *mut c_void,
                 None,
             );
+            #[cfg(not(feature = "outline-fonts"))]
+            let hb_face = {
+                assert_eq!(hb_dome_bitmap_only(), 1, "DomeD requires its native bitmap HarfBuzz fork");
+                let source = font.font_data_and_index().unwrap_or_else(|_| panic!("Native bitmap font data must remain available"));
+                let data = Box::new(source.data.clone());
+                let bytes: &[u8] = data.as_ref().as_ref();
+                let length = c_uint::try_from(bytes.len()).expect("Native BDF font exceeds HarfBuzz limits");
+                let blob = hb_blob_create(bytes.as_ptr().cast(), length, HB_MEMORY_MODE_READONLY,
+                    Box::into_raw(data).cast(), Some(destroy_native_bdf_data));
+                let face = harfbuzz_sys::hb_face_create(blob, source.index);
+                harfbuzz_sys::hb_blob_destroy(blob);
+                assert!(harfbuzz_sys::hb_face_get_glyph_count(face) > 0, "DomeD rejected a non-bitmap font");
+                face
+            };
             let hb_font: *mut hb_font_t = hb_font_create(hb_face);
 
             // Set points-per-em. if zero, performs no hinting in that direction.
@@ -226,6 +249,7 @@ impl Shaper {
 
             // Create a subfont before setting font-funcs so that we can
             // inherit the default font-funcs for the funcs we don't set.
+            #[cfg(feature = "outline-fonts")]
             let hb_font = {
                 let sub_font = hb_font_create_sub_font(hb_font);
                 hb_font_destroy(hb_font);
@@ -233,6 +257,7 @@ impl Shaper {
             };
 
             // Now configure the subset of function callbacks that we do implement.
+            #[cfg(feature = "outline-fonts")]
             hb_font_set_funcs(
                 hb_font,
                 HB_FONT_FUNCS.0,

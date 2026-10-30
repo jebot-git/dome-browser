@@ -33,6 +33,9 @@ use icu_locale_core::subtags::Language;
 pub use platform::font_list::fallback_font_families;
 pub(crate) use shapers::*;
 pub use system_font_service::SystemFontService;
+
+/// The default DomeD build accepts host-provided Unicode BDF strikes only.
+pub const fn bitmap_only() -> bool { !cfg!(feature = "outline-fonts") }
 use unicode_properties::{EmojiStatus, UnicodeEmoji, emoji};
 
 /// Whether or not font fallback selection prefers the emoji or text representation

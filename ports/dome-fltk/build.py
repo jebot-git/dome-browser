@@ -14,6 +14,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--jobs', type=int, default=1)
 parser.add_argument('--release', action='store_true')
 parser.add_argument('--test', action='store_true', help='Run the port unit tests')
+parser.add_argument('--outline-fonts', action='store_true', help='Explicitly enable non-bitmap font formats')
 args = parser.parse_args()
 env = dict(os.environ)
 toolchain = suite.parent / 'dome-compositor/.local-deps/toolchain/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin'
@@ -27,7 +28,12 @@ resource = suite / '_deps/servo-clang/usr/lib/llvm-21/lib/clang/21'
 if resource.is_dir():
     env.setdefault('BINDGEN_EXTRA_CLANG_ARGS', '-resource-dir=' + str(resource))
 env.update(CARGO_BUILD_JOBS=str(max(1, args.jobs)), CARGO_PROFILE_DEV_DEBUG='0', CARGO_INCREMENTAL='0')
+if not args.outline_fonts:
+    runtime = Path(env.get('DOME_BDF_RUNTIME_PREFIX', '/opt/fltk-vr/bdf-runtime'))
+    env['PKG_CONFIG_PATH'] = str(runtime / 'lib/pkgconfig') + os.pathsep + env.get('PKG_CONFIG_PATH', '')
 command = ['cargo', 'test' if args.test else 'build', '--locked', '-p', 'dome-browser']
+if args.outline_fonts:
+    command.extend(['--features', 'outline-fonts'])
 if args.release:
     command.append('--release')
 subprocess.run(command, cwd=source, env=env, check=True)

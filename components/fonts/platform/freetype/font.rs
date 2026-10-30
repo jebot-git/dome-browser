@@ -80,6 +80,8 @@ impl PlatformFontMethods for PlatformFont {
             Some(requested_size) => (requested_size, face.set_size(requested_size)?),
             None => (Au::zero(), Au::zero()),
         };
+        #[cfg(not(feature = "outline-fonts"))]
+        let requested_face_size = actual_face_size;
 
         let table_provider_data = FreeTypeFaceTableProviderData::Web(font_data.clone());
 
@@ -120,6 +122,8 @@ impl PlatformFontMethods for PlatformFont {
             Some(requested_size) => (requested_size, face.set_size(requested_size)?),
             None => (Au::zero(), Au::zero()),
         };
+        #[cfg(not(feature = "outline-fonts"))]
+        let requested_face_size = actual_face_size;
 
         let table_provider_data =
             FreeTypeFaceTableProviderData::Local(memory_mapped_font_data, font_identifier.index());
@@ -409,6 +413,9 @@ impl PlatformFontMethods for PlatformFont {
     fn variations(&self) -> &[FontVariation] {
         &self.variations
     }
+
+    #[cfg(not(feature = "outline-fonts"))]
+    fn native_bitmap_size(&self) -> Option<Au> { Some(self.actual_face_size) }
 }
 
 impl PlatformFont {

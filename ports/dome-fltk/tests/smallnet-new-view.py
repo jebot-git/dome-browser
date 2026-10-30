@@ -69,7 +69,8 @@ try:
         app=subprocess.Popen([str(a.binary.resolve()),'--software','--no-restore','--profile',str(profile),'about:blank'],env=env,stdout=log,stderr=log);stack.callback(stop,app)
         def windows():return wl.windows() if wl else xd.screen().root.query_tree().children
         def main_window():return next((w for w in windows() if (wl or w.get_attributes().map_state==X.IsViewable) and 'Dome Browser' in str(w.get_wm_name() or '')),None)
-        window=wait(main_window);window.set_input_focus(X.RevertToParent,X.CurrentTime);xd.sync()
+        # Software Mesa may compile its first shaders while other builds run.
+        window=wait(main_window,45);window.set_input_focus(X.RevertToParent,X.CurrentTime);xd.sync()
         def key(name,ctrl=False):
             if ctrl:xtest.fake_input(xd,X.KeyPress,xd.keysym_to_keycode(XK.XK_Control_L))
             code=xd.keysym_to_keycode(XK.string_to_keysym(name));xtest.fake_input(xd,X.KeyPress,code);xtest.fake_input(xd,X.KeyRelease,code)
@@ -90,9 +91,9 @@ try:
             navigate(source);wait(lambda:(kind,'' if kind=='gopher' else '/') in hits)
             wait(lambda:source in str(window.get_wm_name()));check(True,kind+' source document loads');time.sleep(.4)
             g=window.get_geometry()
-            # First link in the native monospace smallnet presentation. Both
+            # First link with the native 16px host bitmap presentation. Both
             # gopher's list indentation and gemtext place its text here.
-            x=g.x+g.width//2-220;y=g.y+(158 if wl else 188)
+            x=g.x+g.width//2-220;y=g.y+(175 if wl else 205)
             xtest.fake_input(xd,X.MotionNotify,x=x,y=y);xtest.fake_input(xd,X.ButtonPress,3);xtest.fake_input(xd,X.ButtonRelease,3);xd.sync()
             if wl:wait(lambda:wl.scene()['popups'])
             else:wait(lambda:any(w.get_attributes().map_state==X.IsViewable and w.get_attributes().override_redirect for w in windows()))

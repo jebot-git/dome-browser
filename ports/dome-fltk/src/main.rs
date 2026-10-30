@@ -10,6 +10,7 @@ mod storage;
 mod cookie_settings;
 mod memory_diagnostics;
 mod memory_reclaim;
+mod font_policy;
 mod graphics;
 mod native_touch;
 mod native_pen;
@@ -506,8 +507,8 @@ fn parse_url(text: &str) -> Result<Url, url::ParseError> {
     if !text.contains(' ') && (text.contains('.') || text.starts_with("localhost")) {
         return Url::parse(&format!("https://{text}"));
     }
-    let mut url = Url::parse("https://duckduckgo.com/")?;
-    url.query_pairs_mut().append_pair("q", text);
+    let mut url = Url::parse("https://www.startpage.com/sp/search")?;
+    url.query_pairs_mut().append_pair("query", text);
     Ok(url)
 }
 fn activate(tabs: &[Tab], index: usize) {
@@ -804,6 +805,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     unsafe { ui::browser_ui_history(ui::c(&serde_json::to_string(&history.urls)?).as_ptr()); }
     let initial = context(software)?;
     let mut prefs = servo::Preferences::default();
+    let mut content_font = font_policy::Settings::read()?;
+    if let Some(font) = &content_font { font.preferences(&mut prefs); }
     // Use smaller sweep batches for native DOM churn. SpiderMonkey continues
     // to scale the threshold with retained live allocations.
     prefs.js_mem_gc_malloc_threshold_base_mb = 8;
@@ -1113,6 +1116,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tabs[active].view.notify_input_event(key(&event));
                 },
                 15 => {
+                    match font_policy::Settings::read() {
+                        Ok(next) if next != content_font => {
+                            if let Some(font) = &next { font.update(&servo); }
+                            content_font = next;
+                        },
+                        Err(error) => { ui::status(&error); eprintln!("FONT: {error}"); },
+                        _ => (),
+                    }
                     for t in &tabs {
                         t.view.notify_theme_change(if event.a != 0 {
                             Theme::Light

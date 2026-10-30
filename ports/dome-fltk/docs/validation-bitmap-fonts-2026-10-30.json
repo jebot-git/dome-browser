@@ -1,0 +1,40 @@
+{
+  "stage": "validated_candidate",
+  "date": "2026-10-30",
+  "policy": "native-unicode-bitmap-only",
+  "formats": [
+    "BDF",
+    "PCF"
+  ],
+  "search_engine": "Startpage",
+  "frontend_unit_tests": 211,
+  "codepages": [
+    "utf-8",
+    "windows-1250",
+    "windows-1251",
+    "iso-8859-1",
+    "koi8-r"
+  ],
+  "font_scales": [
+    1,
+    2
+  ],
+  "downloaded_page_fonts": false,
+  "default_shared_freetype_harfbuzz": true,
+  "outline_feature_compile_check": "passed",
+  "native_metrics_and_pixels": "passed",
+  "pcf_adapter_unicode_glyphs": 57086,
+  "pcf_style_identity": "preserved",
+  "smallnet_wayland_checks": 11,
+  "adblock_animation_checks": 5,
+  "worker_shutdown_scenarios": 3,
+  "system_rpms": 20,
+  "abi_comparisons": 27,
+  "missing_symbols": 0,
+  "full_relro_architectures": [
+    "x86_64",
+    "i686"
+  ],
+  "candidate_sha256": "6ce7cc0a92621363459188e218ece37008cedf30c220203c86adacc7663ab11b",
+  "sessions_restarted": false
+}

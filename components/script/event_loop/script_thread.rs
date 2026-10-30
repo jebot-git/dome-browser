@@ -2079,6 +2079,7 @@ impl ScriptThread {
                 self.handle_refresh_cursor(pipeline_id);
             },
             ScriptThreadMessage::PreferencesUpdated(updates) => {
+                let fonts_changed = updates.iter().any(|(name, _)| name.starts_with("fonts_"));
                 let cosmetic_changed = updates.iter().any(|(name, _)| {
                     name == "network_cosmetic_filter_generation"
                         || name == "network_cosmetic_filtering_enabled"
@@ -2088,6 +2089,11 @@ impl ScriptThread {
                     current_preferences.set_value(&name, value);
                 }
                 prefs::set(current_preferences);
+                if fonts_changed {
+                    let documents: Vec<_> = self.documents.borrow().iter()
+                        .map(|(_, document)| DomRoot::from_ref(&*document)).collect();
+                    for document in documents { document.apply_dome_font_style(cx); }
+                }
                 if cosmetic_changed {
                     let documents: Vec<_> = self
                         .documents
@@ -3905,6 +3911,7 @@ impl ScriptThread {
 
         // Step 10. Set window's associated Document to document.
         window.init_document(&document);
+        document.apply_dome_font_style(cx);
         document.queue_initial_visibility_entry(cx);
 
         let iframe = incomplete.parent_info.and_then(|parent_id| {

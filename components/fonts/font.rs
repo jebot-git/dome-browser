@@ -181,6 +181,10 @@ pub trait PlatformFontMethods: Sized {
     /// Return all the variation values that the font was instantiated with.
     fn variations(&self) -> &[FontVariation];
 
+    /// Native bitmap strikes are rendered at their actual size, never resampled
+    /// to an arbitrary CSS size in the DomeD build.
+    fn native_bitmap_size(&self) -> Option<Au> { None }
+
     fn descriptor_from_os2_table(os2: &Os2) -> FontTemplateDescriptor {
         let mut style = FontStyle::NORMAL;
         if os2.fs_selection().contains(SelectionFlags::ITALIC) {
@@ -367,6 +371,11 @@ impl Font {
             &data,
             synthetic_bold,
         )?;
+        #[cfg(not(feature = "outline-fonts"))]
+        let descriptor = FontDescriptor {
+            pt_size: handle.native_bitmap_size().unwrap_or(descriptor.pt_size),
+            ..descriptor
+        };
         let variation_axes = VariationAxes::from_platform_font(&handle);
 
         // Compute and apply the OpenType variations
@@ -851,6 +860,7 @@ impl FontGroup {
         };
 
         let font_has_glyph_and_presentation = |font: &FontRef| {
+            if crate::bitmap_only() { return font.has_glyph_for(options.character); }
             // Do not select this font if it goes against our emoji preference.
             match options.presentation_preference {
                 EmojiPresentationPreference::Text if font.has_color_bitmap_or_colr_table() => {

@@ -32,6 +32,8 @@ p.add_argument('--fixture-filters',type=Path,help='Seed only the temporary fixtu
 p.add_argument('--disable-adblock',action='store_true',help='Disable content filtering only in this temporary fixture profile')
 p.add_argument('--capture-exceptions',action='store_true',help='Collect reference browser exception events for error-reporting tests')
 p.add_argument('--capture-frame',action='store_true',help='Save the rendered content frame before closing')
+p.add_argument('--appearance-fixture',type=Path,help='Seed only the private test configuration with these appearance settings')
+p.add_argument('--fixture-encoding',default='utf-8',choices=['utf-8','windows-1250','windows-1251','iso-8859-1','koi8-r'],help='Declared character encoding of the synthetic HTML fixture')
 p.add_argument('--timeout',type=float,default=150,help='Seconds to wait for the fixture result')
 p.add_argument('--host',default='127.0.0.1')
 p.add_argument('--path',default='/')
@@ -116,7 +118,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path=='/opaque-vary':headers['Vary']='*'
             if path=='/opaque-corp':headers['Cross-Origin-Resource-Policy']='cross-origin'
         else:
-            data=page;kind='text/html; charset=utf-8'
+            data=page;kind='text/html; charset='+a.fixture_encoding
             if path=='/coep-document':
                 query=parse_qs(urlsplit(self.path).query)
                 name='Cross-Origin-Embedder-Policy-Report-Only'if 'report_only'in query else'Cross-Origin-Embedder-Policy'
@@ -149,6 +151,10 @@ try:
         env={**os.environ,'DISPLAY':screen,'FLTK_BACKEND':'x11','LIBGL_ALWAYS_SOFTWARE':'1','XDG_RUNTIME_DIR':directory,
              'XDG_CONFIG_HOME':directory+'/config','XDG_CACHE_HOME':directory+'/cache','XDG_DATA_HOME':directory+'/data'}
         for key in ['WAYLAND_DISPLAY','WAYLAND_SOCKET']:env.pop(key,None)
+        if a.appearance_fixture:
+            appearance=Path(env['XDG_CONFIG_HOME'])/'dome/appearance.json'
+            appearance.parent.mkdir(parents=True,exist_ok=True)
+            appearance.write_bytes(a.appearance_fixture.read_bytes())
         if a.disable_adblock:
             fixture_profile=Path(directory)/'profile';fixture_profile.mkdir(exist_ok=True)
             (fixture_profile/'adblock-disabled').write_text('disabled for isolated engine fixture\n')

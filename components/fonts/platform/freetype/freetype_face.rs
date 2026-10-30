@@ -21,6 +21,11 @@ use webrender_api::{FontHinting, FontVariation};
 
 use crate::platform::freetype::library_handle::FreeTypeLibraryHandle;
 
+#[cfg(not(feature = "outline-fonts"))]
+unsafe extern "C" {
+    fn FT_Get_Font_Format(face: FT_Face) -> *const std::ffi::c_char;
+}
+
 /// The fallback hinting style to use when there is no user-specified default
 /// hinting style.
 ///
@@ -109,6 +114,21 @@ impl FreeTypeFace {
         let Some(face) = ptr::NonNull::new(face) else {
             return Err("Could not create FreeType face");
         };
+
+        #[cfg(not(feature = "outline-fonts"))]
+        unsafe {
+            // Check the decoded format, not the filename or CSS family name.
+            let format = FT_Get_Font_Format(face.as_ptr());
+            if format.is_null()
+                || !matches!(std::ffi::CStr::from_ptr(format).to_bytes(), b"BDF" | b"PCF")
+                || face.as_ref().face_flags & FT_FACE_FLAG_SCALABLE as c_long != 0
+                || face.as_ref().num_fixed_sizes != 1
+                || freetype_sys::FT_Select_Charmap(face.as_ptr(), freetype_sys::FT_ENCODING_UNICODE) != 0
+            {
+                FT_Done_Face(face.as_ptr());
+                return Err("DomeD requires a native Unicode BDF/PCF bitmap face");
+            }
+        }
 
         Ok(Self {
             face,

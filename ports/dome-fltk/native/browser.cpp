@@ -371,6 +371,18 @@ extern "C" int browser_ui_visible(){
   return !fl_wl_window_suspended || fl_wl_window_suspended(browser.get())!=1;
 }
 extern "C" void browser_ui_wake(){Fl::awake();}
+extern "C" const char *browser_ui_font_settings(){
+  static std::string value;
+  try {
+    const auto exact=bdf_fonts::qt_alias(dx::selected_font,"browser");
+    bdf_fonts::register_font(exact.file);
+    value=Json({{"family",exact.family},{"pixels",exact.pixels},
+      {"file",exact.file},{"source",dx::selected_font.file}}).dump();
+    return value.c_str();
+  } catch(const std::exception &error) {
+    fprintf(stderr,"FONT: %s\n",error.what());return nullptr;
+  }
+}
 extern "C" void browser_ui_close(){if(Fl::event_dispatch()==nativeDispatch)Fl::event_dispatch(previousDispatch);keyboardFocused=false;reportedPageFocus=-1;if(setNativePenHandler)setNativePenHandler(nullptr,nullptr);setNativePenHandler=nullptr;if(fl_wl_set_touch_handler)fl_wl_set_touch_handler(nullptr,nullptr);browser_ui_smallnet_form_close();browser.reset();if(applicationBus){if(applicationObject)g_dbus_connection_unregister_object(applicationBus,applicationObject);g_object_unref(applicationBus);applicationBus=nullptr;}if(applicationInfo){g_dbus_node_info_unref(applicationInfo);applicationInfo=nullptr;}}
 extern "C" void browser_ui_scroll_metrics(uint64_t tab,uint64_t generation,float offset,float visible,float total){if(browser)browser->page->scroll_metrics(tab,generation,offset,visible,total);}
 extern "C" void browser_ui_frame(const uint8_t *p,unsigned w,unsigned h){browser->page->frame(p,w,h);}

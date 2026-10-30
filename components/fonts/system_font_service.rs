@@ -66,6 +66,7 @@ pub struct SystemFontService {
     webrender_fonts: HashMap<(FontIdentifier, PainterId), FontKey>,
     font_instances: HashMap<FontInstancesMapKey, FontInstanceKey>,
     generic_fonts: ResolvedGenericFontFamilies,
+    bitmap_family_generation: Option<String>,
 
     /// This is an optimization that allows the [`SystemFontService`] to send font data to
     /// `Paint` asynchronously for creating WebRender fonts, while immediately
@@ -99,6 +100,7 @@ impl SystemFontService {
                     webrender_fonts: HashMap::new(),
                     font_instances: HashMap::new(),
                     generic_fonts: Default::default(),
+                    bitmap_family_generation: None,
                     free_font_keys: Default::default(),
                     free_font_instance_keys: Default::default(),
                 };
@@ -241,8 +243,25 @@ impl SystemFontService {
         descriptor_to_match: Option<&FontDescriptor>,
         family: &SingleFontFamily,
     ) -> Vec<FontTemplateRef> {
+        if crate::bitmap_only() {
+            // Newly selected/2x BDF faces may have been registered by the native
+            // appearance bridge after this service started.
+            let selected = pref!(fonts_default);
+            if self.bitmap_family_generation.as_ref() != Some(&selected) {
+                self.refresh_local_families();
+                self.bitmap_family_generation = Some(selected);
+            }
+        }
         // TODO(Issue #188): look up localized font family names if canonical name not found
         // look up canonical name
+        if crate::bitmap_only() {
+            if let SingleFontFamily::FamilyName(name) = family {
+                let key: LowercaseFontFamilyName = name.name.clone().into();
+                if name.name.starts_with("Dome Browser Bitmap ") && !self.local_families.families.contains_key(&key) {
+                    self.refresh_local_families();
+                }
+            }
+        }
         let family_name = self.family_name_for_single_font_family(family);
         self.local_families
             .families
@@ -321,6 +340,14 @@ impl SystemFontService {
         &mut self,
         family: &SingleFontFamily,
     ) -> LowercaseFontFamilyName {
+        if crate::bitmap_only() {
+            if let SingleFontFamily::FamilyName(family) = family {
+                let name: LowercaseFontFamilyName = family.name.clone().into();
+                if self.local_families.families.contains_key(&name) { return name; }
+            }
+            let selected = pref!(fonts_default);
+            if !selected.is_empty() { return selected.into(); }
+        }
         let generic = match family {
             SingleFontFamily::FamilyName(family_name) => return family_name.name.clone().into(),
             SingleFontFamily::Generic(generic) => generic,

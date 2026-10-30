@@ -493,6 +493,7 @@ pub(crate) struct Document {
     #[custom_trace]
     stylesheets: DomRefCell<DocumentStylesheetSet<ServoStylesheetInDocument>>,
     cosmetic_filters: DomRefCell<super::cosmetic_filtering::CosmeticFilterState>,
+    dome_font_style: DomRefCell<super::dome_font_policy::State>,
     stylesheet_list: MutNullableDom<StyleSheetList>,
     ready_state: Cell<DocumentReadyState>,
     /// The script element that is currently executing.
@@ -852,6 +853,9 @@ impl Document {
     pub(super) fn cosmetic_filter_state(&self) -> &DomRefCell<super::cosmetic_filtering::CosmeticFilterState> {
         &self.cosmetic_filters
     }
+    pub(super) fn dome_font_style_state(&self) -> &DomRefCell<super::dome_font_policy::State> {
+        &self.dome_font_style
+    }
 
     pub(crate) fn module_map(
         &self,
@@ -1188,6 +1192,7 @@ impl Document {
         self.notify_embedder_favicon();
         self.dirty_all_nodes(cx.no_gc());
         self.reset_cosmetic_filters(cx);
+        self.apply_dome_font_style(cx);
         self.window().resume(cx);
         media.resume(&client_context_id);
 
@@ -4387,6 +4392,7 @@ impl Document {
             shared_style_locks,
             stylesheets: DomRefCell::new(DocumentStylesheetSet::new()),
             cosmetic_filters: Default::default(),
+            dome_font_style: Default::default(),
             stylesheet_list: MutNullableDom::new(None),
             // https://html.spec.whatwg.org/multipage/#current-document-readiness
             // > Each Document has a current document readiness, a string, initially "complete".

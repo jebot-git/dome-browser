@@ -61,6 +61,16 @@ fn main() {
         ],
     );
     let mut cpp = cc::Build::new();
+    if env::var_os("CARGO_FEATURE_OUTLINE_FONTS").is_some() {
+        cpp.define("DOME_OUTLINE_FONTS", "1");
+    } else {
+        let runtime = PathBuf::from(env::var_os("DOME_BDF_RUNTIME_PREFIX")
+            .unwrap_or_else(|| "/opt/fltk-vr/bdf-runtime".into()));
+        assert!(runtime.join("share/domed-bdf-runtime/manifest.json").is_file(),
+            "Build the DomeD native BDF HarfBuzz runtime first");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", runtime.join("lib").display());
+    }
+    println!("cargo:rerun-if-env-changed=DOME_BDF_RUNTIME_PREFIX");
     cpp.cpp(true)
         .std("c++17")
         .file("native/browser.cpp")

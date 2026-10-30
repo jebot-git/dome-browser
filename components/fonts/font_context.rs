@@ -461,6 +461,7 @@ impl FontContext {
     }
 
     pub fn is_supported_web_font_source(source: &&Source) -> bool {
+        if crate::bitmap_only() { return matches!(source, Source::Local(_)); }
         let url_source = match &source {
             Source::Url(url_source) => url_source,
             Source::Local(_) => return true,
@@ -983,6 +984,7 @@ impl FontContext {
         self.have_removed_web_fonts.store(true, Ordering::Relaxed);
     }
 
+    #[cfg(feature = "outline-fonts")]
     pub fn construct_web_font_from_data(
         &self,
         data: &[u8],
@@ -1008,6 +1010,10 @@ impl FontContext {
 
         Some((descriptors.family_name, new_template))
     }
+
+    #[cfg(not(feature = "outline-fonts"))]
+    pub fn construct_web_font_from_data(&self, _: &[u8], _: CSSFontFaceDescriptors)
+        -> Option<(LowercaseFontFamilyName, FontTemplate)> { None }
 
     fn start_loading_one_web_font(
         self: &Arc<FontContext>,
@@ -1374,6 +1380,7 @@ impl RemoteWebFontDownloader {
 
     /// After a download finishes, try to process the downloaded data, returning true if
     /// the font is added successfully to the [`FontContext`] or false if it isn't.
+    #[cfg(feature = "outline-fonts")]
     fn process_downloaded_font_and_signal_completion(&mut self) {
         let font_data = std::mem::take(&mut self.response_data);
         trace!(
@@ -1398,6 +1405,12 @@ impl RemoteWebFontDownloader {
         let url: ServoUrl = self.url.clone().into();
         self.font_context
             .handle_web_font_request_succeeded(font_data, url);
+    }
+
+    #[cfg(not(feature = "outline-fonts"))]
+    fn process_downloaded_font_and_signal_completion(&mut self) {
+        self.response_data.clear();
+        self.font_context.handle_web_font_request_failed(self.url.clone().into());
     }
 
     fn handle_web_font_fetch_message(

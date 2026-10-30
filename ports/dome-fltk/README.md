@@ -1,6 +1,6 @@
 # Dome Browser
 
-## Installed candidate — 29 October 2026
+## Earlier installed candidate — 29 October 2026
 
 The optimized release implementing `78165f94ed1b` is installed at
 `/usr/local/libexec/dome-browser/dome-browser`. Its bytes match the candidate
@@ -69,6 +69,26 @@ WebXR device interface for consent. A further engine fix delivers text-only noti
 without waiting for a nonexistent image-resource callback. Active XR sessions
 are also ended when a document is suspended in history or its window is torn
 down, so navigation and tab closure release the device promptly.
+
+## Host bitmap fonts and search
+
+[The 30 October bitmap validation record](docs/validation-bitmap-fonts-2026-10-30.json) covers the current font policy candidate.
+
+The default DomeD build uses the shared, native BDF/PCF FreeType, HarfBuzz,
+Cairo and Pango runtime. It follows the selected host bitmap family, native
+pixel size and 1×/2× setting, including smallnet documents. It ships no fonts,
+downloads no page fonts, and never falls back to outlines. Document character
+encoding is decoded normally before Unicode glyph selection.
+
+Build the matching runtime with DomeD's `scripts/prepare-bitmap-runtime.py`.
+Set `DOME_BDF_RUNTIME_PREFIX` while building against a staged prefix. Non-bitmap
+page fonts require the explicit `build.py --outline-fonts` / Cargo
+`--features outline-fonts` option, which opts into bundled upstream FreeType,
+HarfBuzz and the sanitizer. This option is disabled for DomeD installations.
+`tests/bitmap-font-policy.py` checks host selection, integer scale, five
+codepages, absence of URL font requests and clean shutdown.
+
+Address-bar searches default to Startpage's `/sp/search?query=` endpoint.
 
 ## Build and run
 

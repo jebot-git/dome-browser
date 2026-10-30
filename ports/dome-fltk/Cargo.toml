@@ -5,6 +5,10 @@ edition.workspace = true
 license = "GPL-3.0-or-later"
 publish = false
 
+[features]
+default = []
+outline-fonts = ["servo/outline-fonts", "servo/bundled_freetype"]
+
 [dependencies]
 socket2 = { workspace = true }
 servo-base = { workspace = true }

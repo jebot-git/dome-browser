@@ -16,6 +16,9 @@ test = true
 doctest = false
 
 [features]
+# DomeD uses native BDF fonts and its shared HarfBuzz fork by default.
+# Other font formats and the upstream bundled shaper require an explicit build.
+outline-fonts = ["dep:fontsan", "harfbuzz-sys/bundled"]
 # Compile FreeType from source (freetype-sys/bundled) instead of searching
 # via pkg-config. If this feature is disabled, and pkg-config fails to find a
 # suitable freetype version, the build will fail!
@@ -31,9 +34,9 @@ content-security-policy = { workspace = true }
 euclid = { workspace = true }
 font-types = { workspace = true }
 fonts_traits = { workspace = true }
-fontsan = { workspace = true }
+fontsan = { workspace = true, optional = true }
 # FIXME (#34517): macOS only needs this when building servo without `--features media-gstreamer`
-harfbuzz-sys = { workspace = true, default-features = false, features = ["bundled"] }
+harfbuzz-sys = { workspace = true, default-features = false }
 icu_locale_core = { workspace = true }
 icu_properties = { workspace = true, features = ["compiled_data"] }
 itertools = { workspace = true }
