@@ -109,6 +109,23 @@ pub const LAST_RESORT_GLYPH_ADVANCE: FractionalPixel = 10.0;
 // needed by the text shaper as well as access to the underlying font
 // resources needed by the graphics layer to draw glyphs.
 
+/// An owned monochrome glyph at the native strike size. Coordinates use a
+/// top-down pixel grid relative to the text baseline.
+pub struct BitmapGlyph {
+    pub width: u32,
+    pub height: u32,
+    pub left: i32,
+    pub top: i32,
+    pub pixels: Vec<u8>,
+}
+
+/// Open a local bitmap face for canvas drawing without interpreting BDF/PCF
+/// data as an OpenType font. Font selection and shaping remain unchanged.
+pub fn bitmap_font(identifier: &fonts_traits::FontIdentifier, size: f32) -> Option<PlatformFont> {
+    let fonts_traits::FontIdentifier::Local(identifier) = identifier else { return None };
+    PlatformFont::new_from_local_font_identifier(identifier.clone(), Some(Au::from_f32_px(size)), false).ok()
+}
+
 pub trait PlatformFontMethods: Sized {
     #[servo_tracing::instrument(name = "PlatformFontMethods::new_from_template", skip_all)]
     fn new_from_template(
@@ -184,6 +201,9 @@ pub trait PlatformFontMethods: Sized {
     /// Native bitmap strikes are rendered at their actual size, never resampled
     /// to an arbitrary CSS size in the DomeD build.
     fn native_bitmap_size(&self) -> Option<Au> { None }
+
+    /// Copy the native monochrome strike before another glyph load can replace it.
+    fn bitmap_glyph(&self, _glyph: GlyphId) -> Option<BitmapGlyph> { None }
 
     fn descriptor_from_os2_table(os2: &Os2) -> FontTemplateDescriptor {
         let mut style = FontStyle::NORMAL;

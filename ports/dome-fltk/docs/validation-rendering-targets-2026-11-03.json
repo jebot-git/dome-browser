@@ -1,0 +1,237 @@
+{
+  "date": "2026-11-03",
+  "scope": "Native Servo rendering and standards-based page compatibility; anonymous public pages only.",
+  "source_baseline": "1b39583e343711f9f17e2b585af0bc66171ccc3b",
+  "installed_baseline_sha256": "a71db9768b2ab8b506ec12d5cdb71d8f0184d09cdae31560d370454c90023259",
+  "policies_preserved": [
+    "Native FLTK/Wayland integration",
+    "Host bitmap BDF/PCF font selection and Unicode decoding; no outline or downloaded fonts",
+    "adblock-rust network and cosmetic privacy filtering enabled",
+    "Third-party cookies blocked by default; editable ck.txt storage",
+    "No authentication, anti-bot or adblock-circumvention workarounds",
+    "No native media or geolocation expansion; existing external-player and PDF handoffs retained",
+    "Existing smallnet and WebXR behavior retained"
+  ],
+  "baseline": {
+    "github_home": {
+      "url": "https://github.com/",
+      "result": "Navigation shell renders; animated hero stays hidden by author opacity:0. One of the initial normal page loads crashed; subsequent repeated loads survived. Remains unresolved.",
+      "artifact": "baseline-desktop/github"
+    },
+    "github_repository": {
+      "url": "https://github.com/servo/servo",
+      "result": "File listing, navigation and sidebar visibly rendered at desktop size; clean shutdown.",
+      "artifact": "baseline-repository/github"
+    },
+    "thingiverse": {
+      "url": "https://www.thingiverse.com/",
+      "result": "Navigation and page layout render. Featured content does not populate: token refresh/content API returns a 403 challenge page. This delivery restriction is classified separately from renderer behavior.",
+      "artifact": "baseline/thingiverse"
+    },
+    "amazon": {
+      "url": "https://www.amazon.com/",
+      "result": "Canvas text causes InvalidSfnt in the bitmap build, followed by a disconnected paint channel. Deterministically reproduced using a local fixture.",
+      "artifact": "baseline/amazon"
+    }
+  },
+  "implementation": {
+    "status": "optimized release built; native fixture checks passed; system installation unchanged",
+    "change": "Rasterize native monochrome glyphs via FreeType and trace their exposed pixel contours for ordinary canvas path filling/stroking. Preserve shaping, baseline coordinates, paint, transforms, clipping, alpha and composition; bound cached faces. Do not interpret BDF/PCF as OpenType.",
+    "canvas_validation": {
+      "native_checks": 10,
+      "contour_unit_tests": 2,
+      "clean_close": true,
+      "initial_candidate_sha256": "4f21af9ea3f415b38be324c19cfc3dba60bbad4eb6572fe4b0a8de9bc6c63072"
+    },
+    "additional_change": "Expose the standard read-only FontFaceSet.status property and track actual native loading transitions; no font downloads or API preferences enabled."
+  },
+  "standards_references": [
+    "https://html.spec.whatwg.org/multipage/canvas.html#drawing-text-to-the-bitmap",
+    "https://freetype.org/freetype2/docs/reference/ft2-basic_types.html#ft_bitmap",
+    "https://drafts.csswg.org/css-font-loading/#fontfaceset-pending-on-the-environment",
+    "https://fetch.spec.whatwg.org/#should-response-to-request-be-blocked-due-to-nosniff"
+  ],
+  "non_goals": [
+    "Pixel identity with outline-font browsers",
+    "Completing challenges or logging into any sample site",
+    "Changing privacy or adblocking policy to make pages work"
+  ],
+  "canvas_candidate_live_results": {
+    "amazon_home": "Visible storefront, navigation, search controls, images and product cards. No canvas panic. Clean close.",
+    "amazon_books_workflow": "A normal books request landed on a rendered books-category page, including image carousel and book covers. No purchase or account action taken. Clean close.",
+    "github_repository": "Public repository file listing, controls and sidebar still render after the canvas change. Clean close.",
+    "github_home": "Author hero content remains opacity:0 despite document.fonts.ready fulfilling; not yet resolved. No crash during this candidate run.",
+    "thingiverse": "Its JavaScript asset requests returned HTML challenge/error bodies with nosniff. The browser correctly refused to execute those bodies. The page displayed its own error screen. Clean close."
+  },
+  "delivery_evidence": {
+    "url": "https://www.thingiverse.com/_next/static/chunks/c6935c62-c944924a6a2af448.js",
+    "status": 403,
+    "content_type": "text/html; charset=UTF-8",
+    "x_content_type_options": "nosniff",
+    "returned_html": true
+  },
+  "candidate_sha256": "16d043694541f3709d1494d3594052df5bc4989bdb0041a63ca7becb370c3f6d",
+  "validation": {
+    "native_bitmap_canvas": {
+      "reports": [
+        {
+          "checks": [
+            {
+              "passed": true,
+              "name": "Bitmap text measurement"
+            },
+            {
+              "passed": true,
+              "name": "fillText renders the native bitmap strike"
+            },
+            {
+              "passed": true,
+              "name": "Whitespace has no painted glyph pixels"
+            },
+            {
+              "passed": true,
+              "name": "strokeText renders connected glyph contours"
+            },
+            {
+              "passed": true,
+              "name": "Canvas transform scales the strike without changing font selection"
+            },
+            {
+              "passed": true,
+              "name": "Bitmap glyphs obey canvas clipping"
+            },
+            {
+              "passed": true,
+              "name": "Glyph alpha follows globalAlpha"
+            },
+            {
+              "passed": true,
+              "name": "Bitmap glyphs accept gradient paint"
+            },
+            {
+              "passed": true,
+              "name": "Bitmap glyphs use the normal canvas compositing operation"
+            },
+            {
+              "passed": true,
+              "name": "Repeated canvas reset keeps the paint channel alive"
+            }
+          ]
+        }
+      ],
+      "exit_code": 0,
+      "binary_sha256": "16d043694541f3709d1494d3594052df5bc4989bdb0041a63ca7becb370c3f6d"
+    },
+    "font_status_and_readiness": {
+      "reports": [
+        {
+          "checks": [
+            {
+              "passed": true,
+              "name": "A font set without pending font loads starts loaded"
+            },
+            {
+              "passed": true,
+              "name": "Font loading status is a read-only WebIDL attribute"
+            },
+            {
+              "passed": true,
+              "name": "Status exposure keeps the default page-font loading API disabled"
+            },
+            {
+              "passed": true,
+              "name": "Font readiness resolves despite unrelated continuous animation"
+            },
+            {
+              "passed": true,
+              "name": "Animation callbacks continue while font readiness is pending"
+            },
+            {
+              "passed": true,
+              "name": "Font set status is loaded when ready resolves"
+            }
+          ]
+        }
+      ],
+      "exit_code": 0,
+      "binary_sha256": "16d043694541f3709d1494d3594052df5bc4989bdb0041a63ca7becb370c3f6d"
+    },
+    "contour_tests": {
+      "passed": 2,
+      "failed": 0,
+      "source_sha256": "1cc19ab486c20da04e5ebc447336378c2022ff7f10f0a2b703be500ff5a58095"
+    },
+    "randomized_contour_check": {
+      "passed": true,
+      "runs": 100,
+      "reason": "Validate that random hash iteration order cannot join diagonal glyph contours or reverse hole winding."
+    },
+    "build": {
+      "returncode": 0,
+      "seconds": 322.0464036464691
+    }
+  },
+  "limits": [
+    "Public anonymous rendering only; no login, checkout, upload or challenge completion tested.",
+    "GitHub homepage animation/rendering gap and baseline intermittent crash remain open.",
+    "No full web-platform conformance claim.",
+    "Downloaded-font API/events and outline-font opt-in were not enabled or validated.",
+    "Canvas runtime checks use the default VelloCPU backend, with accelerated WebRender presentation. Optional Vello GPU Canvas was not runtime-tested.",
+    "WebXR, smallnet, media handoff and geolocation scope unchanged; no new device/session tests in this round."
+  ],
+  "final_live_results": {
+    "github": {
+      "exit": {
+        "code": 0,
+        "requested_close": true
+      },
+      "panics_observed": false,
+      "ready_state": "complete",
+      "nodes": 2144,
+      "font_status": "loaded",
+      "font_readiness": {
+        "state": "fulfilled",
+        "observed": true
+      },
+      "frame": "final/github/frame.png"
+    },
+    "thingiverse": {
+      "exit": {
+        "code": 0,
+        "requested_close": true
+      },
+      "panics_observed": false,
+      "ready_state": "complete",
+      "nodes": 80,
+      "font_status": "loaded",
+      "font_readiness": {
+        "state": "fulfilled",
+        "observed": true
+      },
+      "frame": "final/thingiverse/frame.png"
+    },
+    "amazon": {
+      "exit": {
+        "code": 0,
+        "requested_close": true
+      },
+      "panics_observed": false,
+      "ready_state": "complete",
+      "nodes": 2023,
+      "font_status": "loaded",
+      "font_readiness": {
+        "state": "fulfilled",
+        "observed": true
+      },
+      "frame": "final/amazon/frame.png"
+    }
+  },
+  "deployment": {
+    "installed": false,
+    "installed_binary_unchanged": true,
+    "candidate_binary": "target/release/dome-browser",
+    "sessions_restarted": false,
+    "saved_candidate": "artifacts/browser-site-compatibility-20261103/candidates/rendering-candidate"
+  },
+  "artifact_directory": "artifacts/browser-site-compatibility-20261103 (de-xr workspace)"
+}

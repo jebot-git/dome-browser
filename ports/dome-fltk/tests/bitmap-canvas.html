@@ -1,0 +1,53 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Native bitmap canvas regression</title>
+<canvas width="320" height="160"></canvas>
+<script>
+(async () => {
+  const checks = [];
+  const check = (passed, name) => checks.push({passed:!!passed, name});
+  const canvas = document.querySelector('canvas');
+  const ctx = canvas.getContext('2d');
+  const pixels = () => ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+  const ink = () => Array.from(pixels()).filter((v, i) => i % 4 === 3 && v).length;
+  const clear = () => { ctx.resetTransform(); ctx.clearRect(0, 0, 320, 160); };
+  ctx.font = '16px monospace';
+  check(ctx.measureText('Dome bitmap').width > 0, 'Bitmap text measurement');
+  ctx.fillText('Dome bitmap', 10, 40);
+  const normal = ink();
+  check(normal > 0, 'fillText renders the native bitmap strike');
+  clear(); ctx.fillText('   ', 10, 40);
+  check(ink() === 0, 'Whitespace has no painted glyph pixels');
+  clear(); ctx.strokeText('Dome bitmap', 10, 40);
+  check(ink() > 0, 'strokeText renders connected glyph contours');
+  clear(); ctx.save(); ctx.translate(20, 20); ctx.scale(2, 2); ctx.fillText('Dome bitmap', 10, 40); ctx.restore();
+  check(ink() === normal * 4, 'Canvas transform scales the strike without changing font selection');
+  clear(); ctx.save(); ctx.beginPath(); ctx.rect(0, 0, 5, 5); ctx.clip(); ctx.fillText('Dome bitmap', 10, 40); ctx.restore();
+  check(ink() === 0, 'Bitmap glyphs obey canvas clipping');
+  clear(); ctx.globalAlpha = 0.5; ctx.fillText('Dome bitmap', 10, 40); ctx.globalAlpha = 1;
+  const alpha = pixels().filter((v, i) => i % 4 === 3 && v);
+  check(alpha.length > 0 && Math.max(...alpha) >= 127 && Math.max(...alpha) <= 128, 'Glyph alpha follows globalAlpha');
+  clear(); const gradient = ctx.createLinearGradient(10, 0, 110, 0);
+  gradient.addColorStop(0, 'red'); gradient.addColorStop(1, 'blue');
+  ctx.fillStyle = gradient; ctx.fillText('Dome bitmap', 10, 40);
+  const colored = pixels();
+  check(colored.some((v, i) => i % 4 === 0 && v) && colored.some((v, i) => i % 4 === 2 && v), 'Bitmap glyphs accept gradient paint');
+  ctx.globalCompositeOperation = 'destination-out'; ctx.fillStyle = 'black'; ctx.fillText('Dome bitmap', 10, 40);
+  check(ink() === 0, 'Bitmap glyphs use the normal canvas compositing operation');
+  ctx.globalCompositeOperation = 'source-over';
+  for (let i = 0; i < 8; i++) {
+    canvas.width = 320; ctx.font = '16px monospace'; ctx.fillText('Dome bitmap', 10, 40);
+  }
+  check(ink() > 0, 'Repeated canvas reset keeps the paint channel alive');
+  if (typeof OffscreenCanvas === 'function') {
+    const offscreen = new OffscreenCanvas(160, 80), off = offscreen.getContext('2d');
+    if (off) {
+      off.font = '16px monospace'; off.fillText('Bitmap', 10, 40);
+      check(off.getImageData(0, 0, 160, 80).data.some((v, i) => i % 4 === 3 && v), 'OffscreenCanvas uses the bitmap renderer');
+    }
+  }
+  await fetch('/report', {method:'POST', body:JSON.stringify({checks})});
+})().catch(async error => {
+  await fetch('/report', {method:'POST', body:JSON.stringify({checks:[{passed:false,name:String(error)}]})});
+});
+</script>

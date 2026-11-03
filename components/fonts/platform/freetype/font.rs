@@ -416,6 +416,40 @@ impl PlatformFontMethods for PlatformFont {
 
     #[cfg(not(feature = "outline-fonts"))]
     fn native_bitmap_size(&self) -> Option<Au> { Some(self.actual_face_size) }
+
+    fn bitmap_glyph(&self, glyph: GlyphId) -> Option<crate::BitmapGlyph> {
+        let face = self.face.lock();
+        if face.as_ref().face_flags & freetype_sys::FT_FACE_FLAG_SCALABLE != 0 {
+            return None;
+        }
+        // SAFETY: The locked face owns the glyph slot and its bitmap buffer.
+        if unsafe { FT_Load_Glyph(face.as_ptr(), glyph as FT_UInt, freetype_sys::FT_LOAD_RENDER) } != 0 {
+            return None;
+        }
+        let slot = unsafe { &*face.as_ref().glyph };
+        let bitmap = &slot.bitmap;
+        let width = bitmap.width as u32;
+        let height = bitmap.rows as u32;
+        let length = (width as usize).checked_mul(height as usize)?;
+        if length > 1024 * 1024 {
+            return None;
+        }
+        let mut pixels = vec![0; length];
+        if length != 0 {
+            if bitmap.pixel_mode as u32 != freetype_sys::FT_PIXEL_MODE_MONO || bitmap.buffer.is_null() ||
+                (bitmap.pitch.unsigned_abs() as usize) < (width as usize).div_ceil(8) {
+                return None;
+            }
+            for y in 0..height as usize {
+                // FT_Bitmap::pitch is the signed offset to the next downward row.
+                let row = unsafe { bitmap.buffer.offset(y as isize * bitmap.pitch as isize) };
+                for x in 0..width as usize {
+                    pixels[y * width as usize + x] = u8::from(unsafe { *row.add(x / 8) } & (0x80 >> (x % 8)) != 0);
+                }
+            }
+        }
+        Some(crate::BitmapGlyph { width, height, left: slot.bitmap_left, top: -slot.bitmap_top, pixels })
+    }
 }
 
 impl PlatformFont {

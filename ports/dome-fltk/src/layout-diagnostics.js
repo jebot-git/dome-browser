@@ -2,6 +2,11 @@
 (() => {
   'use strict';
   const safe = (read, fallback = null) => { try { return read(); } catch (_) { return fallback; } };
+  const fontReadiness = globalThis.__domeFontReadiness || (globalThis.__domeFontReadiness = {state:'pending'});
+  if (!fontReadiness.observed) {
+    fontReadiness.observed = true;
+    document.fonts.ready.then(() => {fontReadiness.state='fulfilled';}, () => {fontReadiness.state='rejected';});
+  }
   const properties = ['display','visibility','opacity','position','width','height','minWidth','minHeight',
     'maxWidth','maxHeight','flexDirection','flexBasis','flexGrow','flexShrink','alignItems','justifyContent',
     'gap','padding','margin','boxSizing','overflow','color','fill','fillOpacity','fillRule',
@@ -123,6 +128,6 @@
     theme:document.documentElement.getAttribute('data-theme'),
     prefersDark:matchMedia('(prefers-color-scheme: dark)').matches,
     viewport:[innerWidth,innerHeight],scroll:[scrollX,scrollY],devicePixelRatio,
-    fontStatus:safe(() => document.fonts.status),nodeCount:document.querySelectorAll('*').length,
+    fontStatus:safe(() => document.fonts.status),fontReadiness,nodeCount:document.querySelectorAll('*').length,
     stylesheets,elements,images,imageAudit:imageAudit.results,mediaCapabilities,media,mediaContainers});
 })();

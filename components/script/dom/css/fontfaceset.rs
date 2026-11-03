@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use cssparser::{Parser, UnicodeRange};
@@ -28,7 +29,7 @@ use style::values::specified::font as specified_font;
 use style_traits::ParsingMode;
 
 use crate::css::css::parser_context_for_document;
-use crate::dom::bindings::codegen::Bindings::FontFaceSetBinding::FontFaceSetMethods;
+use crate::dom::bindings::codegen::Bindings::FontFaceSetBinding::{FontFaceSetLoadStatus, FontFaceSetMethods};
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
@@ -53,6 +54,8 @@ pub(crate) struct FontFaceSet {
     /// <https://drafts.csswg.org/css-font-loading/#dom-fontfaceset-readypromise-slot>
     promise: DomRefCell<TracedPromise>,
 
+    status: Cell<FontFaceSetLoadStatus>,
+
     set_entries: DomRefCell<Vec<Dom<FontFace>>>,
 }
 
@@ -61,6 +64,7 @@ impl FontFaceSet {
         FontFaceSet {
             target: EventTarget::new_inherited(),
             promise: DomRefCell::new(promise.to_traced()),
+            status: Cell::new(FontFaceSetLoadStatus::Loaded),
             set_entries: Default::default(),
         }
     }
@@ -111,6 +115,7 @@ impl FontFaceSet {
         if promise.is_fulfilled() {
             return false;
         }
+        self.status.set(FontFaceSetLoadStatus::Loaded);
         promise.resolve_native(cx, self);
         true
     }
@@ -149,7 +154,7 @@ impl FontFaceSet {
         // Note: This is self.
 
         // Step 2. Set the status attribute of font face set to "loading".
-        // TODO: Implement the FontFaceSet status attribute.
+        self.status.set(FontFaceSetLoadStatus::Loading);
 
         // Step 3. If font face set’s [[ReadyPromise]] slot currently holds a fulfilled
         // promise, replace it with a fresh pending promise.
@@ -275,6 +280,11 @@ impl FontFaceSet {
 }
 
 impl FontFaceSetMethods<crate::DomTypeHolder> for FontFaceSet {
+    /// <https://drafts.csswg.org/css-font-loading/#dom-fontfaceset-status>
+    fn Status(&self) -> FontFaceSetLoadStatus {
+        self.status.get()
+    }
+
     /// <https://drafts.csswg.org/css-font-loading/#dom-fontfaceset-ready>
     fn Ready(&self, cx: &mut JSContext) -> RootedPromise {
         if self.promise.borrow().is_fulfilled() {

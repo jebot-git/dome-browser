@@ -1,5 +1,31 @@
 # Dome Browser
 
+## Rendering compatibility candidate — 3 November 2026
+
+The local release candidate renders Canvas text using the selected native BDF/PCF
+strike instead of passing bitmap font bytes to an OpenType-only glyph parser.
+Fill and stroke share the normal canvas paint, transform, clipping, alpha and
+compositing operations. The font cache is bounded. The standard read-only
+`document.fonts.status` property now tracks the native font-loading state without
+enabling downloaded fonts or the optional page-font loading API.
+
+Amazon's public storefront and books category visibly render with the Canvas fix.
+GitHub repository listings render; its animated homepage still has hidden hero
+content, and an intermittent crash observed in the baseline remains unresolved.
+Thingiverse's content API and some script asset URLs return HTML challenge/error
+responses, preventing a reliable content-rendering baseline. MIME checks and
+adblocking remain enabled. No site-specific CSS, authentication, challenge bypass,
+outline fonts or privacy exceptions were introduced.
+
+The candidate passes 16 native Wayland fixture checks and two contour unit tests;
+the hole/diagonal geometry test also passes across 100 randomized hash seeds.
+Evidence and remaining scope are recorded in
+[the rendering validation record](docs/validation-rendering-targets-2026-11-03.json),
+which captures the candidate before deployment. Local installation receipts are
+kept under `/usr/local/share/dome-browser/`.
+`tests/native-rendering.py` runs the local bitmap canvas and font-readiness fixtures
+with private profiles and session buses on a DomeD Wayland test desktop.
+
 ## Earlier installed candidate — 29 October 2026
 
 The optimized release implementing `78165f94ed1b` is installed at

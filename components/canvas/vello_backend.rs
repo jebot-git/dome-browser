@@ -415,6 +415,10 @@ impl GenericDrawTarget for VelloDrawTarget {
         composition_options: CompositionOptions,
         transform: Transform2D<f64>,
     ) {
+        if let Some(path) = crate::bitmap_text::text_path(&text_runs) {
+            self.fill(&path, FillRule::Nonzero, style, composition_options, transform);
+            return;
+        }
         self.ensure_drawing();
         let pattern = convert_to_brush(style, composition_options);
         let transform = transform.cast().into();
@@ -533,6 +537,10 @@ impl GenericDrawTarget for VelloDrawTarget {
         composition_options: CompositionOptions,
         transform: Transform2D<f64>,
     ) {
+        if let Some(path) = crate::bitmap_text::text_path(&text_runs) {
+            self.stroke(&path, style, line_options, composition_options, transform);
+            return;
+        }
         self.ensure_drawing();
         let pattern = convert_to_brush(style, composition_options);
         let transform = transform.cast().into();

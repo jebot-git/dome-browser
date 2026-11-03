@@ -6,6 +6,7 @@
 #![expect(clippy::too_many_arguments)]
 
 mod backend;
+mod bitmap_text;
 pub mod canvas_data;
 pub mod canvas_paint_thread;
 mod peniko_conversions;

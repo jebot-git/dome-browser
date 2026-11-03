@@ -1,0 +1,19 @@
+<!doctype html><meta charset="utf-8"><title>Font readiness during animation</title>
+<style>@keyframes pulse {from{opacity:.5}to{opacity:1}}#sample{animation:pulse .2s infinite alternate}</style>
+<p id="sample">Host bitmap text</p>
+<script>
+(async()=>{
+ const checks=[];let frames=0,stop=false;
+ checks.push({passed:document.fonts.status==='loaded',name:'A font set without pending font loads starts loaded'});
+ const descriptor=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(document.fonts),'status');
+ checks.push({passed:typeof descriptor?.get==='function' && descriptor.set===undefined,name:'Font loading status is a read-only WebIDL attribute'});
+ checks.push({passed:typeof FontFace==='undefined' && typeof document.fonts.load==='undefined',name:'Status exposure keeps the default page-font loading API disabled'});
+ function frame(){frames++;sample.style.transform=`translateX(${frames%4}px)`;if(!stop)requestAnimationFrame(frame)}
+ requestAnimationFrame(frame);
+ const result=await Promise.race([document.fonts.ready.then(()=>true),new Promise(r=>setTimeout(()=>r(false),5000))]);
+ checks.push({passed:result,name:'Font readiness resolves despite unrelated continuous animation'});
+ checks.push({passed:frames>0,name:'Animation callbacks continue while font readiness is pending'});
+ checks.push({passed:document.fonts.status==='loaded',name:'Font set status is loaded when ready resolves'});
+ stop=true;await fetch('/report',{method:'POST',body:JSON.stringify({checks})});
+})().catch(async error=>fetch('/report',{method:'POST',body:JSON.stringify({checks:[{passed:false,name:String(error)}]})}));
+</script>
