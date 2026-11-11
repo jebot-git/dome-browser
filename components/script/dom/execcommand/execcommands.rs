@@ -270,6 +270,18 @@ impl DocumentExecCommandSupport for Document {
         command_id: DOMString,
         value: DOMString,
     ) -> bool {
+        self.exec_command_with_composition(cx, command_id, value, false)
+    }
+}
+
+impl Document {
+    pub(crate) fn exec_command_with_composition(
+        &self,
+        cx: &mut JSContext,
+        command_id: DOMString,
+        value: DOMString,
+        is_composing: bool,
+    ) -> bool {
         let window = self.window();
         // Step 3. If command is not supported or not enabled, return false.
         let Some((command, mut selection)) = self.check_support_and_enabled(cx, &command_id) else {
@@ -305,8 +317,8 @@ impl DocumentExecCommandSupport for Document {
                 Some(window),
                 0,
                 input_data.clone(),
-                false,
-                mapped_value_of_command(command),
+                is_composing,
+                if is_composing { "insertCompositionText".into() } else { mapped_value_of_command(command) },
             );
             let event = event.upcast::<Event>();
             // Step 4.3. If the value returned by the previous step is false, return false.
@@ -359,8 +371,8 @@ impl DocumentExecCommandSupport for Document {
                 Some(window),
                 0,
                 input_data,
-                false,
-                mapped_value_of_command(command),
+                is_composing,
+                if is_composing { "insertCompositionText".into() } else { mapped_value_of_command(command) },
             );
             let event = event.upcast::<Event>();
             event.set_trusted(true);

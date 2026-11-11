@@ -509,7 +509,16 @@ insertion path now supplies the inserted text in `beforeinput` and `input`,
 allowing controlled rich-text editors to update their own document models.
 Native `keypress` events also expose character values through `charCode` and
 `which`. These changes apply to the engine, including pages outside Discord.
-They do not implement full IME integration or all contenteditable navigation.
+FLTK marked text is forwarded as composition start/update/end events. Preedit
+updates replace the current composition; commits insert the final text once,
+and cancellation removes the preedit. The native address field retains FLTK's
+own composition handling. Other contenteditable navigation limitations remain.
+
+`tests/input-method.py` runs real Fcitx5 with US, Czech, Serbian Cyrillic,
+Korean Hangul and Japanese Anthy input in a private DomeD compositor. It checks
+exact text in input, textarea and contenteditable controls, DOM composition
+updates, and cancellation. Use `--xvfb` for a test-local Xvfb executable; it does
+not use or restart the active desktop session.
 
 ## Embedded HTML in SVG
 

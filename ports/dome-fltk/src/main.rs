@@ -19,7 +19,7 @@ mod xr;
 mod smallnet;
 mod identities;
 use servo::{
-    Code, EmbedderControl, InputEvent, Key, KeyState, KeyboardEvent, LoadStatus, Location,
+    Code, CompositionEvent, CompositionState, EmbedderControl, ImeEvent, InputEvent, Key, KeyState, KeyboardEvent, LoadStatus, Location,
     Modifiers, MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey,
     PermissionFeature, PermissionRequest, RenderingContext, ServoBuilder, SimpleDialog,
     SoftwareRenderingContext, Theme, WebView, WebViewBuilder, WebViewDelegate, WheelDelta,
@@ -1114,6 +1114,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 14 => {
                     tabs[active].view.notify_input_event(key(&event));
+                },
+                49 => {
+                    // Servo's End event clears composition ownership; the
+                    // final replacement (including an empty cancellation) is
+                    // an Update before End.
+                    if event.a == 2 {
+                        tabs[active].view.notify_input_event(InputEvent::Ime(ImeEvent::Composition(
+                            CompositionEvent { state: CompositionState::Update, data: event.text() },
+                        )));
+                    }
+                    tabs[active].view.notify_input_event(InputEvent::Ime(ImeEvent::Composition(
+                        CompositionEvent {
+                            state: match event.a {
+                                0 => CompositionState::Start,
+                                1 => CompositionState::Update,
+                                _ => CompositionState::End,
+                            },
+                            data: event.text(),
+                        },
+                    )));
                 },
                 15 => {
                     match font_policy::Settings::read() {

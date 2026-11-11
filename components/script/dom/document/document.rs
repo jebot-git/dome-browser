@@ -645,6 +645,9 @@ pub(crate) struct Document {
     has_pending_animated_image_update: Cell<bool>,
     /// <https://w3c.github.io/slection-api/#dfn-selection>
     selection: MutNullableDom<Selection>,
+    /// Live span and focused target of a contenteditable IME preedit.
+    composition_range: MutNullableDom<Range>,
+    composition_target: MutNullableDom<Element>,
     /// A timeline for animations which is used for synchronizing animations.
     /// <https://drafts.csswg.org/web-animations/#timeline>
     timeline: Dom<DocumentTimeline>,
@@ -1154,6 +1157,14 @@ impl Document {
     #[inline]
     pub(crate) fn current_rendering_epoch(&self) -> Epoch {
         self.current_rendering_epoch.get()
+    }
+
+    pub(super) fn composition_range(&self) -> &MutNullableDom<Range> {
+        &self.composition_range
+    }
+
+    pub(super) fn composition_target(&self) -> &MutNullableDom<Element> {
+        &self.composition_target
     }
 
     /// Get the [`Selection`] instance for this [`Document`] if there is one or `None`.
@@ -4457,6 +4468,8 @@ impl Document {
             dirty_canvases: DomRefCell::new(Default::default()),
             has_pending_animated_image_update: Cell::new(false),
             selection: MutNullableDom::new(None),
+            composition_range: MutNullableDom::new(None),
+            composition_target: MutNullableDom::new(None),
             timeline: Dom::from_ref(timeline),
             animation_manager: AnimationManager::new(),
             dirty_root: Default::default(),

@@ -18,6 +18,7 @@ use layout_api::{QueryMsg, SegmentGranularity};
 use script_bindings::codegen::GenericBindings::DocumentBinding::DocumentMethods;
 use script_bindings::codegen::GenericBindings::EventBinding::EventMethods;
 use script_bindings::codegen::GenericBindings::SelectionBinding::SelectionMethods;
+use script_bindings::codegen::GenericBindings::RangeBinding::RangeMethods;
 use script_bindings::codegen::GenericBindings::UIEventBinding::UIEventMethods as _;
 use script_bindings::dom::UnrootedDom;
 use script_bindings::inheritance::Castable;
@@ -29,6 +30,7 @@ use crate::dom::clipboardevent::ClipboardEventType;
 use crate::dom::event::{EventBubbles, EventCancelable};
 use crate::dom::execcommand::execcommands::DocumentExecCommandSupport;
 use crate::dom::inputevent::HitTestResult;
+use crate::dom::range::Range;
 use crate::dom::selection_range::{RootedSelectionBoundary, SelectionRange};
 use crate::dom::text_control::TextControlElement;
 use crate::dom::text_input::{InputEventType, IsComposing};
@@ -389,6 +391,73 @@ impl Document {
         }
     }
 
+    /// Replace the live preedit span while keeping the normal DOM caret at its
+    /// end. Using a Range handles UTF-16 offsets and DOM mutations between IME
+    /// updates without deleting preceding committed text.
+    fn perform_contenteditable_composition(
+        &self,
+        cx: &mut JSContext,
+        action: &EditingAction,
+    ) -> bool {
+        let target = self.focus_handler().focused_area().element().map(DomRoot::from_ref);
+        if self.composition_target().get().as_deref() != target.as_deref() {
+            self.composition_range().set(None);
+        }
+        let Some(selection) = self.GetSelection(cx) else { return false; };
+        if matches!(action, EditingAction::StartComposition) {
+            let range = selection.active_range(cx).map(|range| range.CloneRange(cx));
+            self.composition_range().set(range.as_deref());
+            self.composition_target().set(target.as_deref());
+            return range.is_some();
+        }
+        if matches!(action, EditingAction::EndComposition(_)) {
+            self.composition_range().set(None);
+            self.composition_target().set(None);
+            return true;
+        }
+        let EditingAction::InsertCompositionText(text) = action else { return false; };
+        let host = target.as_deref().and_then(|element| element.upcast::<Node>().editing_host_of());
+        if host.is_none() { return false; }
+        if let Some(range) = self.composition_range().get() {
+            // A script may have detached the preedit or moved it to a different
+            // editor since the last event. Never edit that stale span.
+            if range.start_container().editing_host_of() == host &&
+                range.end_container().editing_host_of() == host
+            {
+                let replacement = range.CloneRange(cx);
+                selection.set_live_range(cx.no_gc(), Some(&replacement));
+            }
+        }
+        let Some(selected) = selection.active_range(cx) else { return false; };
+        let span = selected.CloneRange(cx);
+        span.Collapse(cx.no_gc(), true);
+        self.composition_range().set(None);
+        let changed = self.exec_command_with_composition(
+            cx, DOMString::from_static("inserttext"), DOMString::from(text.as_str()), true,
+        );
+        if changed && let Some(caret) = selection.active_range(cx) {
+            // insertText may normalize a host boundary into a neighbouring text
+            // node. Prefer its resulting UTF-16 offsets for single-node text.
+            let end = caret.end_container();
+            let offset = caret.end_offset();
+            let length = text.encode_utf16().count() as u32;
+            let range = if end.is::<crate::dom::text::Text>() && offset >= length {
+                Range::new(cx, self, &end, offset - length, &end, offset)
+            } else {
+                let _ = span.SetEnd(cx.no_gc(), &end, offset);
+                span
+            };
+            if range.Stringifier(cx.no_gc()).str() == text.as_str() &&
+                range.start_container().editing_host_of() == host &&
+                range.end_container().editing_host_of() == host
+            {
+                self.composition_range().set(Some(&range));
+                self.composition_target().set(target.as_deref());
+            }
+        }
+        changed
+    }
+
     /// <https://w3c.github.io/editing/docs/execCommand/#additional-requirements>
     ///
     /// This function does not do any checks for whether or not we are actually inside an
@@ -403,13 +472,18 @@ impl Document {
             return false;
         }
 
-        // This function does not do any checks for whether or not we are actually inside an
-        // editing host, since those checks are performed by exec_command_for_command_id either way.
+        if matches!(editing_action, EditingAction::StartComposition |
+            EditingAction::InsertCompositionText(_) | EditingAction::EndComposition(_))
+        {
+            return self.perform_contenteditable_composition(cx, editing_action);
+        }
+        self.composition_range().set(None);
+        self.composition_target().set(None);
+        // The command implementation checks that the selection is editable.
         let (command, argument) = match editing_action {
-            // TODO: composition should be supported once editing hosts have selection support
-            EditingAction::MoveCursor(..) |
-            EditingAction::StartComposition |
-            EditingAction::EndComposition(..) => return false,
+            EditingAction::MoveCursor(..) => return false,
+            EditingAction::StartComposition | EditingAction::InsertCompositionText(_) |
+            EditingAction::EndComposition(_) => unreachable!(),
             EditingAction::SelectAll | EditingAction::Clipboard(_) => {
                 unreachable!("Should have been handled before this point.")
             },
@@ -446,8 +520,7 @@ impl Document {
             // > with value equal to the text the user provided. If the user inserts multiple
             // > characters at once or in quick succession, this specification does not define
             // > whether it is treated as one insertion or several consecutive insertions.
-            // TODO: composition should be supported once editing hosts have selection support
-            EditingAction::InsertText(text) | EditingAction::InsertCompositionText(text) => (
+            EditingAction::InsertText(text) => (
                 DOMString::from_static("inserttext"),
                 DOMString::from(text.as_str()),
             ),

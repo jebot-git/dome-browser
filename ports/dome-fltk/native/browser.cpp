@@ -138,6 +138,9 @@ int reportedPageFocus=-1;
 void reportPageFocus(bool focused);
 class Page : public Fl_Widget {
   std::vector<uint8_t> pixels;
+  std::string preedit;
+  bool composing=false;
+  bool pendingCompositionEnd=false;
   unsigned pw=0,ph=0;
   ScrollIndicator indicator;
   static double now() {return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();}
@@ -163,6 +166,9 @@ class Page : public Fl_Widget {
     fl_pop_clip();
   }
 public:
+  void flush_composition() {
+    if(pendingCompositionEnd){emit(49,2);pendingCompositionEnd=false;composing=false;preedit.clear();}
+  }
   ~Page() override {Fl::remove_timeout(fade,this);}
   void scroll_metrics(uint64_t tab,uint64_t generation,float offset,float visible,float total) {
     if(indicator.update(tab,generation,offset,visible,total,now()))redraw();
@@ -188,13 +194,33 @@ public:
     switch(event) {
       case FL_ENTER: return 1;
       case FL_FOCUS: reportPageFocus(true); return 1;
-      case FL_UNFOCUS: reportPageFocus(false); return 1;
+      case FL_UNFOCUS:
+        if(composing){emit(49,2);composing=false;pendingCompositionEnd=false;preedit.clear();}
+        reportPageFocus(false); return 1;
       case FL_PUSH: take_focus(); emit(11,1,Fl::event_button(),px,py); return 1;
       case FL_RELEASE: emit(11,0,Fl::event_button(),px,py); return 1;
       case FL_MOVE: case FL_DRAG: emit(12,px,py,Fl::event_state()); return 1;
       case FL_MOUSEWHEEL: emit(13,Fl::event_dx(),Fl::event_dy(),px,py); return 1;
       case FL_KEYDOWN: case FL_KEYUP:
         if (event==FL_KEYDOWN) {
+          // FLTK delivers marked text as synthetic keydowns. Its compose
+          // contract replaces `del` UTF-8 bytes rather than appending each
+          // preedit update and then inserting the final commit again.
+          int del=0;
+          const bool text=Fl::compose(del)!=0;
+          if(text && (composing || del>0 || Fl::compose_state>0)) {
+            if(!composing){emit(49,0);composing=true;}
+            preedit.erase(preedit.size()-std::min(preedit.size(),size_t(std::max(0,del))));
+            preedit.append(Fl::event_text(),Fl::event_length());
+            // Wayland clears marked text immediately before delivering its
+            // commit in the same dispatch. Coalesce those into one final
+            // composition event; an unpaired clear is a cancellation.
+            if(Fl::compose_state==0 && preedit.empty()){pendingCompositionEnd=true;return 1;}
+            pendingCompositionEnd=false;
+            emit(49,Fl::compose_state>0?1:2,0,0,0,preedit.c_str());
+            if(Fl::compose_state==0){composing=false;preedit.clear();}
+            return 1;
+          }
           int key=Fl::event_key();
           if(key==FL_Insert && Fl::event_state(FL_SHIFT)){emit(40);return 1;}
           if ((Fl::event_state(FL_CTRL) && (key=='l'||key=='t'||key=='w'||key=='q'||key=='r'||key=='s'||key=='d'||key=='o'||key=='h'||key==FL_Tab||key=='+'||key=='='||key=='-'||key=='0')) ||
@@ -362,6 +388,7 @@ extern "C" int browser_ui_open(const char *url) {
 extern "C" void browser_ui_wait(double seconds) {
   while(g_main_context_iteration(nullptr,false)){}
   Fl::wait(seconds);
+  browser->page->flush_composition();
   if(revision!=dx::font_revision){revision=dx::font_revision;browser->layout();emit(15,browser_ui_light());}
 }
 extern "C" int browser_ui_poll(BrowserEvent *e) {if(events.empty())return 0;*e=events.front();events.pop_front();return 1;}
