@@ -78,6 +78,8 @@ pub(crate) struct DocumentEmbedderControls {
     user_interface_element_index: Cell<Epoch>,
     /// A map of visible user interface elements.
     visible_elements: DomRefCell<FxHashMap<NoTrace<Epoch>, ControlElement>>,
+    #[no_trace]
+    download_claims: DomRefCell<FxHashMap<NoTrace<Epoch>, net_traits::blob_url_store::UrlWithBlobClaim>>,
 }
 
 impl DocumentEmbedderControls {
@@ -86,6 +88,7 @@ impl DocumentEmbedderControls {
             window: Dom::from_ref(window),
             user_interface_element_index: Default::default(),
             visible_elements: Default::default(),
+            download_claims: Default::default(),
         }
     }
 
@@ -99,6 +102,15 @@ impl DocumentEmbedderControls {
             pipeline_id: self.window.pipeline_id(),
             index,
         }
+    }
+
+    /// Keep the activation-time blob token until the native download snapshots
+    /// this document. Immediate URL.revokeObjectURL() must not break a click.
+    pub(crate) fn retain_download(&self, id: EmbedderControlId, url: net_traits::blob_url_store::UrlWithBlobClaim) {
+        self.download_claims.borrow_mut().insert(id.index.into(), url);
+    }
+    pub(crate) fn take_download(&self, id: Option<EmbedderControlId>) -> Option<net_traits::blob_url_store::UrlWithBlobClaim> {
+        id.and_then(|id| self.download_claims.borrow_mut().remove(&id.index.into()))
     }
 
     #[cfg_attr(crown, expect(crown::unrooted_must_root))]

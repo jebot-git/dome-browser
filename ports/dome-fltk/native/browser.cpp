@@ -482,6 +482,20 @@ static const char *selection_text(int source){
 }
 extern "C" const char *browser_ui_paste(){return selection_text(1);}
 extern "C" const char *browser_ui_primary_selection(){return selection_text(0);}
+extern "C" const char *browser_ui_save_as(const char *suggested){
+  Fl_Native_File_Chooser picker;picker.title("Save As");picker.type(Fl_Native_File_Chooser::BROWSE_SAVE_FILE);
+  picker.options(Fl_Native_File_Chooser::SAVEAS_CONFIRM|Fl_Native_File_Chooser::NEW_FOLDER);
+  picker.preset_file(suggested);
+  if(picker.show()!=0 || !picker.filename())return nullptr;
+  returned=picker.filename();return returned.c_str();
+}
+extern "C" int browser_ui_download_action(const char *name,const char *mime){
+  int result;auto app=file_handler(mime,result);
+  std::string message=std::string(name)+"\n"+mime;
+  if(app){message+="\nOpen with ";message+=g_app_info_get_display_name(app);g_object_unref(app);}
+  fl_message_title("Download ready");
+  return fl_choice("%s","&Cancel","&Save As…",app?"&Open":nullptr,message.c_str());
+}
 extern "C" const char *browser_ui_file(int multiple){Fl_Native_File_Chooser picker;picker.title("Choose a file");picker.type(multiple?Fl_Native_File_Chooser::BROWSE_MULTI_FILE:Fl_Native_File_Chooser::BROWSE_FILE);if(picker.show()!=0)return nullptr;Json paths=Json::array();for(int i=0;i<picker.count();++i)paths.push_back(picker.filename(i));returned=paths.dump();return returned.c_str();}
 extern "C" int browser_ui_select(const char *text,int x,int y){try{
   const auto values=Json::parse(text).get<std::vector<std::string>>();

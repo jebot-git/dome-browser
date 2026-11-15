@@ -66,11 +66,14 @@ fn main() {
     } else {
         let runtime = PathBuf::from(env::var_os("DOME_BDF_RUNTIME_PREFIX")
             .unwrap_or_else(|| "/opt/fltk-vr/bdf-runtime".into()));
-        assert!(runtime.join("share/domed-bdf-runtime/manifest.json").is_file(),
-            "Build the DomeD native BDF HarfBuzz runtime first");
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", runtime.join("lib").display());
+        let system_sdk = env::var("DOME_SYSTEM_BITMAP_SDK").as_deref() == Ok("1");
+        assert!(system_sdk || runtime.join("share/domed-bdf-runtime/manifest.json").is_file(),
+            "Use the qualified DomeD bitmap runtime or the source-built distribution bitmap SDK");
+        if !system_sdk { println!("cargo:rustc-link-arg=-Wl,-rpath,{}", runtime.join("lib").display()); }
     }
     println!("cargo:rerun-if-env-changed=DOME_BDF_RUNTIME_PREFIX");
+    println!("cargo:rerun-if-env-changed=DOME_SYSTEM_BITMAP_SDK");
+    println!("cargo:rerun-if-env-changed=DOME_FLTK_LIBDIR");
     cpp.cpp(true)
         .std("c++17")
         .file("native/browser.cpp")
@@ -88,10 +91,8 @@ fn main() {
     c.file(out.join("appmenu-protocol.c"))
         .include(&out)
         .compile("dome_appmenu_protocol");
-    println!(
-        "cargo:rustc-link-search=native={}",
-        prefix.join("lib").display()
-    );
+    let libdir = env::var_os("DOME_FLTK_LIBDIR").map(PathBuf::from).unwrap_or_else(|| prefix.join("lib"));
+    println!("cargo:rustc-link-search=native={}", libdir.display());
     for lib in [
         "fltk_images",
         "fltk",
@@ -104,9 +105,10 @@ fn main() {
     ] {
         println!("cargo:rustc-link-lib=dylib={lib}");
     }
-    println!(
-        "cargo:rustc-link-arg=-Wl,-rpath,{}",
-        prefix.join("lib").display()
-    );
-    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/dome-browser");
+    if prefix != PathBuf::from("/usr") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", libdir.display());
+    }
+    if prefix != PathBuf::from("/usr") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/dome-browser");
+    }
 }

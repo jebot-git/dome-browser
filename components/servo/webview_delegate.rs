@@ -959,6 +959,9 @@ pub trait WebViewDelegate {
     /// The `LoadStatus` of the currently loading or loaded page in this [`WebView`] has changed. The new
     /// status can accessed via [`WebView::load_status`].
     fn notify_load_status_changed(&self, _webview: WebView, _status: LoadStatus) {}
+    /// A document requested a download rather than a navigation.
+    fn request_download(&self, _webview: WebView, _url: Url, _filename: String,
+        _context: embedder_traits::EmbedderControlId) {}
     /// An opted-in top-level document response is supplied to the native handler.
     /// Events retain response bytes, so handlers need not repeat the request.
     fn notify_external_document(&self, _webview: WebView, _event: embedder_traits::ExternalDocumentEvent) {}

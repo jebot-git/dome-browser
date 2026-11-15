@@ -8,7 +8,7 @@ from Xlib.ext import xtest
 from private_wayland import PrivateWayland
 signal.pthread_sigmask(signal.SIG_SETMASK,[]);resource.setrlimit(resource.RLIMIT_CORE,(0,0))
 if os.environ.get('DOME_PDF_TEST_BUS')!='1':os.execvpe('dbus-run-session',['dbus-run-session','--',sys.executable,*sys.argv],{**os.environ,'DOME_PDF_TEST_BUS':'1'})
-p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True);a=p.parse_args()
+p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--xvfb',default=os.environ.get('DOME_XVFB','Xvfb'));a=p.parse_args()
 out=a.output.resolve();out.mkdir(parents=True,exist_ok=False);checks=[];failure=None;child=None;hits=[];completed=set();fetch_errors=[];release=threading.Event()
 source=Path(__file__).resolve().parents[3];payload=(source/'tests/wpt/tests/html/browsers/browsing-the-web/navigating-across-documents/resources/portable-document-format-sample-valid.pdf').read_bytes();digest=hashlib.sha256(payload).hexdigest()
 def stop(proc):
@@ -77,7 +77,7 @@ with open(os.environ['DOME_PDF_TEST_RECORD'],'a') as f:f.write(json.dumps(dict(a
     finally:completed.add(case);self.close_connection=True
   server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Site);threading.Thread(target=server.serve_forever,daemon=True).start();stack.callback(server.server_close);stack.callback(server.shutdown);stack.callback(release.set)
   origin=f'http://127.0.0.1:{server.server_port}'
-  rd,wr=os.pipe();xvfb=subprocess.Popen(['Xvfb','-displayfd',str(wr),'-screen','0','1400x1000x24','-nolisten','tcp'],pass_fds=(wr,),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);stack.callback(stop,xvfb);os.close(wr);screen=':'+os.read(rd,64).decode().strip();os.close(rd)
+  rd,wr=os.pipe();xvfb=subprocess.Popen([a.xvfb,'-displayfd',str(wr),'-screen','0','1400x1000x24','-nolisten','tcp'],pass_fds=(wr,),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);stack.callback(stop,xvfb);os.close(wr);screen=':'+os.read(rd,64).decode().strip();os.close(rd)
   connection=display.Display(screen);stack.callback(connection.close);wayland=PrivateWayland(connection,screen,root,out);stack.callback(wayland.close)
   env={k:v for k,v in os.environ.items() if not k.startswith('DOME_')};env.update(HOME=str(root),XDG_RUNTIME_DIR=str(root),XDG_CONFIG_HOME=str(config),XDG_DATA_HOME=str(data),XDG_DATA_DIRS=str(root/'system-data'),XDG_CONFIG_DIRS=str(root/'system-config'),XDG_STATE_HOME=str(root/'state'),XDG_CACHE_HOME=str(root/'cache'),XDG_CURRENT_DESKTOP='Dome',FLTK_BACKEND='wayland',WAYLAND_DISPLAY=wayland.socket,LIBGL_ALWAYS_SOFTWARE='1',RUST_LOG='warn',DOME_PDF_TEST_RECORD=str(record))
   for name in ['DISPLAY','WAYLAND_SOCKET']:env.pop(name,None)
@@ -98,21 +98,26 @@ with open(os.environ['DOME_PDF_TEST_RECORD'],'a') as f:f.write(json.dumps(dict(a
     if shift:xtest.fake_input(connection,X.KeyRelease,connection.keysym_to_keycode(XK.XK_Shift_L))
     connection.sync();time.sleep(.002)
    key(XK.XK_Return)
+  def download_action(save=False):
+   dialog=wait(lambda:next((w for w in wayland.windows()if w.value()['client_pid']==child.pid and 'Download ready'in str(w.get_wm_name())),None));dialog.set_input_focus()
+   alt=connection.keysym_to_keycode(XK.XK_Alt_L);xtest.fake_input(connection,X.KeyPress,alt);key(XK.XK_s if save else XK.XK_o);xtest.fake_input(connection,X.KeyRelease,alt);connection.sync()
+   if save:
+    chooser=wait(lambda:next((w for w in wayland.windows()if w.value()['client_pid']==child.pid and 'Save As'in str(w.get_wm_name())),None));chooser.set_input_focus();key(XK.XK_Return)
   def opened(path,count):
-   navigate(origin+path);wait(lambda:len(calls())==count);c=calls()[-1]
+   navigate(origin+path);download_action();wait(lambda:len(calls())==count);c=calls()[-1]
    check(c['sha256']==digest and c['size']==len(payload),'Viewer receives the entire original PDF response '+str(count));check(c['permissions']==0o600,'Saved PDF uses private file permissions '+str(count));return c
   first=opened('/download?case=domed',1)
   check(first['handler']=='file' and len(first['args'])==1 and not first['args'][0].startswith('file:'),'DomeD PDF preference supports a file-only desktop application')
   check(first['name']=='domed document.pdf','PDF MIME detection handles an extensionless URL and UTF-8 disposition filename')
   opened('/post-form',2);post=[h for h in hits if h['path']=='/post'];check(len(post)==1 and post[0]['method']=='POST' and post[0]['body']=='mode=posted' and 'fixture=pdf' in post[0]['cookie'],'Authenticated PDF POST is handed off without repeating the request')
   opened('/redirect',3);check(sum(h['path']=='/redirect' for h in hits)==1 and sum(h['path']=='/download?case=redirect' for h in hits)==1,'Redirected PDF is handed off without a second download')
-  local=root/'local fixture.pdf';local.write_bytes(payload);navigate(local.as_uri());wait(lambda:len(calls())==4);check(calls()[-1]['sha256']==digest,'Local PDF files open through the same default viewer')
+  local=root/'local fixture.pdf';local.write_bytes(payload);navigate(local.as_uri());download_action();wait(lambda:len(calls())==4);check(calls()[-1]['sha256']==digest,'Local PDF files open through the same default viewer')
   scoped.unlink();standard=opened('/download?case=system',5);check(standard['handler']=='uri','System MIME default is used when DomeD has no PDF override')
   navigate(origin+'/html.pdf');wait(lambda:str(window.get_wm_name()).startswith('HTML with PDF suffix'));time.sleep(.3);check(len(calls())==5,'HTML with a PDF filename remains HTML')
   navigate(origin+'/embedded');wait(lambda:'embedded' in completed);time.sleep(.4);check(len(calls())==5,'Embedded PDFs do not automatically launch desktop applications')
   navigate(origin+'/download?case=truncated');wait(lambda:'truncated' in completed);wait(lambda:not (downloads/'truncated document.pdf').exists());check(len(calls())==5 and not (downloads/'truncated document.pdf').exists(),'Incomplete PDF responses are not opened or retained as complete files')
-  navigate(origin+'/download?case=cancel');wait(lambda:(downloads/'cancel document.pdf').exists() and (downloads/'cancel document.pdf').stat().st_size>0);navigate(origin+'/seed');wait(lambda:str(window.get_wm_name()).startswith('PDF handoff fixture'));release.set();wait(lambda:'cancel' in completed);time.sleep(.3);check(len(calls())==5 and not (downloads/'cancel document.pdf').exists(),'Navigating away cancels the partial PDF handoff')
-  scoped.write_text('[Default Applications]\napplication/pdf=missing.desktop;\n');navigate(origin+'/download?case=missing');wait(lambda:'missing' in completed);wait(lambda:(downloads/'missing document.pdf').exists() and (downloads/'missing document.pdf').stat().st_size==len(payload));time.sleep(.3);check(len(calls())==5 and child.poll() is None,'A missing configured viewer preserves the saved PDF without choosing another application')
+  navigate(origin+'/download?case=cancel');wait(lambda:any((root/'cache/dome-browser/downloads').glob('*.part')));navigate(origin+'/seed');wait(lambda:str(window.get_wm_name()).startswith('PDF handoff fixture'));release.set();wait(lambda:'cancel' in completed);time.sleep(.3);check(len(calls())==5 and not (downloads/'cancel document.pdf').exists(),'Navigating away cancels the partial PDF handoff')
+  scoped.write_text('[Default Applications]\napplication/pdf=missing.desktop;\n');navigate(origin+'/download?case=missing');download_action(save=True);wait(lambda:'missing' in completed);wait(lambda:(downloads/'missing document.pdf').exists() and (downloads/'missing document.pdf').stat().st_size==len(payload));time.sleep(.3);check(len(calls())==5 and child.poll() is None,'A missing configured viewer preserves the saved PDF without choosing another application')
   check(all(sum(h['path']==path for h in hits)==1 for path in ['/download?case=domed','/download?case=system']),'PDF handoff uses original navigation streams')
   scoped.write_text('[Default Applications]\napplication/pdf=pdf-uri.desktop;\n');opened('/download?case=gzip',6)
   navigate(origin+'/fetch-test');wait(lambda:fetch_errors);check(fetch_errors==['body rejected'],'JavaScript response consumption also rejects an interrupted body')

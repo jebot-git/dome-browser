@@ -12,8 +12,9 @@ from Xlib.ext import xtest
 from PIL import Image
 source = Path(__file__).resolve().parents[3]
 p=argparse.ArgumentParser(description=__doc__)
-p.add_argument('--binary',type=Path,default=Path(os.environ.get('DOME_BROWSER_BINARY',source/'target/debug/dome-browser')))
+p.add_argument('--binary',type=Path,default=Path(os.environ.get('DOME_BROWSER_BINARY',source/'target/release/dome-browser')))
 p.add_argument('--output',type=Path,required=True)
+p.add_argument('--xvfb',default=os.environ.get('DOME_XVFB','Xvfb'))
 a=p.parse_args();binary=a.binary.resolve();artifacts=a.output.resolve();artifacts.mkdir(parents=True,exist_ok=False)
 checks=[];driver_sha=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 image_bytes = io.BytesIO()
@@ -74,7 +75,7 @@ with tempfile.TemporaryDirectory(prefix='dome-download-') as temporary:
     server = http.server.ThreadingHTTPServer(('127.0.0.1',0),Server)
     threading.Thread(target=server.serve_forever,daemon=True).start()
     rd, wr = os.pipe()
-    xvfb = subprocess.Popen(['Xvfb','-displayfd',str(wr),'-screen','0','1400x1000x24','-nolisten','tcp'],pass_fds=(wr,),stderr=subprocess.DEVNULL)
+    xvfb = subprocess.Popen([a.xvfb,'-displayfd',str(wr),'-screen','0','1400x1000x24','-nolisten','tcp'],pass_fds=(wr,),stderr=subprocess.DEVNULL)
     os.close(wr)
     with os.fdopen(rd) as stream: screen = ':'+stream.readline().strip()
     x = display.Display(screen)
@@ -125,6 +126,19 @@ with tempfile.TemporaryDirectory(prefix='dome-download-') as temporary:
         xtest.fake_input(x,X.MotionNotify,x=2,y=2);x.sync();time.sleep(.1)
         for _ in range(up+1):key('Tab',shift=True)
         key('Return');time.sleep(.3)
+    def save_as(path=None):
+        dialog=wait(lambda:next((w for w in windows() if 'Save As' in str(w.get_wm_name()or'') and w.get_attributes().map_state==X.IsViewable),None))
+        dialog.set_input_focus(X.RevertToParent,X.CurrentTime);x.sync();time.sleep(.15)
+        if path:
+            key('a',control=True)
+            for char in str(path):
+                symbol=XK.string_to_keysym(char)or ord(char);code=x.keysym_to_keycode(symbol)
+                shifted=x.keycode_to_keysym(code,0)!=symbol and x.keycode_to_keysym(code,1)==symbol
+                if shifted:xtest.fake_input(x,X.KeyPress,x.keysym_to_keycode(XK.XK_Shift_L))
+                xtest.fake_input(x,X.KeyPress,code);xtest.fake_input(x,X.KeyRelease,code)
+                if shifted:xtest.fake_input(x,X.KeyRelease,x.keysym_to_keycode(XK.XK_Shift_L))
+                x.sync();time.sleep(.005)
+        key('Return')
     def clipboard(target):
         owner = x.screen().root.create_window(0,0,1,1,0,X.CopyFromParent,event_mask=X.PropertyChangeMask)
         prop = x.intern_atom('DOME_TEST_CLIP')
@@ -148,13 +162,16 @@ with tempfile.TemporaryDirectory(prefix='dome-download-') as temporary:
         time.sleep(.7)
         # Native chrome reserves 120 pixels with the local menu visible.
         context(90,147,up=1)
+        save_as()
         saved=downloads/'report test.bin'
         wait(lambda:saved.exists() and saved.stat().st_size>0)
         check(saved.read_bytes()==b'authenticated file\x00\xff\n','Save Link preserves binary bytes and uses browser HttpOnly cookies')
         context(90,147,up=1)
+        save_as(downloads/'report test (1).bin')
         wait(lambda:(downloads/'report test (1).bin').exists())
-        check(saved.read_bytes()==b'authenticated file\x00\xff\n','Repeated saves preserve the existing file')
+        check(saved.read_bytes()==b'authenticated file\x00\xff\n','Saving under another name preserves the existing file')
         context(45,207,up=1)
+        save_as()
         wait(lambda:(downloads/'image.png').exists())
         check((downloads/'image.png').read_bytes()==png,'Save Image preserves original encoded image')
         context(45,207)
@@ -165,9 +182,11 @@ with tempfile.TemporaryDirectory(prefix='dome-download-') as temporary:
         check(target is not None,'Copy Image offers an actual image clipboard MIME type')
         copied=Image.open(io.BytesIO(bytes(clipboard(target).value))).convert('RGB')
         check(copied.size==(7,5) and copied.getpixel((3,2))==(20,100,220),'Clipboard preserves original image dimensions and pixels')
+        main.set_input_focus(X.RevertToParent,X.CurrentTime);x.sync()
         key('s',control=True)
+        save_as()
         wait(lambda:(downloads/'page.html').exists())
-        check(b'Dome Download Fixture' in (downloads/'page.html').read_bytes(),'Ctrl+S saves the page source in the XDG Downloads directory')
+        check(b'Dome Download Fixture' in (downloads/'page.html').read_bytes(),'Ctrl+S offers Save As with the XDG Downloads directory as its initial destination')
         before=set(downloads.iterdir())
         context(80,270,up=1)
         wait(lambda:any(p=='/missing' for p,_ in hits))
@@ -180,7 +199,10 @@ with tempfile.TemporaryDirectory(prefix='dome-download-') as temporary:
             source_url=f'http://127.0.0.1:{server.server_port}/frames?case={case}'
             navigate(source_url,'Download frame '+case)
             wait(lambda:any(path=='/frame?case='+case for path,_ in hits));time.sleep(.3)
-            context(90,147,up=1)
+            # The frame's CSP blocks its inline body margin; target the
+            # link at the default 8px margin inside the iframe.
+            context(90,137,up=1)
+            save_as()
             target=downloads/('frame-'+case+'.txt')
             wait(lambda:target.exists())
             expected='fixture=secret' if case in ['same','again'] else ''

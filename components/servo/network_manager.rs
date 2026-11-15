@@ -46,7 +46,7 @@ pub struct NetworkManager {
 impl NetworkManager {
     /// Fetch a resource using the browser's network session and registered protocol handlers.
     /// This privileged API is for explicit native user actions, not web scripts.
-    /// Blob URLs require a document-owned claim and are not accepted here.
+    /// Blob URLs are claimed in the active originating document.
     pub fn download_resource(
         &self,
         webview_id: crate::WebViewId,
@@ -66,15 +66,16 @@ impl NetworkManager {
         }
         let custom = !matches!(url.scheme(), "http" | "https" | "data" | "file" | "blob") &&
             url.has_host() && !url.cannot_be_a_base();
-        if !(matches!(url.scheme(), "http" | "https" | "data" | "file") || custom) {
+        if !(matches!(url.scheme(), "http" | "https" | "data" | "file" | "blob") || custom) {
             return Err(format!("Saving {} URLs is not supported", url.scheme()));
         }
         let thread = self.public_resource_threads.core_thread.clone();
+        let requested_url = ServoUrl::from_url(url.clone());
         let mut pending = Some((url, callback));
-        let snapshot = GenericCallback::new(move |result: Result<Option<(ServoUrl, RequestClient)>, _>| {
+        let snapshot = GenericCallback::new(move |result: Result<Option<(ServoUrl, RequestClient, net_traits::blob_url_store::UrlWithBlobClaim)>, _>| {
             // Only one reply may start a request, including on a disconnected script thread.
             let Some((url, mut callback)) = pending.take() else { return; };
-            let Ok(Some((source, mut client))) = result else {
+            let Ok(Some((source, mut client, claimed_url))) = result else {
                 callback(ResourceDownloadEvent::Finished(Err("The source document is no longer active".into())));
                 return;
             };
@@ -92,8 +93,7 @@ impl NetworkManager {
                 ..PolicyContainer::default()
             });
             let mut request = RequestBuilder::new(Some(webview_id),
-                net_traits::blob_url_store::UrlWithBlobClaim::for_url(ServoUrl::from_url(url))
-                    .expect("Blob URLs were excluded above"),
+                claimed_url,
                 Referrer::ReferrerUrl(source))
                 .credentials_mode(CredentialsMode::Include)
                 .client(client).initiator(Initiator::Download);
@@ -130,7 +130,7 @@ impl NetworkManager {
             }));
         }).map_err(|error| format!("Cannot obtain the source document: {error:?}"))?;
         self.constellation_proxy.sender().send(
-            EmbedderToConstellationMessage::GetDownloadClient(webview_id, context, snapshot),
+            EmbedderToConstellationMessage::GetDownloadClient(webview_id, context, requested_url, snapshot),
         ).map_err(|_| "The browser is shutting down")?;
         Ok(())
     }

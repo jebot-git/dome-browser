@@ -671,6 +671,11 @@ impl ServoInner {
                     webview.set_favicon(image);
                 }
             },
+            EmbedderMsg::DownloadRequested(context, url, filename) => {
+                if let Some(webview) = self.get_webview_handle(context.webview_id) {
+                    webview.delegate().request_download(webview, url, filename, context);
+                }
+            },
             EmbedderMsg::ExternalDocument(webview_id, event) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
                     webview.delegate().notify_external_document(webview, event);

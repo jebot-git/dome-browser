@@ -538,6 +538,7 @@ pub enum EmbedderMsg {
     /// The [`LoadStatus`] of the Given `WebView` has changed.
     NotifyLoadStatusChanged(WebViewId, LoadStatus),
     ExternalDocument(WebViewId, ExternalDocumentEvent),
+    DownloadRequested(EmbedderControlId, Url, String),
     /// Open dialog to select bluetooth device.
     GetSelectedBluetoothDevice(
         WebViewId,

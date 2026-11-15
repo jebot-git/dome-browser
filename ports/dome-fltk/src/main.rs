@@ -89,7 +89,6 @@ struct Services {
     downloads: downloads::Downloads,
     external_player: external_media::Handoff,
     external_links: external_links::Handoff,
-    external_pdf: external_documents::Handoff,
     xr_focus: xr::Focus,
 }
 impl servo::ServoDelegate for Services {
@@ -146,11 +145,16 @@ impl WebViewDelegate for PageState {
         self.history.set((current, entries.len()));
         self.changed.set(true)
     }
+    fn request_download(&self, view: WebView, url: Url, filename: String, context: servo::EmbedderControlId) {
+        self.services.downloads.start_named(&view, url, false, Some(context), filename);
+        ui::status("Downloading file…");
+    }
     fn notify_external_document(&self, _: WebView, event: servo::ExternalDocumentEvent) {
+        ui::status("Downloading file…");
         match self.pdf.borrow_mut().event(event) {
-            Ok(Some(path)) => self.services.external_pdf.launch(path),
+            Ok(Some(path)) => self.services.downloads.ready(path, true),
             Ok(None) => (),
-            Err(error) => ui::status(&format!("Cannot open PDF: {error}")),
+            Err(error) => ui::status(&format!("Download failed: {error}")),
         }
     }
     fn notify_load_status_changed(&self, _: WebView, status: LoadStatus) {
@@ -794,7 +798,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else { None };
     let services=Rc::new(Services { blocker:RefCell::new(adblocking::Blocker::load(&profile)?),
         wallet:RefCell::new(wallet::Wallet::new(&profile)?),active:Cell::new(0),downloads:downloads::Downloads::new(),
-        external_player:external_media::Handoff::new(&profile),external_links:external_links::Handoff::new(), external_pdf:external_documents::Handoff::new(), xr_focus: xr::Focus::default() });
+        external_player:external_media::Handoff::new(&profile),external_links:external_links::Handoff::new(), xr_focus: xr::Focus::default() });
     let mut history_writable = screenshot.is_none();
     let mut history = match storage::History::load(&profile.join("hs.txt")) {
         Ok(history) => history,
@@ -819,6 +823,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     unsafe { ui::browser_ui_cookie_policy(i32::from(third_party_cookies_blocked)); }
     prefs.dom_notification_enabled = true;
     prefs.dom_external_pdf_enabled = true;
+    prefs.dom_external_downloads_enabled = true;
     // GitHub's component runtime requires these implemented Servo APIs.
     prefs.dom_intersection_observer_enabled = true;
     prefs.dom_adoptedstylesheet_enabled = true;
@@ -943,14 +948,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         while let Ok(result)=services.external_links.receiver.try_recv() {
             match result { Ok(())=>ui::status("Link opened in the default application"),Err(message)=>ui::status(message) }
         }
-        while let Ok(result) = services.external_pdf.receiver.try_recv() {
-            match result { Ok(path)=>ui::status(&format!("PDF opened in system viewer; saved to {}",path.display())),Err(error)=>ui::status(&error) }
-        }
         while let Ok(success) = services.external_player.receiver.try_recv() {
             if !success { ui::status("External player could not play this media or page"); }
         }
         while let Ok(result) = services.downloads.receiver.try_recv() {
             match result {
+                downloads::Completion::Ready(download, handoff) => services.downloads.present(download, handoff),
+                downloads::Completion::Opened(path) => ui::status(&format!("Opened in default application; saved to {}", path.display())),
                 downloads::Completion::Saved(path) => ui::status(&format!("Saved to {}", path.display())),
                 downloads::Completion::Image(image) => {
                     let (width, height) = image.dimensions();

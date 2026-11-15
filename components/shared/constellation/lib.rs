@@ -118,7 +118,8 @@ pub enum EmbedderToConstellationMessage {
     GetDownloadClient(
         WebViewId,
         Option<EmbedderControlId>,
-        GenericCallback<Option<(ServoUrl, RequestClient)>>,
+        ServoUrl,
+        GenericCallback<Option<(ServoUrl, RequestClient, net_traits::blob_url_store::UrlWithBlobClaim)>>,
     ),
     /// Create a memory report and return it via the [`GenericCallback`]
     CreateMemoryReport(GenericCallback<MemoryReportResult>),

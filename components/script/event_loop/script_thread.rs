@@ -1911,13 +1911,16 @@ impl ScriptThread {
             ScriptThreadMessage::GetDocumentOriginDetails(pipeline_id, result_sender) => {
                 self.handle_get_origin_details(pipeline_id, result_sender);
             },
-            ScriptThreadMessage::GetDownloadClient(pipeline_id, callback) => {
+            ScriptThreadMessage::GetDownloadClient(pipeline_id, url, context, callback) => {
                 let client = self
                     .documents
                     .borrow()
                     .find_document(pipeline_id)
                     .filter(|document| document.is_fully_active())
-                    .map(|document| (document.url(), document.window().request_client(None)));
+                    .map(|document| (document.url(), document.window().request_client(None),
+                        document.embedder_controls().take_download(context)
+                            .filter(|claimed| claimed.url() == url)
+                            .unwrap_or_else(|| crate::url::ensure_blob_referenced_by_url_is_kept_alive(&document.owner_global(), url.clone()))));
                 let _ = callback.send(client);
             },
             ScriptThreadMessage::GetTitle(pipeline_id) => self.handle_get_title_msg(pipeline_id),

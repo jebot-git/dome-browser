@@ -1414,7 +1414,7 @@ where
             ) => {
                 self.handle_evaluate_javascript(webview_id, evaluation_id, script);
             },
-            EmbedderToConstellationMessage::GetDownloadClient(webview_id, context, callback) => {
+            EmbedderToConstellationMessage::GetDownloadClient(webview_id, context, url, callback) => {
                 let pipeline = match context {
                     Some(id) if id.webview_id == webview_id => self.pipelines.get(&id.pipeline_id),
                     Some(_) => None,
@@ -1429,6 +1429,8 @@ where
                         .event_loop
                         .send(ScriptThreadMessage::GetDownloadClient(
                             pipeline.id,
+                            url.clone(),
+                            context,
                             callback.clone(),
                         ))
                         .is_err()

@@ -225,6 +225,9 @@ impl HTMLAnchorElementMethods<crate::DomTypeHolder> for HTMLAnchorElement {
     // https://html.spec.whatwg.org/multipage/#dom-a-shape
     make_setter!(SetShape, "shape");
 
+    make_getter!(Download, "download");
+    make_setter!(SetDownload, "download");
+
     // https://html.spec.whatwg.org/multipage/#attr-hyperlink-target
     make_getter!(Target, "target");
 
@@ -383,8 +386,26 @@ impl Activatable for HTMLAnchorElement {
             ))
         }
 
+        // A download attribute is honored for same-origin, data and blob URLs.
+        // Cross-origin links still navigate and require an attachment response.
+        if servo_config::pref!(dom_external_downloads_enabled) && element.has_attribute(&local_name!("download")) {
+            let document = self.owner_document();
+            if document.has_active_sandboxing_flag(content_security_policy::sandboxing_directive::SandboxingFlagSet::SANDBOXED_DOWNLOADS_BROWSING_CONTEXT_FLAG) {
+                return;
+            }
+            if document.is_fully_active() && let Some(url) = self.full_href_url_for_user_interface(cx.no_gc()) &&
+                (matches!(url.scheme(), "data" | "blob") || url.origin() == document.url().origin())
+            {
+                let context = document.embedder_controls().next_control_id();
+                document.embedder_controls().retain_download(context,
+                    crate::url::ensure_blob_referenced_by_url_is_kept_alive(&self.owner_global(), url.clone()));
+                document.window().send_to_embedder(embedder_traits::EmbedderMsg::DownloadRequested(
+                    context, url.into_url(), self.Download().to_string(),
+                ));
+                return;
+            }
+        }
         // Step 2.
-        // TODO: Download the link is `download` attribute is set.
         follow_hyperlink(cx, element, self.relations.get(), ismap_suffix);
     }
 }

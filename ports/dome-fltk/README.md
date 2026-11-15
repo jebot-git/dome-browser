@@ -217,16 +217,23 @@ history containing long URLs and a long Unicode page title.
 
 ## PDF files
 
-Top-level PDF navigations save the completed response into the user's Downloads
-folder and open the system's PDF viewer. DomeD's `application/pdf` default takes
-precedence over the standard desktop MIME default. Both file and URI desktop
-handlers are supported. The browser passes the original response bytes, including
-authenticated requests, POST results and redirects, without downloading again.
-Incomplete or cancelled transfers remove their partial files and never launch
-a viewer. Saved files have private permissions and a `.pdf` filename. If a viewer
-is unavailable, the complete file remains saved and the status bar reports it.
-Embedded PDFs do not launch external applications automatically; an HTML page
-whose URL ends in `.pdf` remains a normal page.
+Top-level PDFs, unsupported MIME types and `Content-Disposition: attachment`
+responses download into private staging files. Once the complete response is
+ready, choose **Save As**, **Open** in the configured application, or **Cancel**.
+Open is offered when a usable MIME handler exists. DomeD's MIME preferences take
+precedence over standard desktop defaults; file-only and URI-only applications
+are supported. Opening retains a uniquely named copy in Downloads. Save As lets
+you choose a folder/name and confirms replacement of an existing file.
+
+The original response bytes are used, including authenticated requests, POST
+results and redirects, without another download. Failed/cancelled responses do
+not leave complete files or launch applications. Saved files are private (0600).
+Embedded documents do not automatically launch applications. An HTML page whose
+URL ends in `.pdf` remains HTML unless the response explicitly requests attachment.
+Same-origin `<a download>` links preserve the source page and honor a suggested
+filename. Data and document-owned blob downloads are supported, including URL
+revocation immediately after activation; sandbox download restrictions remain in
+force. Cross-origin links require the server's attachment response.
 
 `tests/pdf-handoff.py` uses private desktop handlers to check these behaviors,
 including UTF-8 filenames, local files, compressed responses and interrupted
@@ -881,15 +888,16 @@ repository and Cargo metadata.
 
 **File → Save Page** (Ctrl+S) saves the current URL's original response, without
 bundling its subresources. Right-click a link for **Save Link**, or an image for
-**Save Image** and **Copy Image**. Saves go directly to the Downloads directory
-configured by `XDG_DOWNLOAD_DIR` in `$XDG_CONFIG_HOME/user-dirs.dirs` (normally
+**Save Image** and **Copy Image**. Saving offers the native **Save As** dialog,
+initially using the Downloads directory configured by `XDG_DOWNLOAD_DIR` in `$XDG_CONFIG_HOME/user-dirs.dirs` (normally
 `~/.config/user-dirs.dirs`), falling back to `~/Downloads`. The setting is parsed
 as data, without executing shell code.
 
 Downloads use Servo's network session, including HttpOnly cookies, HTTP
 authentication, redirects and TLS validation. Server filenames (including UTF-8
-`filename*`) are sanitized; existing files and symlinks are never overwritten.
-Failures remove the incomplete file. HTTP errors are reported in the status bar.
+`filename*`) are sanitized. Save As confirms overwrites and commits a completed
+sibling temporary file atomically; it never follows a destination symlink.
+Failures remove incomplete staging files. HTTP errors are reported in the status bar.
 Files are created with mode 0600.
 
 Copy Image decodes the original resource and publishes bitmap clipboard data
@@ -1663,7 +1671,7 @@ protocol request. PNG/SVG pixels and Gopher GIF are covered by private fixtures;
 this does not claim every image decoder. Finger remains a text protocol.
 
 Ctrl+S saves the original native response bytes, rather than the generated HTML.
-Save Link and Save Image use the XDG Downloads directory, preserve encoded image
+Save Link and Save Image offer Save As with the XDG Downloads directory, preserve encoded image
 and binary bytes, and keep the current page open. Copy Image exports a decoded
 raster image to the native clipboard. Unsupported binary navigation opens an
 explicit native save chooser. Document and image previews retain the existing
@@ -2697,3 +2705,21 @@ live appearance, keybindings, notifications, activation and session restoration.
 The six test runs total 131 checks. Private displays and profiles leave the
 active desktop session intact. System installation still awaits the existing
 native sudo dialog. See `docs/validation-desktop-gpu-2026-10-29.json`.
+
+
+## OpenRepo source RPM
+
+The maintained `fedora44-migration/recipes/dome-browser` recipe builds the pinned
+Git source, offline Cargo dependencies and SpiderMonkey in the rootless Fedora
+builder. It links the qualified system FLTK/bitmap SDK with generic x86-64 release
+hardening; `DOME_SYSTEM_BITMAP_SDK=1` is reserved for that qualified SDK. The normal
+private-runtime build remains available. Outline fonts are an explicit opt-in.
+The RPM installs `/usr/bin/dome-browser` and `/usr/libexec/dome-browser`, without
+changing MIME defaults or restarting a session. Existing `/usr/local` deployments
+must be handled separately during a reviewed package adoption.
+
+`tests/download-handoff.py` checks native Save As, cancellation and overwrite
+confirmation, original-response authenticated/POST/redirect transfers, MIME
+handlers, blob revocation, download attributes and sandbox restrictions on a
+private Wayland seat. The existing context-save and PDF suites also exercise
+these dialogs. No user files or default applications are changed by the tests.

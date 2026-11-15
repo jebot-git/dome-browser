@@ -220,7 +220,9 @@ pub enum ScriptThreadMessage {
     /// Snapshot a fully active document for an explicit native resource save.
     GetDownloadClient(
         PipelineId,
-        GenericCallback<Option<(ServoUrl, RequestClient)>>,
+        ServoUrl,
+        Option<EmbedderControlId>,
+        GenericCallback<Option<(ServoUrl, RequestClient, net_traits::blob_url_store::UrlWithBlobClaim)>>,
     ),
     /// Notifies script thread of a change to one of its document's activity
     SetDocumentActivity(PipelineId, DocumentActivity),

@@ -975,6 +975,7 @@ struct NavigationParams {
     /// content-type of this document, if known. Otherwise need to sniff it
     content_type: Option<Mime>,
     content_disposition: String,
+    download_response_ok: bool,
     /// link headers from the response
     link_headers: Vec<LinkHeader>,
     /// <https://html.spec.whatwg.org/multipage/#navigation-params-sandboxing>
@@ -1042,6 +1043,7 @@ impl ParserContext {
                 policy_container: Default::default(),
                 content_type: None,
                 content_disposition: String::new(),
+                download_response_ok: true,
                 link_headers: vec![],
                 final_sandboxing_flag_set: creation_sandboxing_flag_set,
                 resource_header: vec![],
@@ -1166,16 +1168,23 @@ impl ParserContext {
             content_type,
             &self.navigation_params.resource_header,
         );
-        if pref!(dom_external_pdf_enabled) && mime_type.essence_str() == "application/pdf" && document.window().is_top_level() {
+        let attachment = self.navigation_params.content_disposition.split(';').next()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("attachment"));
+        let external_type = matches!(MimeClassifier::get_media_type(&mime_type), None | Some(MediaType::Font));
+        let external = (pref!(dom_external_downloads_enabled) && (attachment || external_type)) ||
+            (pref!(dom_external_pdf_enabled) && mime_type.essence_str() == "application/pdf");
+        if external && document.window().is_top_level() && self.navigation_params.download_response_ok &&
+            !document.has_active_sandboxing_flag(SandboxingFlagSet::SANDBOXED_DOWNLOADS_BROWSING_CONTEXT_FLAG)
+        {
             self.external_document = true;
             document.window().send_to_embedder(EmbedderMsg::ExternalDocument(self.webview_id, ExternalDocumentEvent::Start {
-                id: self.pipeline_id, url: document.url().into_url(), content_type: "application/pdf".into(),
+                id: self.pipeline_id, url: document.url().into_url(), content_type: mime_type.essence_str().into(),
                 content_disposition: self.navigation_params.content_disposition.clone(),
             }));
             let header = std::mem::take(&mut self.navigation_params.resource_header);
             self.send_external_data(document, header);
-            self.load_inline_unknown_content(cx, parser.expect("PDF navigation needs a parser"),
-                "<!doctype html><title>PDF document</title><p>This PDF is being opened in your system PDF viewer.</p>".into());
+            self.load_inline_unknown_content(cx, parser.expect("Download navigation needs a parser"),
+                "<!doctype html><title>Download</title><p>Downloading this file. Choose Save As or open it in your default application when it is ready.</p>".into());
             return;
         }
         // Step 2. If the user agent has been configured to process resources of the given type using
@@ -1623,6 +1632,7 @@ impl ParserContext {
             content_type,
             content_disposition: metadata.as_ref().and_then(|metadata| metadata.headers.as_ref())
                 .and_then(|headers| headers.get("Content-Disposition")).and_then(|header| header.to_str().ok()).unwrap_or_default().to_owned(),
+            download_response_ok: metadata.as_ref().is_some_and(|value| value.status.is_success()),
             final_sandboxing_flag_set,
             link_headers,
             about_base_url: document.about_base_url(),
@@ -1774,8 +1784,8 @@ impl ParserContext {
 
         if self.external_document {
             let result = if parser.as_ref().is_some_and(|parser| parser.aborted.get()) {
-                Err("PDF load cancelled".into())
-            } else { status.as_ref().map(|_| ()).map_err(|_| "PDF download failed".into()) };
+                Err("Download cancelled".into())
+            } else { status.as_ref().map(|_| ()).map_err(|_| "Download failed".into()) };
             if status.is_ok() { document.set_resource_fetch_timing(timing); }
             document.window().send_to_embedder(EmbedderMsg::ExternalDocument(self.webview_id,
                 ExternalDocumentEvent::Finished { id: self.pipeline_id, result }));
