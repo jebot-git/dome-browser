@@ -2723,3 +2723,12 @@ confirmation, original-response authenticated/POST/redirect transfers, MIME
 handlers, blob revocation, download attributes and sandbox restrictions on a
 private Wayland seat. The existing context-save and PDF suites also exercise
 these dialogs. No user files or default applications are changed by the tests.
+
+SmallNet file responses use the same completed-download policy as HTTP: native
+Save As with overwrite confirmation, Cancel, or Open with the configured MIME
+application. This includes streamed binary responses and large text source
+transfers; protocol framing and completion checks finish before a file is offered.
+Ctrl+S, Save Link and Save Image also use Save As and preserve original protocol
+bytes. Gemini trust, remote input, identities, Titan and Gopher+ submission review
+remain protocol prompts; explicitly selected Gopher+ response destinations keep
+using their reviewed form destination.

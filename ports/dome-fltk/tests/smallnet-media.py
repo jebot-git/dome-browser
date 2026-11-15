@@ -12,6 +12,7 @@ from Xlib.ext import xtest
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--wayland',action='store_true');p.add_argument('--cases',nargs='+')
 p.add_argument('--large-transfers',action='store_true');p.add_argument('--transfer-mode',choices=['normal','slow','reset','unclean','missing-eof'],default='normal')
+p.add_argument('--xvfb',default=os.environ.get('DOME_XVFB','Xvfb'))
 p.add_argument('--gophers-plus',action='store_true',help='Use explicit Gopher+ commands inside TLS')
 p.add_argument('--gopher-framing',choices=['count','dot','eof'],default='count')
 a=p.parse_args();binary=a.binary.resolve();out=a.output.resolve();assert not out.exists();out.mkdir(parents=True,mode=0o700)
@@ -200,12 +201,12 @@ def link_point(w,skip=0):
     image=frame(w);r,g,b=image.split();mask=ImageChops.multiply(ImageChops.subtract(b,r).point(lambda v:255 if v>=20 else 0),ImageChops.subtract(b,g).point(lambda v:255 if v>=20 else 0));pixels=mask.tobytes()
     last=-10
     for y in range(100,min(600,image.height-30)):
-        match=re.search(b'\xff{12,}',pixels[y*image.width:(y+1)*image.width])
-        if match:
+        row=pixels[y*image.width:(y+1)*image.width];colored=[x for x,value in enumerate(row) if value==255]
+        if len(colored)>=20:
             if y<=last+2:last=y;continue
             last=y
             if skip:skip-=1;continue
-            return ((match.start()+match.end())//2,y-3)
+            return ((colored[0]+colored[-1])//2,y-3)
 def context_action(w,position,from_last=0):
     point(w,*position,button=3);time.sleep(.25)
     # Moving outside clears the popup's hover selection; Shift+Tab wraps from
@@ -213,6 +214,19 @@ def context_action(w,position,from_last=0):
     xtest.fake_input(connection,X.MotionNotify,x=2,y=2);connection.sync();time.sleep(.1)
     for _ in range(from_last+1):key(XK.XK_Tab,XK.XK_Shift_L)
     key(XK.XK_Return)
+def save_as(path=None,cancel=False):
+    chooser=wait(lambda:next((item for item in windows() if 'Save As' in str(item.get_wm_name())),None))
+    check(chooser is not None,'Shared native Save As opens')
+    focus(chooser)
+    if cancel:key(XK.XK_Escape)
+    else:
+        if path:key(XK.XK_a,XK.XK_Control_L);text(str(path))
+        key(XK.XK_Return)
+    check(wait(lambda:chooser.id not in [item.id for item in windows()]),'Shared Save As closes after selection or cancel')
+def download_ready():
+    prompt=wait(lambda:next((item for item in windows() if 'Download ready' in str(item.get_wm_name())),None),seconds=60)
+    check(prompt is not None,'Completed SmallNet navigation offers shared download actions')
+    focus(prompt);key(XK.XK_s,XK.XK_Alt_L)
 def clipboard(env):
     if wayland:
         def offer():
@@ -274,7 +288,7 @@ try:
         if a.transfer_mode=='missing-eof':cases=[case for case in cases if case[1]=='guppy' and case[2]=='binary']
         if a.transfer_mode=='unclean':cases=[case for case in cases if case[1] in ['gemini','scroll','gophers'] and case[2]=='binary']
     if a.cases:cases=[case for case in cases if case[0] in a.cases];assert len(cases)==len(a.cases),'Unknown test case'
-    rd,wr=os.pipe();xvfb=subprocess.Popen(['Xvfb','-displayfd',str(wr),'-screen','0','1440x1000x24','-nolisten','tcp'],pass_fds=(wr,),stderr=subprocess.DEVNULL);os.close(wr)
+    rd,wr=os.pipe();xvfb=subprocess.Popen([a.xvfb,'-displayfd',str(wr),'-screen','0','1440x1000x24','-nolisten','tcp'],pass_fds=(wr,),stderr=subprocess.DEVNULL);os.close(wr)
     with os.fdopen(rd) as stream:screen=':'+stream.readline().strip()
     connection=display.Display(screen)
     if a.wayland:
@@ -295,11 +309,11 @@ try:
                 filename=scheme+'-picture.'+extension;path='/'+filename;url=address(scheme,path,'g' if extension=='gif' else 'I');navigate(w,url)
                 color=(0,204,136) if extension=='svg' else (231,44,91);position=wait(lambda:color_point(w,color));check(position is not None,name+': original image pixels visibly render')
                 check(url in str(w.get_wm_name()),name+': native resource URL remains public');check(sum(r['kind']==scheme and r['path']==path for r in records[since:])==1,name+': displaying the image needs one native retrieval')
-                frame(w).save(folder/'frame.png');focus(w);key(XK.XK_s,XK.XK_Control_L)
+                frame(w).save(folder/'frame.png');focus(w);key(XK.XK_s,XK.XK_Control_L);save_as()
                 target=downloads/filename;expected_bytes=payload(path)[1];check(wait(lambda:target.exists() and target.read_bytes()==expected_bytes),name+': Ctrl+S saves original encoded image bytes')
                 check(target.stat().st_mode&0o777==0o600,name+': saved image is private');check(url in str(w.get_wm_name()),name+': saving retains the current image page')
                 if name=='gopher-png':
-                    context_action(w,position,from_last=1);check(wait(lambda:(downloads/'image.png').exists() and (downloads/'image.png').read_bytes()==png),'Save Image preserves the native image bytes')
+                    context_action(w,position,from_last=1);save_as(downloads/'image.png');check(wait(lambda:(downloads/'image.png').exists() and (downloads/'image.png').read_bytes()==png),'Save Image preserves the native image bytes')
                     context_action(w,position);copied=Image.open(io.BytesIO(clipboard(env))).convert('RGB');check(copied.size==pixels.size and copied.tobytes()==pixels.tobytes(),'Copy Image preserves original dimensions and pixels');copied.save(folder/'clipboard.png')
             elif extension in ['gopher-ask','gopher-uri']:
                 asked=extension=='gopher-ask';url=address(scheme if asked else 'nex','/ask-index' if asked else '/uri-gophers-index/' if scheme=='gophers' else '/uri-index/')+'#native-index';navigate(w,url)
@@ -320,6 +334,7 @@ try:
                     check(not target.exists(),name+': interrupted response removes the download')
                     if asked:check(destination.read_bytes()==b'Previous selected destination',name+': interrupted response preserves the selected destination')
                 else:
+                    save_as()
                     check(wait(lambda:target.exists() and target.read_bytes()==binary_body,seconds=60),name+': submitted response reaches the original download consumer')
                     if asked:check(destination.read_bytes()==binary_body and destination.stat().st_mode&0o777==0o600,name+': same stream saves the explicitly selected private destination')
                 answers=[r['submitted'] for r in records[since:] if r['submitted'] is not None]
@@ -340,7 +355,9 @@ try:
                     check(wait(lambda:(out/'browser.log').read_text().count('DOWNLOAD_ERROR')>errors_before,seconds=60 if a.transfer_mode=='missing-eof' else 30),name+': interrupted download reports an error')
                     check(not target.exists(),name+': interrupted download removes its partial file')
                     check(not list(downloads.glob('*.part')),name+': interrupted download leaves no temporary download')
-                else:check(wait(lambda:target.exists() and target.read_bytes()==binary_body,seconds=60),name+': Save Link preserves binary bytes without transfer framing')
+                else:
+                    save_as()
+                    check(wait(lambda:target.exists() and target.read_bytes()==binary_body,seconds=60),name+': Save Link preserves binary bytes without transfer framing')
                 saved_session=json.loads((profile/'session.json').read_text());check(saved_session['tabs'][saved_session['active']]['url']==url,name+': Save Link keeps the index open')
                 if scheme in ['gopher','gopher+']:check(any(r['kind']==scheme and r['path']=='/'+scheme+'-file.bin' for r in records[since:]),name+': file retrieval uses the requested Gopher protocol')
                 if action:
@@ -353,32 +370,27 @@ try:
                 target=downloads/(name+'.txt')
                 if a.transfer_mode=='reset':
                     check(wait(lambda:(out/'browser.log').read_text().count('DOWNLOAD_ERROR')>errors_before),name+': interrupted text save reports an error');check(not target.exists(),name+': interrupted text save removes the partial file')
-                else:check(wait(lambda:target.exists() and target.read_bytes()==gopher_text_body,seconds=60),name+': source save streams original encoding and dot-unescaped line endings')
+                else:
+                    save_as()
+                    check(wait(lambda:target.exists() and target.read_bytes()==gopher_text_body,seconds=60),name+': source save streams original encoding and dot-unescaped line endings')
             elif extension=='text':
                 url=address('finger','/alice');navigate(w,url);check(wait(lambda:url in str(w.get_wm_name())),'Finger resource loads');focus(w);key(XK.XK_s,XK.XK_Control_L)
                 if a.large_transfers and a.transfer_mode=='reset':
                     check(wait(lambda:(out/'browser.log').read_text().count('DOWNLOAD_ERROR')>errors_before),'Finger interrupted source save reports an error');check(not (downloads/'alice').exists(),'Finger interrupted source save removes its partial file')
-                else:check(wait(lambda:(downloads/'alice').exists() and (downloads/'alice').read_bytes()==finger_body,seconds=60),'Finger Ctrl+S preserves original text encoding and line endings')
-            else:
-                url=address(scheme,'/'+name+'.bin','9');navigate(w,url,paint=False);save_title='Save '+('Gopher TLS' if scheme=='gophers' else scheme.capitalize())+' file';form=wait(lambda:next((item for item in windows() if item.get_wm_name()==save_title),None));check(form is not None,name+': binary navigation opens its native save form')
-                if extension=='cancel':
-                    point(form,530,613);check(wait(lambda:not any(item.get_wm_name()==save_title for item in windows())),name+': native cancel closes the save form')
-                    if a.large_transfers:
-                        if scheme=='guppy':
-                            def released():
-                                probe=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
-                                try:probe.bind(('127.0.0.1',records[since]['peer_port']));return True
-                                except OSError:return False
-                                finally:probe.close()
-                            check(wait(released),name+': native cancel releases the UDP source port')
-                        else:check(wait(lambda:any(r.get('closed_early') for r in records[since:])),name+': native cancel releases the pending transport')
                 else:
-                    point(form,642,130);chooser=wait(lambda:next((item for item in windows() if item.id not in [w.id,form.id]),None));check(chooser is not None,'Native binary destination chooser opens')
-                    target=runtime/(name+'.bin' if a.large_transfers else 'chosen-response.bin');focus(chooser);key(XK.XK_l,XK.XK_Control_L);key(XK.XK_a,XK.XK_Control_L);text(str(target));key(XK.XK_Return)
-                    check(wait(lambda:chooser.id not in [item.id for item in windows()]),'Native binary destination is selected');point(form,680,613);check(wait(lambda:target.exists() and target.read_bytes()==binary_body,seconds=60),'Binary navigation saves original file bytes')
+                    save_as(downloads/'alice')
+                    check(wait(lambda:(downloads/'alice').exists() and (downloads/'alice').read_bytes()==finger_body,seconds=60),'Finger Ctrl+S preserves original text encoding and line endings')
+            else:
+                url=address(scheme,'/'+name+'.bin','9');navigate(w,url,paint=False);download_ready()
+                if extension=='cancel':
+                    save_as(cancel=True)
+                    check(not list((runtime/'cache/dome-browser/downloads').glob('*.part')),name+': native cancel removes staging')
+                else:
+                    target=runtime/(name+'.bin' if a.large_transfers else 'chosen-response.bin');save_as(target)
+                    check(wait(lambda:target.exists() and target.read_bytes()==binary_body,seconds=60),'Binary navigation saves original file bytes')
                     if a.large_transfers:
-                        check(wait(lambda:json.loads((profile/'session.json').read_text())['tabs'][json.loads((profile/'session.json').read_text())['active']]['url']==url and url in str(w.get_wm_name())),name+': completed save commits its original resource address')
-                        focus(w);key(XK.XK_s,XK.XK_Control_L);source=downloads/(name+'.bin')
+                        check(wait(lambda:json.loads((profile/'session.json').read_text())['tabs'][json.loads((profile/'session.json').read_text())['active']]['url']==url),name+': completed download retains its original resource address')
+                        focus(w);key(XK.XK_s,XK.XK_Control_L);source=downloads/(name+'.bin');save_as(source)
                         check(wait(lambda:source.exists() and source.read_bytes()==binary_body,seconds=60),name+': Ctrl+S streams the complete original resource')
             if a.large_transfers and (scheme=='gopher+' or (scheme=='gophers' and a.gophers_plus)) and extension!='cancel' and a.gopher_framing in ['count','dot'] and a.transfer_mode!='reset':
                 check(wait(lambda:any(r.get('client_closed_after_frame') for r in records[since:])),name+': framed response completes while its server waits for client EOF')

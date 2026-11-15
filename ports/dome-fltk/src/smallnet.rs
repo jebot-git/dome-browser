@@ -204,29 +204,17 @@ impl Handler {
             self.save_resource(url,mime,bytes,download_filename(url).unwrap_or_else(||"download".into()),owner,context).await
         }
     }
-    async fn save_resource(&self,url:&Url,mime:&str,bytes:Vec<u8>,suggestion:String,owner:String,context:&FetchContext)->Result<Resource,Error> {
-        let label=protocol_label(url);
-        let spec=serde_json::json!({"title":format!("Save {label} file"),"origin":url.as_str(),"submit_label":"Save","description":"Choose a local destination for the retrieved file.",
-            "fields":[{"kind":"save","label":format!("{} ({} bytes)",mime,bytes.len()),"value":suggestion,"file_title":format!("Save {label} file"),"options":[]}]});
-        let answer=self.prompt_with_form(owner,String::new(),Some(spec.to_string()),context).await?;
-        let fields:serde_json::Value=serde_json::from_str(&answer).map_err(|_|Error::Address)?;
-        let path=fields.as_array().filter(|fields|fields.len()==1).and_then(|fields|fields[0]["value"].as_str()).ok_or(Error::Address)?;
-        let path=std::path::PathBuf::from(path);
-        if context.is_cancelled(){return Err(Error::Cancelled);}
-        tokio::task::spawn_blocking(move ||ask::save(&path,&bytes)).await.map_err(|_|Error::Transport)??;
-        Ok(Resource::Document(Content::html(document::plain(url,&format!("{label} file saved to the selected destination.")))))
+    // Return the original response to the shared download pipeline. SmallNet
+    // protocol prompts only collect remote input; destinations and MIME actions
+    // use the same native policy as HTTP, after successful transfer completion.
+    async fn save_resource(&self,_url:&Url,mime:&str,bytes:Vec<u8>,suggestion:String,_owner:String,_context:&FetchContext)->Result<Resource,Error> {
+        let mut content=Content::raw(bytes,mime.into());
+        content.filename=Some(suggestion);
+        Ok(Resource::Document(content))
     }
 
-    async fn save_transfer(&self,url:&Url,stream:transfer::Transfer,suggestion:String,owner:String,context:&FetchContext)->Result<Resource,Error> {
-        let label=protocol_label(url);
-        let size=stream.length.map(|n|format!("{n} bytes")).unwrap_or_else(||"streaming transfer".into());
-        let spec=serde_json::json!({"title":format!("Save {label} file"),"origin":url.as_str(),"submit_label":"Save","description":"Choose a local destination for this file.",
-            "fields":[{"kind":"save","label":format!("{} ({size})",stream.mime),"value":suggestion,"file_title":format!("Save {label} file"),"options":[]}]});
-        let answer=self.prompt_with_form(owner,String::new(),Some(spec.to_string()),context).await?;
-        let fields:serde_json::Value=serde_json::from_str(&answer).map_err(|_|Error::Address)?;
-        let path=fields.as_array().filter(|fields|fields.len()==1).and_then(|fields|fields[0]["value"].as_str()).ok_or(Error::Address)?;
-        stream.save(std::path::Path::new(path),context).await?;
-        Ok(Resource::Document(Content::html(document::plain(url,&format!("{label} file saved to the selected destination.")))))
+    async fn save_transfer(&self,_url:&Url,stream:transfer::Transfer,suggestion:String,_owner:String,_context:&FetchContext)->Result<Resource,Error> {
+        Ok(Resource::Stream(stream.as_attachment(suggestion)))
     }
 
     async fn query_input(&self,owner:String,target:&Url,message:&str,sensitive:bool,context:&FetchContext)->Result<String,Error> {

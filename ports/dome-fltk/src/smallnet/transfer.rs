@@ -16,6 +16,7 @@ pub(super) struct Transfer {
     reader:Box<dyn AsyncRead+Unpin+Send>,
     completion:Option<Completion>,
     destination:Option<PathBuf>,
+    filename:Option<String>,
 }
 enum Sink<'a> { Channel(&'a mpsc::UnboundedSender<Data>), File(&'a mut tokio::fs::File) }
 
@@ -33,11 +34,12 @@ async fn interrupt<T>(future:impl Future<Output=Result<T,Error>>,cancelled:&(imp
 }
 impl Transfer {
     pub(super) fn new(mime:String,length:Option<u64>,reader:impl AsyncRead+Unpin+Send+'static)->Self {
-        Self {mime,length,reader:Box::new(reader),completion:None,destination:None}
+        Self {mime,length,reader:Box::new(reader),completion:None,destination:None,filename:None}
     }
     pub(super) fn with_completion(mut self,future:impl Future<Output=Result<(),Error>>+Send+'static)->Self {
         self.completion=Some(Box::pin(future));self
     }
+    pub(super) fn as_attachment(mut self,name:String)->Self {self.filename=Some(name);self}
     pub(super) fn also_save_to(mut self,path:PathBuf)->Self {self.destination=Some(path);self}
     async fn pump(&mut self,sink:&mut Sink<'_>,cancelled:&(impl Fn()->bool+Sync))->Result<u64,Error> {
         let mut destination=match self.destination.take() {Some(path)=>Some(interrupt(Save::create(&path),cancelled).await?),None=>None};
@@ -78,6 +80,9 @@ impl Transfer {
     pub(super) fn response(mut self,url:url::Url,request:&Request,done:&mut DoneChannel,context:&FetchContext)->Response {
         let mut response=Response::new(url.into(),ResourceFetchTiming::new(request.timing_type()));
         response.headers.insert("content-type",self.mime.parse().expect("Locally selected MIME type"));
+        if let Some(name)=self.filename.take() {
+            response.headers.insert("content-disposition",format!("attachment; filename*=UTF-8''{}",percent_encoding::utf8_percent_encode(&name,percent_encoding::NON_ALPHANUMERIC)).parse().expect("Locally encoded download name"));
+        }
         if let Some(length)=self.length{response.headers.insert("content-length",length.to_string().parse().unwrap());}
         response.headers.insert("referrer-policy","no-referrer".parse().unwrap());
         response.headers.insert("x-content-type-options","nosniff".parse().unwrap());
