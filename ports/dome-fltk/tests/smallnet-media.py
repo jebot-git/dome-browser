@@ -201,7 +201,7 @@ def link_point(w,skip=0):
     image=frame(w);r,g,b=image.split();mask=ImageChops.multiply(ImageChops.subtract(b,r).point(lambda v:255 if v>=20 else 0),ImageChops.subtract(b,g).point(lambda v:255 if v>=20 else 0));pixels=mask.tobytes()
     last=-10
     for y in range(100,min(600,image.height-30)):
-        row=pixels[y*image.width:(y+1)*image.width];colored=[x for x,value in enumerate(row) if value==255]
+        row=pixels[y*image.width:(y+1)*image.width];colored=[x for x,value in enumerate(row) if 8<=x<image.width-8 and value==255]
         if len(colored)>=20:
             if y<=last+2:last=y;continue
             last=y
