@@ -34,6 +34,7 @@ mod turboshake_operation;
 mod x25519_operation;
 mod x448_operation;
 
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::marker::PhantomData;
 use std::ptr;
@@ -321,17 +322,17 @@ where
     fn resolve_promise_with_key_pair(
         &self,
         promise: &<D::Promise as PromiseHelpers<D>>::StackRoot,
-        key_pair: CryptoKeyPair<D>,
+        key_pair: &CryptoKeyPair<D>,
     ) {
-        let trusted_private_key = key_pair.privateKey.map(|key| Trusted::new(&*key));
-        let trusted_public_key = key_pair.publicKey.map(|key| Trusted::new(&*key));
+        let trusted_private_key = key_pair.privateKey.as_deref().map(Trusted::new);
+        let trusted_public_key = key_pair.publicKey.as_deref().map(Trusted::new);
         let trusted_promise = promise.to_trusted();
         self.global_from_reflector()
             .queue_crypto_task_source(task!(resolve_key: move |cx| {
-                let key_pair = CryptoKeyPair::<D> {
-                    privateKey: trusted_private_key.map(|trusted_key| trusted_key.root()),
-                    publicKey: trusted_public_key.map(|trusted_key| trusted_key.root()),
-                };
+                let key_pair = RootedTraceableBox::new(CryptoKeyPair::<D> {
+                    privateKey: trusted_private_key.map(|trusted_key| trusted_key.root().as_traced()),
+                    publicKey: trusted_public_key.map(|trusted_key| trusted_key.root().as_traced()),
+                });
                 let promise = trusted_promise.root(cx);
                 promise.resolve_native(cx, &key_pair);
             }));
@@ -915,7 +916,7 @@ where
                         subtle.resolve_promise_with_key(promise, &key);
                     },
                     CryptoKeyOrCryptoKeyPair::CryptoKeyPair(key_pair) => {
-                        subtle.resolve_promise_with_key_pair(promise, key_pair);
+                        subtle.resolve_promise_with_key_pair(promise, &key_pair);
                     },
                 }
             }));
@@ -1873,10 +1874,6 @@ where
                 // specified by normalizedSharedKeyAlgorithm using "raw-secret" as format, the
                 // sharedKey field of encapsulatedBits as keyData, sharedKeyAlgorithm as algorithm
                 // and using extractable and usages.
-                // Step 14. Set the [[extractable]] internal slot of sharedKey to extractable.
-                // Step 15. Set the [[usages]] internal slot of sharedKey to the normalized value
-                // of usages.
-                // NOTE: Step 14 and 15 are done by the importKey operation in Step 13.
                 let encapsulated_shared_key = match &encapsulated_bits.shared_key {
                     Some(shared_key) => shared_key,
                     None => {
@@ -1902,18 +1899,30 @@ where
                     },
                 };
 
-                // Step 16. Let encapsulatedKey be a new EncapsulatedKey dictionary with sharedKey
+                // Step 14. If usages is empty, then throw a SyntaxError.
+                if usages.is_empty() {
+                    subtle.reject_promise_with_error(promise, Error::Syntax(Some(
+                        "Usages is empty".into())));
+                    return;
+                }
+
+                // Step 15. Set the [[extractable]] internal slot of sharedKey to extractable.
+                // Step 16. Set the [[usages]] internal slot of sharedKey to the normalized value
+                // of usages.
+                // NOTE: Done by the importKey operation in Step 13.
+
+                // Step 17. Let encapsulatedKey be a new EncapsulatedKey dictionary with sharedKey
                 // set to sharedKey and ciphertext set to the ciphertext field of encapsulatedBits.
                 let encapsulated_key = EncapsulatedKey {
                     shared_key: Some(Trusted::new(&shared_key)),
                     ciphertext:encapsulated_bits.ciphertext,
                 };
 
-                // Step 17. Queue a global task on the crypto task source, given realm's global
+                // Step 18. Queue a global task on the crypto task source, given realm's global
                 // object, to perform the remaining steps.
-                // Step 18. Let result be the result of converting encapsulatedKey to an ECMAScript
+                // Step 19. Let result be the result of converting encapsulatedKey to an ECMAScript
                 // Object in realm, as defined by [WebIDL].
-                // Step 19. Resolve promise with result.
+                // Step 20. Resolve promise with result.
                 subtle.resolve_promise_with_encapsulated_key(promise, encapsulated_key);
             })
         );
@@ -2115,10 +2124,6 @@ where
                 // specified by normalizedSharedKeyAlgorithm using "raw-secret" as format, the
                 // decapsulatedBits as keyData, sharedKeyAlgorithm as algorithm and using
                 // extractable and usages.
-                // Step 15. Set the [[extractable]] internal slot of sharedKey to extractable.
-                // Step 16. Set the [[usages]] internal slot of sharedKey to the normalized value
-                // of usages.
-                // NOTE: Step 15 and 16 are done by the importKey operation in Step 14.
                 let shared_key_result = normalized_shared_key_algorithm.import_key(
                     cx,
                     &*subtle.global_from_reflector(),
@@ -2135,11 +2140,23 @@ where
                     },
                 };
 
-                // Step 17. Queue a global task on the crypto task source, given realm's global
+                // Step 15. If usages is empty, then throw a SyntaxError.
+                if usages.is_empty() {
+                    subtle.reject_promise_with_error(promise, Error::Syntax(Some(
+                        "Usages is empty".into())));
+                    return;
+                }
+
+                // Step 16. Set the [[extractable]] internal slot of sharedKey to extractable.
+                // Step 17. Set the [[usages]] internal slot of sharedKey to the normalized value
+                // of usages.
+                // NOTE: Done by the importKey operation in Step 14.
+
+                // Step 18. Queue a global task on the crypto task source, given realm's global
                 // object, to perform the remaining steps.
-                // Step 18. Let result be the result of converting sharedKey to an ECMAScript
+                // Step 19. Let result be the result of converting sharedKey to an ECMAScript
                 // Object in realm, as defined by [WebIDL].
-                // Step 19. Resolve promise with result.
+                // Step 20. Resolve promise with result.
                 subtle.resolve_promise_with_key(promise, &shared_key);
             }));
         promise
@@ -4200,6 +4217,36 @@ impl ExportedKey {
     }
 }
 
+/// Given a byte sequence containing a bit sequence, truncate the bit sequence, keeping the first
+/// `length` bits.
+///
+/// If `length` is greater or equal to `bit_sequqnce.len() * 8`, this function has no effect.
+fn truncate_bit_sequence(bit_sequence: &mut Vec<u8>, length: usize) {
+    bit_sequence.truncate(length.div_ceil(8));
+
+    // Set the excess bits in the last byte to zero.
+    if length < bit_sequence.len() * 8 &&
+        let Some(last_byte) = bit_sequence.last_mut()
+    {
+        *last_byte &= u8::MAX << (8 - length % 8);
+    }
+}
+
+/// Given a Keccak encoding of a bit string, truncate the bit string, keeping the first `length`
+/// bits.
+///
+/// If `length` is greater or equal to `bit_string.len() * 8`, this function has no effect.
+fn truncate_keccak_bit_string(bit_string: &mut Vec<u8>, length: usize) {
+    bit_string.truncate(length.div_ceil(8));
+
+    // Set the excess bits in the last byte to zero.
+    if length < bit_string.len() * 8 &&
+        let Some(last_byte) = bit_string.last_mut()
+    {
+        *last_byte &= u8::MAX >> (8 - length % 8);
+    }
+}
+
 /// Union type of KeyAlgorithm and IDL dictionary types derived from it. Note that we actually use
 /// our "subtle" structs of the corresponding IDL dictionary types so that they can be easily
 /// passed to another threads.
@@ -4292,6 +4339,7 @@ impl From<&KeyAlgorithmAndDerivatives> for SerializableKeyAlgorithmAndDerivative
     }
 }
 
+/// [`JsonWebKey`] fields that are [`DOMString`].
 #[derive(Clone, Copy)]
 enum JwkStringField {
     X,
@@ -4330,28 +4378,62 @@ impl Display for JwkStringField {
     }
 }
 
-trait JsonWebKeyExt {
+/// Helper functions for [`JsonWebKey`].
+trait JsonWebKeyHelper {
+    /// <https://w3c.github.io/webcrypto/#concept-parse-a-jwk>
     fn parse(cx: &mut JSContext, data: &[u8]) -> Result<JsonWebKey, Error>;
+
+    /// Convert a JsonWebKey value to DOMString. We first convert the JsonWebKey value to
+    /// JavaScript value, and then serialize it by performing steps in
+    /// <https://infra.spec.whatwg.org/#serialize-a-javascript-value-to-a-json-string>. This acts
+    /// like the opposite of JsonWebKey::parse if you further convert the stringified result to
+    /// bytes.
     fn stringify(&self, cx: &mut JSContext) -> Result<Zeroizing<DOMString>, Error>;
+
+    /// Get key usages from "key_ops" JWK members.
     fn get_usages_from_key_ops(&self) -> Result<Vec<KeyUsage>, Error>;
+
+    /// If the key_ops field of jwk is present, and is invalid according to the requirements of
+    /// JSON Web Key (JWK) or does not contain all of the specified usages values, then throw a
+    /// `DataError`.
     fn check_key_ops(&self, specified_usages: &[KeyUsage]) -> Result<(), Error>;
+
+    /// Set the key_ops attribute of jwk to equal the given usages.
     fn set_key_ops(&mut self, usages: &[KeyUsage]);
+
+    /// Encode a byte sequence to a Base64URL-encoded string, and set the field to the encoded
+    /// string.
     fn encode_string_field(&mut self, field: JwkStringField, data: &[u8]);
+
+    /// Decode a field from a Base64URL-encoded string to a byte sequence. If the field is not a
+    /// valid base64url-encoded string, then throw a `DataError`.
     fn decode_optional_string_field(
         &self,
         field: JwkStringField,
     ) -> Result<Option<Zeroizing<Vec<u8>>>, Error>;
+
+    /// Decode a field from a Base64URL-encoded string to a byte sequence. If the field is not
+    /// present or it is not a valid Base64URL-encoded string, then throw a `DataError`.
     fn decode_required_string_field(
         &self,
         field: JwkStringField,
     ) -> Result<Zeroizing<Vec<u8>>, Error>;
+
+    /// Decode the "r", "d" and "t" field of each entry in the "oth" array, from a Base64URL-encoded
+    /// string to a byte sequence, and append the decoded "r" field to the `primes` list, in the
+    /// order of presence in the "oth" array.
+    ///
+    /// If the "oth" field is present and any of the "p", "q", "dp", "dq" or "qi" field is not
+    /// present, then throw a `DataError`. For each entry in the "oth" array, if any of the "r", "d"
+    /// and "t" field is not present or it is not a valid Base64URL-encoded string, then throw a
+    /// `DataError`.
     fn decode_primes_from_oth_field(
         &self,
         primes: &mut Vec<Zeroizing<Vec<u8>>>,
     ) -> Result<(), Error>;
 }
 
-impl JsonWebKeyExt for JsonWebKey {
+impl JsonWebKeyHelper for JsonWebKey {
     /// <https://w3c.github.io/webcrypto/#concept-parse-a-jwk>
     #[expect(unsafe_code)]
     fn parse(cx: &mut JSContext, data: &[u8]) -> Result<JsonWebKey, Error> {
@@ -4396,11 +4478,6 @@ impl JsonWebKeyExt for JsonWebKey {
         Ok(key)
     }
 
-    /// Convert a JsonWebKey value to DOMString. We first convert the JsonWebKey value to
-    /// JavaScript value, and then serialize it by performing steps in
-    /// <https://infra.spec.whatwg.org/#serialize-a-javascript-value-to-a-json-string>. This acts
-    /// like the opposite of JsonWebKey::parse if you further convert the stringified result to
-    /// bytes.
     fn stringify(&self, cx: &mut JSContext) -> Result<Zeroizing<DOMString>, Error> {
         rooted!(&in(cx) let mut data = UndefinedValue());
         self.to_jsval(cx, data.handle_mut());
@@ -4420,20 +4497,14 @@ impl JsonWebKeyExt for JsonWebKey {
         Ok(usages)
     }
 
-    /// If the key_ops field of jwk is present, and is invalid according to the requirements of
-    /// JSON Web Key [JWK] or does not contain all of the specified usages values, then throw a
-    /// DataError.
     fn check_key_ops(&self, specified_usages: &[KeyUsage]) -> Result<(), Error> {
         // If the key_ops field of jwk is present,
         if let Some(ref key_ops) = self.key_ops {
             // and is invalid according to the requirements of JSON Web Key [JWK]:
+            //
+            // <https://www.rfc-editor.org/info/rfc7517/#section-4.3>
             // 1. Duplicate key operation values MUST NOT be present in the array.
-            if key_ops
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len() <
-                key_ops.len()
-            {
+            if key_ops.iter().collect::<HashSet<_>>().len() < key_ops.len() {
                 return Err(Error::Data(Some(
                     "Duplicate key operation values are present in array".into(),
                 )));
@@ -4463,7 +4534,6 @@ impl JsonWebKeyExt for JsonWebKey {
         Ok(())
     }
 
-    // Set the key_ops attribute of jwk to equal the given usages.
     fn set_key_ops(&mut self, usages: &[KeyUsage]) {
         self.key_ops = Some(
             usages
@@ -4473,8 +4543,6 @@ impl JsonWebKeyExt for JsonWebKey {
         );
     }
 
-    // Encode a byte sequence to a base64url-encoded string, and set the field to the encoded
-    // string.
     fn encode_string_field(&mut self, field: JwkStringField, data: &[u8]) {
         let encoded_data = DOMString::from(Base64UrlUnpadded::encode_string(data));
         match field {
@@ -4494,8 +4562,6 @@ impl JsonWebKeyExt for JsonWebKey {
         }
     }
 
-    // Decode a field from a base64url-encoded string to a byte sequence. If the field is not a
-    // valid base64url-encoded string, then throw a DataError.
     fn decode_optional_string_field(
         &self,
         field: JwkStringField,
@@ -4525,8 +4591,6 @@ impl JsonWebKeyExt for JsonWebKey {
             .map_err(|_| Error::Data(Some(format!("Failed to decode {} field in jwk", field))))
     }
 
-    // Decode a field from a base64url-encoded string to a byte sequence. If the field is not
-    // present or it is not a valid base64url-encoded string, then throw a DataError.
     fn decode_required_string_field(
         &self,
         field: JwkStringField,
@@ -4538,14 +4602,6 @@ impl JsonWebKeyExt for JsonWebKey {
             ))))
     }
 
-    // Decode the "r", "d" and "t" field of each entry in the "oth" array, from a base64url-encoded
-    // string to a byte sequence, and append the decoded "r" field to the `primes` list, in the
-    // order of presence in the "oth" array.
-    //
-    // If the "oth" field is present and any of the "p", "q", "dp", "dq" or "qi" field is not
-    // present, then throw a DataError. For each entry in the "oth" array, if any of the "r", "d"
-    // and "t" field is not present or it is not a valid base64url-encoded string, then throw a
-    // DataError.
     fn decode_primes_from_oth_field(
         &self,
         primes: &mut Vec<Zeroizing<Vec<u8>>>,
@@ -4558,7 +4614,7 @@ impl JsonWebKeyExt for JsonWebKey {
                 self.qi.is_none())
         {
             return Err(Error::Data(Some(
-                "The oth field is present while at least one of p, q, dp, dq, qi is missing, in jwk".to_string()
+                "The oth field is present while at least one of p, q, dp, dq, qi is missing".into(),
             )));
         }
 
@@ -4568,14 +4624,13 @@ impl JsonWebKeyExt for JsonWebKey {
                     .r
                     .as_ref()
                     .ok_or(Error::Data(Some(
-                        "The r field is not present in one of the entry of oth field in jwk"
-                            .to_string(),
+                        "The r field is not present in one of the entry of oth field in jwk".into(),
                     )))?
                     .str(),
             )
             .map_err(|_| {
                 Error::Data(Some(
-                    "Fail to decode r field in one of the entry of oth field in jwk".to_string(),
+                    "Fail to decode r field in one of the entry of oth field in jwk".into(),
                 ))
             })?;
             primes.push(Zeroizing::new(r));
@@ -4585,14 +4640,13 @@ impl JsonWebKeyExt for JsonWebKey {
                     .d
                     .as_ref()
                     .ok_or(Error::Data(Some(
-                        "The d field is not present in one of the entry of oth field in jwk"
-                            .to_string(),
+                        "The d field is not present in one of the entry of oth field in jwk".into(),
                     )))?
                     .str(),
             )
             .map_err(|_| {
                 Error::Data(Some(
-                    "Fail to decode d field in one of the entry of oth field in jwk".to_string(),
+                    "Fail to decode d field in one of the entry of oth field in jwk".into(),
                 ))
             })?;
 
@@ -4601,14 +4655,13 @@ impl JsonWebKeyExt for JsonWebKey {
                     .t
                     .as_ref()
                     .ok_or(Error::Data(Some(
-                        "The t field is not present in one of the entry of oth field in jwk"
-                            .to_string(),
+                        "The t field is not present in one of the entry of oth field in jwk".into(),
                     )))?
                     .str(),
             )
             .map_err(|_| {
                 Error::Data(Some(
-                    "Fail to decode t field in one of the entry of oth field in jwk".to_string(),
+                    "Fail to decode t field in one of the entry of oth field in jwk".into(),
                 ))
             })?;
         }

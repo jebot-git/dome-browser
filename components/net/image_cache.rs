@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::{mem, thread_local};
 
 use base64::Engine as _;
+use embedder_traits::resources::ResourceBytes;
 use imsz::imsz_from_reader;
 use log::{debug, error, warn};
 use malloc_size_of::{MallocConditionalSizeOf, MallocSizeOf as MallocSizeOfTrait, MallocSizeOfOps};
@@ -19,7 +20,7 @@ use mime::Mime;
 use net_traits::image_cache::{
     FontResolver, Image, ImageCache, ImageCacheFactory, ImageCacheResponseCallback,
     ImageCacheResponseMessage, ImageCacheResult, ImageLoadListener, ImageOrMetadataAvailable,
-    ImageResponse, PendingImageId, RasterizationCompleteResponse, VectorImage,
+    ImageResponse, PendingImageId, RasterizationCompleteResponse, RasterizationResult, VectorImage,
 };
 use net_traits::request::CorsSettings;
 use net_traits::{FetchResponseMsg, Metadata, NetworkError};
@@ -40,6 +41,8 @@ use webrender_api::ImageKey as WebRenderImageKey;
 use webrender_api::units::DeviceIntSize;
 
 use crate::image_cache::KeyCacheState::PipelineClosed;
+
+const MAX_SVG_DEPTH: u32 = 500;
 
 thread_local! {
     pub static SUPPRESS_ABORT_IN_PANIC_HOOK: Cell<bool> = const { Cell::new(false) };
@@ -680,7 +683,7 @@ impl ImageCacheStore {
             Some(load) => load,
             None => return,
         };
-        let url = pending_load.final_url.clone();
+        let url = pending_load.final_url;
         let image_response = match load_result {
             LoadResult::LoadedRasterImage(mut raster_image) => {
                 assert!(raster_image.id.is_some());
@@ -836,13 +839,13 @@ impl ImageCacheStore {
 
 pub struct ImageCacheFactoryImpl {
     /// The data to use for the broken image icon used when images cannot load.
-    broken_image_icon_data: Arc<Vec<u8>>,
+    broken_image_icon_data: Arc<ResourceBytes>,
     /// Thread pool for image decoding
     thread_pool: Arc<ThreadPool>,
 }
 
 impl ImageCacheFactoryImpl {
-    pub fn new(broken_image_icon_data: Vec<u8>) -> Self {
+    pub fn new(broken_image_icon_data: ResourceBytes) -> Self {
         debug!("Creating new ImageCacheFactoryImpl");
 
         Self {
@@ -880,6 +883,7 @@ impl ImageCacheFactory for ImageCacheFactoryImpl {
             },
             font_resolver: usvg_font_resolver,
             fontdb: Arc::new(fontdb::Database::new()),
+            max_depth: MAX_SVG_DEPTH,
             ..usvg::Options::default()
         };
 
@@ -911,7 +915,7 @@ pub struct ImageCacheImpl {
     /// Maps an SVGElement uuid to a pending image id in the store
     svg_id_image_id_map: Arc<Mutex<FxHashMap<Uuid, PendingImageId>>>,
     /// The data to use for the broken image icon used when images cannot load.
-    broken_image_icon_data: Arc<Vec<u8>>,
+    broken_image_icon_data: Arc<ResourceBytes>,
     /// Thread pool for image decoding. This is shared with other [`ImageCache`]s in the
     /// same process.
     thread_pool: Arc<ThreadPool>,
@@ -1087,11 +1091,11 @@ impl ImageCache for ImageCacheImpl {
         image_id: PendingImageId,
         requested_size: DeviceIntSize,
         svg_id: Option<Uuid>,
-    ) -> Option<RasterImage> {
+    ) -> RasterizationResult {
         let mut store = self.store.lock();
         let Some(vector_image) = store.vector_images.get(&image_id).cloned() else {
             warn!("Unknown image id {image_id:?} requested for rasterization");
-            return None;
+            return RasterizationResult::InvalidSvgParameters;
         };
 
         // This early return relies on the fact that the result of image rasterization cannot
@@ -1102,7 +1106,7 @@ impl ImageCache for ImageCacheImpl {
             .entry((image_id, requested_size))
             .or_default();
         if let Some(result) = entry.result.as_ref() {
-            return Some(result.clone());
+            return RasterizationResult::Image(result.clone());
         }
 
         if let Some(svg_id) = svg_id {
@@ -1111,14 +1115,12 @@ impl ImageCache for ImageCacheImpl {
             self.svg_id_image_id_map.lock().insert(svg_id, image_id);
         }
 
-        if store
-            .svg_rasterization_task_store
-            .is_or_set_being_rasterized(image_id, requested_size)
-        {
-            return None;
-        }
-
         let natural_size = vector_image.svg_tree.size().to_int_size();
+        let natural_tinyskia_size = {
+            let width = natural_size.width().min(MAX_SVG_PIXMAP_DIMENSION);
+            let height = natural_size.height().min(MAX_SVG_PIXMAP_DIMENSION);
+            tiny_skia::IntSize::from_wh(width, height)
+        };
         let tinyskia_requested_size = {
             let width = requested_size
                 .width
@@ -1130,19 +1132,26 @@ impl ImageCache for ImageCacheImpl {
                 .try_into()
                 .unwrap_or(0)
                 .min(MAX_SVG_PIXMAP_DIMENSION);
-            tiny_skia::IntSize::from_wh(width, height).unwrap_or(natural_size)
+            tiny_skia::IntSize::from_wh(width, height).or(natural_tinyskia_size)
+        };
+        let Some(tinyskia_requested_size) = tinyskia_requested_size else {
+            debug!(
+                "Asked for requested size {:?} which has zero size, and natural size {:?} has zero dimension. Not returning image",
+                requested_size, natural_size
+            );
+            return RasterizationResult::InvalidSvgParameters;
         };
 
-        // Requirements from tiny_skia::Pixmap::new
-        if tinyskia_requested_size.width() == 0
-            || tinyskia_requested_size.width() > (i32::MAX / 4).try_into().unwrap()
-            || tinyskia_requested_size.height() == 0
+        if natural_tinyskia_size.is_none() {
+            debug!("SVG natural size has zero dimension. Not returning image");
+            return RasterizationResult::InvalidSvgParameters;
+        }
+
+        if store
+            .svg_rasterization_task_store
+            .is_or_set_being_rasterized(image_id, requested_size)
         {
-            debug!(
-                "Asked for requested size {:?} which has zero size. Not returning image",
-                requested_size
-            );
-            return None;
+            return RasterizationResult::PendingRasterization;
         }
 
         let store = self.store.clone();
@@ -1214,7 +1223,7 @@ impl ImageCache for ImageCacheImpl {
                 },
             }
         });
-        None
+        RasterizationResult::PendingRasterization
     }
 
     fn prepare_image_for_svg_snapshot(
@@ -1331,22 +1340,21 @@ impl ImageCache for ImageCacheImpl {
                 if let Some(pending_load) = store.pending_loads.get_by_key_mut(&id) {
                     let (cors_status, metadata): (_, Option<Metadata>) = match response {
                         Ok(fetch_metadata) => {
-                            let cors_status = if fetch_metadata.is_cors_cross_origin() {
-                                CorsStatus::Unsafe
-                            } else {
-                                CorsStatus::Safe
-                            };
-                            (cors_status, Some(fetch_metadata.into()))
+                            (fetch_metadata.cors_status(), Some(fetch_metadata.into()))
                         },
                         Err(_) => (CorsStatus::Unsafe, None),
                     };
-                    let final_url = metadata.as_ref().map(|m| m.final_url.clone());
+                    let (final_url, content_type) = metadata.map_or((None, None), |metadata| {
+                        (
+                            Some(metadata.final_url),
+                            metadata
+                                .content_type
+                                .map(|content_type| content_type.into_inner().into()),
+                        )
+                    });
                     pending_load.final_url = final_url;
+                    pending_load.content_type = content_type;
                     pending_load.cors_status = cors_status;
-                    pending_load.content_type = metadata
-                        .as_ref()
-                        .and_then(|metadata| metadata.content_type.clone())
-                        .map(|content_type| content_type.into_inner().into());
                 } else {
                     debug!("Pending load for id {:?} already evicted from cache", id);
                 }
@@ -1452,8 +1460,11 @@ impl ImageCache for ImageCacheImpl {
         store
             .broken_image_icon_image
             .get_or_init(|| {
-                let mut image = load_from_memory(&self.broken_image_icon_data, CorsStatus::Unsafe)
-                    .or_else(|| load_from_memory(FALLBACK_RIPPY, CorsStatus::Unsafe))?;
+                let mut image = load_from_memory(
+                    self.broken_image_icon_data.as_ref().as_ref(),
+                    CorsStatus::Unsafe,
+                )
+                .or_else(|| load_from_memory(FALLBACK_RIPPY, CorsStatus::Unsafe))?;
                 let image_key = store
                     .paint_api
                     .generate_image_key_blocking(store.webview_id)

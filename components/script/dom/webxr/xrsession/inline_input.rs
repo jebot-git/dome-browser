@@ -31,14 +31,14 @@ impl ScreenPointerSample {
         self.canvas.upcast::<EventTarget>() == target
     }
 
-    pub(crate) fn from_hit(hit: &HitTestResult) -> Option<Self> {
+    pub(crate) fn from_hit(cx: &mut JSContext, hit: &HitTestResult) -> Option<Self> {
         let canvas = DomRoot::from_ref(hit.node.downcast::<HTMLCanvasElement>()?);
         let node = canvas.upcast::<Node>();
         let window = node.owner_window();
         // Hit testing already inverts the fragment's CSS transforms. Use the
         // same untransformed box, excluding border/padding from the ray area.
-        let content = window.box_area_query(node, BoxAreaType::Content, true)?;
-        let border = window.box_area_query(node, BoxAreaType::Border, true)?;
+        let content = window.box_area_query(cx, node, BoxAreaType::Content, true)?;
+        let border = window.box_area_query(cx, node, BoxAreaType::Border, true)?;
         let width = content.size.width.to_f32_px();
         let height = content.size.height.to_f32_px();
         if width <= 0.0 || height <= 0.0 {

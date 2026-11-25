@@ -99,10 +99,7 @@ impl OscillatorNodeMethods<crate::DomTypeHolder> for OscillatorNode {
             ))));
         }
 
-        let maybe_periodic_wave = options
-            .periodicWave
-            .as_ref()
-            .map(|x| (*x.as_traced()).convert());
+        let maybe_periodic_wave = options.periodicWave.as_deref().map(|x| x.convert());
 
         let options = ServoMediaOscillatorOptions {
             oscillator_type: convert_oscillator_options(oscillator_type, maybe_periodic_wave)?,
@@ -185,7 +182,9 @@ impl OscillatorNodeMethods<crate::DomTypeHolder> for OscillatorNode {
     /// <https://webaudio.github.io/web-audio-api/#dom-oscillatornode-type>
     fn SetType(&self, type_: OscillatorType) -> ErrorResult {
         if type_ == OscillatorType::Custom {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "Use setPeriodicWave() to set a custom type".into(),
+            )));
         }
         self.oscillator_type.set(type_);
         self.source_node

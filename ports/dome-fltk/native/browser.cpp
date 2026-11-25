@@ -200,7 +200,10 @@ public:
       case FL_PUSH: take_focus(); emit(11,1,Fl::event_button(),px,py); return 1;
       case FL_RELEASE: emit(11,0,Fl::event_button(),px,py); return 1;
       case FL_MOVE: case FL_DRAG: emit(12,px,py,Fl::event_state()); return 1;
-      case FL_MOUSEWHEEL: emit(13,Fl::event_dx(),Fl::event_dy(),px,py); return 1;
+      case FL_MOUSEWHEEL:
+        // Snapshot modifiers with the queued wheel event; later FLTK events
+        // can change the global event state before Rust drains the queue.
+        emit(13,Fl::event_dx(),Fl::event_dy(),px,py,std::to_string(Fl::event_state()).c_str()); return 1;
       case FL_KEYDOWN: case FL_KEYUP:
         if (event==FL_KEYDOWN) {
           // FLTK delivers marked text as synthetic keydowns. Its compose

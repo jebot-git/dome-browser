@@ -15,6 +15,7 @@ use servo_arc::Arc as ServoArc;
 use style::selector_parser::PseudoElement;
 use style::values::specified::box_::{Display, Overflow};
 
+use crate::containing_block::{ConstraintSpace, ContainingBlock, ContainingBlockSize};
 use crate::context::LayoutContext;
 use crate::dom_traversal::{Contents, NodeAndStyleInfo, NonReplacedContents, PseudoElementContentItem};
 use crate::formatting_contexts::IndependentFormattingContext;
@@ -23,7 +24,6 @@ use crate::geom::{LogicalVec2, PhysicalPoint, PhysicalRect, PhysicalSides, Physi
 use crate::positioned::PositioningContext;
 use crate::sizing::{InlineContentSizesResult, LazySize, SizeConstraint};
 use crate::style_ext::DisplayInside;
-use crate::{ConstraintSpace, ContainingBlock, ContainingBlockSize};
 
 #[derive(Debug, MallocSizeOf)]
 pub(crate) struct ImageFallback {
@@ -67,7 +67,7 @@ impl ImageFallback {
     pub(crate) fn block_size(&self, context: &LayoutContext, inline: Au) -> Au {
         let flow = self.flow.borrow();
         let cb = ContainingBlock {
-            size: ContainingBlockSize { inline, block: SizeConstraint::default() },
+            size: ContainingBlockSize::new(inline, SizeConstraint::default()),
             style: &flow.base.style,
         };
         flow.layout(
@@ -80,9 +80,9 @@ impl ImageFallback {
         let flow = self.flow.borrow();
         let logical = LogicalVec2::from_physical_size(&size, flow.base.style.writing_mode);
         let cb = ContainingBlock {
-            size: ContainingBlockSize {
-                inline: logical.inline, block: SizeConstraint::Definite(logical.block),
-            },
+            size: ContainingBlockSize::new(
+                logical.inline, SizeConstraint::Definite(logical.block),
+            ),
             style: &flow.base.style,
         };
         let layout = flow.layout(

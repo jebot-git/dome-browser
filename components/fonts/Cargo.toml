@@ -16,9 +16,11 @@ test = true
 doctest = false
 
 [features]
-# DomeD uses native BDF fonts and its shared HarfBuzz fork by default.
-# Other font formats and the upstream bundled shaper require an explicit build.
+# Native bitmap faces require the system HarfBuzz callbacks by default.
+default = ["harfbuzz"]
 outline-fonts = ["dep:fontsan", "harfbuzz-sys/bundled"]
+harfbuzz = ["dep:harfbuzz-sys"]
+harfrust = ["dep:harfrust", "harfbuzz"]
 # Compile FreeType from source (freetype-sys/bundled) instead of searching
 # via pkg-config. If this feature is disabled, and pkg-config fails to find a
 # suitable freetype version, the build will fail!
@@ -36,7 +38,8 @@ font-types = { workspace = true }
 fonts_traits = { workspace = true }
 fontsan = { workspace = true, optional = true }
 # FIXME (#34517): macOS only needs this when building servo without `--features media-gstreamer`
-harfbuzz-sys = { workspace = true, default-features = false }
+harfbuzz-sys = { workspace = true, optional = true, default-features = false }
+harfrust = { workspace = true, optional = true }
 icu_locale_core = { workspace = true }
 icu_properties = { workspace = true, features = ["compiled_data"] }
 itertools = { workspace = true }
@@ -73,7 +76,7 @@ webrender_api = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 byteorder = { workspace = true }
-harfbuzz-sys = { workspace = true, features = ["coretext"] }
+harfbuzz-sys = { workspace = true, optional = true, features = ["coretext"] }
 objc2 = { workspace = true }
 objc2-core-foundation = { workspace = true }
 objc2-core-graphics = { workspace = true }
@@ -81,7 +84,7 @@ objc2-core-text = { workspace = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))'.dependencies]
 freetype-sys = { workspace = true }
-harfbuzz-sys = { workspace = true, features = ["freetype"] }
+harfbuzz-sys = { workspace = true, optional = true, features = ["freetype"] }
 servo-allocator = { workspace = true }
 
 [target.'cfg(all(any(target_os = "linux", target_os = "freebsd"), not(target_env = "ohos")))'.dependencies]
@@ -96,7 +99,7 @@ freetype-sys = { workspace = true, features = ["bundled"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 dwrote = { workspace = true }
-harfbuzz-sys = { workspace = true, features = ["directwrite"] }
+harfbuzz-sys = { workspace = true, optional = true, features = ["directwrite"] }
 winapi = { workspace = true }
 
 [lints]

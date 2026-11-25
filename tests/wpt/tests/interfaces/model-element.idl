@@ -3,8 +3,16 @@
 // (https://github.com/w3c/webref)
 // Source: The <model> element (https://immersive-web.github.io/model-element/)
 
-[Exposed=Window]
+[Exposed=Window, SecureContext]
 interface HTMLModelElement : HTMLElement {
+  [CEReactions, Reflect] attribute unsigned long width;
+  [CEReactions, Reflect] attribute unsigned long height;
+  [CEReactions, ReflectURL] attribute USVString src;
+  [CEReactions, Reflect] attribute boolean autoplay;
+  [CEReactions, Reflect] attribute boolean loop;
+  [CEReactions] attribute DOMString? crossOrigin;
+  [CEReactions, ReflectURL] attribute USVString poster;
+
   readonly attribute Promise<HTMLModelElement> ready;
   readonly attribute DOMPointReadOnly boundingBoxCenter;
   readonly attribute DOMPointReadOnly boundingBoxExtents;

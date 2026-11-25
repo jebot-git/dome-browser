@@ -6,7 +6,10 @@
 
 use crate::derives::*;
 use crate::queries::feature::{AllowsRanges, Evaluator, FeatureFlags, QueryFeatureDescription};
-use crate::queries::values::{Orientation, PrefersColorScheme};
+use crate::queries::values::{
+    Orientation, PrefersColorScheme, PrefersContrast, PrefersReducedMotion,
+    PrefersReducedTransparency,
+};
 use crate::values::computed::{CSSPixelLength, Context, Ratio, Resolution};
 use std::fmt::Debug;
 
@@ -32,6 +35,12 @@ fn eval_device_height(context: &Context) -> CSSPixelLength {
     let device = context.device();
     let scaled = device.device_size() / device.device_pixel_ratio();
     CSSPixelLength::new(scaled.height)
+}
+
+/// <https://drafts.csswg.org/mediaqueries-4/#device-aspect-ratio>
+fn eval_device_aspect_ratio(context: &Context) -> Ratio {
+    let size = context.device().device_size();
+    Ratio::new(size.width, size.height)
 }
 
 /// https://drafts.csswg.org/mediaqueries-4/#orientation
@@ -70,9 +79,39 @@ fn eval_prefers_color_scheme(context: &Context, query_value: Option<PrefersColor
     }
 }
 
+fn eval_prefers_contrast(context: &Context, query_value: Option<PrefersContrast>) -> bool {
+    let contrast = context.device().contrast();
+    match query_value {
+        Some(v) => contrast == v,
+        None => contrast != PrefersContrast::NoPreference,
+    }
+}
+
+fn eval_prefers_reduced_motion(
+    context: &Context,
+    query_value: Option<PrefersReducedMotion>,
+) -> bool {
+    let reduced_motion = context.device().reduced_motion();
+    match query_value {
+        Some(v) => reduced_motion == v,
+        None => reduced_motion != PrefersReducedMotion::NoPreference,
+    }
+}
+
+fn eval_prefers_reduced_transparency(
+    context: &Context,
+    query_value: Option<PrefersReducedTransparency>,
+) -> bool {
+    let reduced_transparency = context.device().reduced_transparency();
+    match query_value {
+        Some(v) => reduced_transparency == v,
+        None => reduced_transparency != PrefersReducedTransparency::NoPreference,
+    }
+}
+
 bitflags! {
     /// https://drafts.csswg.org/mediaqueries-4/#mf-interaction
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct PointerCapabilities: u8 {
         /// The input mechanism includes a pointing device of limited accuracy, such as a finger on a touchscreen.
         const COARSE = 0b001;
@@ -160,7 +199,7 @@ fn eval_aspect_ratio(context: &Context) -> Ratio {
 }
 
 /// A list with all the media features that Servo supports.
-pub static MEDIA_FEATURES: [QueryFeatureDescription; 15] = [
+pub static MEDIA_FEATURES: [QueryFeatureDescription; 19] = [
     feature!(
         atom!("width"),
         AllowsRanges::Yes,
@@ -222,6 +261,12 @@ pub static MEDIA_FEATURES: [QueryFeatureDescription; 15] = [
         FeatureFlags::empty(),
     ),
     feature!(
+        atom!("device-aspect-ratio"),
+        AllowsRanges::Yes,
+        Evaluator::NumberRatio(eval_device_aspect_ratio),
+        FeatureFlags::empty(),
+    ),
+    feature!(
         atom!("scan"),
         AllowsRanges::No,
         keyword_evaluator!(eval_scan, Scan),
@@ -249,6 +294,27 @@ pub static MEDIA_FEATURES: [QueryFeatureDescription; 15] = [
         atom!("prefers-color-scheme"),
         AllowsRanges::No,
         keyword_evaluator!(eval_prefers_color_scheme, PrefersColorScheme),
+        FeatureFlags::empty(),
+    ),
+    feature!(
+        atom!("prefers-contrast"),
+        AllowsRanges::No,
+        keyword_evaluator!(eval_prefers_contrast, PrefersContrast),
+        FeatureFlags::empty(),
+    ),
+    feature!(
+        atom!("prefers-reduced-motion"),
+        AllowsRanges::No,
+        keyword_evaluator!(eval_prefers_reduced_motion, PrefersReducedMotion),
+        FeatureFlags::empty(),
+    ),
+    feature!(
+        atom!("prefers-reduced-transparency"),
+        AllowsRanges::No,
+        keyword_evaluator!(
+            eval_prefers_reduced_transparency,
+            PrefersReducedTransparency
+        ),
         FeatureFlags::empty(),
     ),
 ];

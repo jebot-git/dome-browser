@@ -2,29 +2,33 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::path::Path;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll, Waker};
 
-use egui::{
-    Area, Button, CornerRadius, Frame, Id, Modal, Order, RichText, Sense, Stroke, Vec2, pos2,
-};
-use egui_file_dialog::{DialogState, FileDialog as EguiFileDialog, Filter};
-use euclid::Length;
+use egui::{Area, Button, CornerRadius, Frame, Id, Modal, Order, RichText, Sense, Stroke, Vec2};
+use itertools::Either;
 use log::{error, warn};
+use rfd::AsyncFileDialog;
 use servo::{
     AlertDialog, AuthenticationRequest, BluetoothDeviceSelectionRequest, ColorPicker,
-    ConfirmDialog, ContextMenu, ContextMenuItem, DeviceIndependentPixel, EmbedderControlId,
-    FilePicker, PermissionRequest, PromptDialog, RgbColor, SelectElement, SelectElementOption,
+    ConfirmDialog, ContextMenu, ContextMenuItem, DeviceIntRect, EmbedderControlId, FilePicker,
+    PermissionRequest, PromptDialog, RgbColor, SelectElement, SelectElementOption,
     SelectElementOptionOrOptgroup, SimpleDialog,
 };
+use winit::window::Window as WinitWindow;
+
+use crate::desktop::event_loop::RepaintEventLoopWaker;
 
 /// The minimum width of many UI elements including dialog boxes and menus,
 /// for the sake of consistency.
 const MINIMUM_UI_ELEMENT_WIDTH: f32 = 150.0;
 
-#[expect(clippy::large_enum_variant)]
 pub enum Dialog {
     File {
-        dialog: EguiFileDialog,
+        future: Pin<Box<dyn Future<Output = Option<Vec<PathBuf>>>>>,
+        waker: Waker,
         maybe_picker: Option<FilePicker>,
     },
     Alert(Option<AlertDialog>),
@@ -45,39 +49,61 @@ pub enum Dialog {
     },
     SelectElement {
         maybe_prompt: Option<SelectElement>,
-        toolbar_offset: Length<f32, DeviceIndependentPixel>,
     },
     ColorPicker {
         current_color: egui::Color32,
         maybe_prompt: Option<ColorPicker>,
-        toolbar_offset: Length<f32, DeviceIndependentPixel>,
     },
     ContextMenu {
         menu: Option<ContextMenu>,
-        toolbar_offset: Length<f32, DeviceIndependentPixel>,
     },
 }
 
 impl Dialog {
-    pub fn new_file_dialog(file_picker: FilePicker) -> Self {
-        let mut dialog = EguiFileDialog::new();
+    pub fn new_file_dialog(
+        file_picker: FilePicker,
+        window: &WinitWindow,
+        waker: RepaintEventLoopWaker,
+    ) -> Self {
+        let mut dialog = AsyncFileDialog::new().set_parent(&window);
         if !file_picker.filter_patterns().is_empty() {
-            let filter_patterns = file_picker.filter_patterns().to_owned();
-            let filter = Filter::new(move |path: &Path| {
-                path.extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|ext| {
-                        let ext = ext.to_lowercase();
-                        filter_patterns.iter().any(|pattern| ext == pattern.0)
-                    })
-            });
-            dialog = dialog
-                .add_file_filter("All Supported Types", filter)
-                .default_file_filter("All Supported Types");
+            let filters: Vec<_> = file_picker
+                .filter_patterns()
+                .iter()
+                .map(|pattern| pattern.0.clone())
+                .collect();
+            dialog = dialog.add_filter("All Supported Types", &filters);
         }
 
+        // We need to call `pick_files` / pick_file` outside of the closure here
+        // in order to ensure they are called at least one time to trigger the
+        // dialog properly.
+        // `webkitdirectory` only allows selecting one folder.
+        let future = if file_picker.select_directory() {
+            Either::Right(Either::Left(dialog.pick_folder()))
+        } else if file_picker.allow_select_multiple() {
+            Either::Left(dialog.pick_files())
+        } else {
+            Either::Right(Either::Right(dialog.pick_file()))
+        };
+
+        let future = Box::pin(async move {
+            let handles = match future {
+                Either::Left(future) => future.await,
+                Either::Right(Either::Left(folder)) => folder.await.map(|handle| vec![handle]),
+                Either::Right(Either::Right(file)) => file.await.map(|handle| vec![handle]),
+            };
+            handles.map(|handles| {
+                handles
+                    .iter()
+                    .map(|handle| handle.path().to_owned())
+                    .collect::<Vec<_>>()
+            })
+        });
+
         Dialog::File {
-            dialog,
+            future,
+            waker: Waker::from(Arc::new(waker)),
             maybe_picker: Some(file_picker),
         }
     }
@@ -116,20 +142,13 @@ impl Dialog {
         }
     }
 
-    pub fn new_select_element_dialog(
-        prompt: SelectElement,
-        toolbar_offset: Length<f32, DeviceIndependentPixel>,
-    ) -> Self {
+    pub fn new_select_element_dialog(prompt: SelectElement) -> Self {
         Dialog::SelectElement {
             maybe_prompt: Some(prompt),
-            toolbar_offset,
         }
     }
 
-    pub fn new_color_picker_dialog(
-        prompt: ColorPicker,
-        toolbar_offset: Length<f32, DeviceIndependentPixel>,
-    ) -> Self {
+    pub fn new_color_picker_dialog(prompt: ColorPicker) -> Self {
         let current_color = prompt
             .current_color()
             .map(|color| egui::Color32::from_rgb(color.red, color.green, color.blue))
@@ -137,12 +156,11 @@ impl Dialog {
         Dialog::ColorPicker {
             current_color,
             maybe_prompt: Some(prompt),
-            toolbar_offset,
         }
     }
 
     /// Returns false if the dialog has been closed, or true otherwise.
-    pub fn update(&mut self, ctx: &egui::Context) -> bool {
+    pub fn update(&mut self, ctx: &egui::Context, webview_rect: egui::Rect) -> bool {
         enum DialogAction {
             Dismiss,
             Submit,
@@ -151,36 +169,24 @@ impl Dialog {
 
         match self {
             Dialog::File {
-                dialog,
+                future,
+                waker,
                 maybe_picker,
             } => {
-                let action = maybe_picker
-                    .as_mut()
-                    .map(|picker| {
-                        if *dialog.state() == DialogState::Closed {
-                            if picker.allow_select_multiple() {
-                                dialog.pick_multiple();
-                            } else {
-                                dialog.pick_file();
-                            }
-                        }
-
-                        let state = dialog.update(ctx).state();
-                        match state {
-                            DialogState::Open => DialogAction::Continue,
-                            DialogState::Picked(path) => {
-                                let paths = std::slice::from_ref(path);
-                                picker.select(paths);
+                let action = match maybe_picker.as_mut() {
+                    Some(picker) => {
+                        let mut context = Context::from_waker(waker);
+                        match future.as_mut().poll(&mut context) {
+                            Poll::Ready(Some(file_paths)) => {
+                                picker.select(&file_paths);
                                 DialogAction::Submit
                             },
-                            DialogState::PickedMultiple(paths) => {
-                                picker.select(paths);
-                                DialogAction::Submit
-                            },
-                            DialogState::Cancelled | DialogState::Closed => DialogAction::Dismiss,
+                            Poll::Ready(None) => DialogAction::Dismiss,
+                            Poll::Pending => DialogAction::Continue,
                         }
-                    })
-                    .unwrap_or(DialogAction::Dismiss);
+                    },
+                    None => DialogAction::Dismiss,
+                };
 
                 match action {
                     DialogAction::Dismiss => {
@@ -464,21 +470,16 @@ impl Dialog {
                 });
                 is_open
             },
-            Dialog::SelectElement {
-                maybe_prompt,
-                toolbar_offset,
-            } => {
+            Dialog::SelectElement { maybe_prompt } => {
                 let Some(prompt) = maybe_prompt else {
                     // Prompt was dismissed, so the dialog should be closed too.
                     return false;
                 };
                 let mut is_open = true;
 
-                let mut position = prompt.position();
-                position.min.y += toolbar_offset.0 as i32;
-                position.max.y += toolbar_offset.0 as i32;
-                let area = egui::Area::new(egui::Id::new("select-window"))
-                    .fixed_pos(egui::pos2(position.min.x as f32, position.max.y as f32));
+                let rect = Self::webview_rect_to_egui_rect(ctx, webview_rect, prompt.position());
+                let area =
+                    egui::Area::new(egui::Id::new("select-window")).fixed_pos(rect.left_bottom());
 
                 let mut selected_options = prompt.selected_options();
 
@@ -590,7 +591,6 @@ impl Dialog {
             Dialog::ColorPicker {
                 current_color,
                 maybe_prompt,
-                toolbar_offset,
             } => {
                 let Some(prompt) = maybe_prompt else {
                     // Prompt was dismissed, so the dialog should be closed too.
@@ -598,11 +598,9 @@ impl Dialog {
                 };
                 let mut is_open = true;
 
-                let mut position = prompt.position();
-                position.min.y += toolbar_offset.0 as i32;
-                position.max.y += toolbar_offset.0 as i32;
-                let area = egui::Area::new(egui::Id::new("select-window"))
-                    .fixed_pos(egui::pos2(position.min.x as f32, position.max.y as f32));
+                let rect = Self::webview_rect_to_egui_rect(ctx, webview_rect, prompt.position());
+                let area =
+                    egui::Area::new(egui::Id::new("select-window")).fixed_pos(rect.left_bottom());
 
                 let modal = Modal::new("select_element_picker".into()).area(area);
                 let backdrop_response = modal
@@ -640,19 +638,15 @@ impl Dialog {
 
                 is_open
             },
-            Dialog::ContextMenu {
-                menu,
-                toolbar_offset,
-            } => {
+            Dialog::ContextMenu { menu } => {
                 let mut is_open = true;
                 if let Some(context_menu) = menu {
                     let mut selected_action = None;
-                    let mut position = context_menu.position();
-                    position.min.y += toolbar_offset.0 as i32;
-                    position.max.y += toolbar_offset.0 as i32;
+                    let rect =
+                        Self::webview_rect_to_egui_rect(ctx, webview_rect, context_menu.position());
 
                     let response = Area::new(Id::new("context_menu"))
-                        .fixed_pos(pos2(position.min.x as f32, position.min.y as f32))
+                        .fixed_pos(rect.left_bottom())
                         .order(Order::Foreground)
                         .show(ctx, |ui| {
                             Frame::popup(ui.style()).show(ui, |ui| {
@@ -741,14 +735,21 @@ impl Dialog {
         }
     }
 
-    pub(crate) fn new_context_menu(
-        menu: ContextMenu,
-        toolbar_offset: Length<f32, DeviceIndependentPixel>,
-    ) -> Dialog {
-        Dialog::ContextMenu {
-            menu: Some(menu),
-            toolbar_offset,
-        }
+    pub(crate) fn new_context_menu(menu: ContextMenu) -> Dialog {
+        Dialog::ContextMenu { menu: Some(menu) }
+    }
+
+    fn webview_rect_to_egui_rect(
+        context: &egui::Context,
+        webview_rect: egui::Rect,
+        rect: DeviceIntRect,
+    ) -> egui::Rect {
+        let rect = rect.to_f32() / context.pixels_per_point();
+        egui::Rect::from_min_max(
+            egui::Pos2::new(rect.min.x, rect.min.y),
+            egui::Pos2::new(rect.max.x, rect.max.y),
+        )
+        .translate(webview_rect.min.to_vec2())
     }
 }
 

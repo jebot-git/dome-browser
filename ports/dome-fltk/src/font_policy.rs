@@ -21,8 +21,8 @@ impl Settings {
         prefs.fonts_monospace = self.family.clone();
         prefs.fonts_serif = self.family.clone();
         prefs.fonts_sans_serif = self.family.clone();
-        prefs.fonts_default_size = self.pixels as i64;
-        prefs.fonts_default_monospace_size = self.pixels as i64;
+        prefs.fonts_default_size = u64::from(self.pixels);
+        prefs.fonts_default_monospace_size = u64::from(self.pixels);
     }
 
     pub fn update(&self, servo: &servo::Servo) {

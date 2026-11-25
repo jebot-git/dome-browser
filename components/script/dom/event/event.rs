@@ -15,6 +15,7 @@ use js::rust::HandleObject;
 use keyboard_types::{Key, NamedKey};
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::PointerEventBinding::PointerEventMethods;
+use script_bindings::domstring::TracedDOMString;
 use script_bindings::match_domstring_ascii;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_proto};
 use script_bindings::traits::DomEventTrait;
@@ -303,6 +304,7 @@ impl Event {
         self.dispatch_inner(cx, target, legacy_target_override, None)
     }
 
+    /// <https://dom.spec.whatwg.org/#concept-event-dispatch>
     fn dispatch_inner(
         &self,
         cx: &mut JSContext,
@@ -402,8 +404,8 @@ impl Event {
                 false,
             );
 
-            // Step 6.4. Let isActivationEvent be true, if event is a MouseEvent object and
-            // event’s type attribute is "click"; otherwise false.
+            // Step 6.4. Let isActivationEvent be true, if event is a MouseEvent object and event’s
+            // type attribute is "click"; otherwise false.
             let is_activation_event = self.is::<MouseEvent>() && self.type_() == atom!("click");
 
             // Step 6.5. If isActivationEvent is true and target has activation behavior,
@@ -933,7 +935,7 @@ impl EventMethods<crate::DomTypeHolder> for Event {
 
     /// <https://dom.spec.whatwg.org/#dom-event-type>
     fn Type(&self) -> DOMString {
-        DOMString::from(&*self.type_()) // FIXME(ajeffrey): Directly convert from Atom to DOMString
+        TracedDOMString::from(self.type_()).root()
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-target>
@@ -954,14 +956,14 @@ impl EventMethods<crate::DomTypeHolder> for Event {
     /// <https://dom.spec.whatwg.org/#dom-event-composedpath>
     fn ComposedPath(&self) -> Vec<DomRoot<EventTarget>> {
         // Step 1. Let composedPath be an empty list.
-        let mut composed_path = vec![];
+        let mut reversed_composed_path = vec![];
 
         // Step 2. Let path be this’s path.
         let path = self.path.borrow();
 
         // Step 3. If path is empty, then return composedPath.
         if path.is_empty() {
-            return composed_path;
+            return reversed_composed_path;
         }
 
         // Step 4. Let currentTarget be this’s currentTarget attribute value.
@@ -969,7 +971,7 @@ impl EventMethods<crate::DomTypeHolder> for Event {
 
         // Step 5. Append currentTarget to composedPath.
         // TODO: https://github.com/whatwg/dom/issues/1343
-        composed_path.push(current_target.clone().expect(
+        reversed_composed_path.push(current_target.clone().expect(
             "Since the event's path is not empty it is being dispatched and must have a current target",
         ));
 
@@ -1023,8 +1025,10 @@ impl EventMethods<crate::DomTypeHolder> for Event {
 
             // Step 12.2 If currentHiddenLevel is less than or equal to maxHiddenLevel,
             // then prepend path[index]'s invocation target to composedPath.
+            //
+            // Note: prepend one by one is slow. Reverse once after loop.
             if current_hidden_level <= max_hidden_level {
-                composed_path.insert(0, element.invocation_target.as_rooted());
+                reversed_composed_path.push(element.invocation_target.as_rooted());
             }
 
             // Step 12.3 If path[index]'s slot-in-closed-tree is true:
@@ -1042,6 +1046,9 @@ impl EventMethods<crate::DomTypeHolder> for Event {
             // Step 12.4 Decrease index by 1.
         }
 
+        // Reverse once to achieve step 12.2's prepend.
+        reversed_composed_path.reverse();
+        let mut composed_path = reversed_composed_path;
         // Step 13. Set currentHiddenLevel and maxHiddenLevel to currentTargetHiddenSubtreeLevel.
         current_hidden_level = current_target_hidden_subtree_level;
         max_hidden_level = current_target_hidden_subtree_level;

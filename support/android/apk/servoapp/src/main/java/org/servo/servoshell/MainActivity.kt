@@ -10,9 +10,7 @@ import android.content.SharedPreferences
 import android.os.Bundle
 import android.system.ErrnoException
 import android.system.Os
-import android.util.Log
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.component1
@@ -54,21 +52,17 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
-import androidx.lifecycle.lifecycleScope
 import androidx.preference.PreferenceManager
 import androidx.window.core.layout.WindowSizeClass
 import kotlinx.coroutines.launch
+import org.servo.servoview.LoadingState
 import org.servo.servoview.Servo
 import org.servo.servoview.ServoNavigator
 
 class MainActivity : ComponentActivity(), Servo.Client {
     private val urlTextFieldState = TextFieldState()
-    private var isRefreshing by mutableStateOf(false)
-    private lateinit var mediaSession: MediaSession
-    private lateinit var historyManager: HistoryManager
-    private var currentUrl = ""
-    private var currentTitle = ""
-    private var softKeyboardVisible by mutableStateOf(false)
+    private var currentUrl: String? = null
+    private var currentTitle: String? = null
     private var alertMessage by mutableStateOf<String?>(null)
 
     private class Settings(preferences: SharedPreferences) {
@@ -79,22 +73,9 @@ class MainActivity : ComponentActivity(), Servo.Client {
         super.onCreate(savedInstanceState)
 
         val sharedPreferences = PreferenceManager.getDefaultSharedPreferences(applicationContext)
-        var settings = Settings(sharedPreferences)
+        val settings = Settings(sharedPreferences)
         val navigator = ServoNavigator()
-        val servo =
-            Servo(
-                args = intent.getStringExtra("servoargs"),
-                url = if (Intent.ACTION_VIEW == intent.action) intent.data.toString() else null,
-                logStr = intent.getStringExtra("servolog"),
-                experimentalMode = settings.experimental,
-                scope = lifecycleScope,
-                client = this,
-                context = this,
-                navigator = navigator,
-            )
-
-        mediaSession = MediaSession(servo, applicationContext)
-        historyManager = HistoryManager(this)
+        var experimentalModeEnabled by mutableStateOf(settings.experimental)
 
         val historyActivityResultLauncher =
             registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
@@ -110,11 +91,8 @@ class MainActivity : ComponentActivity(), Servo.Client {
 
         setContent {
             LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
-                val updatedSettings = Settings(sharedPreferences)
-                if (updatedSettings.experimental != settings.experimental) {
-                    servo.setExperimentalMode(updatedSettings.experimental)
-                }
-                settings = updatedSettings
+                val settings = Settings(sharedPreferences)
+                experimentalModeEnabled = settings.experimental
             }
 
             val isWindowWidthAtLeastMedium =
@@ -122,6 +100,7 @@ class MainActivity : ComponentActivity(), Servo.Client {
                     .windowSizeClass
                     .isWidthAtLeastBreakpoint(WindowSizeClass.WIDTH_DP_MEDIUM_LOWER_BOUND)
 
+            var loadingState by remember { mutableStateOf(LoadingState.Loading) }
             val servoFocusRequester = remember { FocusRequester() }
             Scaffold(
                 topBar = {
@@ -147,20 +126,23 @@ class MainActivity : ComponentActivity(), Servo.Client {
                             }
                             IconButton(
                                 onClick = {
-                                    if (isRefreshing) onCancelMenuItemClicked(navigator)
-                                    else onRefreshMenuItemClicked(navigator)
-                                }
+                                    when (loadingState) {
+                                        LoadingState.Loading -> onCancelMenuItemClicked(navigator)
+                                        LoadingState.Finished -> onRefreshMenuItemClicked(navigator)
+                                    }
+                                },
                             ) {
-                                if (isRefreshing) {
-                                    Icon(
-                                        painterResource(R.drawable.cancel),
-                                        stringResource(R.string.cancel),
-                                    )
-                                } else {
-                                    Icon(
-                                        painterResource(R.drawable.refresh),
-                                        stringResource(R.string.refresh),
-                                    )
+                                when (loadingState) {
+                                    LoadingState.Loading ->
+                                        Icon(
+                                            painterResource(R.drawable.cancel),
+                                            stringResource(R.string.cancel),
+                                        )
+                                    LoadingState.Finished ->
+                                        Icon(
+                                            painterResource(R.drawable.refresh),
+                                            stringResource(R.string.refresh),
+                                        )
                                 }
                             }
                         }
@@ -172,9 +154,9 @@ class MainActivity : ComponentActivity(), Servo.Client {
                             },
                             modifier = Modifier.weight(1f).padding(end = 10.dp),
                         )
-                        if (isRefreshing) {
+                        if (loadingState == LoadingState.Loading) {
                             CircularProgressIndicator(
-                                modifier = Modifier.padding(end = 10.dp).size(20.dp)
+                                modifier = Modifier.padding(end = 10.dp).size(20.dp),
                             )
                         }
                         if (isWindowWidthAtLeastMedium) {
@@ -187,7 +169,7 @@ class MainActivity : ComponentActivity(), Servo.Client {
                             IconButton(
                                 onClick = {
                                     onHistoryMenuItemClicked(historyActivityResultLauncher)
-                                }
+                                },
                             ) {
                                 Icon(
                                     painterResource(R.drawable.history),
@@ -214,20 +196,21 @@ class MainActivity : ComponentActivity(), Servo.Client {
                                 icon = { Icon(painterResource(R.drawable.arrow_forward), null) },
                                 label = { Text(stringResource(R.string.history_forward)) },
                             )
-                            if (isRefreshing) {
-                                NavigationBarItem(
-                                    selected = false,
-                                    onClick = { onCancelMenuItemClicked(navigator) },
-                                    icon = { Icon(painterResource(R.drawable.cancel), null) },
-                                    label = { Text(stringResource(R.string.cancel)) },
-                                )
-                            } else {
-                                NavigationBarItem(
-                                    selected = false,
-                                    onClick = { onRefreshMenuItemClicked(navigator) },
-                                    icon = { Icon(painterResource(R.drawable.refresh), null) },
-                                    label = { Text(stringResource(R.string.refresh)) },
-                                )
+                            when (loadingState) {
+                                LoadingState.Loading ->
+                                    NavigationBarItem(
+                                        selected = false,
+                                        onClick = { onCancelMenuItemClicked(navigator) },
+                                        icon = { Icon(painterResource(R.drawable.cancel), null) },
+                                        label = { Text(stringResource(R.string.cancel)) },
+                                    )
+                                LoadingState.Finished ->
+                                    NavigationBarItem(
+                                        selected = false,
+                                        onClick = { onRefreshMenuItemClicked(navigator) },
+                                        icon = { Icon(painterResource(R.drawable.refresh), null) },
+                                        label = { Text(stringResource(R.string.refresh)) },
+                                    )
                             }
                             NavigationBarItem(
                                 selected = false,
@@ -248,12 +231,22 @@ class MainActivity : ComponentActivity(), Servo.Client {
                 },
             ) { innerPadding ->
                 Servo(
-                    softKeyboardVisible = softKeyboardVisible,
-                    servo = servo,
+                    experimentalModeEnabled = experimentalModeEnabled,
+                    args = intent.getStringExtra("servoargs"),
+                    initialUrl =
+                        if (Intent.ACTION_VIEW == intent.action) intent.data.toString() else null,
+                    logStr = intent.getStringExtra("servolog"),
+                    onLoadingStateChange = { loadingState = it },
+                    client = this,
                     navigator = navigator,
                     modifier = Modifier.padding(innerPadding).focusRequester(servoFocusRequester),
                 )
-                BackHandler(enabled = navigator.canGoBack) { navigator.back() }
+                val historyManager = remember { HistoryManager(this) }
+                if (loadingState == LoadingState.Finished) {
+                    currentUrl?.let { currentUrl ->
+                        historyManager.addEntry(currentUrl, currentTitle)
+                    }
+                }
                 LaunchedEffect(servoFocusRequester) { servoFocusRequester.requestFocus() }
                 alertMessage?.let { alertMessage ->
                     AlertDialog(
@@ -278,11 +271,6 @@ class MainActivity : ComponentActivity(), Servo.Client {
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        mediaSession.hideMediaSessionControls()
-    }
-
     private fun onHistoryBackMenuItemClicked(navigator: ServoNavigator) {
         navigator.back()
     }
@@ -304,40 +292,13 @@ class MainActivity : ComponentActivity(), Servo.Client {
     }
 
     private fun onHistoryMenuItemClicked(
-        historyActivityResultLauncher: ActivityResultLauncher<Intent>
+        historyActivityResultLauncher: ActivityResultLauncher<Intent>,
     ) {
         historyActivityResultLauncher.launch(Intent(this, HistoryActivity::class.java))
     }
 
-    override fun onImeShow() {
-        softKeyboardVisible = true
-    }
-
-    override fun onImeHide() {
-        softKeyboardVisible = false
-    }
-
     override fun onAlert(message: String) {
         alertMessage = message
-    }
-
-    override fun onLoadStarted() {
-        // This doesn’t seem to actually happen when navigating
-        // back to a page that is already cached.
-        Log.i(TAG, "onLoadStarted: ")
-        isRefreshing = true
-    }
-
-    // INFO: This currently gets called multiple times on each load.
-    override fun onLoadEnded() {
-        Log.i(TAG, "onLoadEnded: ")
-        if (currentUrl.isNotEmpty()) {
-            // HistoryManager has a basic method of preventing clobbering
-            // by the fact that onLoadEnded gets called multiple times
-            // per page.
-            historyManager.addEntry(currentUrl, currentTitle)
-        }
-        isRefreshing = false
     }
 
     override fun onTitleChanged(title: String) {
@@ -347,39 +308,6 @@ class MainActivity : ComponentActivity(), Servo.Client {
     override fun onUrlChanged(url: String) {
         urlTextFieldState.edit { replace(0, length, url) }
         currentUrl = url
-    }
-
-    override fun onMediaSessionMetadata(title: String, artist: String, album: String) {
-        Log.d("onMediaSessionMetadata", "$title $artist $album")
-        mediaSession.updateMetadata(title, artist, album)
-    }
-
-    override fun onMediaSessionPlaybackStateChange(state: Int) {
-        Log.d("onMediaSessionPlaybackStateChange", state.toString())
-        mediaSession.setPlaybackState(state)
-
-        if (state == MediaSession.PLAYBACK_STATE_NONE) {
-            mediaSession.hideMediaSessionControls()
-            return
-        }
-        if (
-            state == MediaSession.PLAYBACK_STATE_PLAYING ||
-                state == MediaSession.PLAYBACK_STATE_PAUSED
-        ) {
-            mediaSession.showMediaSessionControls()
-        }
-    }
-
-    override fun onMediaSessionSetPositionState(
-        duration: Float,
-        position: Float,
-        playbackRate: Float,
-    ) {
-        Log.d("onMediaSessionSetPositionState", "$duration $position $playbackRate")
-    }
-
-    companion object {
-        private const val TAG = "MainActivity"
     }
 }
 

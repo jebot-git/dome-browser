@@ -312,6 +312,9 @@ bitflags! {
         /// a red text decoration
         #[cfg(feature = "gecko")]
         const COLOR_OVERRIDE = 1 << 7;
+
+        /// Flags that can be mixed.
+        const MIXED_FLAGS = Self::UNDERLINE.0 | Self::OVERLINE.0 | Self::LINE_THROUGH.0 | Self::BLINK.0;
     }
 }
 

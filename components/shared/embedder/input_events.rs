@@ -259,7 +259,7 @@ impl MouseButtonEvent {
 /// The types of mouse buttons.
 ///
 /// <https://w3c.github.io/pointerevents/#the-button-property>
-#[derive(Clone, Copy, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, MallocSizeOf, PartialEq, Serialize)]
 pub enum MouseButton {
     #[doc(hidden)]
     None,
@@ -537,7 +537,16 @@ pub struct WheelEvent {
 }
 
 impl WheelEvent {
-    pub fn new(delta: WheelDelta, point: WebViewPoint) -> Self {
+    /// Create a new [`WheelEvent`]. The modifiers passed should be the current set
+    /// of keyboard modifiers. This is used to adjust the scroll direction with the
+    /// modifiers.
+    pub fn new(mut delta: WheelDelta, point: WebViewPoint, modifiers: Modifiers) -> Self {
+        // If this is a purely vertical scroll, then the shift key should turn it into
+        // a horizontal scroll. Some platforms might do the rotation on their on so it's
+        // important not to unrotate accidentally.
+        if modifiers.contains(Modifiers::SHIFT) && delta.x == 0. && delta.z == 0. {
+            std::mem::swap(&mut delta.x, &mut delta.y);
+        }
         WheelEvent { delta, point }
     }
 }
@@ -545,7 +554,12 @@ impl WheelEvent {
 /// The types of an input method event.
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub enum ImeEvent {
+    /// See [CompositionEvent].
     Composition(CompositionEvent),
+    /// The input method committed text. Note that this can be sent without
+    /// an active composition.
+    Commit(String),
+    /// The input method was dismissed.
     Dismissed,
 }
 

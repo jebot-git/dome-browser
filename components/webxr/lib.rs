@@ -16,6 +16,8 @@ pub mod openxr;
 pub mod compatibility;
 pub mod native_cleanup;
 pub mod pending_context;
+pub mod inline;
+
 pub mod surfman_layer_manager;
 pub use surfman_layer_manager::{SurfmanGL, SurfmanLayerManager};
 pub type MainThreadRegistry = webxr_api::MainThreadRegistry<surfman_layer_manager::SurfmanGL>;

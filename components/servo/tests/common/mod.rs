@@ -12,11 +12,12 @@ use dpi::PhysicalSize;
 use embedder_traits::EventLoopWaker;
 use paint_api::rendering_context::{RenderingContext, SoftwareRenderingContext};
 use servo::{
-    ConsoleLogLevel, EmbedderControl, InputEvent, InputEventId, InputEventResult, JSValue,
-    JavaScriptEvaluationError, LoadStatus, MouseButton, MouseButtonAction, MouseButtonEvent,
-    MouseMoveEvent, Preferences, Servo, ServoBuilder, SimpleDialog, WebView, WebViewDelegate,
+    ConsoleLogLevel, DeviceIntRect, EmbedderControl, InputEvent, InputEventId, InputEventResult,
+    JSValue, JavaScriptEvaluationError, LoadStatus, MouseButton, MouseButtonAction,
+    MouseButtonEvent, MouseMoveEvent, Preferences, Servo, ServoBuilder, SimpleDialog, WebView,
+    WebViewDelegate,
 };
-use webrender_api::units::DevicePoint;
+use webrender_api::units::{DevicePoint, DeviceRect};
 
 pub struct ServoTest {
     pub servo: Servo,
@@ -117,6 +118,23 @@ impl WebViewDelegateImpl {
         self.crashes.set(0);
         *self.input_event_result.borrow_mut() = None;
     }
+
+    pub fn last_embedder_control_rect(&self) -> DeviceIntRect {
+        self.controls_shown
+            .borrow()
+            .last()
+            .map(|control| match control {
+                EmbedderControl::SelectElement(select_element) => select_element.position(),
+                EmbedderControl::ColorPicker(color_picker) => color_picker.position(),
+                EmbedderControl::FilePicker(..) => Default::default(),
+                EmbedderControl::InputMethod(input_method_control) => {
+                    input_method_control.position()
+                },
+                EmbedderControl::SimpleDialog(..) => Default::default(),
+                EmbedderControl::ContextMenu(context_menu) => context_menu.position(),
+            })
+            .unwrap_or_default()
+    }
 }
 
 impl WebViewDelegate for WebViewDelegateImpl {
@@ -134,7 +152,7 @@ impl WebViewDelegate for WebViewDelegateImpl {
     }
 
     fn notify_load_status_changed(&self, _webview: WebView, status: LoadStatus) {
-        if status == LoadStatus::Complete {
+        if matches!(status, LoadStatus::Complete | LoadStatus::Stopped) {
             self.load_status_changed.set(true);
         }
     }
@@ -216,7 +234,12 @@ pub(crate) fn evaluate_javascript(
     webview: WebView,
     script: impl ToString,
 ) -> Result<JSValue, JavaScriptEvaluationError> {
-    let _ = servo_test.spin(|| webview.load_status() != LoadStatus::Complete);
+    let _ = servo_test.spin(|| {
+        !matches!(
+            webview.load_status(),
+            LoadStatus::Complete | LoadStatus::Stopped,
+        )
+    });
 
     let saved_result = Rc::new(RefCell::new(None));
     let callback_result = saved_result.clone();
@@ -239,7 +262,12 @@ pub(crate) fn show_webview_and_wait_for_rendering_to_be_ready(
     webview: &WebView,
     delegate: &Rc<WebViewDelegateImpl>,
 ) {
-    servo_test.spin(|| webview.load_status() != LoadStatus::Complete);
+    servo_test.spin(|| {
+        !matches!(
+            webview.load_status(),
+            LoadStatus::Complete | LoadStatus::Stopped,
+        )
+    });
 
     delegate.reset();
 

@@ -230,8 +230,10 @@ impl Cache {
                 vec![request.Signal(), state.controller.signal()],
                 &global,
             );
+            // RequestInit::empty() returns a rooted dictionary, so its traced
+            // signal remains alive while Fetch creates the dependent request.
             let mut init = RequestInit::empty();
-            init.signal = Some(Some(signal));
+            init.signal = Some(Some(signal.as_traced()));
             let mut realm = enter_auto_realm(cx, &*global);
             let cx = &mut realm.current_realm();
             let fetched = Fetch(&global, RequestInfo::Request(request), &init, cx);

@@ -43,6 +43,7 @@ use markup5ever::TokenizerResult;
 use mime::{self, Mime};
 use net_traits::mime_classifier::{ApacheBugFlag, MediaType, MimeClassifier, NoSniffFlag};
 use net_traits::policy_container::{EmbedderPolicy, PolicyContainer};
+use net_traits::response::RedirectTaint;
 use net_traits::{
     FetchMetadata, LoadContext, Metadata, NetworkError, ReferrerPolicy, ResourceFetchTiming,
 };
@@ -537,23 +538,32 @@ impl ServoParser {
 
     /// <https://html.spec.whatwg.org/multipage/#abort-a-parser>
     pub(crate) fn abort(&self, cx: &mut JSContext, reason: AbortReason) {
-        assert!(!self.aborted.get());
+        // This can happen if, for example, a `readystatechange` handler that runs during
+        // an abort calls `stop()` another time.
+        if self.aborted.get() {
+            return;
+        }
+
         self.aborted.set(true);
 
-        // Step 1.
+        // Step 1. Throw away any pending content in the input stream, and discard any future
+        // content that would have been added to it.
         self.script_input.replace_with(BufferQueue::default());
         self.network_input.replace_with(BufferQueue::default());
 
-        // Step 2.
+        // Step 2. Stop the speculative HTML parser for this HTML parser.
+        // TODO: Implement this.
+
+        // Step 3. Update the current document readiness to "interactive".
         self.document
             .update_the_current_document_readiness(cx, DocumentReadyState::Interactive);
 
-        // Step 3.
+        // Step 4. Pop all the nodes off the stack of open elements.
         self.tokenizer.end(cx);
         self.document
             .set_current_parser(None, SetParserReason::Abort(reason));
 
-        // Step 4.
+        // Step 5. Update the current document readiness to "complete".
         self.document
             .update_the_current_document_readiness(cx, DocumentReadyState::Complete);
     }
@@ -727,7 +737,8 @@ impl ServoParser {
             )
         });
 
-        if self.suspended.get() {
+        // Tokenizing can cause parsing to be suspended or aborted.
+        if self.suspended.get() || self.aborted.get() {
             return;
         }
 
@@ -978,6 +989,8 @@ struct NavigationParams {
     download_response_ok: bool,
     /// link headers from the response
     link_headers: Vec<LinkHeader>,
+    /// redirect taint from the response
+    redirect_taint: RedirectTaint,
     /// <https://html.spec.whatwg.org/multipage/#navigation-params-sandboxing>
     final_sandboxing_flag_set: SandboxingFlagSet,
     /// <https://mimesniff.spec.whatwg.org/#resource-header>
@@ -1049,6 +1062,7 @@ impl ParserContext {
                 resource_header: vec![],
                 about_base_url: Default::default(),
                 iframe_element_referrer_policy: Default::default(),
+                redirect_taint: Default::default(),
             },
             target_snapshot_params,
             source_origin,
@@ -1376,7 +1390,7 @@ impl ParserContext {
     /// Load a JSON document with a pretty-printing, interactive viewer.
     fn load_json_document(&mut self, cx: &mut JSContext, parser: &ServoParser) {
         self.initialize_document_object(cx, &parser.document);
-        parser.push_string_input_chunk(resources::read_string(Resource::JsonViewerHTML));
+        parser.push_string_input_chunk(String::from_utf8(resources::read_bytes(Resource::JsonViewerHTML).as_ref().to_vec()).expect("Built-in document resource must be UTF-8"));
         parser.parse_sync(cx);
         parser.tokenizer.set_plaintext_state();
         self.process_link_headers_in_media_phase_with_task(&parser.document);
@@ -1468,25 +1482,27 @@ impl ParserContext {
         // Step 21.9. Set responsePolicyContainer to the result of creating a
         // policy container from a fetch response given response and request's
         // reserved client.
-        let (mut policy_container, endpoints_list, link_headers, content_language) = metadata
-            .as_ref()
-            .map(|metadata| {
-                (
-                    Self::create_policy_container_from_fetch_response(metadata),
-                    ReportingEndpoint::parse_reporting_endpoints_header(
-                        &self.url.clone(),
-                        &metadata.headers,
-                    ),
-                    extract_links_from_headers(&metadata.headers),
-                    metadata
-                        .headers
-                        .as_ref()
-                        .and_then(|headers| headers.get("Content-Language"))
-                        .and_then(|header| header.to_str().ok())
-                        .map(|string| string.to_owned()),
-                )
-            })
-            .unwrap_or_default();
+        let (mut policy_container, endpoints_list, link_headers, content_language, redirect_taint) =
+            metadata
+                .as_ref()
+                .map(|metadata| {
+                    (
+                        Self::create_policy_container_from_fetch_response(metadata),
+                        ReportingEndpoint::parse_reporting_endpoints_header(
+                            &self.url,
+                            &metadata.headers,
+                        ),
+                        extract_links_from_headers(&metadata.headers),
+                        metadata
+                            .headers
+                            .as_ref()
+                            .and_then(|headers| headers.get("Content-Language"))
+                            .and_then(|header| header.to_str().ok())
+                            .map(|string| string.to_owned()),
+                        metadata.redirect_taint,
+                    )
+                })
+                .unwrap_or_default();
 
         // Step 21.10. Set finalSandboxFlags to the union of targetSnapshotParams's
         // sandboxing flags and responsePolicyContainer's CSP list's CSP-derived
@@ -1640,6 +1656,7 @@ impl ParserContext {
             iframe_element_referrer_policy: self
                 .target_snapshot_params
                 .iframe_element_referrer_policy,
+            redirect_taint,
         };
         self.submit_resource_timing(cx);
 
@@ -1653,22 +1670,28 @@ impl ParserContext {
         if let Some(error) = error {
             let page = match error {
                 NetworkError::SslValidation(reason, bytes) => {
-                    let page = resources::read_string(Resource::BadCertHTML);
+                    let bytes_resource = resources::read_bytes(Resource::BadCertHTML);
+                    let page = str::from_utf8(bytes_resource.as_ref())
+                        .expect("BadCertHTML Resource not valid utf8");
                     let encoded_bytes = general_purpose::STANDARD_NO_PAD.encode(bytes);
                     let page = page.replace("${bytes}", encoded_bytes.as_str());
                     let page = page.replace("${secret}", &net_traits::PRIVILEGED_SECRET.to_string());
                     page.replace("${reason}", &error_text(&reason))
                 },
-                NetworkError::BlobURLStoreError(reason)
-                | NetworkError::WebsocketConnectionFailure(reason)
-                | NetworkError::HttpError(reason)
-                | NetworkError::ResourceLoadError(reason)
-                | NetworkError::MimeType(reason) => {
-                    let page = resources::read_string(Resource::NetErrorHTML);
+                NetworkError::BlobURLStoreError(reason) |
+                NetworkError::WebsocketConnectionFailure(reason) |
+                NetworkError::HttpError(reason) |
+                NetworkError::ResourceLoadError(reason) |
+                NetworkError::MimeType(reason) => {
+                    let resource_bytes = resources::read_bytes(Resource::NetErrorHTML);
+                    let page = str::from_utf8(resource_bytes.as_ref())
+                        .expect("NetErrorHTML Resource not valid utf8");
                     page.replace("${reason}", &error_text(&reason))
                 },
                 NetworkError::Crash(details) => {
-                    let page = resources::read_string(Resource::CrashHTML);
+                    let resource_bytes = resources::read_bytes(Resource::CrashHTML);
+                    let page = str::from_utf8(resource_bytes.as_ref())
+                        .expect("CrashHTML Resource not valid utf8");
                     page.replace("${details}", &error_text(&details))
                 },
                 NetworkError::UnsupportedScheme
@@ -1695,7 +1718,7 @@ impl ParserContext {
                 | NetworkError::PartialResponseToNonRangeRequestError
                 | NetworkError::ProtocolHandlerSubstitutionError
                 | NetworkError::DecompressionError => {
-                    let page = resources::read_string(Resource::NetErrorHTML);
+                    let page = String::from_utf8(resources::read_bytes(Resource::NetErrorHTML).as_ref().to_vec()).expect("Built-in document resource must be UTF-8");
                     page.replace("${reason}", &error_text(&format!("{error:?}")))
                 },
                 NetworkError::LoadCancelled => {
@@ -1795,7 +1818,31 @@ impl ParserContext {
         let cx = &mut realm;
 
         if status.is_ok() {
-            document.set_resource_fetch_timing(timing);
+            // Step 15 of https://html.spec.whatwg.org/multipage/#initialise-the-document-object
+
+            // Step 15.1. Let fullTimingInfo be the result of extracting the full timing info
+            // from navigationParams's fetch controller.
+            let mut full_timing_info = timing;
+
+            // Step 15.3. If navigationParams's response's redirect taint is "same-origin", or all of the following are true:
+            //   * navigationParams's request's client is null, or navigationParams's request's referrer is not "no-referrer", and
+            //   * navigation TAO check given navigationParams's response and navigationParams's origin returns success,
+            // then set redirectCount to navigationParams's request's redirect count.
+            //
+            // TODO: Implement the two other bullet points
+            let redirect_count =
+                if self.navigation_params.redirect_taint == RedirectTaint::SameOrigin {
+                    full_timing_info.redirect_count
+                } else {
+                    // Step 15.2. Let redirectCount be 0.
+                    0
+                };
+
+            // Step 15.4. Create the navigation timing entry for document, given fullTimingInfo, redirectCount,
+            // navigationTimingType, navigationParams's response's service worker timing info,
+            // and navigationParams's response's body info.
+            full_timing_info.redirect_count = redirect_count;
+            document.set_resource_fetch_timing(full_timing_info);
         }
 
         if let Some(parser) = parser {
@@ -1848,6 +1895,7 @@ fn insert_an_element_at_the_adjusted_insertion_location(
         &node_to_insert,
         adjusted_insertion_location_parent,
         adjusted_insertion_location_child,
+        &[],
     )
     .is_err()
     {

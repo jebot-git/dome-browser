@@ -10,6 +10,7 @@ use js::context::{JSContext, NoGC};
 use script_bindings::cell::DomRefCell;
 use script_bindings::domstring::TracedDOMString;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
+use stylo_dom::ElementState;
 
 use crate::dom::bindings::codegen::Bindings::ElementInternalsBinding::{
     ElementInternalsMethods, ValidityStateFlags,
@@ -146,10 +147,20 @@ impl ElementInternals {
         {
             warn!("We are in perform_entry_construction on an element with disabled attribute!");
         }
-        if self.target_element.upcast::<Element>().disabled_state() {
+        if self
+            .target_element
+            .upcast::<Element>()
+            .state()
+            .contains(ElementState::DISABLED)
+        {
             warn!("We are in perform_entry_construction on an element with disabled bit!");
         }
-        if !self.target_element.upcast::<Element>().enabled_state() {
+        if !self
+            .target_element
+            .upcast::<Element>()
+            .state()
+            .contains(ElementState::ENABLED)
+        {
             warn!("We are in perform_entry_construction on an element without enabled bit!");
         }
 
@@ -186,10 +197,10 @@ impl ElementInternals {
         }
     }
 
-    pub(crate) fn is_invalid(&self, cx: &mut JSContext) -> bool {
+    pub(crate) fn is_invalid(&self, no_gc: &NoGC) -> bool {
         self.is_target_form_associated() &&
-            self.is_instance_validatable(cx.no_gc()) &&
-            !self.satisfies_constraints(cx)
+            self.is_instance_validatable(no_gc) &&
+            !self.satisfies_constraints()
     }
 
     pub(crate) fn custom_states_for_layout<'a>(&'a self) -> Option<LayoutDom<'a, CustomStateSet>> {
@@ -423,6 +434,13 @@ impl Validatable for ElementInternals {
         })
     }
 
+    fn satisfies_constraints(&self) -> bool {
+        let Some(validity_state) = self.validity_state.get() else {
+            return true;
+        };
+        validity_state.invalid_flags().is_empty()
+    }
+
     /// <https://html.spec.whatwg.org/multipage#candidate-for-constraint-validation>
     fn is_instance_validatable(&self, no_gc: &NoGC) -> bool {
         debug_assert!(self.is_target_form_associated());
@@ -434,7 +452,7 @@ impl Validatable for ElementInternals {
         // if the readonly attribute is specified, the element is disabled,
         // or the element has a datalist element ancestor.
         !self.as_element().read_write_state() &&
-            !self.as_element().disabled_state() &&
+            !self.target_element.is_form_element_disabled(no_gc) &&
             !is_barred_by_datalist_ancestor(no_gc, self.target_element.upcast::<Node>())
     }
 }

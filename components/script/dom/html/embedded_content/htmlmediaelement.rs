@@ -4,7 +4,6 @@
 
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::VecDeque;
-use std::f64;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -24,7 +23,7 @@ use layout_api::MediaFrame;
 use net_traits::fetch::fetch_controller::FetchController;
 use net_traits::request::{Destination, RequestId};
 use net_traits::{CoreResourceThread, FetchMetadata, Metadata, NetworkError, ResourceFetchTiming};
-use pixels::RasterImage;
+use pixels::{CorsStatus, RasterImage};
 use script_bindings::assert::assert_in_script;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::InheritTypes::{
@@ -108,10 +107,11 @@ use crate::dom::videotracklist::VideoTrackList;
 use crate::dom::{RootedPromise, TracedPromise, referrer_policy_for_element};
 use crate::event_loop::document_loader::{LoadBlocker, LoadType};
 use crate::event_loop::script_thread::ScriptThread;
-use crate::fetch::fetch::{RequestWithGlobalScope, create_a_potential_cors_request};
+use crate::fetch::fetch::{RequestWithGlobalScope, create_a_potential_cors_request_with_claim};
 use crate::fetch::network_listener::{self, FetchResponseListener, ResourceTimingListener};
 use crate::realms::enter_auto_realm;
 use crate::runtime::job_queue::MicrotaskRunnable;
+use crate::url::ensure_blob_referenced_by_url_is_kept_alive;
 
 /// A CSS file to style the media controls.
 static MEDIA_CONTROL_CSS: &str = include_str!("../../../resources/media-controls.css");
@@ -503,6 +503,57 @@ impl HTMLMediaElement {
         {
             error!("Could not pause player: {error:?}");
         }
+
+        self.update_keep_alive();
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#playing-the-media-resource>
+    /// > Media elements must not stop playing just because all references to them have been
+    /// > removed; only once a media element is in a state where no further audio could ever be
+    /// > played by that element may the element be garbage collected.
+    fn should_keep_alive(&self) -> bool {
+        let document = self.owner_document();
+        if !document.is_active() || document.is_prompting_or_unloading() {
+            return false;
+        }
+
+        if self.in_error_state() {
+            return false;
+        }
+
+        if self.ended_playback(LoopCondition::Included) {
+            return false;
+        }
+
+        if !self.Paused() {
+            return true;
+        }
+
+        if self.eligible_for_autoplay() {
+            return true;
+        }
+
+        false
+    }
+
+    pub(crate) fn update_keep_alive(&self) {
+        let document = self.owner_document();
+        if self.should_keep_alive() {
+            document.register_active_media_element(self);
+        } else {
+            document.unregister_active_media_element(self);
+        }
+    }
+
+    pub(crate) fn clean_up_on_document_unload(&self, unloading_doc: &Document, no_gc: &NoGC) {
+        if &*self.owner_document() != unloading_doc {
+            return;
+        }
+        self.paused.set(true);
+        if let Some(ref mut current_fetch_context) = *self.current_fetch_context.borrow_mut() {
+            current_fetch_context.cancel(CancelReason::Abort);
+        }
+        self.reset_media_player(no_gc);
     }
 
     /// Marks that element as delaying the load event or not.
@@ -529,15 +580,14 @@ impl HTMLMediaElement {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#time-marches-on>
-    #[expect(clippy::type_complexity)]
     fn current_and_other_cues<'no_gc>(
         &self,
         no_gc: &'no_gc NoGC,
         text_tracks_list: &TextTrackList,
-    ) -> Option<(
+    ) -> (
         Vec<UnrootedDom<'no_gc, TextTrackCue>>,
         Vec<UnrootedDom<'no_gc, TextTrackCue>>,
-    )> {
+    ) {
         // Step 1. Let current cues be a list of cues,
         // initialized to contain all the cues of all the hidden or
         // showing text tracks of the media element (not the disabled ones)
@@ -547,56 +597,46 @@ impl HTMLMediaElement {
         // all the cues of hidden and showing text tracks of the media element
         // that are not present in current cues.
         let current_playback_position = self.current_playback_position.get();
-        Some(
-            text_tracks_list
-                .iter(no_gc)
-                .filter(|text_track| text_track.Mode() != TextTrackMode::Disabled)
-                .flat_map(|text_track| text_track.cues(no_gc))
-                .partition(|cue| {
-                    cue.start_time() <= current_playback_position &&
-                        cue.end_time() > current_playback_position
-                }),
-        )
+        text_tracks_list
+            .iter(no_gc)
+            .filter(|text_track| text_track.Mode() != TextTrackMode::Disabled)
+            .flat_map(|text_track| text_track.cues(no_gc))
+            .partition(|cue| {
+                cue.start_time() <= current_playback_position &&
+                    cue.end_time() > current_playback_position
+            })
     }
 
     /// <https://html.spec.whatwg.org/multipage/#time-marches-on>
     fn time_marches_on(&self, cx: &mut JSContext, playback_was_moved: PlaybackPositionWasMoved) {
         let playback_was_moved_monotonic_increase =
             playback_was_moved == PlaybackPositionWasMoved::NormalPlayback;
-        // Step 1. Let current cues be a list of cues,
-        // initialized to contain all the cues of all the hidden or
-        // showing text tracks of the media element (not the disabled ones)
-        // whose start times are less than or equal to the current playback position
-        // and whose end times are greater than the current playback position.
-        // Step 2. Let other cues be a list of cues, initialized to contain
-        // all the cues of hidden and showing text tracks of the media element
-        // that are not present in current cues.
-        let Some(text_tracks_list) = self.text_tracks_list.get() else {
-            return;
-        };
-        let Some((current_cues, other_cues)) =
-            self.current_and_other_cues(cx.no_gc(), &text_tracks_list)
-        else {
-            return;
-        };
-        // Step 3. Let last time be the current playback position at the time
-        // this algorithm was last run for this media element,
-        // if this is not the first time it has run.
+
+        // Step 1. Let current cues be a list of cues, initialized to contain all the cues of all
+        // the hidden or showing text tracks of the media element (not the disabled ones) whose
+        // start times are less than or equal to the current playback position and whose end times
+        // are greater than the current playback position.
+        //
+        // Step 2. Let other cues be a list of cues, initialized to contain all the cues of hidden
+        // and showing text tracks of the media element that are not present in current cues.
+        let text_tracks_list = self.TextTracks(cx);
+        let (current_cues, other_cues) = self.current_and_other_cues(cx.no_gc(), &text_tracks_list);
+
+        // Step 3. Let last time be the current playback position at the time this algorithm was
+        // last run for this media element, if this is not the first time it has run.
         let current_playback_position = self.current_playback_position.get();
         let last_time = self.position_when_time_marches_on_ran.get();
         self.position_when_time_marches_on_ran
             .set(Some(current_playback_position));
 
-        // Step 4. If the current playback position has,
-        // since the last time this algorithm was run,
-        // only changed through its usual monotonic increase during normal playback,
-        // then let missed cues be the list of cues in other cues whose start times
-        // are greater than or equal to last time and whose end times are less
-        // than or equal to the current playback position.
+        // Step 4. If the current playback position has, since the last time this algorithm was run,
+        // only changed through its usual monotonic increase during normal playback, then let missed
+        // cues be the list of cues in other cues whose start times are greater than or equal to
+        // last time and whose end times are less than or equal to the current playback position.
         // Otherwise, let missed cues be an empty list.
-        // Step 5. Remove all the cues in missed cues that are also in
-        // the media element's list of newly introduced cues,
-        // and then empty the element's list of newly introduced cues.
+        //
+        // Step 5. Remove all the cues in missed cues that are also in the media element's list of
+        // newly introduced cues, and then empty the element's list of newly introduced cues.
         let missed_cues =
             if playback_was_moved_monotonic_increase && let Some(last_time) = last_time {
                 let newly_introduced_cues: Vec<DomRoot<TextTrackCue>> =
@@ -636,8 +676,8 @@ impl HTMLMediaElement {
         }
 
         // Step 7. If all of the cues in current cues have their text track cue active flag set,
-        // none of the cues in other cues have their text track cue active flag set,
-        // and missed cues is empty, then return.
+        // none of the cues in other cues have their text track cue active flag set, and missed cues
+        // is empty, then return.
         if current_cues.iter().all(|cue| cue.is_active()) &&
             !other_cues.iter().any(|cue| cue.is_active()) &&
             missed_cues.is_empty()
@@ -650,11 +690,10 @@ impl HTMLMediaElement {
         let other_cues: Vec<DomRoot<TextTrackCue>> =
             other_cues.iter().map(|cue| cue.as_rooted()).collect();
 
-        // Step 8. If the time was reached through the usual monotonic increase of the
-        // current playback position during normal playback,
-        // and there are cues in other cues that have their text track cue pause-on-exit flag
-        // set and that either have their text track cue active flag set or are also in missed cues,
-        // then immediately pause the media element.
+        // Step 8. If the time was reached through the usual monotonic increase of the current
+        // playback position during normal playback, and there are cues in other cues that have
+        // their text track cue pause-on-exit flag set and that either have their text track cue
+        // active flag set or are also in missed cues, then immediately pause the media element.
         if playback_was_moved_monotonic_increase &&
             other_cues.iter().any(|cue| {
                 cue.PauseOnExit() &&
@@ -664,13 +703,11 @@ impl HTMLMediaElement {
             self.Pause(cx);
         }
 
-        // Step 9. Let events be a list of tasks, initially empty.
-        // Each task in this list will be associated with a text track,
-        // a text track cue, and a time, which are used to sort the list before the tasks are queued.
-        // Let affected tracks be a list of text tracks, initially empty.
-        // When the steps below say to prepare an event named event for
-        // a text track cue target with a time time,
-        // the user agent must run these steps:
+        // Step 9. Let events be a list of tasks, initially empty. Each task in this list will be
+        // associated with a text track, a text track cue, and a time, which are used to sort the
+        // list before the tasks are queued. Let affected tracks be a list of text tracks, initially
+        // empty. When the steps below say to prepare an event named event for a text track cue
+        // target with a time time, the user agent must run these steps:
         let mut events: Vec<(f64, (Atom, DomRoot<TextTrackCue>))> = vec![];
         let no_gc = cx.no_gc();
         let mut affected_tracks = vec![];
@@ -692,8 +729,8 @@ impl HTMLMediaElement {
                 affected_tracks.push(track.as_unrooted(no_gc));
             };
 
-        // Step 10. For each text track cue in missed cues,
-        // prepare an event named enter for the TextTrackCue object with the text track cue start time.
+        // Step 10. For each text track cue in missed cues, prepare an event named enter for the
+        // TextTrackCue object with the text track cue start time.
         for text_track_cue in &missed_cues {
             prepare_an_event(
                 text_track_cue.start_time(),
@@ -702,10 +739,9 @@ impl HTMLMediaElement {
             );
         }
 
-        // Step 11. For each text track cue in other cues that either
-        // has its text track cue active flag set
-        // or is in missed cues, prepare an event named exit for the TextTrackCue object with
-        // the later of the text track cue end time and the text track cue start time.
+        // Step 11. For each text track cue in other cues that either has its text track cue active
+        // flag set or is in missed cues, prepare an event named exit for the TextTrackCue object
+        // with the later of the text track cue end time and the text track cue start time.
         for text_track_cue in &other_cues {
             if text_track_cue.is_active() || missed_cues.iter().any(|cue| cue == text_track_cue) {
                 prepare_an_event(
@@ -716,9 +752,9 @@ impl HTMLMediaElement {
             }
         }
 
-        // Step 12. For each text track cue in current cues that does not have
-        // its text track cue active flag set,
-        // prepare an event named enter for the TextTrackCue object with the text track cue start time.
+        // Step 12. For each text track cue in current cues that does not have its text track cue
+        // active flag set, prepare an event named enter for the TextTrackCue object with the text
+        // track cue start time.
         for text_track_cue in &current_cues {
             if !text_track_cue.is_active() {
                 prepare_an_event(
@@ -745,19 +781,18 @@ impl HTMLMediaElement {
                 }));
         }
 
-        // Step 15. Sort affected tracks in the same order as the text tracks appear
-        // in the media element's list of text tracks, and remove duplicates.
+        // Step 15. Sort affected tracks in the same order as the text tracks appear in the media
+        // element's list of text tracks, and remove duplicates.
         let affected_tracks: Vec<DomRoot<TextTrack>> = text_tracks_list
             .iter(cx.no_gc())
             .filter(|text_track| affected_tracks.contains(text_track))
             .map(|text_track| text_track.as_rooted())
             .collect();
 
-        // Step 16. For each text track in affected tracks, in the list order,
-        // queue a media element task given the media element to fire
-        // an event named cuechange at the TextTrack object,
-        // and, if the text track has a corresponding track element,
-        // to then fire an event named cuechange at the track element as well.
+        // Step 16. For each text track in affected tracks, in the list order, queue a media element
+        // task given the media element to fire an event named cuechange at the TextTrack object,
+        // and, if the text track has a corresponding track element, to then fire an event named
+        // cuechange at the track element as well.
         for text_track in &affected_tracks {
             let text_track = Trusted::new(&**text_track);
 
@@ -783,12 +818,10 @@ impl HTMLMediaElement {
             text_track_cue.set_active(false);
         }
 
-        // Step 18. Run the rules for updating the text track rendering of each
-        // of the text tracks in affected tracks that are showing,
-        // providing the text track's text track language as the fallback language
-        // if it is not the empty string.
-        // For example, for text tracks based on WebVTT,
-        // the rules for updating the display of WebVTT text tracks. [WEBVTT]
+        // Step 18. Run the rules for updating the text track rendering of each of the text tracks
+        // in affected tracks that are showing, providing the text track's text track language as
+        // the fallback language if it is not the empty string. For example, for text tracks based
+        // on WebVTT, the rules for updating the display of WebVTT text tracks. [WEBVTT]
         //
         // TODO(https://github.com/whatwg/html/issues/12994): Figure out how to pass in language
         // as well as handling multiple text tracks with different updating rules
@@ -1264,7 +1297,10 @@ impl HTMLMediaElement {
         // Step 9.attribute.2. Let urlRecord be the result of encoding-parsing a URL given
         // the src attribute's value, relative to the media element's node document when the
         // src attribute was last changed.
-        let Ok(url_record) = base_url.join(src) else {
+        let Ok(url_record) = self
+            .owner_document()
+            .encoding_parse_a_url_with_base(src, &base_url)
+        else {
             self.queue_dedicated_media_source_failure_steps();
             return;
         };
@@ -1320,7 +1356,7 @@ impl HTMLMediaElement {
         // Step 9.children.4. Let urlRecord be the result of encoding-parsing a URL given
         // candidate's src attribute's value, relative to candidate's node document when the src
         // attribute was last changed.
-        let Ok(url_record) = source.owner_document().base_url().join(&src) else {
+        let Ok(url_record) = source.owner_document().encoding_parse_a_url(&src) else {
             // Step 9.children.5. If urlRecord is failure, then end the synchronous section,
             // and jump down to the failed with elements step below.
             self.load_from_source_child_failure_steps(cx, source);
@@ -1524,9 +1560,10 @@ impl HTMLMediaElement {
 
         let cors_setting = cors_setting_for_element(self.upcast());
         let global = self.global();
-        let request = create_a_potential_cors_request(
+        let url_with_blob_claim = ensure_blob_referenced_by_url_is_kept_alive(&global, url.clone());
+        let request = create_a_potential_cors_request_with_claim(
             Some(document.webview_id()),
-            url.clone(),
+            url_with_blob_claim,
             destination,
             cors_setting,
             None,
@@ -1733,6 +1770,8 @@ impl HTMLMediaElement {
                 // Step 7. Set the element's delaying-the-load-event flag to false. This stops
                 // delaying the load event.
                 this.delay_load_event(cx, false);
+
+                this.update_keep_alive();
             }));
     }
 
@@ -1884,6 +1923,7 @@ impl HTMLMediaElement {
         self.invoke_resource_selection_algorithm(cx);
 
         // Step 11. Note: Playback of any previously playing media resource for this element stops.
+        self.update_keep_alive();
     }
 
     /// Queue a media element task given the media element to fire an event at the media element.
@@ -2052,6 +2092,7 @@ impl HTMLMediaElement {
         self.upcast::<EventTarget>().fire_event(cx, atom!("error"));
 
         // Step 6. Abort the overall resource selection algorithm.
+        self.update_keep_alive();
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-media-seek>
@@ -2279,8 +2320,11 @@ impl HTMLMediaElement {
                 self.media_type_id(),
                 HTMLMediaElementTypeId::HTMLVideoElement
             );
-            let should_enable_download_buffering =
-                (is_video || self.Loop()) && self.Preload() == "auto";
+            let should_enable_download_buffering = if is_video {
+                self.Preload() == "auto"
+            } else {
+                self.Loop()
+            };
             if let Err(error) =
                 player_guard.set_download_buffering_enabled(should_enable_download_buffering)
             {
@@ -2440,6 +2484,8 @@ impl HTMLMediaElement {
 
                 // Step 3.3. Fire an event named ended at the media element.
                 this.upcast::<EventTarget>().fire_event(cx, atom!("ended"));
+
+                this.update_keep_alive();
             }));
 
         // <https://html.spec.whatwg.org/multipage/#dom-media-have_current_data>
@@ -2454,6 +2500,7 @@ impl HTMLMediaElement {
         // element.
         if self.current_playback_position.get() <= self.earliest_possible_position() {
             self.queue_media_element_task_to_fire_event(atom!("timeupdate"));
+            self.update_keep_alive();
         }
     }
 
@@ -3330,13 +3377,15 @@ impl HTMLMediaElementMethods<crate::DomTypeHolder> for HTMLMediaElement {
     }
 
     // https://html.spec.whatwg.org/multipage/#attr-media-preload
-    // Missing/Invalid values are user-agent defined.
+    // > The attribute's missing value default and invalid value default are both implementation-defined,
+    // though the Metadata state is suggested as a compromise between reducing server load and providing
+    // an optimal user experience.
     make_enumerated_getter!(
         Preload,
         "preload",
         "none" | "metadata" | "auto",
-        missing => "auto",
-        invalid => "auto"
+        missing => "metadata",
+        invalid => "metadata"
     );
 
     // https://html.spec.whatwg.org/multipage/#attr-media-preload
@@ -3683,6 +3732,9 @@ impl VirtualMethods for HTMLMediaElement {
                     self.media_element_load_algorithm(cx);
                 }
             },
+            local_name!("autoplay") | local_name!("loop") => {
+                self.update_keep_alive();
+            },
             local_name!("controls") => {
                 if mutation.new_value(attr).is_some() {
                     self.render_controls(cx);
@@ -3713,6 +3765,9 @@ impl VirtualMethods for HTMLMediaElement {
 
     fn adopting_steps(&self, cx: &mut JSContext, old_doc: &Document) {
         self.super_type().unwrap().adopting_steps(cx, old_doc);
+
+        old_doc.unregister_active_media_element(self);
+        self.update_keep_alive();
 
         // Note that media control id should be adopting between documents so "privileged"
         // document.servoGetMediaControls(id) API is keeping access to the whitelist of media
@@ -4007,12 +4062,12 @@ impl FetchResponseListener for HTMLMediaElementFetchListener {
     ) {
         let element = self.element.root();
 
-        let (metadata, origin_clean) = match metadata {
+        let (metadata, cors_status) = match metadata {
             Ok(fetch_metadata) => {
-                let is_cross_origin = fetch_metadata.is_cors_cross_origin();
-                (Some(fetch_metadata.into()), !is_cross_origin)
+                let cors_status = fetch_metadata.cors_status();
+                (Some(fetch_metadata.into()), cors_status)
             },
-            Err(_) => (None, true),
+            Err(_) => (None, CorsStatus::Safe),
         };
 
         let (status_is_success, is_seekable) =
@@ -4037,7 +4092,7 @@ impl FetchResponseListener for HTMLMediaElementFetchListener {
 
         if let Some(ref mut current_fetch_context) = *element.current_fetch_context.borrow_mut() {
             current_fetch_context.set_seekable(is_seekable);
-            current_fetch_context.set_origin_clean(origin_clean);
+            current_fetch_context.set_origin_clean(cors_status == CorsStatus::Safe);
         }
 
         if let Some(metadata) = metadata.as_ref() &&

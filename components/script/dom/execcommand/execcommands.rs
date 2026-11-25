@@ -15,7 +15,7 @@ use crate::dom::bindings::str::DOMString;
 use crate::dom::comment::Comment;
 use crate::dom::document::Document;
 use crate::dom::event::Event;
-use crate::dom::event::inputevent::InputEvent;
+use crate::dom::event::inputevent::{InputEvent, InputEventFlags};
 use crate::dom::execcommand::basecommand::CommandName;
 use crate::dom::execcommand::commands::fontsize::maybe_normalize_pixels;
 use crate::dom::html::htmlelement::HTMLElement;
@@ -169,6 +169,7 @@ impl Document {
             "insertparagraph" => CommandName::InsertParagraph,
             "inserttext" => CommandName::InsertText,
             "italic" => CommandName::Italic,
+            "outdent" => CommandName::Outdent,
             "removeformat" => CommandName::RemoveFormat,
             "strikethrough" => CommandName::Strikethrough,
             "stylewithcss" => CommandName::StyleWithCss,
@@ -312,12 +313,10 @@ impl Document {
                 window,
                 None,
                 atom!("beforeinput"),
-                true,
-                true,
+                InputEventFlags::BUBBLES | InputEventFlags::CANCELABLE | if is_composing { InputEventFlags::COMPOSING } else { InputEventFlags::empty() },
                 Some(window),
                 0,
                 input_data.clone(),
-                is_composing,
                 if is_composing { "insertCompositionText".into() } else { mapped_value_of_command(command) },
             );
             let event = event.upcast::<Event>();
@@ -366,12 +365,10 @@ impl Document {
                 window,
                 None,
                 atom!("input"),
-                true,
-                false,
+                InputEventFlags::BUBBLES | if is_composing { InputEventFlags::COMPOSING } else { InputEventFlags::empty() },
                 Some(window),
                 0,
                 input_data,
-                is_composing,
                 if is_composing { "insertCompositionText".into() } else { mapped_value_of_command(command) },
             );
             let event = event.upcast::<Event>();

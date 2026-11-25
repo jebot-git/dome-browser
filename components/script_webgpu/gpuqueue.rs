@@ -277,7 +277,9 @@ where
         let (source_image_width, source_image_height) = match source_image {
             GPUCopyExternalImageSource::ImageBitmap(inner) => (inner.Width(), inner.Height()),
             GPUCopyExternalImageSource::ImageData(inner) => (inner.Width(), inner.Height()),
-            GPUCopyExternalImageSource::HTMLImageElement(inner) => (inner.Width(), inner.Height()),
+            GPUCopyExternalImageSource::HTMLImageElement(inner) => {
+                (inner.Width(cx), inner.Height(cx))
+            },
             GPUCopyExternalImageSource::HTMLVideoElement(inner) => (inner.Width(), inner.Height()),
             GPUCopyExternalImageSource::HTMLCanvasElement(inner) => (inner.Width(), inner.Height()),
             GPUCopyExternalImageSource::OffscreenCanvas(inner) => {
@@ -285,13 +287,13 @@ where
             },
         };
         // source.origin.x + copySize.width must be ≤ the width of sourceImage.
-        if !(source_origin.x + copy_size.width <= source_image_width) {
+        if !(source_origin.x.saturating_add(copy_size.width) <= source_image_width) {
             return Err(Error::Operation(Some(
                 "Source origin x + copy width exceeds source image width".to_string(),
             )));
         }
         // source.origin.y + copySize.height must be ≤ the height of sourceImage.
-        if !(source_origin.y + copy_size.height <= source_image_height) {
+        if !(source_origin.y.saturating_add(copy_size.height) <= source_image_height) {
             return Err(Error::Operation(Some(
                 "Source origin y + copy height exceeds source image height".to_string(),
             )));

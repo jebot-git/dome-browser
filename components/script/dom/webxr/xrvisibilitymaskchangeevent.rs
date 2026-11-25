@@ -120,8 +120,8 @@ impl XRVisibilityMaskChangeEventMethods<crate::DomTypeHolder> for XRVisibilityMa
     ) -> Fallible<DomRoot<Self>> {
         // The generated dictionary roots the supplied typed arrays. Retain their
         // identity, as required by the Event constructor and SameObject attributes.
-        rooted!(&in(cx) let vertices = unsafe { init.vertices.underlying_object().get() });
-        rooted!(&in(cx) let indices = unsafe { init.indices.underlying_object().get() });
+        rooted!(&in(cx) let vertices = unsafe { *init.vertices.underlying_object() });
+        rooted!(&in(cx) let indices = unsafe { *init.indices.underlying_object() });
         Ok(Self::new_with_proto(
             cx,
             window,

@@ -23,3 +23,4 @@ pub(crate) mod webglcompressedtextureetc1;
 pub(crate) mod webglcompressedtextures3tc;
 
 pub(crate) mod webgllosecontext;
+pub(crate) mod webgldebugrendererinfo;

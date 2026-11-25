@@ -76,11 +76,12 @@ impl ANGLEInstancedArraysMethods<crate::DomTypeHolder> for ANGLEInstancedArrays 
         primcount: i32,
     ) {
         if self.ctx.is_context_lost() { return; }
-        handle_potential_webgl_error!(
-            self.ctx,
-            self.ctx
-                .draw_arrays_instanced(cx, mode, first, count, primcount)
-        )
+        if let Err(error) = self
+            .ctx
+            .draw_arrays_instanced(cx, mode, first, count, primcount)
+        {
+            self.ctx.webgl_error(error);
+        }
     }
 
     /// <https://www.khronos.org/registry/webgl/extensions/ANGLE_instanced_arrays/>
@@ -94,11 +95,12 @@ impl ANGLEInstancedArraysMethods<crate::DomTypeHolder> for ANGLEInstancedArrays 
         primcount: i32,
     ) {
         if self.ctx.is_context_lost() { return; }
-        handle_potential_webgl_error!(
-            self.ctx,
-            self.ctx
-                .draw_elements_instanced(cx, mode, count, type_, offset, primcount)
-        )
+        if let Err(error) = self
+            .ctx
+            .draw_elements_instanced(cx, mode, count, type_, offset, primcount)
+        {
+            self.ctx.webgl_error(error);
+        }
     }
 
     fn VertexAttribDivisorANGLE(&self, cx: &mut JSContext, index: u32, divisor: u32) {

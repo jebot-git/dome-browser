@@ -17,6 +17,7 @@ use malloc_size_of_derive::MallocSizeOf;
 use net_traits::pub_domains::reg_suffix;
 use net_traits::request::{CredentialsMode, Referrer};
 use script_bindings::reflector::reflect_dom_object_with_proto;
+#[cfg(feature = "devtools")]
 use servo_base::generic_channel;
 use servo_base::id::WorkerId;
 use servo_constellation_traits::{MessagePortImpl, WorkerScriptLoadOrigin};
@@ -643,7 +644,7 @@ impl SharedWorkerMethods<crate::DomTypeHolder> for SharedWorker {
             Some(devtools_sender),
             worker_id,
             #[cfg(feature = "webgl")]
-            window.webgl_chan_value(),
+            window.webgl_chan(),
         );
 
         let (setup_sender, setup_receiver) = unbounded();
@@ -679,7 +680,7 @@ impl SharedWorkerMethods<crate::DomTypeHolder> for SharedWorker {
             outside_storage_key,
             global.insecure_requests_policy(),
             global.policy_container(),
-            global.font_context(),
+            Arc::new(global.font_context().new_for_worker()),
         ) {
             Ok(join_handle) => join_handle,
             Err(error) => {

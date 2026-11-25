@@ -11,9 +11,7 @@
 use servo_arc::{Arc, UniqueArc};
 use std::{ops, ptr, fmt, mem};
 
-#[cfg(feature = "servo")] use euclid::SideOffsets2D;
 #[cfg(feature = "gecko")] use crate::gecko_bindings::structs::{self, NonCustomCSSPropertyId};
-#[cfg(feature = "servo")] use crate::logical_geometry::LogicalMargin;
 #[cfg(feature = "servo")] use crate::dom::AttributeReferences;
 use crate::logical_geometry::WritingMode;
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
@@ -402,38 +400,27 @@ impl NonCustomPropertyId {
 
     /// Returns whether a given rule allows a given property.
     #[inline]
-    pub fn allowed_in_rule(self, rule_types: CssRuleTypes) -> bool {
+    pub(super) fn allowed_in_rule(self, rule_types: CssRuleTypes) -> bool {
+        let allowed_types = rule_types.intersection(CssRuleTypes::DECLARATION_ALLOWED_TYPES);
         debug_assert!(
-            rule_types.contains(CssRuleType::Keyframe) ||
-            rule_types.contains(CssRuleType::Page) ||
-            rule_types.contains(CssRuleType::Style) ||
-            rule_types.contains(CssRuleType::Scope) ||
-            rule_types.contains(CssRuleType::PositionTry),
-            "Given rule type does not allow declarations."
+            !allowed_types.is_empty(),
+            "{rule_types:?} doesn't allow declarations (parsing {self:?})"
         );
 
         #[allow(clippy::identity_op)]
-        static MAP: [u32; property_counts::NON_CUSTOM] = [
+        static MAP: [CssRuleTypes; property_counts::NON_CUSTOM] = [
             % for property in data.longhands + data.shorthands + data.all_aliases():
+            CssRuleTypes::from_bits(
             % for name in RULE_VALUES:
             % if property.rule_types_allowed & RULE_VALUES[name] != 0:
             CssRuleType::${to_camel_case(name)}.bit() |
             % endif
             % endfor
-            0,
+            0),
             % endfor
         ];
-        MAP[self.0 as usize] & rule_types.bits() != 0
+        MAP[self.0 as usize].contains_all(allowed_types)
     }
-
-    pub(super) fn allowed_in(self, context: &ParserContext) -> bool {
-        if !self.allowed_in_rule(context.rule_types()) {
-            return false;
-        }
-
-        self.allowed_in_ignoring_rule_type(context)
-    }
-
 
     pub(super) fn allowed_in_ignoring_rule_type(self, context: &ParserContext) -> bool {
         // The semantics of these are kinda hard to reason about, what follows
@@ -2061,11 +2048,6 @@ impl ComputedValuesInner {
         }
     % endfor
 
-    /// Gets a reference to the rule node. Panic if no rule node exists.
-    pub fn rules(&self) -> &StrongRuleNode {
-        self.rules.as_ref().unwrap()
-    }
-
     #[inline]
     /// Returns whether the "content" property for the given style is completely
     /// ineffective, and would yield an empty `::before` or `::after`
@@ -2078,94 +2060,6 @@ impl ComputedValuesInner {
         }
     }
 
-    /// Whether the current style is multicolumn.
-    #[inline]
-    pub fn is_multicol(&self) -> bool {
-        self.get_column().is_multicol()
-    }
-
-    /// Get the logical computed inline size.
-    #[inline]
-    pub fn content_inline_size(&self) -> &computed::Size {
-        let position_style = self.get_position();
-        if self.writing_mode.is_vertical() {
-            &position_style.height
-        } else {
-            &position_style.width
-        }
-    }
-
-    /// Get the logical computed block size.
-    #[inline]
-    pub fn content_block_size(&self) -> &computed::Size {
-        let position_style = self.get_position();
-        if self.writing_mode.is_vertical() { &position_style.width } else { &position_style.height }
-    }
-
-    /// Get the logical computed min inline size.
-    #[inline]
-    pub fn min_inline_size(&self) -> &computed::Size {
-        let position_style = self.get_position();
-        if self.writing_mode.is_vertical() { &position_style.min_height } else { &position_style.min_width }
-    }
-
-    /// Get the logical computed min block size.
-    #[inline]
-    pub fn min_block_size(&self) -> &computed::Size {
-        let position_style = self.get_position();
-        if self.writing_mode.is_vertical() { &position_style.min_width } else { &position_style.min_height }
-    }
-
-    /// Get the logical computed max inline size.
-    #[inline]
-    pub fn max_inline_size(&self) -> &computed::MaxSize {
-        let position_style = self.get_position();
-        if self.writing_mode.is_vertical() { &position_style.max_height } else { &position_style.max_width }
-    }
-
-    /// Get the logical computed max block size.
-    #[inline]
-    pub fn max_block_size(&self) -> &computed::MaxSize {
-        let position_style = self.get_position();
-        if self.writing_mode.is_vertical() { &position_style.max_width } else { &position_style.max_height }
-    }
-
-    /// Get the logical computed padding for this writing mode.
-    #[inline]
-    pub fn logical_padding(&self) -> LogicalMargin<&computed::LengthPercentage> {
-        let padding_style = self.get_padding();
-        LogicalMargin::from_physical(self.writing_mode, SideOffsets2D::new(
-            &padding_style.padding_top.0,
-            &padding_style.padding_right.0,
-            &padding_style.padding_bottom.0,
-            &padding_style.padding_left.0,
-        ))
-    }
-
-    /// Gets the logical computed margin from this style.
-    #[inline]
-    pub fn logical_margin(&self) -> LogicalMargin<&computed::Margin> {
-        let margin_style = self.get_margin();
-        LogicalMargin::from_physical(self.writing_mode, SideOffsets2D::new(
-            &margin_style.margin_top,
-            &margin_style.margin_right,
-            &margin_style.margin_bottom,
-            &margin_style.margin_left,
-        ))
-    }
-
-    /// Gets the logical position from this style.
-    #[inline]
-    pub fn logical_position(&self) -> LogicalMargin<&computed::Inset> {
-        // FIXME(SimonSapin): should be the writing mode of the containing block, maybe?
-        let position_style = self.get_position();
-        LogicalMargin::from_physical(self.writing_mode, SideOffsets2D::new(
-            &position_style.top,
-            &position_style.right,
-            &position_style.bottom,
-            &position_style.left,
-        ))
-    }
 }
 
 /// A reference to a style struct of the parent, or our own style struct.
@@ -2926,6 +2820,15 @@ pub(crate) fn restyle_damage_${effect_name} (old: &ComputedValues, new: &Compute
     false
 }
 % endfor
+
+pub(crate) fn all_inherited_style_structs_equal(old: &ComputedValues, new: &ComputedValues) -> bool {
+    % for style_struct in data.active_style_structs():
+        % if style_struct.inherited:
+        old.${style_struct.ident} == new.${style_struct.ident} &&
+        % endif
+    % endfor
+    true
+}
 % endif
 
 ## Descriptor types for @-rules like @font-face and @counter-style.

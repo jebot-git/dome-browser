@@ -12,7 +12,7 @@
 [package]
 edition = "2018"
 name = "webrender"
-version = "0.70.0"
+version = "0.70.1"
 authors = ["Glenn Watson <gw@intuitionlibrary.com>"]
 build = "build.rs"
 autolib = false
@@ -128,7 +128,7 @@ version = "=67.3.2"
 optional = true
 
 [dependencies.glyph_rasterizer]
-version = "0.70"
+version = "0.70.1"
 default-features = false
 package = "wr_glyph_rasterizer"
 

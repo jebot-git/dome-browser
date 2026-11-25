@@ -21,17 +21,20 @@ use style::values::computed::transform::{Matrix, Transform, TransformOperation, 
 use style::values::generics::transform::GenericTransform;
 use web_atoms::{LocalName, ns};
 
+use crate::containing_block::{ContainingBlock, ContainingBlockSize};
 use crate::context::LayoutContext;
 use crate::dom::{LayoutBox, NodeExt, WeakLayoutBox};
 use crate::dom_traversal::{Contents, NodeAndStyleInfo, NonReplacedContents};
 use crate::flow::BlockLevelBox;
 use crate::formatting_contexts::IndependentFormattingContext;
-use crate::fragment_tree::{BaseFragmentInfo, BoxFragment, Fragment, FragmentFlags};
-use crate::geom::{LogicalVec2, PhysicalPoint, PhysicalRect, PhysicalSides, PhysicalSize};
+use crate::fragment_tree::{
+    BaseFragmentInfo, BoxFragment, Fragment, FragmentAndLogicalRect, FragmentChildren, FragmentFlags,
+};
+use crate::geom::{LogicalRect, LogicalVec2, PhysicalPoint, PhysicalRect, PhysicalSides, PhysicalSize};
 use crate::positioned::PositioningContext;
 use crate::sizing::{LazySize, SizeConstraint};
 use crate::style_ext::{Display, DisplayInside};
-use crate::{ArcRefCell, ContainingBlock, ContainingBlockSize, PropagatedBoxTreeData};
+use crate::{ArcRefCell, PropagatedBoxTreeData};
 
 #[derive(Clone, Copy, Debug, MallocSizeOf)]
 struct Length {
@@ -289,10 +292,7 @@ impl ForeignObjects {
             let mut positioning = PositioningContext::default();
             let size = LogicalVec2::from_physical_size(&bounds, flow.base.style.writing_mode);
             let cb = ContainingBlock {
-                size: ContainingBlockSize {
-                    inline: size.inline,
-                    block: SizeConstraint::Definite(size.block),
-                },
+                size: ContainingBlockSize::new(size.inline, SizeConstraint::Definite(size.block)),
                 style: &flow.base.style,
             };
             let mut layout = flow.layout(
@@ -347,10 +347,17 @@ impl ForeignObjects {
                     Zero::zero(),
                     Zero::zero(),
                 ));
+            // The child rectangle is physical. Convert using the wrapper's
+            // writing mode so vertical/RTL islands retain their zero origin.
+            let child_rect = LogicalRect::from_physical(
+                PhysicalRect::new(PhysicalPoint::origin(), bounds),
+                style.writing_mode,
+                LogicalVec2::from_physical_size(&bounds, style.writing_mode),
+            );
             let wrapper = BoxFragment::new(
                 BaseFragmentInfo::anonymous(),
                 ServoArc::new(style),
-                vec![fragment],
+                FragmentChildren::Logical(vec![FragmentAndLogicalRect::new(fragment, child_rect)]),
                 PhysicalRect::new(PhysicalPoint::origin(), bounds),
                 PhysicalSides::zero(),
                 PhysicalSides::zero(),

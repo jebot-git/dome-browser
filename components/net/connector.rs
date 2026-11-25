@@ -27,7 +27,7 @@ use log::warn;
 use parking_lot::Mutex;
 use rustls::client::danger::ServerCertVerifier;
 use rustls::client::{ClientConnection, EchStatus};
-use rustls::crypto::{CryptoProvider, aws_lc_rs};
+use rustls::crypto::CryptoProvider;
 use rustls::{CipherSuite, ClientConfig, NamedGroup, ProtocolVersion};
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use servo_config::pref;
@@ -41,6 +41,8 @@ pub const BUF_SIZE: usize = 32768;
 
 /// ALPN identifier for HTTP/2 (RFC 7540 §3.1).
 pub const ALPN_H2: &str = "h2";
+
+const HTTP2_MAX_HEADER_LIST_SIZE: u32 = 64 * 1024;
 
 #[derive(Clone)]
 pub struct ServoHttpConnector {
@@ -398,8 +400,15 @@ static CRYPTO_PROVIDER_CACHE: LazyLock<Arc<CryptoProvider>> = LazyLock::new(|| {
         // The embedder should have initialized the default crypto provider before
         // initializing servo, so this should never fail.
         .unwrap_or_else(|| {
-            warn!("Default crypto provider not initialized before first access in connector.");
-            Arc::new(aws_lc_rs::default_provider())
+            #[cfg(feature = "aws-lc-rs")]
+            {
+                warn!("Default crypto provider not initialized before first access in connector.");
+                Arc::new(rustls::crypto::aws_lc_rs::default_provider())
+            }
+            #[cfg(not(feature = "aws-lc-rs"))]
+            {
+                panic!("Default crypto provider not initialized before first access in connector.");
+            }
         })
 });
 
@@ -668,6 +677,8 @@ pub fn create_http_client(tls_config: TlsConfig) -> ServoClient {
 
     Client::builder(TokioExecutor {})
         .http1_title_case_headers(true)
+        // The default 16 KiB size is insufficient for certain sites like YouTube
+        .http2_max_header_list_size(HTTP2_MAX_HEADER_LIST_SIZE)
         // This is necessary to allow hyper to perform various background tasks for HTTP/2.
         .timer(TokioTimer::new())
         // This is necessary for hyper to reap unused idle keep-alive connections.

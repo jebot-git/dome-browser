@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 use bitflags::bitflags;
 use embedder_traits::InputMethodType;
-use js::context::JSContext;
+use js::context::{JSContext, NoGC};
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::HTMLInputElementBinding::HTMLInputElementMethods;
 use script_bindings::domstring::DOMString;
@@ -59,7 +59,7 @@ use crate::dom::html::form_controls::input_type::url_input_type::UrlInputType;
 use crate::dom::html::form_controls::input_type::week_input_type::WeekInputType;
 use crate::dom::htmlformelement::HTMLFormElement;
 use crate::dom::input_type::text_input_widget::TextInputWidget;
-use crate::dom::node::{BindContext, UnbindContext};
+use crate::dom::node::UnbindContext;
 
 pub(crate) mod button_input_type;
 pub(crate) mod checkbox_input_type;
@@ -404,7 +404,12 @@ pub(crate) trait SpecificInputType {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#the-required-attribute%3Asuffering-from-being-missing>
-    fn suffers_from_being_missing(&self, input: &HTMLInputElement, value: &DOMString) -> bool {
+    fn suffers_from_being_missing(
+        &self,
+        _no_gc: &NoGC,
+        input: &HTMLInputElement,
+        value: &DOMString,
+    ) -> bool {
         input.Required() &&
             input.value_mode() == ValueMode::Value &&
             input.is_mutable() &&
@@ -442,9 +447,15 @@ pub(crate) trait SpecificInputType {
     ) {
     }
 
-    fn show_the_picker_if_applicable(&self, _input: &HTMLInputElement) {}
+    fn show_the_picker_if_applicable(&self, _cx: &mut JSContext, _input: &HTMLInputElement) {}
 
-    fn select_files(&self, _input: &HTMLInputElement, _test_paths: Option<Vec<DOMString>>) {}
+    fn select_files(
+        &self,
+        _cx: &mut JSContext,
+        _input: &HTMLInputElement,
+        _test_paths: Option<Vec<DOMString>>,
+    ) {
+    }
 
     fn get_files(&self) -> Option<DomRoot<FileList>> {
         None
@@ -476,7 +487,11 @@ pub(crate) trait SpecificInputType {
     ) {
     }
 
-    fn bind_to_tree(&self, _cx: &mut JSContext, _input: &HTMLInputElement, _context: &BindContext) {
+    fn run_shared_bind_to_tree_or_moving_steps(
+        &self,
+        _cx: &mut JSContext,
+        _input: &HTMLInputElement,
+    ) {
     }
 
     fn unbind_from_tree(

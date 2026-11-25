@@ -18,7 +18,7 @@ use fonts::{
     FontBaseline, FontContext, FontGroup, FontIdentifier, FontMetrics, FontRef, ShapingFlags,
     ShapingOptions,
 };
-use icu_locale_core::subtags::Language;
+use icu_locale_core::LanguageIdentifier;
 use js::context::{JSContext, NoGC};
 use net_traits::image_cache::{ImageCache, ImageResponse};
 use net_traits::request::CorsSettings;
@@ -35,7 +35,6 @@ use servo_canvas_traits::canvas::{
 };
 use servo_constellation_traits::ScriptToConstellationMessage;
 use servo_url::{ImmutableOrigin, ServoUrl};
-use style::Zero;
 use style::color::{AbsoluteColor, ColorFlags, ColorSpace};
 use style::computed_values::font_variant_position::T as FontVariantPosition;
 use style::properties::longhands::font_variant_caps::computed_value::T as FontVariantCaps;
@@ -47,6 +46,7 @@ use style::values::computed::{
     FontFeatureSettings, FontVariantEastAsian, FontVariantLigatures, FontVariantNumeric,
 };
 use style::values::specified::color::Color;
+use style::{Atom, Zero};
 use style_traits::values::ToCss;
 use style_traits::{CssWriter, ParsingMode};
 use unicode_script::Script;
@@ -1235,8 +1235,13 @@ impl CanvasState {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-shadowcolor>
-    pub(super) fn set_shadow_color(&self, canvas: Option<&HTMLCanvasElement>, value: DOMString) {
-        if let Ok(rgba) = parse_color(canvas, &value) {
+    pub(super) fn set_shadow_color(
+        &self,
+        cx: &mut JSContext,
+        canvas: Option<&HTMLCanvasElement>,
+        value: DOMString,
+    ) {
+        if let Ok(rgba) = parse_color(cx, canvas, &value) {
             self.state.borrow_mut().shadow_color = rgba;
         }
     }
@@ -1261,12 +1266,13 @@ impl CanvasState {
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-strokestyle>
     pub(super) fn set_stroke_style(
         &self,
+        cx: &mut JSContext,
         canvas: Option<&HTMLCanvasElement>,
         value: StringOrCanvasGradientOrCanvasPattern,
     ) {
         match value {
             StringOrCanvasGradientOrCanvasPattern::String(string) => {
-                if let Ok(rgba) = parse_color(canvas, &string) {
+                if let Ok(rgba) = parse_color(cx, canvas, &string) {
                     self.state.borrow_mut().stroke_style = CanvasFillOrStrokeStyle::Color(rgba);
                 }
             },
@@ -1304,12 +1310,13 @@ impl CanvasState {
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-strokestyle>
     pub(super) fn set_fill_style(
         &self,
+        cx: &mut JSContext,
         canvas: Option<&HTMLCanvasElement>,
         value: StringOrCanvasGradientOrCanvasPattern,
     ) {
         match value {
             StringOrCanvasGradientOrCanvasPattern::String(string) => {
-                if let Ok(rgba) = parse_color(canvas, &string) {
+                if let Ok(rgba) = parse_color(cx, canvas, &string) {
                     self.state.borrow_mut().fill_style = CanvasFillOrStrokeStyle::Color(rgba);
                 }
             },
@@ -1517,8 +1524,10 @@ impl CanvasState {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-filltext>
+    #[expect(clippy::too_many_arguments)]
     pub(super) fn fill_text(
         &self,
+        cx: &mut JSContext,
         global_scope: &GlobalScope,
         canvas: Option<&HTMLCanvasElement>,
         text: DOMString,
@@ -1535,7 +1544,7 @@ impl CanvasState {
         }
 
         if self.state.borrow().font_style.is_none() {
-            self.set_font(canvas, CanvasContextState::DEFAULT_FONT_STYLE.into())
+            self.set_font(cx, canvas, CanvasContextState::DEFAULT_FONT_STYLE.into())
         }
         // This may be `None` if if this is offscreen canvas, in which case just use
         // the initial values for the text style.
@@ -1561,8 +1570,10 @@ impl CanvasState {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-stroketext>
+    #[expect(clippy::too_many_arguments)]
     pub(super) fn stroke_text(
         &self,
+        cx: &mut JSContext,
         global_scope: &GlobalScope,
         canvas: Option<&HTMLCanvasElement>,
         text: DOMString,
@@ -1579,7 +1590,7 @@ impl CanvasState {
         }
 
         if self.state.borrow().font_style.is_none() {
-            self.set_font(canvas, CanvasContextState::DEFAULT_FONT_STYLE.into())
+            self.set_font(cx, canvas, CanvasContextState::DEFAULT_FONT_STYLE.into())
         }
         // This may be `None` if if this is offscreen canvas, in which case just use
         // the initial values for the text style.
@@ -1624,7 +1635,7 @@ impl CanvasState {
         // > Step 3: Let font be the current font of target, as given by that object's font
         // > attribute.
         if self.state.borrow().font_style.is_none() {
-            self.set_font(canvas, CanvasContextState::DEFAULT_FONT_STYLE.into());
+            self.set_font(cx, canvas, CanvasContextState::DEFAULT_FONT_STYLE.into());
         }
 
         let font_context = &global.font_context();
@@ -1698,7 +1709,12 @@ impl CanvasState {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-font>
-    pub(super) fn set_font(&self, canvas: Option<&HTMLCanvasElement>, value: DOMString) {
+    pub(super) fn set_font(
+        &self,
+        cx: &mut JSContext,
+        canvas: Option<&HTMLCanvasElement>,
+        value: DOMString,
+    ) {
         let canvas = match canvas {
             Some(element) => element,
             None => return, // offscreen canvas doesn't have a placeholder canvas
@@ -1706,7 +1722,8 @@ impl CanvasState {
         let node = canvas.upcast::<Node>();
         let window = canvas.owner_window();
 
-        let Some(resolved_font_style) = window.resolved_font_style_query(node, String::from(value))
+        let Some(resolved_font_style) =
+            window.resolved_font_style_query(cx, node, String::from(value))
         else {
             // This will happen when there is a syntax error.
             return;
@@ -2509,9 +2526,11 @@ impl CanvasState {
         let mut runs = Vec::new();
         // TODO: canvas also has experimental `lang` attribute (https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/lang),
         // which Servo doesn't support yet. When this attribute is supported, some changes may be needed here.
-        let x_language = self.font_style()._x_lang.clone();
-        let language = x_language.0.parse().unwrap_or(Language::UNKNOWN);
-        let mut current_text_run = UnshapedTextRun::new(language);
+        let language = self.font_style()._x_lang.0.clone();
+        let language_for_fallback = LanguageIdentifier::try_from_locale_bytes(language.as_bytes())
+            .unwrap_or(LanguageIdentifier::UNKNOWN)
+            .language;
+        let mut current_text_run = UnshapedTextRun::new(language.clone());
         let mut current_text_run_start_index = 0;
 
         // Variation Selectors (U+FE00–U+FE0F) and Variation Selectors Supplement (U+E0100–U+E01EF)
@@ -2525,11 +2544,13 @@ impl CanvasState {
 
         for (index, character) in text.char_indices() {
             let next_char = text[index + character.len_utf8()..].chars().next();
-
             let script = Script::from(character);
-
-            let font = font_group.find_by_codepoint(font_context, character, next_char, language);
-
+            let font = font_group.find_by_codepoint(
+                font_context,
+                character,
+                next_char,
+                language_for_fallback,
+            );
             if !is_variation_selector(character) &&
                 !current_text_run.script_and_font_compatible(script, &font)
             {
@@ -2539,7 +2560,7 @@ impl CanvasState {
                         font: font.clone(),
                         script,
                         string: Default::default(),
-                        language,
+                        language: language.clone(),
                     },
                 );
                 current_text_run_start_index = index;
@@ -2615,11 +2636,11 @@ struct UnshapedTextRun<'a> {
     font: Option<FontRef>,
     script: Script,
     string: &'a str,
-    language: Language,
+    language: Atom,
 }
 
 impl UnshapedTextRun<'_> {
-    fn new(language: Language) -> Self {
+    fn new(language: Atom) -> Self {
         Self {
             font: Default::default(),
             script: Default::default(),
@@ -2649,6 +2670,7 @@ impl UnshapedTextRun<'_> {
             word_spacing: Au::zero(),
             script: self.script,
             language: self.language,
+            language_override: None,
             flags: ShapingFlags::empty(),
             ligatures: FontVariantLigatures::NORMAL,
             numeric: FontVariantNumeric::NORMAL,
@@ -2707,6 +2729,7 @@ impl UnshapedTextRun<'_> {
 
 /// <https://drafts.csswg.org/css-color/#parse-a-css-color-value>
 pub(super) fn parse_color(
+    cx: &mut JSContext,
     canvas: Option<&HTMLCanvasElement>,
     string: &DOMString,
 ) -> Result<AbsoluteColor, ()> {
@@ -2743,8 +2766,8 @@ pub(super) fn parse_color(
             None => AbsoluteColor::BLACK,
             Some(canvas) => {
                 let canvas_element = canvas.upcast::<Element>();
-                match canvas_element.style() {
-                    Some(ref s) if canvas_element.has_css_layout_box() => {
+                match canvas_element.style(cx) {
+                    Some(ref s) if canvas_element.has_css_layout_box_deprecated(cx) => {
                         s.get_inherited_text().color
                     },
                     _ => AbsoluteColor::BLACK,

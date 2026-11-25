@@ -2,8 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::rc::Rc;
+#[cfg(target_os = "android")]
 use std::sync::atomic::AtomicU64;
 
 use euclid::Scale;
@@ -12,8 +13,8 @@ use servo::{
     AuthenticationRequest, BluetoothDeviceSelectionRequest, ConsoleLogLevel,
     CreateNewWebViewRequest, Cursor, DeviceIndependentIntRect, DeviceIndependentPixel,
     DeviceIntPoint, DeviceIntSize, DevicePixel, EmbedderControl, EmbedderControlId, InputEventId,
-    InputEventResult, MediaSessionEvent, PermissionRequest, RenderingContext, ScreenGeometry,
-    WebView, WebViewBuilder, WebViewId,
+    InputEventResult, PermissionRequest, RenderingContext, ScreenGeometry, WebView, WebViewBuilder,
+    WebViewId,
 };
 use url::Url;
 
@@ -31,6 +32,7 @@ pub(crate) const LINE_WIDTH: f32 = 76.0;
 #[cfg_attr(any(target_os = "android", target_env = "ohos"), expect(dead_code))]
 pub(crate) const MIN_WINDOW_INNER_SIZE: DeviceIntSize = DeviceIntSize::new(100, 100);
 
+#[cfg(target_os = "android")]
 static SERVOSHELL_WINDOW_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
@@ -42,16 +44,28 @@ impl From<u64> for ServoShellWindowId {
     }
 }
 
+impl From<u32> for ServoShellWindowId {
+    fn from(value: u32) -> Self {
+        Self(u64::from(value))
+    }
+}
+
 impl ServoShellWindowId {
-    #[cfg_attr(not(any(target_os = "android", target_env = "ohos")), expect(unused))]
+    #[cfg(target_os = "android")]
     pub(crate) fn next() -> ServoShellWindowId {
         ServoShellWindowId(SERVOSHELL_WINDOW_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// Expose the inner ID
+    #[cfg_attr(not(target_env = "ohos"), expect(unused))]
+    pub(crate) fn raw(self) -> u64 {
+        self.0
     }
 }
 
 pub(crate) struct ServoShellWindow {
     /// The [`WebView`]s that have been added to this window.
-    pub(crate) webview_collection: RefCell<WebViewCollection>,
+    webview_collection: RefCell<WebViewCollection>,
     /// A handle to the [`PlatformWindow`] that servoshell is rendering in.
     platform_window: Rc<dyn PlatformWindow>,
     /// Whether or not this window should be closed at the end of the spin of the next event loop.
@@ -195,11 +209,18 @@ impl ServoShellWindow {
 
     /// Returns all [`WebView`]s in creation order.
     pub(crate) fn webviews(&self) -> Vec<(WebViewId, WebView)> {
-        self.webview_collection
-            .borrow()
+        self.webview_collection()
             .all_in_creation_order()
             .map(|(id, webview)| (id, webview.clone()))
             .collect()
+    }
+
+    pub(crate) fn webview_collection(&self) -> Ref<'_, WebViewCollection> {
+        self.webview_collection.borrow()
+    }
+
+    pub(crate) fn webview_collection_mut(&self) -> RefMut<'_, WebViewCollection> {
+        self.webview_collection.borrow_mut()
     }
 
     pub(crate) fn activate_webview(&self, webview_id: WebViewId) {
@@ -390,6 +411,15 @@ impl ServoShellWindow {
             }
         }
     }
+
+    #[cfg_attr(any(target_os = "android", target_env = "ohos"), expect(dead_code))]
+    pub(crate) fn set_accessibility_active(self: &Rc<Self>, active: bool) {
+        for (_, webview) in self.webviews() {
+            // Activate accessibility in the WebView.
+            // There are two sites like this; this is the a11y activation site.
+            webview.set_accessibility_active(active);
+        }
+    }
 }
 
 /// A `PlatformWindow` abstracts away the differents kinds of platform windows that might
@@ -465,7 +495,6 @@ pub(crate) trait PlatformWindow {
     ) {
     }
 
-    fn notify_media_session_event(&self, _: MediaSessionEvent) {}
     fn notify_crashed(&self, _: WebView, _reason: String, _backtrace: Option<String>) {}
     fn show_console_message(&self, _level: ConsoleLogLevel, _message: &str) {}
 

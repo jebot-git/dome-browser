@@ -22,6 +22,7 @@ use js::rust::{HandleObject, MutableHandleValue};
 use rustc_hash::FxBuildHasher;
 use script_bindings::callback::HasCallbackHolder;
 use script_bindings::cell::DomRefCell;
+use script_bindings::domstring::TracedDOMString;
 use script_bindings::js::JS_GetProperty;
 use script_bindings::reflector::{DomObject, Reflector, reflect_dom_object_with_proto};
 use script_bindings::settings_stack::{run_a_callback, run_a_script};
@@ -271,8 +272,7 @@ impl CustomElementRegistry {
 
     /// <https://html.spec.whatwg.org/multipage/#dom-customelementregistry-define>
     /// Step 14.13: Add form associated callbacks to LifecycleCallbacks
-    #[expect(unsafe_code)]
-    unsafe fn add_form_associated_callbacks(
+    fn add_form_associated_callbacks(
         &self,
         cx: &mut JSContext,
         prototype: HandleObject,
@@ -561,15 +561,13 @@ impl CustomElementRegistryMethods<crate::DomTypeHolder> for CustomElementRegistr
         // Steps 14.13: Add the `formAssociated` callbacks.
         if form_associated {
             let mut realm = AutoRealm::new_from_handle(cx, proto_object.handle());
-            unsafe {
-                if let Err(error) = self.add_form_associated_callbacks(
-                    &mut realm,
-                    proto_object.handle(),
-                    &mut callbacks,
-                ) {
-                    self.element_definition_is_running.set(false);
-                    return Err(error);
-                }
+            if let Err(error) = self.add_form_associated_callbacks(
+                &mut realm,
+                proto_object.handle(),
+                &mut callbacks,
+            ) {
+                self.element_definition_is_running.set(false);
+                return Err(error);
             }
         }
 
@@ -593,7 +591,7 @@ impl CustomElementRegistryMethods<crate::DomTypeHolder> for CustomElementRegistr
 
         // Step 16: Append definition to this's custom element definition set.
         self.definitions
-            .borrow_mut()
+            .safe_borrow_mut(cx.no_gc())
             .insert(name.clone(), definition.clone());
 
         // Step 17: If this's is scoped is true, then for each document of
@@ -626,7 +624,7 @@ impl CustomElementRegistryMethods<crate::DomTypeHolder> for CustomElementRegistr
         // Step 19.2: Remove this's when-defined promise map[name].
         let promise = self
             .when_defined
-            .borrow_mut()
+            .safe_borrow_mut(cx.no_gc())
             .remove(&name)
             .map(|promise| promise.root(cx));
         if let Some(promise) = promise {
@@ -655,7 +653,7 @@ impl CustomElementRegistryMethods<crate::DomTypeHolder> for CustomElementRegistr
             .0
             .values()
             .find(|definition| definition.constructor.callback() == constructor.callback())
-            .map(|definition| DOMString::from(definition.name.to_string()))
+            .map(|definition| TracedDOMString::from(definition.name.clone()).root())
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-customelementregistry-whendefined>
@@ -694,7 +692,7 @@ impl CustomElementRegistryMethods<crate::DomTypeHolder> for CustomElementRegistr
         existing_promise.unwrap_or_else(|| {
             let promise = Promise::new_in_realm(realm);
             self.when_defined
-                .borrow_mut()
+                .safe_borrow_mut(realm.no_gc())
                 .insert(name, promise.to_traced());
             promise
         })
@@ -1076,7 +1074,7 @@ pub(crate) fn upgrade_element(
     // Step 6. Add element to the end of definition's construction stack.
     definition
         .construction_stack
-        .borrow_mut()
+        .safe_borrow_mut(cx.no_gc())
         .push(ConstructionStackEntry::Element(Dom::from_ref(element)));
 
     // Save/restore the agent's active registry even when author code reenters
@@ -1086,9 +1084,12 @@ pub(crate) fn upgrade_element(
     );
     let result = run_upgrade_constructor(cx, &definition, element);
 
-    // "regardless of whether the above steps threw an exception" steps
+    // Run cleanup even when the constructor throws.
     drop(active_constructor);
-    definition.construction_stack.borrow_mut().pop();
+    definition
+        .construction_stack
+        .safe_borrow_mut(cx.no_gc())
+        .pop();
 
     // Step 8 exception handling
     if let Err(error) = result {
@@ -1127,26 +1128,13 @@ pub(crate) fn upgrade_element(
             // and we don't need two reactions.
         }
 
-        // Either enabled_state or disabled_state needs to be set,
-        // and the possibility of a disabled fieldset ancestor needs
-        // to be accounted for. (In the spec, being disabled is
-        // a fact that's true or false about a node at a given time,
-        // not a flag that belongs to the node and is updated,
-        // so it doesn't describe this check as an action.)
-        element.check_disabled_attribute(cx.no_gc());
-        element.check_ancestors_disabled_state_for_form_control(cx.no_gc());
         element.update_read_write_state_from_readonly_attribute(cx.no_gc());
 
         // Step 9.2: If element is disabled, then enqueue a custom element callback reaction
         // with element.
-        if element.disabled_state() {
-            custom_element_reaction_stack.enqueue_callback_reaction(
-                cx,
-                element,
-                CallbackReaction::FormDisabled(true),
-                Some(definition),
-            )
-        }
+        //
+        // The element couldn't have been disabled before, so if it is now, this will enqueue the reaction.
+        element.invalidate_disabled_state(cx);
     }
 
     // Step 10
@@ -1372,15 +1360,15 @@ impl CustomElementReactionStack {
 
     pub(crate) fn pop_current_element_queue(&self, cx: &mut JSContext) {
         rooted_vec!(let mut stack);
-        mem::swap(&mut *stack, &mut *self.stack.borrow_mut());
+        mem::swap(&mut *stack, &mut *self.stack.safe_borrow_mut(cx.no_gc()));
 
         if let Some(current_queue) = stack.last() {
             current_queue.invoke_reactions(cx);
         }
         stack.pop();
 
-        mem::swap(&mut *self.stack.borrow_mut(), &mut *stack);
-        self.stack.borrow_mut().append(&mut *stack);
+        mem::swap(&mut *self.stack.safe_borrow_mut(cx.no_gc()), &mut *stack);
+        self.stack.safe_borrow_mut(cx.no_gc()).append(&mut *stack);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#enqueue-an-element-on-the-appropriate-element-queue>
@@ -1464,7 +1452,7 @@ impl CustomElementReactionStack {
                 let mut realm = enter_auto_realm(cx, &*element.global());
                 let cx = &mut realm;
 
-                let local_name = DOMString::from(&*local_name);
+                let local_name = TracedDOMString::from(local_name).root();
                 rooted!(&in(cx) let mut name_value = UndefinedValue());
                 local_name.to_jsval(cx, name_value.handle_mut());
 
@@ -1480,7 +1468,7 @@ impl CustomElementReactionStack {
 
                 rooted!(&in(cx) let mut namespace_value = NullValue());
                 if namespace != ns!() {
-                    let namespace = DOMString::from(&*namespace);
+                    let namespace = TracedDOMString::from(namespace).root();
                     namespace.to_jsval(cx, namespace_value.handle_mut());
                 }
 
@@ -1614,7 +1602,7 @@ impl ElementQueue {
         while let Some(element) = self.next_element() {
             element.invoke_reactions(cx)
         }
-        self.queue.borrow_mut().clear();
+        self.queue.safe_borrow_mut(cx.no_gc()).clear();
     }
 
     fn next_element(&self) -> Option<DomRoot<Element>> {

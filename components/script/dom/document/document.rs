@@ -4,7 +4,7 @@
 
 #![cfg_attr(crown, allow(crown::jscontext_first_arg))]
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -17,7 +17,6 @@ use std::time::Duration;
 
 use atomic_refcell::{AtomicRef, AtomicRefCell};
 use bitflags::bitflags;
-use chrono::Local;
 use content_security_policy::sandboxing_directive::SandboxingFlagSet;
 use content_security_policy::{CspList, Policy as CspPolicy, PolicyDisposition};
 use cookie::Cookie;
@@ -33,10 +32,11 @@ use encoding_rs::{Encoding, UTF_8};
 use html5ever::{LocalName, QualName, local_name, ns};
 use hyper_serde::Serde;
 use indexmap::IndexSet;
+use jiff::ZonedDateTime;
 use js::context::{JSContext, NoGC};
 use js::jsapi::JSObject;
 use js::realm::CurrentRealm;
-use js::rust::{HandleObject, HandleValue, MutableHandleValue};
+use js::rust::{HandleObject, HandleValue};
 use layout_api::{
     ContainerTimingRecord, LCPCandidate, PendingRestyle, ReflowGoal, ReflowPhasesRun,
     ReflowStatistics, RestyleReason, ScrollContainerQueryFlags, TrustedNodeAddress,
@@ -48,9 +48,10 @@ use net_traits::image_cache::ImageCache;
 use net_traits::permissions_policy::{ContainerPolicy, PermissionsPolicy, PolicyFeature};
 use crate::dom::permissionspolicy::DOMPermissionsPolicy;
 use net_traits::policy_container::{EmbedderPolicyValue, PolicyContainer};
-use net_traits::pub_domains::is_pub_domain;
+use net_traits::pub_domains::{Site, is_pub_domain};
 use net_traits::request::{
     InsecureRequestsPolicy, PreloadId, PreloadKey, PreloadedResources, RequestBuilder,
+    UpgradeInsecureNavigations,
 };
 use net_traits::{ReferrerPolicy, ResourceFetchTiming};
 use paint_api::display_list::PaintTimingInfo;
@@ -65,7 +66,8 @@ use script_bindings::cell::{DomRefCell, Ref, RefMut};
 use script_bindings::domstring::TracedDOMString;
 use script_bindings::interfaces::DocumentHelpers;
 use script_bindings::reflector::reflect_dom_object_with_proto;
-use script_bindings::trace::CustomTraceable;
+use script_bindings::tasks::NonSendTaskBox;
+use script_bindings::trace::{CustomTraceable, RootedTraceableBox};
 use script_traits::{DocumentActivity, ProgressiveWebMetricType};
 use servo_arc::Arc;
 use servo_base::cross_process_instant::CrossProcessInstant;
@@ -108,6 +110,7 @@ use crate::dom::bindings::codegen::Bindings::ElementBinding::ScrollLogicalPositi
 use crate::dom::bindings::codegen::Bindings::EventBinding::Event_Binding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLElementBinding::HTMLElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLIFrameElementBinding::HTMLIFrameElement_Binding::HTMLIFrameElementMethods;
+use crate::dom::bindings::codegen::Bindings::IntersectionObserverBinding::IntersectionObserverMethods;
 #[cfg(any(feature = "webxr", feature = "gamepad"))]
 use crate::dom::bindings::codegen::Bindings::NavigatorBinding::Navigator_Binding::NavigatorMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
@@ -127,7 +130,6 @@ use crate::dom::bindings::domname::{
     self, is_valid_attribute_local_name, is_valid_element_local_name, namespace_from_domstring,
 };
 use crate::dom::bindings::error::{Error, ErrorInfo, ErrorResult, Fallible};
-use crate::dom::bindings::frozenarray::CachedFrozenArray;
 use crate::dom::bindings::inheritance::{Castable, ElementTypeId, HTMLElementTypeId, NodeTypeId};
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::refcounted::Trusted;
@@ -155,6 +157,7 @@ use crate::dom::document::tree_ordered_index_map::TreeOrderedIndexMap;
 use crate::dom::document::websocket::WebSocket;
 use crate::dom::document_embedder_controls::DocumentEmbedderControls;
 use crate::dom::document_event_handler::DocumentEventHandler;
+use crate::dom::document_overlay_handler::DocumentOverlayHandler;
 use crate::dom::documentfragment::DocumentFragment;
 use crate::dom::documentorshadowroot::{
     DocumentOrShadowRoot, ServoStylesheetInDocument, StylesheetSource,
@@ -184,6 +187,7 @@ use crate::dom::html::htmlheadelement::HTMLHeadElement;
 use crate::dom::html::htmlhtmlelement::HTMLHtmlElement;
 use crate::dom::html::htmliframeelement::HTMLIFrameElement;
 use crate::dom::html::htmlimageelement::HTMLImageElement;
+use crate::dom::html::htmlmediaelement::HTMLMediaElement;
 use crate::dom::html::htmlscriptelement::{HTMLScriptElement, ScriptResult, TracedScriptResult};
 use crate::dom::html::htmltitleelement::HTMLTitleElement;
 use crate::dom::htmldetailselement::DetailsNameGroups;
@@ -234,7 +238,6 @@ use crate::mime::{APPLICATION, CHARSET};
 use crate::navigation::navigate;
 use crate::runtime::script_runtime::compute_size;
 use crate::scripting::script_module::{ModuleRequest, ModuleStatus};
-use crate::tasks::task::NonSendTaskBox;
 use crate::tasks::task_manager::TaskManager;
 use crate::tasks::task_source::TaskSourceName;
 use crate::xpath::parse_expression;
@@ -468,6 +471,8 @@ pub(crate) struct Document {
     event_handler: DocumentEventHandler,
     /// A helper used to process and store data related to focus handling.
     focus_handler: DocumentFocusHandler,
+    /// A helper used to process and store data related to overlays.
+    overlay_handler: OnceCell<DocumentOverlayHandler>,
     /// A helper to handle showing and hiding user interface controls in the embedding layer.
     embedder_controls: DocumentEmbedderControls,
     id_map: TreeOrderedIndexMap,
@@ -584,8 +589,6 @@ pub(crate) struct Document {
     /// A rAF request is considered spurious if nothing was actually reflowed.
     spurious_animation_frames: Cell<u8>,
 
-    /// Entry node for fullscreen.
-    fullscreen_element: MutNullableDom<Element>,
     /// Map from ID to set of form control elements that have that ID as
     /// their 'form' content attribute. Used to reset form controls
     /// whenever any element with the same ID as the form attribute
@@ -625,7 +628,7 @@ pub(crate) struct Document {
     script_and_layout_blockers: Cell<u32>,
     /// List of tasks to execute as soon as last script/layout blocker is removed.
     #[ignore_malloc_size_of = "Measuring trait objects is hard"]
-    delayed_tasks: DomRefCell<Vec<Box<dyn NonSendTaskBox>>>,
+    delayed_tasks: DomRefCell<VecDeque<Box<dyn NonSendTaskBox>>>,
     /// <https://html.spec.whatwg.org/multipage/#completely-loaded>
     completely_loaded: Cell<bool>,
     /// Set of shadow roots connected to the document tree.
@@ -696,6 +699,8 @@ pub(crate) struct Document {
     /// The lifetime of an intersection observer is specified at
     /// <https://github.com/w3c/IntersectionObserver/issues/525>.
     intersection_observers: DomRefCell<Vec<Dom<IntersectionObserver>>>,
+    /// <https://html.spec.whatwg.org/multipage/#lazy-load-intersection-observer>
+    lazy_load_intersection_observer: MutNullableDom<IntersectionObserver>,
     /// The node that is currently highlighted by the devtools
     highlighted_dom_node: MutNullableDom<Node>,
     /// Resolved LCP candidate elements, keyed by their [LCPCandidateID].
@@ -715,11 +720,9 @@ pub(crate) struct Document {
     #[no_trace]
     container_first_render_times: DomRefCell<HashMap<OpaqueNode, CrossProcessInstant>>,
     /// The constructed stylesheet that is adopted by this [Document].
+    /// The DOM-side adopted stylesheet list for this [Document], including duplicates.
     /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
     adopted_stylesheets: DomRefCell<Vec<Dom<CSSStyleSheet>>>,
-    /// Cached frozen array of [`Self::adopted_stylesheets`]
-    #[ignore_malloc_size_of = "mozjs"]
-    adopted_stylesheets_frozen_types: CachedFrozenArray,
     /// <https://drafts.csswg.org/cssom-view/#document-pending-scroll-events>
     /// > Each Document has an associated list of pending scroll events, which stores
     /// > pairs of (EventTarget, DOMString), initially empty.
@@ -758,9 +761,15 @@ pub(crate) struct Document {
     /// The cached favicon for that document.
     #[no_trace]
     favicon: RefCell<Option<Image>>,
+    /// Whether an explicit `<link rel="icon">` was ever found in this [`Document`].
+    ever_had_favicon_link: Cell<bool>,
 
     /// All websockets created that are associated with this document.
     websockets: DOMTracker<WebSocket>,
+
+    /// <https://html.spec.whatwg.org/multipage/#playing-the-media-resource>
+    /// Active media elements that are kept alive while playing or eligible for autoplay.
+    active_media_elements: DomRefCell<FxHashSet<Dom<HTMLMediaElement>>>,
 
     /// <https://html.spec.whatwg.org/multipage/#details-name-group>
     details_name_groups: DomRefCell<Option<DetailsNameGroups>>,
@@ -886,26 +895,11 @@ impl Document {
         self.pipeline_id
     }
 
-    /// <https://fullscreen.spec.whatwg.org/#fully-exit-fullscreen>
-    fn fully_exit_fullscreen(&self, cx: &mut JSContext) {
-        // Step 1. If document’s fullscreen element is null, terminate these
-        // steps.
-        if self.fullscreen_element().is_none() {
-            return;
-        };
-
-        // TODO Step 2. Unfullscreen elements whose fullscreen flag is set,
-        // within document’s top layer, except for document’s fullscreen element.
-
-        // Step 3. Exit fullscreen document.
-        let _ = self.exit_fullscreen(cx);
-    }
-
     /// <https://html.spec.whatwg.org/multipage/#unloading-document-cleanup-steps>
     fn unloading_cleanup_steps(&self, cx: &mut JSContext) {
         // > https://fullscreen.spec.whatwg.org/#model
         // > "Whenever the unloading document cleanup steps run with a document, fully exit fullscreen document."
-        self.fully_exit_fullscreen(cx);
+        self.overlay_handler().fully_exit_fullscreen(cx);
 
         // Step 1. Let window be document's relevant global object.
         // Step 2. For each WebSocket object webSocket whose relevant global object is window, make disappear webSocket.
@@ -913,6 +907,8 @@ impl Document {
             // If this affected any WebSocket objects, then make document unsalvageable given document and "websocket".
             self.salvageable.set(false);
         }
+
+        self.clean_up_media_elements(cx.no_gc());
 
         // Step 3. For each WebTransport object transport whose relevant global object is window, run the context cleanup steps given transport.
         // TODO
@@ -931,6 +927,9 @@ impl Document {
             let msg = ScriptToConstellationMessage::DiscardDocument;
             let _ = global_scope.script_to_constellation_chan().send(msg);
         }
+
+        // If any element has requested to open a control, we should hide all of them
+        self.embedder_controls().hide_all_embedder_controls();
     }
 
     pub(crate) fn track_websocket(&self, websocket: &WebSocket) {
@@ -945,6 +944,31 @@ impl Document {
             }
         });
         closed_any_websocket
+    }
+
+    pub(crate) fn register_active_media_element(&self, element: &HTMLMediaElement) {
+        self.active_media_elements
+            .borrow_mut()
+            .insert(Dom::from_ref(element));
+    }
+
+    pub(crate) fn unregister_active_media_element(&self, element: &HTMLMediaElement) {
+        self.active_media_elements
+            .borrow_mut()
+            .remove(&Dom::from_ref(element));
+    }
+
+    fn clean_up_media_elements(&self, no_gc: &NoGC) {
+        let media_elements: Vec<DomRoot<HTMLMediaElement>> = self
+            .active_media_elements
+            .borrow()
+            .iter()
+            .map(|e| DomRoot::from_ref(&**e))
+            .collect();
+        self.active_media_elements.borrow_mut().clear();
+        for element in &media_elements {
+            element.clean_up_on_document_unload(self, no_gc);
+        }
     }
 
     fn document_element_changed(&self) {
@@ -1301,25 +1325,16 @@ impl Document {
 
     /// <https://html.spec.whatwg.org/multipage/#fallback-base-url>
     pub(crate) fn fallback_base_url(&self) -> ServoUrl {
+        // Step 1. If document's URL matches about:blank or matches about:srcdoc,
+        // and document's about base URL is non-null, then return document's about base URL.
         let document_url = self.url();
-        // Step 1: If document is an iframe srcdoc document:
-        if document_url.as_str() == "about:srcdoc" {
-            // Step 1.1: Assert: document's about base URL is non-null.
-            // Step 1.2: Return document's about base URL.
-            return self
-                .about_base_url()
-                .expect("about:srcdoc page should always have an about base URL");
-        }
-
-        // Step 2: If document's URL matches about:blank and document's about base URL is
-        // non-null, then return document's about base URL.
-        if document_url.matches_about_blank()
-            && let Some(about_base_url) = self.about_base_url()
+        if (document_url.matches_about_blank() || document_url.matches_about_srcdoc()) &&
+            let Some(about_base_url) = self.about_base_url()
         {
             return about_base_url;
         }
 
-        // Step 3: Return document's URL.
+        // Step 2. Return document's URL.
         document_url
     }
 
@@ -1413,7 +1428,9 @@ impl Document {
     pub(crate) fn set_quirks_mode(&self, new_mode: QuirksMode) {
         let old_mode = self.quirks_mode.replace(new_mode);
 
-        if old_mode != new_mode {
+        // Only pass the quirks mode on to layout when we are dealing with the `Window`'s
+        // main `Document`, not those created with other DOM APIs.
+        if old_mode != new_mode && self.has_browsing_context() {
             self.window.layout_mut().set_quirks_mode(new_mode);
         }
     }
@@ -1593,7 +1610,7 @@ impl Document {
         indicated_part.run_the_focusing_steps(
             cx,
             Some(FocusableArea::Viewport),
-            FocusTrigger::Other,
+            FocusTrigger::Script,
         );
 
         // Step 3.7. Move the sequential focus navigation starting point to target.
@@ -1611,11 +1628,12 @@ impl Document {
     }
 
     pub(crate) fn notify_embedder_of_load_completion(&self) {
-        if self.window().is_top_level() {
+        if self.window().is_top_level() && !self.loader().aborted() {
             self.send_to_embedder(EmbedderMsg::NotifyLoadStatusChanged(
                 self.webview_id(),
                 LoadStatus::Complete,
             ));
+            self.maybe_fetch_fallback_favicon();
         }
     }
 
@@ -1643,6 +1661,7 @@ impl Document {
                 LoadStatus::Started,
             ));
             self.send_to_embedder(EmbedderMsg::Status(webview_id, None));
+            self.send_to_embedder(EmbedderMsg::SetFavicon(webview_id, None));
         }
 
         self.ready_state.set(DocumentReadyState::Loading);
@@ -2212,10 +2231,40 @@ impl Document {
 
     pub(crate) fn set_policy_container(&self, policy_container: StdArc<PolicyContainer>) {
         *self.policy_container.borrow_mut() = policy_container;
+        self.update_upgrade_insecure_navigations_set();
     }
 
     pub(crate) fn set_csp_list(&self, csp_list: Option<CspList>) {
         StdArc::make_mut(&mut *self.policy_container.borrow_mut()).set_csp_list(csp_list);
+        self.update_upgrade_insecure_navigations_set();
+    }
+
+    /// <https://w3c.github.io/webappsec-upgrade-insecure-requests/#delivery> Step 3-4
+    fn update_upgrade_insecure_navigations_set(&self) {
+        if let Some(csp_list) = self.get_csp_list().as_ref() {
+            for policy in &csp_list.0 {
+                if policy.contains_a_directive_whose_name_is("upgrade-insecure-requests") &&
+                    policy.disposition == PolicyDisposition::Enforce
+                {
+                    if let ImmutableOrigin::Tuple(_, host, port) = self.url.borrow().origin() {
+                        let tuple = UpgradeInsecureNavigations {
+                            host: host.to_string(),
+                            port,
+                        };
+                        let global_scope = self.window.as_global_scope();
+
+                        global_scope
+                            .script_to_constellation_chan()
+                            .send(ScriptToConstellationMessage::AddTupleToUpgradeInsecureNavigationsSet(tuple.clone()))
+                            .unwrap();
+                        global_scope
+                            .upgrade_insecure_navigations_set_mut()
+                            .insert(tuple);
+                    }
+                    return;
+                }
+            }
+        }
     }
 
     /// <https://www.w3.org/TR/CSP/#enforced>
@@ -2265,6 +2314,23 @@ impl Document {
         self.window()
             .as_global_scope()
             .fetch(request_builder, listener, networking_task_source);
+    }
+
+    pub(crate) fn fetch_favicon<Listener: FetchResponseListener>(
+        &self,
+        request_builder: RequestBuilder,
+        listener: Listener,
+    ) {
+        let networking_task_source = self
+            .owner_global()
+            .task_manager()
+            .networking_task_source()
+            .to_sendable();
+        self.window().as_global_scope().fetch_favicon(
+            request_builder,
+            listener,
+            networking_task_source,
+        );
     }
 
     /// <https://fetch.spec.whatwg.org/#deferred-fetch-control-document>
@@ -2621,7 +2687,7 @@ impl Document {
         //
         // Note: this will also result in the "iframe-load-event-steps" being run.
         // https://html.spec.whatwg.org/multipage/#iframe-load-event-steps
-        self.notify_constellation_load();
+        self.notify_constellation_that_load_finished(false /* aborted */);
 
         // Step 5. Otherwise, if container is non-null, then queue an element task on the DOM manipulation task source
         // given container to fire an event named load at container.
@@ -2674,7 +2740,19 @@ impl Document {
                 }
 
                 // Step 9.1. Update the current document readiness to "complete".
+                // This must happen even if the load was stopped.
                 document.update_the_current_document_readiness(cx, DocumentReadyState::Complete);
+
+                // The document may have been stopped after this task was queued.
+                //
+                // The HTML specification doesn't say which events should be fired when
+                // aborting a Document. Blink and WebKit don't fire the load event in this
+                // situation; see <https://github.com/whatwg/html/issues/5535>.
+                //
+                // This check is intentionally after step 9.1 to move readystate to "complete".
+                if document.loader().aborted() {
+                    return;
+                }
 
                 // Step 9.2. If the Document object's browsing context is null, then abort these steps.
                 if document.browsing_context().is_none() {
@@ -2896,24 +2974,32 @@ impl Document {
             return;
         }
 
-        // Step 5.1. Spin the event loop until the first script in the list of scripts that will execute when the
-        // document has finished parsing has its ready to be parser-executed set to true and the parser's Document
-        // has no style sheet that is blocking scripts.
+        // Step 5. While the list of scripts that will execute when the document has finished
+        // parsing is not empty:
+        // Step 5.1. Spin the event loop until the first script in the list of scripts that will
+        // execute when the document has finished parsing has its ready to be parser-executed set to
+        // true and the parser's Document has no style sheet that is blocking scripts.
         loop {
+            if self.deferred_scripts.is_empty() {
+                break;
+            }
             if self.has_a_stylesheet_that_is_blocking_scripts() {
                 return;
             }
-            // Step 5.3. Remove the first script element from the list of scripts that will execute when the
-            // document has finished parsing (i.e. shift out the first entry in the list).
+            // Step 5.3. Remove the first script element from the list of scripts that will execute
+            // when the document has finished parsing (i.e. shift out the first entry in the list).
             if let Some((element, result)) = self.deferred_scripts.take_next_ready_to_be_executed()
             {
-                // Step 5.2. Execute the script element given by the first script in the list of scripts that will execute when the document has finished parsing.
+                // Step 5.2. Execute the script element given by the first script in the list of
+                // scripts that will execute when the document has finished parsing.
                 element.execute(cx, result);
             } else {
                 break;
             }
         }
-        // Step 5. While the list of scripts that will execute when the document has finished parsing is not empty:
+
+        // If the list of scripts is empty, we can move on to the next step, otherwise we will
+        // re-enter this method as the ScriptThread's event loop spins.
         if self.deferred_scripts.is_empty() {
             self.current_the_end_loading_phase
                 .set(TheEndLoadingPhase::ProcessingAsSoonAsPossibleScripts);
@@ -3113,6 +3199,10 @@ impl Document {
         // Step 11. For each workletGlobalScope in document's worklet global scopes,
         // terminate workletGlobalScope.
         // TODO
+
+        // This is not a specification step but needs to be done in order to ensure proper
+        // garbage collection of this global scope.
+        exited_window.as_global_scope().tear_down();
     }
 
     /// <https://html.spec.whatwg.org/multipage/#active-parser>
@@ -3125,8 +3215,11 @@ impl Document {
 
     /// <https://html.spec.whatwg.org/multipage/#abort-a-document>
     pub(crate) fn abort(&self, cx: &mut JSContext, reason: AbortReason) {
-        // We need to inhibit the loader before anything else.
-        self.loader.borrow_mut().inhibit_events();
+        // We need to inhibit the loader before anything else and prevent any further movement
+        // through "the-end" loading phases.
+        self.loader.borrow_mut().abort();
+        self.current_the_end_loading_phase
+            .set(TheEndLoadingPhase::Done);
 
         // Step 1. Assert: this is running as part of a task queued on document's relevant agent's event loop.
         // TODO
@@ -3170,7 +3263,23 @@ impl Document {
             parser.abort(cx, reason);
             // Step 4.3. Make document unsalvageable given document and "parser-aborted".
             self.salvageable.set(false);
+        } else if self.ready_state.get() != DocumentReadyState::Complete {
+            // See <https://github.com/whatwg/html/issues/5535>.
+            // All browsers set the document readiness to "complete" when aborting, even though
+            // it isn't specified. In addition, WPT tests depend on this happening.
+            let document = Trusted::new(self);
+            self.owner_global()
+                .task_manager()
+                .dom_manipulation_task_source()
+                .queue(task!(fire_complete: move |cx| {
+                    let document = document.root();
+                    if document.is_fully_active() {
+                        document.update_the_current_document_readiness(cx, DocumentReadyState::Complete)
+                    }
+                }));
         }
+
+        self.window().allow_layout_if_necessary(cx);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#abort-a-document-and-its-descendants>
@@ -3210,9 +3319,9 @@ impl Document {
         self.abort(cx, reason);
     }
 
-    pub(crate) fn notify_constellation_load(&self) {
+    pub(crate) fn notify_constellation_that_load_finished(&self, aborted: bool) {
         self.window()
-            .send_to_constellation(ScriptToConstellationMessage::LoadComplete);
+            .send_to_constellation(ScriptToConstellationMessage::LoadFinished { aborted });
     }
 
     pub(crate) fn set_current_parser(&self, script: Option<&ServoParser>, reason: SetParserReason) {
@@ -3357,7 +3466,7 @@ impl Document {
             is = options.is.as_ref().map(LocalName::from);
             if let Some(override_registry) = &options.customElementRegistry {
                 if is.is_some() { return Err(Error::NotSupported(None)); }
-                registry = override_registry.clone();
+                registry = override_registry.as_ref().map(|registry| DomRoot::from_ref(&**registry));
             }
             if registry.as_ref().is_some_and(|registry| {
                 !registry.is_scoped() && self.custom_element_registry().as_deref() != Some(&**registry)
@@ -3477,6 +3586,9 @@ impl Document {
             return true;
         }
         if self.has_pending_scroll_events() {
+            return true;
+        }
+        if self.overlay_handler().has_pending_fullscreen_events() {
             return true;
         }
         if self.window().has_unhandled_resize_event() {
@@ -3629,11 +3741,30 @@ impl Document {
         &self.id_map
     }
 
-    /// <https://drafts.csswg.org/resize-observer/#dom-resizeobserver-resizeobserver>
-    pub(crate) fn add_resize_observer(&self, resize_observer: &ResizeObserver) {
+    /// <https://drafts.csswg.org/resize-observer/#lifetime>
+    pub(crate) fn add_resize_observer(&self, no_gc: &NoGC, resize_observer: &ResizeObserver) {
+        let mut resize_observers = self.resize_observers.safe_borrow_mut(no_gc);
+        let mut insertion_index = None;
+        for (index, existing_resize_observer) in resize_observers.iter().enumerate() {
+            if &**existing_resize_observer == resize_observer {
+                return;
+            }
+            if existing_resize_observer.created_after(resize_observer) {
+                insertion_index = Some(index);
+                break;
+            }
+        }
+
+        match insertion_index {
+            Some(index) => resize_observers.insert(index, Dom::from_ref(resize_observer)),
+            None => resize_observers.push(Dom::from_ref(resize_observer)),
+        }
+    }
+
+    pub(crate) fn remove_resize_observer(&self, no_gc: &NoGC, resize_observer: &ResizeObserver) {
         self.resize_observers
-            .borrow_mut()
-            .push(Dom::from_ref(resize_observer));
+            .safe_borrow_mut(no_gc)
+            .retain(|existing_resize_observer| &**existing_resize_observer != resize_observer);
     }
 
     /// <https://drafts.csswg.org/resize-observer/#gather-active-observations-h>
@@ -3643,8 +3774,9 @@ impl Document {
         no_gc: &NoGC,
         depth: &ResizeObservationDepth,
     ) -> bool {
+        // This does not trigger a creation of ResizeObservers, so we can take a simple borrow.
         let mut has_active_resize_observations = false;
-        for observer in self.resize_observers.borrow_mut().iter_mut() {
+        for observer in self.resize_observers.borrow().iter() {
             observer.gather_active_resize_observations_at_depth(
                 no_gc,
                 depth,
@@ -3654,22 +3786,62 @@ impl Document {
         has_active_resize_observations
     }
 
+    /// Step 16 from
+    /// <https://html.spec.whatwg.org/multipage/#update-the-rendering>
+    pub(crate) fn run_the_resize_observer_steps(&self, cx: &mut JSContext) {
+        // Not specified, but allows us to skip work when it isn't necessary.
+        if self.resize_observers.borrow().is_empty() {
+            return;
+        }
+
+        // Step 16.1. Let resizeObserverDepth be 0.
+        let mut resize_observer_depth = Default::default();
+        // Step 16.2. While true:
+        loop {
+            // Step 16.2.1. Recalculate styles and update layout for doc.
+            self.window()
+                .reflow_for_non_flushing_update_the_rendering_queries(cx);
+
+            // Step 16.2.2. Let hadInitialVisibleContentVisibilityDetermination be false.
+            // Step 16.2.3. For each element element with 'auto' used value of 'content-visibility':
+            // Step 16.2.4. If hadInitialVisibleContentVisibilityDetermination is true, then continue.
+            // TODO: Implement content-visibility
+
+            // Step 16.2.5. Gather active resize observations at depth resizeObserverDepth for doc.
+            let has_active_resize_observers =
+                self.gather_active_resize_observations_at_depth(cx.no_gc(), &resize_observer_depth);
+            // Step 16.2.6. If doc has active resize observations:
+            if has_active_resize_observers {
+                // Step 16.2.6.1. Set resizeObserverDepth to the result of broadcasting active resize
+                // observations given doc.
+                resize_observer_depth = self.broadcast_active_resize_observations(cx);
+                continue;
+            }
+            // Step 16.2.7. Otherwise, break.
+            break;
+        }
+
+        // Step 16.3. If doc has skipped resize observations, then deliver resize loop error given
+        // doc.
+        if self.has_skipped_resize_observations() {
+            self.deliver_resize_loop_error_notification(cx);
+            // Ensure that another turn of the event loop occurs to process
+            // the skipped observations.
+            self.add_rendering_update_reason(
+                RenderingUpdateReason::ResizeObserverStartedObservingTarget,
+            );
+        }
+    }
+
     /// <https://drafts.csswg.org/resize-observer/#broadcast-active-resize-observations>
     pub(crate) fn broadcast_active_resize_observations(
         &self,
         cx: &mut JSContext,
     ) -> ResizeObservationDepth {
+        // As the interior of the loop can trigger creation of new ResizeObservers (which mutably borrows `resize_observers`, we have to clone the fields.
         let mut shallowest = ResizeObservationDepth::max();
-        // Breaking potential re-borrow cycle on `resize_observers`:
-        // broadcasting resize observations calls into a JS callback,
-        // which can add new observers.
-        let iterator: Vec<DomRoot<ResizeObserver>> = self
-            .resize_observers
-            .borrow()
-            .iter()
-            .map(|obs| obs.as_rooted())
-            .collect();
-        for observer in iterator {
+        rooted_vec!(let observers <- self.resize_observers.borrow().iter().cloned());
+        for observer in &*observers {
             observer.broadcast_active_resize_observations(cx, &mut shallowest);
         }
         shallowest
@@ -3700,6 +3872,21 @@ impl Document {
 
     /// <https://html.spec.whatwg.org/multipage/#encoding-parsing-a-url>
     pub(crate) fn encoding_parse_a_url(&self, url: &str) -> Result<ServoUrl, url::ParseError> {
+        // Step 4. Let baseURL be environment's base URL, if environment is a Document object;
+        // otherwise environment's API base URL.
+        self.encoding_parse_a_url_with_base(url, &self.base_url())
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#encoding-parsing-a-url>
+    ///
+    /// Like [`Self::encoding_parse_a_url`], but resolves relative to the given base URL
+    /// instead of the document's current one. This is for callers that must use the
+    /// document's base URL from an earlier point in time.
+    pub(crate) fn encoding_parse_a_url_with_base(
+        &self,
+        url: &str,
+        base_url: &ServoUrl,
+    ) -> Result<ServoUrl, url::ParseError> {
         // NOTE: This algorithm is defined for both Document and environment settings objects.
         // This implementation is only for documents.
 
@@ -3709,10 +3896,6 @@ impl Document {
 
         // Step 3. Otherwise, if environment's relevant global object is a Window object, set encoding to environment's
         // relevant global object's associated Document's character encoding.
-
-        // Step 4. Let baseURL be environment's base URL, if environment is a Document object;
-        // otherwise environment's API base URL.
-        let base_url = self.base_url();
 
         // Step 5. Return the result of applying the URL parser to url, with baseURL and encoding.
         url::Url::options()
@@ -3764,6 +3947,33 @@ impl Document {
         self.intersection_observers
             .borrow_mut()
             .retain(|observer| *observer != intersection_observer)
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#start-intersection-observing-a-lazy-loading-element>
+    pub(crate) fn start_intersection_observing_a_lazy_loading_element(
+        &self,
+        cx: &mut JSContext,
+        element: &Element,
+    ) {
+        // Step 2: create the observer if it is still null.
+        let observer = self
+            .lazy_load_intersection_observer
+            .or_init(|| IntersectionObserver::new_lazy_load(cx, &self.window));
+        observer.Observe(cx.no_gc(), element);
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#stop-intersection-observing-a-lazy-loading-element>
+    pub(crate) fn stop_intersection_observing_a_lazy_loading_element(
+        &self,
+        no_gc: &NoGC,
+        element: &Element,
+    ) {
+        // The spec asserts the observer is not null. We skip quietly instead,
+        // because navigation code may call this for iframes that were
+        // never observed (for example ones with a `src` attribute).
+        if let Some(observer) = self.lazy_load_intersection_observer.get() {
+            observer.Unobserve(no_gc, element);
+        }
     }
 
     /// <https://w3c.github.io/IntersectionObserver/#update-intersection-observations-algo>
@@ -4382,6 +4592,7 @@ impl Document {
             quirks_mode: Cell::new(quirks_mode),
             event_handler: DocumentEventHandler::new(window),
             focus_handler: DocumentFocusHandler::new(window, has_focus),
+            overlay_handler: Default::default(),
             embedder_controls: DocumentEmbedderControls::new(window),
             id_map: TreeOrderedIndexMap::id(),
             name_map: TreeOrderedIndexMap::name(),
@@ -4447,7 +4658,6 @@ impl Document {
             ignore_destructive_writes_counter: Default::default(),
             ignore_opens_during_unload_counter: Default::default(),
             spurious_animation_frames: Cell::new(0),
-            fullscreen_element: MutNullableDom::new(None),
             form_id_listener_map: Default::default(),
             interactive_time: DomRefCell::new(interactive_time),
             tti_window: DomRefCell::new(InteractiveWindow::default()),
@@ -4491,13 +4701,13 @@ impl Document {
             has_trustworthy_ancestor_origin: Cell::new(has_trustworthy_ancestor_origin),
             intersection_observer_task_queued: Cell::new(false),
             intersection_observers: Default::default(),
+            lazy_load_intersection_observer: Default::default(),
             highlighted_dom_node: Default::default(),
             lcp_candidates: DomRefCell::new(Default::default()),
             paint_timing_info: Cell::new(PaintTimingInfo::now()),
             container_timing_records: DomRefCell::new(Default::default()),
             container_first_render_times: DomRefCell::new(Default::default()),
             adopted_stylesheets: Default::default(),
-            adopted_stylesheets_frozen_types: CachedFrozenArray::new(),
             pending_scroll_events: Default::default(),
             rendering_update_reasons: Default::default(),
             waiting_on_canvas_image_updates: Cell::new(false),
@@ -4507,7 +4717,9 @@ impl Document {
             active_sandboxing_flag_set: Cell::new(creation_sandboxing_flag_set),
             creation_sandboxing_flag_set: Cell::new(creation_sandboxing_flag_set),
             favicon: RefCell::new(None),
+            ever_had_favicon_link: Cell::new(false),
             websockets: DOMTracker::new(),
+            active_media_elements: Default::default(),
             details_name_groups: Default::default(),
             protocol_handler_automation_mode: Default::default(),
             layout_animations_test_enabled: pref!(layout_animations_test_enabled),
@@ -4538,6 +4750,13 @@ impl Document {
 
     pub(crate) fn detach_window(&self) {
         self.window_detached.set(true);
+
+        // Note: This is step 7 of "destroy a document"
+        // <https://html.spec.whatwg.org/multipage/#destroy-a-document>. Eventually
+        // document replacement should call `Document::destroy` via step 20 in
+        // "unload" <https://html.spec.whatwg.org/multipage/#unload-a-document>.
+        self.task_manager()
+            .cancel_all_tasks_and_ignore_future_tasks();
     }
 
     pub(crate) fn window_detached(&self) -> bool {
@@ -4569,6 +4788,12 @@ impl Document {
     /// Get the [`Document`]'s [`DocumentFocusHandler`].
     pub(crate) fn focus_handler(&self) -> &DocumentFocusHandler {
         &self.focus_handler
+    }
+
+    /// Get the [`Document`]'s [`DocumentOverlayHandler`].
+    pub(crate) fn overlay_handler(&self) -> &DocumentOverlayHandler {
+        self.overlay_handler
+            .get_or_init(|| DocumentOverlayHandler::new(self))
     }
 
     /// Get the [`Document`]'s [`DocumentEmbedderControls`].
@@ -4613,16 +4838,17 @@ impl Document {
         assert!(self.script_and_layout_blockers.get() > 0);
         self.script_and_layout_blockers
             .set(self.script_and_layout_blockers.get() - 1);
-        while self.script_and_layout_blockers.get() == 0 && !self.delayed_tasks.borrow().is_empty()
-        {
-            let task = self.delayed_tasks.borrow_mut().remove(0);
+        while self.script_and_layout_blockers.get() == 0 {
+            let Some(task) = self.delayed_tasks.borrow_mut().pop_front() else {
+                return;
+            };
             task.run_box(cx);
         }
     }
 
     /// Enqueue a task to run as soon as any JS and layout blockers are removed.
     pub(crate) fn add_delayed_task<T: 'static + NonSendTaskBox>(&self, task: T) {
-        self.delayed_tasks.borrow_mut().push(Box::new(task));
+        self.delayed_tasks.borrow_mut().push_back(Box::new(task));
     }
 
     /// Returns true if the DOM is in a state that will allow running content JS or
@@ -5033,8 +5259,13 @@ impl Document {
             entry.hint.insert(RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
         }
 
-        if vtable_for(el.upcast()).attribute_affects_presentational_hints(attr)
-            || el.check_style_on_self_or_eager_pseudos(|style| {
+        let affects_presentational_hints =
+            vtable_for(el.upcast()).attribute_affects_presentational_hints(attr);
+        if affects_presentational_hints {
+            el.dirty_presentational_hints();
+        }
+        if affects_presentational_hints ||
+            el.check_style_on_self_or_eager_pseudos(|style| {
                 if let Some(ref attribute_references) = style.attribute_references {
                     return attribute_references.contains_key(attr.local_name());
                 }
@@ -5115,10 +5346,6 @@ impl Document {
     fn decr_ignore_opens_during_unload_counter(&self) {
         self.ignore_opens_during_unload_counter
             .set(self.ignore_opens_during_unload_counter.get() - 1);
-    }
-
-    pub(crate) fn set_fullscreen_element(&self, element: Option<&Element>) {
-        self.fullscreen_element.set(element);
     }
 
     fn reset_form_owner_for_listeners(&self, cx: &mut JSContext, id: &Atom) {
@@ -5236,26 +5463,13 @@ impl Document {
     /// it would be the last element, we therefore would not mess with the ordering.
     ///
     /// <https://drafts.csswg.org/cssom/#documentorshadowroot-final-css-style-sheets>
-    #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     pub(crate) fn append_constructed_stylesheet(&self, cssom_stylesheet: &CSSStyleSheet) {
         debug_assert!(cssom_stylesheet.is_constructed());
 
         let sheet = cssom_stylesheet.style_stylesheet().clone();
-        let insertion_point = {
-            let stylesheets = &mut *self.stylesheets.borrow_mut();
-
-            stylesheets
-                .iter()
-                .last()
-                .map(|(sheet, _origin)| sheet)
-                .cloned()
-        };
 
         if self.has_browsing_context() {
-            self.add_stylesheet_to_stylist(
-                sheet.clone(),
-                insertion_point.as_ref().map(|s| s.sheet.clone()),
-            );
+            self.add_stylesheet_to_stylist(sheet.clone(), None);
         }
 
         let stylesheets = &mut *self.stylesheets.borrow_mut();
@@ -5263,7 +5477,7 @@ impl Document {
             StylesheetSource::Constructed(Dom::from_ref(cssom_stylesheet)),
             StylesheetSetRef::Document(stylesheets),
             sheet,
-            insertion_point,
+            None,
             self.style_shared_author_lock(),
         );
     }
@@ -5627,6 +5841,51 @@ impl Document {
             || self.origin().immutable().is_potentially_trustworthy()
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#concept-environment-top-level-origin>
+    pub(crate) fn top_level_origin(&self) -> Option<ImmutableOrigin> {
+        if self.window().is_top_level() {
+            Some(self.origin().immutable().clone())
+        } else if let Some(top_level_document) = self.window().top_level_document_if_local() {
+            Some(top_level_document.origin().immutable().clone())
+        } else if let Ok(ancestor_origins) = self.internal_ancestor_origin_objects_list.try_borrow()
+        {
+            ancestor_origins
+                .as_ref()
+                .and_then(|ancestors| ancestors.last().cloned())
+        } else {
+            None
+        }
+    }
+
+    /// <https://fetch.spec.whatwg.org/#determine-the-network-partition-key>
+    pub(crate) fn determine_the_network_partition_key(&self) -> Option<Site> {
+        // Step 1. Let topLevelOrigin be environment’s top-level origin.
+        let top_level_origin = self.top_level_origin();
+
+        // Step 2. If topLevelOrigin is null, then set topLevelOrigin to environment’s
+        // top-level creation URL’s origin.
+        let top_level_origin = top_level_origin.or_else(|| {
+            self.window()
+                .as_global_scope()
+                .top_level_creation_url()
+                .map(|url| url.origin())
+        });
+
+        // Step 3. Assert: topLevelOrigin is an origin.
+        let top_level_origin = top_level_origin.expect("topLevelOrigin must be an origin");
+
+        // Step 4. Let topLevelSite be the result of obtaining a site, given topLevelOrigin.
+        let top_level_site = Site::from_origin(&top_level_origin);
+
+        // Step 5. Let secondKey be null or an implementation-defined value.
+        //
+        // We choose to do nothing here
+
+        // Step 6. Return (topLevelSite, secondKey).
+        Some(top_level_site)
+    }
+
+    #[cfg(feature = "devtools")]
     pub(crate) fn highlight_dom_node(&self, node: Option<&Node>) {
         self.highlighted_dom_node.set(node);
         self.add_restyle_reason(RestyleReason::HighlightedDOMNodeChanged);
@@ -5674,9 +5933,13 @@ impl Document {
     }
 
     pub(crate) fn notify_embedder_favicon(&self) {
-        if let Some(ref image) = *self.favicon.borrow() {
-            self.send_to_embedder(EmbedderMsg::NewFavicon(self.webview_id(), image.clone()));
+        if !self.window.is_top_level() {
+            return;
         }
+        self.send_to_embedder(EmbedderMsg::SetFavicon(
+            self.webview_id(),
+            self.favicon.borrow().clone(),
+        ));
     }
 
     pub(crate) fn set_favicon(&self, favicon: Image) {
@@ -5684,8 +5947,16 @@ impl Document {
         self.notify_embedder_favicon();
     }
 
-    pub(crate) fn fullscreen_element(&self) -> Option<DomRoot<Element>> {
-        self.fullscreen_element.get()
+    pub(crate) fn favicon(&self) -> Option<Image> {
+        self.favicon.borrow().clone()
+    }
+
+    pub(crate) fn ever_had_favicon_link(&self) -> bool {
+        self.ever_had_favicon_link.get()
+    }
+
+    pub(crate) fn set_ever_had_favicon_link(&self, value: bool) {
+        self.ever_had_favicon_link.set(value);
     }
 
     /// <https://w3c.github.io/editing/docs/execCommand/#state-override>
@@ -5767,6 +6038,7 @@ impl Document {
         self.theme_override.get()
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn set_theme_override(&self, new_theme: Option<Theme>) {
         self.theme_override.set(new_theme);
         self.window.refresh_theme();
@@ -5782,10 +6054,10 @@ impl Document {
 
     pub(crate) fn create_element(&self, cx: &mut JSContext, name: &str) -> DomRoot<Element> {
         let element_options =
-            StringOrElementCreationOptions::ElementCreationOptions(ElementCreationOptions {
+            StringOrElementCreationOptions::ElementCreationOptions(RootedTraceableBox::new(ElementCreationOptions {
                 customElementRegistry: None,
                 is: None,
-            });
+            }));
         self.CreateElement(cx, name.into(), element_options)
             .expect("Must always be able to create element")
     }
@@ -6134,7 +6406,10 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
 
     /// <https://dom.spec.whatwg.org/#dom-document-content_type>
     fn ContentType(&self) -> DOMString {
-        DOMString::from(self.content_type.to_string())
+        DOMString::from(format!(
+            "{}/{}",
+            self.content_type.type_, self.content_type.subtype
+        ))
     }
 
     /// <https://dom.spec.whatwg.org/#dom-document-doctype>
@@ -6440,21 +6715,21 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
                 // Step 5.1. Set subtree to the negation of options["selfOnly"].
                 let subtree = (!options.selfOnly).into();
                 // Step 5.2. If options["customElementRegistry"] exists, then set registry to it.
-                let registry = if let Some(registry) = options.customElementRegistry {
-                    // Step 5.3. If registry's is scoped is false and registry
-                    // is not this's custom element registry, then throw a "NotSupportedError" DOMException.
+                let registry = options.customElementRegistry.as_ref().map(Dom::as_rooted);
+
+                // Step 5.3. If registry's is scoped is false and registry is not
+                // this's custom element registry, then throw a "NotSupportedError" DOMException.
+                if registry.as_ref().is_some_and(|registry| {
                     let this_registry = self
                         .custom_element_registry()
                         .expect("Document must have a custom element registry");
-                    if !registry.is_scoped() && registry != this_registry {
-                        return Err(Error::NotSupported(Some(
+
+                    !registry.is_scoped() && *registry != this_registry
+                }) {
+                    return Err(Error::NotSupported(Some(
                             "Imported customElementRegistry is not scoped and does not match existing registry.".into()
                         )));
-                    }
-                    Some(registry)
-                } else {
-                    None
-                };
+                }
                 (subtree, registry)
             },
         };
@@ -6570,13 +6845,10 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
 
     /// <https://html.spec.whatwg.org/multipage/#dom-document-lastmodified>
     fn LastModified(&self) -> DOMString {
-        DOMString::from(self.last_modified.as_ref().cloned().unwrap_or_else(|| {
-            // Ideally this would get the local time using `time`, but `time` always fails to get the local
-            // timezone on Unix unless the application is single threaded unless the library is explicitly
-            // set to "unsound" mode. Maybe that's fine, but it needs more investigation. see
-            // https://nvd.nist.gov/vuln/detail/CVE-2020-26235
-            // When `time` supports a thread-safe way of getting the local time zone we could use it here.
-            Local::now().format("%m/%d/%Y %H:%M:%S").to_string()
+        DOMString::from(self.last_modified.clone().unwrap_or_else(|| {
+            ZonedDateTime::now()
+                .strftime("%m/%d/%Y %H:%M:%S")
+                .to_string()
         }))
     }
 
@@ -7161,7 +7433,7 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
 
         names_with_first_named_element_vec
             .into_iter()
-            .map(|(k, _)| DOMString::from(&*k))
+            .map(|(k, _)| TracedDOMString::from(k).root())
             .collect()
     }
 
@@ -7191,8 +7463,14 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
     );
 
     /// <https://drafts.csswg.org/cssom-view/#dom-document-elementfrompoint>
-    fn ElementFromPoint(&self, x: Finite<f64>, y: Finite<f64>) -> Option<DomRoot<Element>> {
+    fn ElementFromPoint(
+        &self,
+        cx: &mut JSContext,
+        x: Finite<f64>,
+        y: Finite<f64>,
+    ) -> Option<DomRoot<Element>> {
         self.document_or_shadow_root.element_from_point(
+            cx,
             self.upcast(),
             x,
             y,
@@ -7202,8 +7480,14 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-document-elementsfrompoint>
-    fn ElementsFromPoint(&self, x: Finite<f64>, y: Finite<f64>) -> Vec<DomRoot<Element>> {
+    fn ElementsFromPoint(
+        &self,
+        cx: &mut JSContext,
+        x: Finite<f64>,
+        y: Finite<f64>,
+    ) -> Vec<DomRoot<Element>> {
         self.document_or_shadow_root.elements_from_point(
+            cx,
             self.upcast(),
             x,
             y,
@@ -7213,7 +7497,7 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-document-scrollingelement>
-    fn GetScrollingElement(&self) -> Option<DomRoot<Element>> {
+    fn GetScrollingElement(&self, cx: &mut JSContext) -> Option<DomRoot<Element>> {
         // Step 1. If the Document is in quirks mode, follow these steps:
         if self.quirks_mode() == QuirksMode::Quirks {
             // Step 1.1. If the body element exists,
@@ -7222,7 +7506,7 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
                 // and it is not potentially scrollable, return the body element and abort these steps.
                 // For this purpose, a value of overflow:clip on the body element’s parent element
                 // must be treated as overflow:hidden.
-                if !e.is_potentially_scrollable_body_for_scrolling_element() {
+                if !e.is_potentially_scrollable_body_for_scrolling_element(cx) {
                     return Some(DomRoot::from_ref(e));
                 }
             }
@@ -7512,22 +7796,32 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
 
     /// <https://fullscreen.spec.whatwg.org/#dom-document-fullscreenenabled>
     fn FullscreenEnabled(&self) -> bool {
-        self.get_allow_fullscreen()
+        // > The fullscreenEnabled getter steps are to return true if this is allowed to use the
+        // > "fullscreen" feature and fullscreen is supported, and false otherwise.
+        self.overlay_handler().is_allowed_to_use_fullscreen() &&
+            self.overlay_handler().fullscreen_is_supported()
     }
 
     /// <https://fullscreen.spec.whatwg.org/#dom-document-fullscreen>
     fn Fullscreen(&self) -> bool {
-        self.fullscreen_element.get().is_some()
+        // > The fullscreen getter steps are to return false if this’s fullscreen element is null,
+        // > and true otherwise.
+        self.overlay_handler().fullscreen_element().is_some()
     }
 
     /// <https://fullscreen.spec.whatwg.org/#dom-document-fullscreenelement>
     fn GetFullscreenElement(&self) -> Option<DomRoot<Element>> {
-        DocumentOrShadowRoot::get_fullscreen_element(&self.node, self.fullscreen_element.get())
+        DocumentOrShadowRoot::get_fullscreen_element(
+            &self.node,
+            self.overlay_handler().fullscreen_element(),
+        )
     }
 
     /// <https://fullscreen.spec.whatwg.org/#dom-document-exitfullscreen>
     fn ExitFullscreen(&self, cx: &mut CurrentRealm) -> RootedPromise {
-        self.exit_fullscreen(cx)
+        // > The exitFullscreen() method steps are to return the result of running exit fullscreen
+        // > on this.
+        self.overlay_handler().exit_fullscreen(cx)
     }
 
     // check-tidy: no specs after this line
@@ -7610,35 +7904,42 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
     }
 
     /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
-    fn AdoptedStyleSheets(&self, cx: &mut JSContext, retval: MutableHandleValue) {
-        self.adopted_stylesheets_frozen_types.get_or_init(
-            cx,
-            || {
-                self.adopted_stylesheets
-                    .borrow()
-                    .clone()
-                    .iter()
-                    .map(|sheet| sheet.as_rooted())
-                    .collect()
-            },
-            retval,
-        );
+    ///
+    /// To react to an ObservableArray indexed write:
+    /// 1. Convert the binding-provided context into a JS API context.
+    /// 2. Insert `value` at `index` in the DOM-side list.
+    /// 3. Reconcile the effective constructed stylesheets for this document.
+    fn OnSetAdoptedStyleSheets(
+        &self,
+        cx: &mut JSContext,
+        value: DomRoot<CSSStyleSheet>,
+        index: u32,
+    ) -> ErrorResult {
+        DocumentOrShadowRoot::on_set_adopted_stylesheets(
+            self.adopted_stylesheets.safe_borrow_mut(cx).as_mut(),
+            &value,
+            index,
+            &StyleSheetListOwner::Document(Dom::from_ref(self)),
+        )
     }
 
     /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
-    fn SetAdoptedStyleSheets(&self, cx: &mut JSContext, val: HandleValue) -> ErrorResult {
-        let result = DocumentOrShadowRoot::set_adopted_stylesheet_from_jsval(
-            cx,
-            &self.adopted_stylesheets,
-            val,
+    ///
+    /// To react to an ObservableArray deletion:
+    /// 1. Convert the binding-provided context into a JS API context.
+    /// 2. Remove the entry at `index` from the DOM-side list.
+    /// 3. Reconcile the effective constructed stylesheets for this document.
+    fn OnDeleteAdoptedStyleSheets(
+        &self,
+        cx: &mut JSContext,
+        _value: DomRoot<CSSStyleSheet>,
+        index: u32,
+    ) -> ErrorResult {
+        DocumentOrShadowRoot::on_delete_adopted_stylesheets(
+            self.adopted_stylesheets.safe_borrow_mut(cx).as_mut(),
+            index,
             &StyleSheetListOwner::Document(Dom::from_ref(self)),
-        );
-
-        if result.is_ok() {
-            self.adopted_stylesheets_frozen_types.clear()
-        }
-
-        result
+        )
     }
 
     fn Timeline(&self) -> DomRoot<DocumentTimeline> {
@@ -7782,20 +8083,21 @@ impl DocumentHelpers for Document {
     }
 }
 
-/// Iterator for same origin ancestor navigables, returning the active documents of the navigables.
+/// Iterator for ancestor navigables whose active document is in this script thread, returning the
+/// active documents of the navigables. Stops at the first ancestor whose document is not local.
 /// <https://html.spec.whatwg.org/multipage/#ancestor-navigables>
-// TODO: Find a way for something equivalent for cross origin document.
-pub(crate) struct SameoriginAncestorNavigablesIterator {
+// TODO: Find a way for something equivalent for documents in other script threads.
+pub(crate) struct LocalAncestorNavigablesIterator {
     document: DomRoot<Document>,
 }
 
-impl SameoriginAncestorNavigablesIterator {
+impl LocalAncestorNavigablesIterator {
     pub(crate) fn new(document: DomRoot<Document>) -> Self {
         Self { document }
     }
 }
 
-impl Iterator for SameoriginAncestorNavigablesIterator {
+impl Iterator for LocalAncestorNavigablesIterator {
     type Item = DomRoot<Document>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -7805,15 +8107,16 @@ impl Iterator for SameoriginAncestorNavigablesIterator {
     }
 }
 
-/// Iterator for same origin descendant navigables in a shadow-including tree order, returning the
-/// active documents of the navigables.
+/// Iterator for descendant navigables whose active document is in this script thread, in a
+/// shadow-including tree order, returning the active documents of the navigables.
+/// This does not descend into navigables whose document is not local.
 /// <https://html.spec.whatwg.org/multipage/#descendant-navigables>
-// TODO: Find a way for something equivalent for cross origin document.
-pub(crate) struct SameOriginDescendantNavigablesIterator {
+// TODO: Find a way for something equivalent for documents in other script threads.
+pub(crate) struct LocalDescendantNavigablesIterator {
     stack: Vec<Box<dyn Iterator<Item = DomRoot<HTMLIFrameElement>>>>,
 }
 
-impl SameOriginDescendantNavigablesIterator {
+impl LocalDescendantNavigablesIterator {
     pub(crate) fn new(document: &Document) -> Self {
         let iframes: Vec<DomRoot<HTMLIFrameElement>> = document.iframes().iter().collect();
         Self {
@@ -7831,7 +8134,7 @@ impl SameOriginDescendantNavigablesIterator {
     }
 }
 
-impl Iterator for SameOriginDescendantNavigablesIterator {
+impl Iterator for LocalDescendantNavigablesIterator {
     type Item = DomRoot<Document>;
 
     fn next(&mut self) -> Option<Self::Item> {

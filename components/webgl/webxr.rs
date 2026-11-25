@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use servo_base::id::PainterId;
 use servo_canvas_traits::webgl::{
     GenericSender, WebGLMsg, WebXRCommand, WebXRLayerManagerId, webgl_channel,
 };
@@ -408,6 +409,10 @@ impl WebXRContexts<WebXRSurfman> for WebGLThread {
     }
     fn device(&self, context_id: WebXRContextId) -> Option<Rc<Device>> {
         self.maybe_device_for_context(context_id.into())
+    }
+
+    fn device_for_painter(&mut self, painter_id: PainterId) -> Option<Rc<Device>> {
+        self.get_or_create_device_for_painter(painter_id).ok()
     }
 
     fn context(&mut self, context_id: WebXRContextId) -> Option<&mut Context> {

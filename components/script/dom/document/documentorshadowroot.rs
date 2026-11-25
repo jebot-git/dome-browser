@@ -8,10 +8,7 @@ use std::fmt;
 
 use embedder_traits::UntrustedNodeAddress;
 use js::context::JSContext;
-use js::conversions::FromJSValConvertible;
-use js::rust::HandleValue;
 use layout_api::HitTestFlags;
-use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::DocumentBinding::DocumentMethods;
 use script_bindings::codegen::GenericBindings::ShadowRootBinding::ShadowRootMethods;
 use script_bindings::codegen::GenericBindings::WindowBinding::WindowMethods;
@@ -28,7 +25,6 @@ use crate::css::stylesheet_set::StylesheetSetRef;
 use crate::dom::Document;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::GetRootNodeOptions;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::Node_Binding::NodeMethods;
-use crate::dom::bindings::conversions::ConversionResult;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
@@ -171,6 +167,7 @@ impl DocumentOrShadowRoot {
     #[expect(unsafe_code)]
     pub(crate) fn element_from_point(
         &self,
+        cx: &mut JSContext,
         this: &Node,
         x: Finite<f64>,
         y: Finite<f64>,
@@ -192,7 +189,7 @@ impl DocumentOrShadowRoot {
         let flags = HitTestFlags::empty();
         let result = self
             .window
-            .elements_from_point_query(flags, LayoutPoint::new(x, y));
+            .elements_from_point_query(cx, flags, LayoutPoint::new(x, y));
         let Some(result) = result.items.first() else {
             return document_element;
         };
@@ -209,6 +206,7 @@ impl DocumentOrShadowRoot {
     #[expect(unsafe_code)]
     pub(crate) fn elements_from_point(
         &self,
+        cx: &mut JSContext,
         this: &Node,
         x: Finite<f64>,
         y: Finite<f64>,
@@ -236,7 +234,7 @@ impl DocumentOrShadowRoot {
         let flags = HitTestFlags::empty();
         let result = self
             .window
-            .elements_from_point_query(flags, LayoutPoint::new(x, y));
+            .elements_from_point_query(cx, flags, LayoutPoint::new(x, y));
 
         let mut elements: Vec<_> = result
             .items
@@ -364,19 +362,13 @@ impl DocumentOrShadowRoot {
         }
     }
 
-    /// Inner part of adopted stylesheet. We are setting it by, assuming it is a FrozenArray
-    /// instead of an ObservableArray. Thus, it would have a completely different workflow
-    /// compared to the spec. The workflow here is actually following Gecko's implementation
-    /// of AdoptedStylesheet before the implementation of ObservableArray.
-    ///
-    /// The main purpose from this function is to set the `&mut adopted_stylesheet` to match
-    /// `incoming_stylesheet` and update the corresponding Styleset in a Document or a ShadowRoot.
-    /// In case of duplicates, the setter will respect the last duplicates.
-    ///
     /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
-    // TODO: Handle duplicated adoptedstylesheet correctly, Stylo is preventing duplicates inside a
-    //       Stylesheet Set. But this is not ideal. https://bugzilla.mozilla.org/show_bug.cgi?id=1978755
-    fn set_adopted_stylesheet(
+    ///
+    /// To replace the DOM-side adopted stylesheet list:
+    /// 1. Validate each incoming stylesheet against the owner document.
+    /// 2. Remove the old effective constructed stylesheets from the style set.
+    /// 3. Rebuild the effective constructed stylesheet order from `incoming_stylesheets`.
+    fn set_adopted_stylesheets(
         adopted_stylesheets: &mut Vec<Dom<CSSStyleSheet>>,
         incoming_stylesheets: &[Dom<CSSStyleSheet>],
         owner: &StyleSheetListOwner,
@@ -390,7 +382,7 @@ impl DocumentOrShadowRoot {
             StyleSheetListOwner::ShadowRoot(root) => root.owner_doc(),
         };
 
-        for sheet in incoming_stylesheets.iter() {
+        for sheet in incoming_stylesheets {
             // > If value’s constructed flag is not set, or its constructor document is not equal
             // > to this DocumentOrShadowRoot’s node document, throw a "NotAllowedError" DOMException.
             if !sheet.constructor_document_matches(owner_doc) {
@@ -406,8 +398,6 @@ impl DocumentOrShadowRoot {
 
         // Remove the old stylesheets from the StyleSet. This workflow is limited by utilities
         // Stylo StyleSet given to us.
-        // TODO(stevennovaryo): we could optimize this by maintaining the longest common prefix
-        //                      but we should consider the implementation of ObservableArray as well.
         for sheet_to_remove in adopted_stylesheets.iter() {
             // Check for duplicates, only proceed with the removal if the stylesheet is not removed yet.
             if stylesheet_remove_set.insert(sheet_to_remove) {
@@ -424,7 +414,7 @@ impl DocumentOrShadowRoot {
 
         // Readd all stylesheet to the StyleSet. This workflow is limited by the utilities
         // Stylo StyleSet given to us.
-        for sheet in incoming_stylesheets.iter() {
+        for sheet in incoming_stylesheets {
             // Check for duplicates.
             if !stylesheet_add_set.insert(sheet) {
                 // The idea is that this case is rare, so we pay the price of removing the
@@ -442,29 +432,61 @@ impl DocumentOrShadowRoot {
         }
 
         *adopted_stylesheets = incoming_stylesheets.to_vec();
-
         Ok(())
     }
 
-    /// Set adoptedStylesheet given a js value by converting and passing the converted
-    /// values to the inner [DocumentOrShadowRoot::set_adopted_stylesheet].
-    pub(crate) fn set_adopted_stylesheet_from_jsval(
-        cx: &mut JSContext,
-        adopted_stylesheets: &DomRefCell<Vec<Dom<CSSStyleSheet>>>,
-        incoming_value: HandleValue,
+    /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
+    pub(crate) fn on_set_adopted_stylesheets(
+        adopted_stylesheets: &mut Vec<Dom<CSSStyleSheet>>,
+        value: &CSSStyleSheet,
+        index: u32,
         owner: &StyleSheetListOwner,
     ) -> ErrorResult {
-        let maybe_stylesheets = Vec::<DomRoot<CSSStyleSheet>>::from_jsval(cx, incoming_value, ())
-            .map_err(|_| Error::JSFailed)?;
+        rooted_vec!(let mut incoming_stylesheets <- adopted_stylesheets.iter().cloned());
+        incoming_stylesheets.insert(index as usize, Dom::from_ref(value));
+        Self::set_adopted_stylesheets(adopted_stylesheets, &incoming_stylesheets, owner)
+    }
 
-        match maybe_stylesheets {
-            ConversionResult::Success(stylesheets) => {
-                rooted_vec!(let stylesheets <- stylesheets.iter().map(|s| s.as_traced()));
+    /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
+    pub(crate) fn on_delete_adopted_stylesheets(
+        adopted_stylesheets: &mut Vec<Dom<CSSStyleSheet>>,
+        index: u32,
+        owner: &StyleSheetListOwner,
+    ) -> ErrorResult {
+        rooted_vec!(let mut incoming_stylesheets <- adopted_stylesheets.iter().cloned());
+        incoming_stylesheets.remove(index as usize);
+        Self::set_adopted_stylesheets(adopted_stylesheets, &incoming_stylesheets, owner)
+    }
 
-                let mut sheets = adopted_stylesheets.safe_borrow_mut(cx);
-                DocumentOrShadowRoot::set_adopted_stylesheet(sheets.as_mut(), &stylesheets, owner)
-            },
-            ConversionResult::Failure(msg) => Err(Error::Type(msg.into_owned())),
+    /// <https://fullscreen.spec.whatwg.org/#dom-document-fullscreenelement>
+    pub(crate) fn get_fullscreen_element(
+        node: &Node,
+        fullscreen_element: Option<DomRoot<Element>>,
+    ) -> Option<DomRoot<Element>> {
+        // Step 1. If this is a shadow root and its host is not connected, then return null.
+        if let Some(shadow_root) = node.downcast::<ShadowRoot>() &&
+            !shadow_root.Host().is_connected()
+        {
+            return None;
         }
+
+        // Step 2. Let candidate be the result of retargeting fullscreen element against this.
+        let retargeted = fullscreen_element?
+            .upcast::<EventTarget>()
+            .retarget(node.upcast());
+        // It's safe to unwrap downcasting to `Element` because `retarget` either returns `fullscreen_element` or a host of `fullscreen_element` and hosts are always elements.
+        let candidate = DomRoot::downcast::<Element>(retargeted).unwrap();
+
+        // Step 3. If candidate and this are in the same tree, then return candidate.
+        if *candidate
+            .upcast::<Node>()
+            .GetRootNode(&GetRootNodeOptions::empty()) ==
+            *node
+        {
+            return Some(candidate);
+        }
+
+        // Step 4. Return null.
+        None
     }
 }

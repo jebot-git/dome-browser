@@ -9,6 +9,7 @@ use js::rust::HandleObject;
 use script_bindings::str::DOMString;
 use stylo_dom::ElementState;
 
+use crate::dom::MoveContext;
 use crate::dom::bindings::codegen::Bindings::HTMLOptGroupElementBinding::HTMLOptGroupElementMethods;
 use crate::dom::bindings::codegen::GenericBindings::NodeBinding::Node_Binding::NodeMethods;
 use crate::dom::bindings::inheritance::Castable;
@@ -19,6 +20,7 @@ use crate::dom::element::{AttributeMutation, Element};
 use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::html::htmloptionelement::HTMLOptionElement;
 use crate::dom::html::htmlselectelement::HTMLSelectElement;
+use crate::dom::iterators::ShadowIncluding;
 use crate::dom::node::virtualmethods::VirtualMethods;
 use crate::dom::node::{BindContext, Node, UnbindContext};
 use crate::dom::validation::Validatable;
@@ -71,6 +73,29 @@ impl HTMLOptGroupElement {
         }
     }
 
+    /// Like the [option element nearest ancestor select](https://html.spec.whatwg.org/multipage/#option-element-nearest-ancestor-select),
+    /// but an ancestor optgroup also means there is none.
+    pub(crate) fn nearest_ancestor_select(&self) -> Option<DomRoot<HTMLSelectElement>> {
+        for ancestor in self.upcast::<Node>().ancestors() {
+            let Some(element) = ancestor.downcast::<Element>() else {
+                continue;
+            };
+            if matches!(
+                element.local_name(),
+                &local_name!("datalist") |
+                    &local_name!("hr") |
+                    &local_name!("option") |
+                    &local_name!("optgroup")
+            ) {
+                return None;
+            }
+            if let Some(select) = DomRoot::downcast::<HTMLSelectElement>(ancestor) {
+                return Some(select);
+            }
+        }
+        None
+    }
+
     fn owner_select_element(&self) -> Option<DomRoot<HTMLSelectElement>> {
         self.upcast::<Node>()
             .GetParentNode()
@@ -107,33 +132,13 @@ impl VirtualMethods for HTMLOptGroupElement {
             .unwrap()
             .attribute_mutated(cx, attr, mutation);
         if attr.local_name() == &local_name!("disabled") {
-            let disabled_state = match mutation {
-                AttributeMutation::Set(None) => true,
-                AttributeMutation::Set(Some(_)) => {
-                    // Option group was already disabled.
-                    return;
-                },
-                AttributeMutation::Removed => false,
-            };
-            let el = self.upcast::<Element>();
-            el.set_disabled_state(cx.no_gc(), disabled_state);
-            el.set_enabled_state(cx.no_gc(), !disabled_state);
-            let options = el
+            let options = self
                 .upcast::<Node>()
-                .children()
-                .filter(|child| child.is::<HTMLOptionElement>())
-                .map(|child| DomRoot::from_ref(child.downcast::<HTMLOptionElement>().unwrap()));
-            if disabled_state {
-                for option in options {
-                    let el = option.upcast::<Element>();
-                    el.set_disabled_state(cx.no_gc(), true);
-                    el.set_enabled_state(cx.no_gc(), false);
-                }
-            } else {
-                for option in options {
-                    let el = option.upcast::<Element>();
-                    el.check_disabled_attribute(cx.no_gc());
-                }
+                .traverse_preorder(ShadowIncluding::No)
+                .filter_map(DomRoot::downcast::<HTMLOptionElement>);
+            // The disabledness of descendant option elements might have changed.
+            for option in options {
+                option.upcast::<Element>().invalidate_disabled_state(cx);
             }
         }
     }
@@ -142,7 +147,13 @@ impl VirtualMethods for HTMLOptGroupElement {
         if let Some(super_type) = self.super_type() {
             super_type.bind_to_tree(cx, context);
         }
+        self.update_select_validity(cx);
+    }
 
+    fn moving_steps(&self, cx: &mut JSContext, context: &MoveContext) {
+        if let Some(super_type) = self.super_type() {
+            super_type.moving_steps(cx, context);
+        }
         self.update_select_validity(cx);
     }
 

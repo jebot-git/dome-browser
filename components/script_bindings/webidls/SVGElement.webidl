@@ -8,8 +8,6 @@ interface SVGElement : Element {
 
   //[SameObject] readonly attribute SVGAnimatedString className;
 
-  //[SameObject] readonly attribute DOMStringMap dataset;
-
   //readonly attribute SVGSVGElement? ownerSVGElement;
   //readonly attribute SVGElement? viewportElement;
 
@@ -21,4 +19,4 @@ interface SVGElement : Element {
 SVGElement includes GlobalEventHandlers;
 //SVGElement includes SVGElementInstance;
 SVGElement includes ElementCSSInlineStyle;
-SVGElement includes HTMLOrSVGElement;
+SVGElement includes HTMLOrSVGOrMathMLElement;

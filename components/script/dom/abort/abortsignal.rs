@@ -30,6 +30,7 @@ use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::internalclosewatcher::InternalCloseWatcher;
 use crate::dom::readablestream::PipeTo;
 use crate::dom::request::Request;
 use crate::fetch::fetch::DeferredFetchRecordId;
@@ -51,6 +52,8 @@ pub(crate) enum AbortAlgorithm {
     Fetch(Dom<Request>),
     /// <https://fetch.spec.whatwg.org/#dom-window-fetchlater>
     FetchLater(#[no_trace] DeferredFetchRecordId),
+    /// <https://html.spec.whatwg.org/multipage/#dom-closewatcher>
+    CloseWatcher(#[conditional_malloc_size_of] Rc<InternalCloseWatcher>),
 }
 
 #[derive(Clone, JSTraceable, MallocSizeOf)]
@@ -79,12 +82,10 @@ pub(crate) struct AbortSignal {
 
     /// <https://dom.spec.whatwg.org/#abortsignal-source-signals>
     #[no_trace]
-    #[ignore_malloc_size_of = "WeakRef"]
     source_signals: DomRefCell<IndexSet<WeakRef<AbortSignal>>>,
 
     /// <https://dom.spec.whatwg.org/#abortsignal-dependent-signals>
     #[no_trace]
-    #[ignore_malloc_size_of = "WeakRef"]
     dependent_signals: DomRefCell<IndexSet<WeakRef<AbortSignal>>>,
 }
 
@@ -204,6 +205,9 @@ impl AbortSignal {
                     removable_listener.listener.as_deref(),
                     &removable_listener.options,
                 );
+            },
+            AbortAlgorithm::CloseWatcher(close_watcher) => {
+                close_watcher.destroy(cx.no_gc());
             },
         }
     }

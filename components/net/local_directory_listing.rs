@@ -2,12 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::fmt::Write as _;
 use std::fs::Metadata;
 use std::path::PathBuf;
 
-use chrono::{DateTime, Local};
-use embedder_traits::resources::{Resource, read_string};
+use embedder_traits::resources::{Resource, read_bytes};
 use headers::{ContentType, HeaderMapExt};
+use jiff::ZonedDateTime;
 use net_traits::request::Request;
 use net_traits::response::{Response, ResponseBody};
 use net_traits::{NetworkError, ResourceFetchTiming};
@@ -29,7 +30,7 @@ pub(crate) async fn fetch(request: &mut Request, url: ServoUrl, path_buf: PathBu
         return Response::network_error(NetworkError::LocalDirectoryError);
     }
 
-    let directory_contents = match tokio::fs::read_dir(path_buf.clone()).await {
+    let directory_contents = match tokio::fs::read_dir(&path_buf).await {
         Ok(directory_contents) => directory_contents,
         Err(error) => {
             return Response::network_error(NetworkError::ResourceLoadError(format!(
@@ -72,14 +73,17 @@ pub(crate) async fn build_html_directory_listing(
         parent_url.as_str().clone_into(&mut parent_url_string);
     }
 
-    page_html.push_str(&read_string(Resource::DirectoryListingHTML));
+    page_html
+        .push_str(str::from_utf8(read_bytes(Resource::DirectoryListingHTML).as_ref()).unwrap());
 
     page_html.push_str("<script>\n");
-    page_html.push_str(&format!(
+    write!(
+        page_html,
         "setData({:?}, {:?}, [",
         url.as_str(),
         parent_url_string
-    ));
+    )
+    .unwrap();
 
     while let Ok(Some(directory_entry)) = directory_contents.next_entry().await {
         let Ok(metadata) = directory_entry.metadata().await else {
@@ -120,12 +124,13 @@ fn write_directory_entry(
         "file"
     };
 
-    let file_url_string = &file_url.to_string();
+    let file_url_string = file_url.as_str();
     let file_size = metadata_to_file_size_string(&metadata);
     let last_modified = metadata
         .modified()
-        .map(DateTime::<Local>::from)
-        .map(|time| time.format("%F %r").to_string())
+        .ok()
+        .and_then(|mtime| ZonedDateTime::try_from(mtime).ok())
+        .map(|timestamp| timestamp.strftime("%F %r").to_string())
         .unwrap_or_default();
 
     // The file name is the only value here that reaches the page unencoded; the
@@ -133,9 +138,11 @@ fn write_directory_entry(
     // fields are produced by us. `{:?}` is not enough on its own because it
     // leaves `</script>` intact inside the script element below.
     let name = script_string_literal(&name);
-    output.push_str(&format!(
+    write!(
+        output,
         "[{class:?}, {name}, {file_url_string:?}, {file_size:?}, {last_modified:?}],"
-    ));
+    )
+    .unwrap();
 }
 
 /// Serialise `value` as a JavaScript string literal that is safe to embed in the

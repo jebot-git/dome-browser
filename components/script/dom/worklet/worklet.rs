@@ -12,7 +12,7 @@
 
 #![cfg_attr(crown, allow(crown::jscontext_first_arg))]
 
-use std::cell::{self, Cell, RefCell, RefMut};
+use std::cell::{self, Cell, RefMut};
 use std::cmp::max;
 use std::collections::hash_map;
 use std::rc::Rc;
@@ -30,6 +30,7 @@ use malloc_size_of::malloc_size_of_is_0;
 use net_traits::policy_container::PolicyContainer;
 use net_traits::request::{Destination, Origin, PreloadedResources, RequestClient};
 use rustc_hash::FxHashMap;
+use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 use servo_base::id::PipelineId;
 use servo_url::{ImmutableOrigin, ServoUrl};
@@ -777,7 +778,9 @@ impl WorkletThread {
             cookie_client_is_null: false,
             is_nested_browsing_context: global.is_nested_browsing_context(),
             insecure_requests_policy: global.insecure_requests_policy(),
+            upgrade_insecure_navigations_set: global.upgrade_insecure_navigations_set().clone(),
             has_trustworthy_ancestor_origin: global.has_trustworthy_ancestor_origin(),
+            network_partition_key: None,
         };
 
         // Step 2. If moduleResponsesMap[requestURL] is "fetching", wait in parallel until that entry's value changes, then queue a task on the networking task source to proceed with running the following steps.
@@ -786,7 +789,7 @@ impl WorkletThread {
 
         // `fetch_a_module_script_graph` requires the `on_complete` closure to be cloneable
         // therefore, we wrap the TrustedPromise in an Rc to make it cloneable and RefCell allows calling `reject_task` and `resolve_task`
-        let promise_task = Rc::new(RefCell::new(Some(promise)));
+        let promise_task = Rc::new(DomRefCell::new(Some(promise)));
         let script_thread_sender = self.global_init.to_script_thread_sender.clone();
         let rooted_global = DomRoot::from_ref(global);
         let script_url = ensure_blob_referenced_by_url_is_kept_alive(global, script_url);
@@ -814,7 +817,7 @@ impl WorkletThread {
 
                         reject_promise(
                             &pending_tasks_struct,
-                            promise_task.borrow_mut(),
+                            promise_task.safe_borrow_mut(cx.no_gc()),
                             script_thread_sender.clone(),
                         );
                     },
@@ -830,7 +833,7 @@ impl WorkletThread {
                             // Step 6.4.2.1. and its substeps are handled by `reject_promise` function
                             reject_promise(
                                 &pending_tasks_struct,
-                                promise_task.borrow_mut(),
+                                promise_task.safe_borrow_mut(cx.no_gc()),
                                 script_thread_sender.clone(),
                             );
 
@@ -856,7 +859,7 @@ impl WorkletThread {
                                 .expect("Worklet thread outlived script thread.");
 
                             let task = promise_task
-                                .borrow_mut()
+                                .safe_borrow_mut(cx.no_gc())
                                 .take()
                                 .expect("promise_task must be consumed exactly once")
                                 .resolve_task(());
@@ -897,7 +900,13 @@ impl WorkletThread {
     fn process_control(&mut self, control: WorkletControl, cx: &mut js::context::JSContext) {
         match control {
             WorkletControl::ExitWorklet(worklet_id) => {
-                self.global_scopes.remove(&worklet_id);
+                if let Some(global_scope) = self
+                    .global_scopes
+                    .remove(&worklet_id)
+                    .map(|global_scope| global_scope.as_rooted())
+                {
+                    global_scope.upcast::<GlobalScope>().tear_down();
+                }
             },
             WorkletControl::FetchAndInvokeAWorkletScript {
                 pipeline_id,

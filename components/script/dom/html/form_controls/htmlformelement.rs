@@ -20,6 +20,7 @@ use rustc_hash::FxBuildHasher;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::DocumentFragmentBinding::DocumentFragmentMethods;
 use script_bindings::dom::UnrootedDom;
+use script_bindings::domstring::TracedDOMString;
 use script_bindings::match_domstring_ascii;
 use script_bindings::reflector::DomObject;
 use servo_constellation_traits::{LoadData, LoadOrigin, NavigationHistoryBehavior};
@@ -36,7 +37,7 @@ use crate::dom::bindings::codegen::Bindings::HTMLElementBinding::HTMLElementMeth
 use crate::dom::bindings::codegen::Bindings::HTMLFormControlsCollectionBinding::HTMLFormControlsCollectionMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLFormElementBinding::HTMLFormElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLInputElementBinding::HTMLInputElementMethods;
-use crate::dom::bindings::codegen::Bindings::HTMLOrSVGElementBinding::FocusOptions;
+use crate::dom::bindings::codegen::Bindings::HTMLOrSVGOrMathMLElementBinding::FocusOptions;
 use crate::dom::bindings::codegen::Bindings::HTMLTextAreaElementBinding::HTMLTextAreaElementMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::{NodeConstants, NodeMethods};
 use crate::dom::bindings::codegen::Bindings::NodeListBinding::NodeListMethods;
@@ -209,6 +210,44 @@ impl HTMLFormElement {
             .iter()
             .filter(|n| HTMLFormElement::filter_for_radio_list(mode, n, name))
             .count() as u32
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#default-button>
+    pub(crate) fn default_button(&self) -> Option<DomRoot<Element>> {
+        // > A form element's default button is the first submit button in tree order whose form owner
+        // > is that form element. `controls` holds exactly the elements owned by this form, kept in
+        // > tree order.
+        self.controls
+            .borrow()
+            .iter()
+            .find(|control| {
+                control
+                    .downcast::<HTMLInputElement>()
+                    .is_some_and(HTMLInputElement::is_submit_button) ||
+                    control
+                        .downcast::<HTMLButtonElement>()
+                        .is_some_and(HTMLButtonElement::is_submit_button)
+            })
+            .map(|control| control.as_rooted())
+    }
+
+    pub(crate) fn invalidate_default_button(&self, no_gc: &NoGC) {
+        let default_button = self.default_button();
+        for control in self.controls.borrow().iter() {
+            Self::update_control_default_state(
+                no_gc,
+                control,
+                default_button.as_deref() == Some(&**control),
+            );
+        }
+    }
+
+    fn update_control_default_state(no_gc: &NoGC, control: &Element, is_default_button: bool) {
+        if let Some(button) = control.downcast::<HTMLButtonElement>() {
+            button.update_default_state(is_default_button, no_gc);
+        } else if let Some(input) = control.downcast::<HTMLInputElement>() {
+            input.update_default_state(is_default_button, no_gc);
+        }
     }
 }
 
@@ -651,7 +690,7 @@ impl HTMLFormElementMethods<crate::DomTypeHolder> for HTMLFormElement {
         let mut names_vec: Vec<DOMString> = Vec::new();
         for elem in sourced_names_vec.iter() {
             if !names_vec.iter().any(|name| *name == *elem.name) {
-                names_vec.push(DOMString::from(&*elem.name));
+                names_vec.push(TracedDOMString::from(elem.name.clone()).root());
             }
         }
 
@@ -777,12 +816,12 @@ impl HTMLFormElement {
         submit_method_flag: SubmittedFrom,
         submitter: FormSubmitterElement,
     ) {
-        // Step 1
+        // Step 1. If form cannot navigate, then return.
         if self.upcast::<Element>().cannot_navigate() {
             return;
         }
 
-        // Step 2
+        // Step 2. If form's constructing entry list is true, then return.
         if self.constructing_entry_list.get() {
             return;
         }
@@ -797,21 +836,27 @@ impl HTMLFormElement {
         }
 
         let base = doc.base_url();
-        // TODO: Handle browsing contexts (Step 5)
-        // Step 6
+        // Step 5. If submitted from submit() method is false:
         if submit_method_flag == SubmittedFrom::NotFromForm {
-            // Step 6.1
+            // Step 5.1. If form's firing submission events is true, then return.
             if self.firing_submission_events.get() {
                 return;
             }
-            // Step 6.2
+            // Step 5.2. Set form's firing submission events to true.
             self.firing_submission_events.set(true);
-            // Step 6.3
+            // Step 5.3. For each element field in the list of submittable elements
+            // whose form owner is form, set field's user validity to true.
+            self.Elements(cx).set_user_validity_on_all(cx.no_gc());
+            // Step 5.4. If the submitter element's no-validate state is false,
+            // then interactively validate the constraints of form and examine
+            // the result. If the result is negative (i.e., the constraint validation
+            // concluded that there were invalid fields and probably informed the
+            // user of this):
             if !submitter.no_validate(self) && self.interactive_validation(cx).is_err() {
                 self.firing_submission_events.set(false);
                 return;
             }
-            // Step 6.4
+            // Step 5.5
             // spec calls this "submitterButton" but it doesn't have to be a button,
             // just not be the form itself
             let submitter_button = match submitter {
@@ -826,7 +871,7 @@ impl HTMLFormElement {
                 FormSubmitterElement::Button(b) => Some(b.upcast::<HTMLElement>()),
             };
 
-            // Step 6.5
+            // Step 5.6
             let event = SubmitEvent::new(
                 cx,
                 self.global().as_window(),
@@ -838,9 +883,9 @@ impl HTMLFormElement {
             let event = event.upcast::<Event>();
             event.fire(cx, self.upcast::<EventTarget>());
 
-            // Step 6.6
+            // Step 5.7
             self.firing_submission_events.set(false);
-            // Step 6.7
+            // Step 5.8
             if event.DefaultPrevented() {
                 // AJAX forms may cancel navigation while still submitting a login.
                 // The native consent prompt and origin/activation checks still apply.
@@ -849,7 +894,7 @@ impl HTMLFormElement {
                 }
                 return;
             }
-            // Step 6.8
+            // Step 5.9
             if self.upcast::<Element>().cannot_navigate() {
                 return;
             }
@@ -918,7 +963,7 @@ impl HTMLFormElement {
         // for choosing a navigable given target, form's node navigable, and noopener.
         let Some(chosen) = doc.browsing_context().and_then(|source| {
             source
-                .choose_a_navigable(cx, target.unwrap_or_default(), noopener)
+                .choose_a_navigable(cx, &target.unwrap_or_default(), noopener)
                 .0
         }) else {
             // Step 23. If targetNavigable is null, then return.
@@ -948,6 +993,10 @@ impl HTMLFormElement {
             target_document.get_referrer_policy(),
             Some(target_window.as_global_scope().is_secure_context()),
             Some(target_document.insecure_requests_policy()),
+            target_window
+                .as_global_scope()
+                .upgrade_insecure_navigations_set()
+                .clone(),
             target_document.has_trustworthy_ancestor_origin(),
             target_document.creation_sandboxing_flag_set_considering_parent_iframe(),
         ).with_cookie_site(doc.cookie_site());
@@ -1299,7 +1348,10 @@ impl HTMLFormElement {
         let mut data_set = Vec::new();
         for child in self.controls.borrow().iter() {
             // Step 5.1: The field element is disabled.
-            if child.disabled_state() {
+            if child
+                .downcast::<HTMLElement>()
+                .is_some_and(|html_element| html_element.is_form_element_disabled(cx.no_gc()))
+            {
                 continue;
             }
             let child = child.upcast::<Node>();
@@ -1782,6 +1834,7 @@ pub(crate) trait FormControl: DomObject<ReflectorType = ()> + NodeTraits {
         node.set_flag(NodeFlags::PARSER_ASSOCIATED_FORM_OWNER, true);
         form.add_control(cx, self);
         self.set_form_owner(cx, Some(form));
+        form.invalidate_default_button(cx.no_gc());
     }
 
     /// <https://html.spec.whatwg.org/multipage/#reset-the-form-owner>
@@ -1823,8 +1876,8 @@ pub(crate) trait FormControl: DomObject<ReflectorType = ()> + NodeTraits {
         };
 
         if old_owner != new_owner {
-            if let Some(o) = old_owner {
-                o.remove_control(cx, self);
+            if let Some(ref old_owner) = old_owner {
+                old_owner.remove_control(cx, self);
             }
             if let Some(ref new_owner) = new_owner {
                 new_owner.add_control(cx, self);
@@ -1843,6 +1896,14 @@ pub(crate) trait FormControl: DomObject<ReflectorType = ()> + NodeTraits {
                 )
             }
             self.set_form_owner(cx, new_owner.as_deref());
+
+            if let Some(old_owner) = old_owner {
+                old_owner.invalidate_default_button(cx.no_gc());
+            }
+            match new_owner {
+                Some(new_owner) => new_owner.invalidate_default_button(cx.no_gc()),
+                None => HTMLFormElement::update_control_default_state(cx.no_gc(), elem, false),
+            }
         }
     }
 
@@ -1901,11 +1962,11 @@ pub(crate) trait FormControl: DomObject<ReflectorType = ()> + NodeTraits {
 
     /// <https://html.spec.whatwg.org/multipage/#association-of-controls-and-forms>
     fn unbind_form_control_from_tree(&self, cx: &mut JSContext) {
-        let elem = self.to_element();
-        let has_form_attr = elem.has_attribute(&local_name!("form"));
+        let element = self.to_element();
+        let has_form_attr = element.has_attribute(&local_name!("form"));
         let same_subtree = self
             .form_owner()
-            .is_none_or(|form| elem.is_in_same_home_subtree(&*form));
+            .is_none_or(|form| element.is_in_same_home_subtree(&*form));
 
         self.unregister_if_necessary();
 

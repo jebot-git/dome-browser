@@ -230,6 +230,8 @@ pub(crate) mod characterdata;
 pub(crate) use self::characterdata::*;
 pub(crate) mod clipboard;
 pub(crate) use self::clipboard::*;
+pub(crate) mod closewatcher;
+pub(crate) use self::closewatcher::*;
 pub(crate) mod console;
 pub(crate) mod cookiestore;
 pub(crate) use self::cookiestore::*;
@@ -262,7 +264,6 @@ pub(crate) mod filesystem;
 pub(crate) use self::filesystem::*;
 pub(crate) mod form;
 pub(crate) use self::form::*;
-pub(crate) mod fullscreen;
 #[cfg(feature = "gamepad")]
 pub(crate) mod gamepad;
 #[cfg(feature = "gamepad")]
@@ -279,6 +280,8 @@ pub(crate) mod indexeddb;
 pub(crate) use self::indexeddb::*;
 pub(crate) mod intersectionobserver;
 pub(crate) use self::intersectionobserver::*;
+pub(crate) mod mathml;
+pub(crate) use self::mathml::*;
 pub(crate) mod media;
 pub(crate) use self::media::*;
 pub(crate) mod mimetype;
@@ -349,11 +352,7 @@ pub(crate) use self::webxr::*;
 pub(crate) mod webgpu;
 #[cfg(feature = "webgpu")]
 pub(crate) use self::webgpu::*;
-#[cfg(not(feature = "webgpu"))]
-pub(crate) mod gpucanvascontext;
-#[cfg(feature = "webcrypto")]
 pub(crate) mod webcrypto;
-#[cfg(feature = "webcrypto")]
 pub(crate) use self::webcrypto::*;
 pub(crate) mod webrtc;
 pub(crate) use self::webrtc::*;

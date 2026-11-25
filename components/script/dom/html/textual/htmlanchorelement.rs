@@ -12,7 +12,6 @@ use js::rust::HandleObject;
 use net_traits::blob_url_store::UrlWithBlobClaim;
 use num_traits::ToPrimitive;
 use script_bindings::cell::DomRefCell;
-use servo_url::ServoUrl;
 use style::attr::AttrValue;
 use stylo_atoms::Atom;
 use stylo_dom::ElementState;
@@ -37,8 +36,8 @@ use crate::dom::html::links::htmlhyperlinkelementutils::{
 };
 use crate::dom::html::links::relations::{LinkRelations, follow_hyperlink};
 use crate::dom::mouseevent::MouseEvent;
-use crate::dom::node::virtualmethods::VirtualMethods;
 use crate::dom::node::{Node, NodeTraits};
+use crate::dom::node::virtualmethods::VirtualMethods;
 
 #[dom_struct]
 pub(crate) struct HTMLAnchorElement {
@@ -79,18 +78,6 @@ impl HTMLAnchorElement {
             document,
             proto,
         )
-    }
-
-    /// Get the full URL of the `href` attribute of this `<a>` element, returning `None` if
-    /// the URL could not be joined with the `Document` URL.
-    pub(crate) fn full_href_url_for_user_interface(&self, no_gc: &NoGC) -> Option<ServoUrl> {
-        if !self.upcast::<Element>().has_attribute(&local_name!("href")) {
-            return None;
-        }
-        self.owner_document()
-            .base_url()
-            .join(&self.Href(no_gc))
-            .ok()
     }
 }
 
@@ -342,7 +329,7 @@ impl HTMLAnchorElementMethods<crate::DomTypeHolder> for HTMLAnchorElement {
         reflect_referrer_policy_attribute(self.upcast::<Element>())
     }
 
-    // https://html.spec.whatwg.org/multipage/#dom-script-referrerpolicy
+    // https://html.spec.whatwg.org/multipage/#dom-a-referrerpolicy
     make_setter!(SetReferrerPolicy, "referrerpolicy");
 }
 
@@ -358,9 +345,12 @@ impl Activatable for HTMLAnchorElement {
         // https://html.spec.whatwg.org/multipage/#the-a-element
         // "The activation behaviour of a elements *that create hyperlinks*"
         self.as_element().has_attribute(&local_name!("href"))
+            // This is not specified, but is what browsers do. They disable any anchor
+            // interaction if it is marked as contenteditable
+            && !self.as_element().has_attribute(&local_name!("contenteditable"))
     }
 
-    /// <https://html.spec.whatwg.org/multipage/#the-a-element:activation-behaviour>
+    /// <https://html.spec.whatwg.org/multipage/#links-created-by-a-and-area-elements:activation-behaviour>
     fn activation_behavior(
         &self,
         cx: &mut js::context::JSContext,
@@ -378,7 +368,7 @@ impl Activatable for HTMLAnchorElement {
             element.has_attribute(&local_name!("ismap"))
         {
             let target_node = element.upcast::<Node>();
-            let rect = target_node.border_box().unwrap_or_default();
+            let rect = target_node.border_box(cx).unwrap_or_default();
             ismap_suffix = Some(format!(
                 "?{},{}",
                 mouse_event.ClientX().to_f32().unwrap() - rect.origin.x.to_f32_px(),
@@ -393,7 +383,7 @@ impl Activatable for HTMLAnchorElement {
             if document.has_active_sandboxing_flag(content_security_policy::sandboxing_directive::SandboxingFlagSet::SANDBOXED_DOWNLOADS_BROWSING_CONTEXT_FLAG) {
                 return;
             }
-            if document.is_fully_active() && let Some(url) = self.full_href_url_for_user_interface(cx.no_gc()) &&
+            if document.is_fully_active() && let Some(url) = self.full_href_url_for_user_interface() &&
                 (matches!(url.scheme(), "data" | "blob") || url.origin() == document.url().origin())
             {
                 let context = document.embedder_controls().next_control_id();

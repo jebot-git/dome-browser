@@ -14,17 +14,16 @@ use euclid::default::Point2D;
 // shapers. For now, however, HarfBuzz is a hard dependency.
 use harfbuzz_sys::{
     HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS, HB_DIRECTION_LTR, HB_DIRECTION_RTL,
-    HB_MEMORY_MODE_READONLY, HB_OT_LAYOUT_BASELINE_TAG_HANGING,
-    HB_OT_LAYOUT_BASELINE_TAG_IDEO_EMBOX_BOTTOM_OR_LEFT, HB_OT_LAYOUT_BASELINE_TAG_ROMAN,
-    hb_blob_create, hb_blob_t, hb_bool_t, hb_buffer_add_utf8, hb_buffer_create, hb_buffer_destroy,
-    hb_buffer_get_glyph_infos, hb_buffer_get_glyph_positions, hb_buffer_set_cluster_level,
-    hb_buffer_set_direction, hb_buffer_set_language, hb_buffer_set_script, hb_buffer_t,
-    hb_codepoint_t, hb_face_create_for_tables, hb_face_destroy, hb_face_t, hb_feature_t,
-    hb_font_create, hb_font_create_sub_font, hb_font_destroy, hb_font_funcs_create,
-    hb_font_funcs_set_glyph_h_advance_func, hb_font_funcs_set_nominal_glyph_func, hb_font_funcs_t,
-    hb_font_set_funcs, hb_font_set_ppem, hb_font_set_scale, hb_font_set_variations, hb_font_t,
-    hb_glyph_info_t, hb_glyph_position_t, hb_language_from_string, hb_ot_layout_get_baseline,
-    hb_position_t, hb_script_from_iso15924_tag, hb_shape, hb_tag_t, hb_variation_t,
+    HB_MEMORY_MODE_READONLY, hb_blob_create, hb_blob_t, hb_bool_t, hb_buffer_add_utf8,
+    hb_buffer_create, hb_buffer_destroy, hb_buffer_get_glyph_infos, hb_buffer_get_glyph_positions,
+    hb_buffer_set_cluster_level, hb_buffer_set_direction, hb_buffer_set_language,
+    hb_buffer_set_script, hb_buffer_t, hb_codepoint_t, hb_face_create_for_tables, hb_face_destroy,
+    hb_face_t, hb_feature_t, hb_font_create, hb_font_create_sub_font, hb_font_destroy,
+    hb_font_funcs_create, hb_font_funcs_set_glyph_h_advance_func,
+    hb_font_funcs_set_nominal_glyph_func, hb_font_funcs_t, hb_font_set_funcs, hb_font_set_ppem,
+    hb_font_set_scale, hb_font_set_variations, hb_font_t, hb_glyph_info_t, hb_glyph_position_t,
+    hb_language_from_string, hb_ot_tag_to_language, hb_position_t, hb_script_from_iso15924_tag,
+    hb_shape, hb_tag_t, hb_variation_t,
 };
 use num_traits::Zero;
 use read_fonts::types::Tag;
@@ -38,13 +37,12 @@ unsafe extern "C" fn destroy_native_bdf_data(data: *mut c_void) {
 }
 
 use super::{GlyphShapingResult, ShapedGlyph, unicode_script_to_iso15924_tag};
+use crate::font::FontTableMethods;
 use crate::platform::font::FontTable;
 use crate::{
-    BASE, Font, FontBaseline, FontTableMethods, GlyphId, ShapedText, ShapingFlags, ShapingOptions,
-    fixed_to_float, float_to_fixed,
+    Font, GlyphId, ShapedText, ShapingFlags, ShapingOptions, fixed_to_float, float_to_fixed,
 };
 
-const HB_OT_TAG_DEFAULT_SCRIPT: hb_tag_t = u32::from_be_bytes(Tag::new(b"DFLT").to_be_bytes());
 const HB_OT_TAG_DEFAULT_LANGUAGE: hb_tag_t = u32::from_be_bytes(Tag::new(b"dflt").to_be_bytes());
 
 pub(crate) struct HarfbuzzGlyphShapingResult {
@@ -55,12 +53,12 @@ pub(crate) struct HarfbuzzGlyphShapingResult {
 }
 
 impl HarfbuzzGlyphShapingResult {
-    /// Create a new [`ShapedGlyphData`] from the given HarfBuzz buffer.
+    /// Create a new [`HarfbuzzGlyphShapingResult`] from the given HarfBuzz buffer.
     ///
     /// # Safety
     ///
     /// - Passing an invalid buffer pointer to this function results in undefined behavior.
-    /// - This function takes ownership of the buffer and the ShapedGlyphData destroys the buffer when dropped
+    /// - This function takes ownership of the buffer and the HarfbuzzGlyphShapingResult destroys the buffer when dropped
     ///   so the pointer must an owned pointer and must not be used after being passed to this function
     unsafe fn new(buffer: *mut hb_buffer_t) -> HarfbuzzGlyphShapingResult {
         let mut glyph_count = 0;
@@ -174,7 +172,6 @@ impl GlyphShapingResult for HarfbuzzGlyphShapingResult {
 pub(crate) struct Shaper {
     hb_face: *mut hb_face_t,
     hb_font: *mut hb_font_t,
-    font: *const Font,
 }
 
 // The HarfBuzz API is thread safe as well as our `Font`, so we can make the data
@@ -265,17 +262,14 @@ impl Shaper {
                 None,
             );
 
-            Shaper {
-                hb_face,
-                hb_font,
-                font,
-            }
+            Shaper { hb_face, hb_font }
         }
     }
 
     /// Calculate the layout metrics associated with the given text with the [`Shaper`]s font.
-    fn shaped_glyph_data(
+    pub(crate) fn shaped_glyph_data(
         &self,
+        _: &Font,
         text: &str,
         options: &ShapingOptions,
         font_features: &[(Tag, u32)],
@@ -304,11 +298,14 @@ impl Shaper {
                 text.len() as c_int,
             );
 
-            let language = options.language;
-            let hb_language = hb_language_from_string(
-                language.as_str().as_ptr() as *const c_char,
-                language.as_str().len() as c_int,
-            );
+            let hb_language = if let Some(language_override) = options.language_override {
+                hb_ot_tag_to_language(u32::from_be_bytes(language_override.to_be_bytes()))
+            } else if !options.language.is_empty() {
+                let language: &str = &options.language;
+                hb_language_from_string(language.as_ptr() as *const c_char, language.len() as c_int)
+            } else {
+                hb_ot_tag_to_language(HB_OT_TAG_DEFAULT_LANGUAGE)
+            };
             hb_buffer_set_language(hb_buffer, hb_language);
 
             let mut features: Vec<_> = font_features
@@ -331,8 +328,10 @@ impl Shaper {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn shape_text(
         &self,
+        font: &Font,
         text: &str,
         options: &ShapingOptions,
         font_features: &[(Tag, u32)],
@@ -340,51 +339,8 @@ impl Shaper {
         ShapedText::with_shaped_glyph_data(
             text,
             options,
-            &self.shaped_glyph_data(text, options, font_features),
+            &self.shaped_glyph_data(font, text, options, font_features),
         )
-    }
-
-    pub(crate) fn baseline(&self) -> Option<FontBaseline> {
-        unsafe { (*self.font).table_for_tag(BASE)? };
-
-        let mut hanging_baseline = 0;
-        let mut alphabetic_baseline = 0;
-        let mut ideographic_baseline = 0;
-
-        unsafe {
-            hb_ot_layout_get_baseline(
-                self.hb_font,
-                HB_OT_LAYOUT_BASELINE_TAG_ROMAN,
-                HB_DIRECTION_LTR,
-                HB_OT_TAG_DEFAULT_SCRIPT,
-                HB_OT_TAG_DEFAULT_LANGUAGE,
-                &mut alphabetic_baseline as *mut _,
-            );
-
-            hb_ot_layout_get_baseline(
-                self.hb_font,
-                HB_OT_LAYOUT_BASELINE_TAG_HANGING,
-                HB_DIRECTION_LTR,
-                HB_OT_TAG_DEFAULT_SCRIPT,
-                HB_OT_TAG_DEFAULT_LANGUAGE,
-                &mut hanging_baseline as *mut _,
-            );
-
-            hb_ot_layout_get_baseline(
-                self.hb_font,
-                HB_OT_LAYOUT_BASELINE_TAG_IDEO_EMBOX_BOTTOM_OR_LEFT,
-                HB_DIRECTION_LTR,
-                HB_OT_TAG_DEFAULT_SCRIPT,
-                HB_OT_TAG_DEFAULT_LANGUAGE,
-                &mut ideographic_baseline as *mut _,
-            );
-        }
-
-        Some(FontBaseline {
-            ideographic_baseline: Shaper::fixed_to_float(ideographic_baseline) as f32,
-            alphabetic_baseline: Shaper::fixed_to_float(alphabetic_baseline) as f32,
-            hanging_baseline: Shaper::fixed_to_float(hanging_baseline) as f32,
-        })
     }
 
     fn float_to_fixed(f: f64) -> i32 {

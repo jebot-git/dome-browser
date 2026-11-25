@@ -252,6 +252,13 @@ pub struct ScrollableNodeInfo {
 }
 
 impl ScrollableNodeInfo {
+    fn scroll_range(&self) -> (LayoutVector2D, LayoutVector2D) {
+        (
+            (self.content_rect.min - self.clip_rect.min).min(LayoutVector2D::zero()),
+            (self.content_rect.max - self.clip_rect.max).max(LayoutVector2D::zero()),
+        )
+    }
+
     fn scroll_to_offset(
         &mut self,
         new_offset: LayoutVector2D,
@@ -263,15 +270,14 @@ impl ScrollableNodeInfo {
             return None;
         }
 
-        let scrollable_size = self.scrollable_size();
         let original_layer_scroll_offset = self.offset;
-
-        if scrollable_size.width > 0. && self.scroll_sensitivity.x.contains(context) {
-            self.offset.x = new_offset.x.clamp(0.0, scrollable_size.width);
+        let (min_scroll_range, max_scroll_range) = self.scroll_range();
+        if min_scroll_range.x != max_scroll_range.x && self.scroll_sensitivity.x.contains(context) {
+            self.offset.x = new_offset.x.clamp(min_scroll_range.x, max_scroll_range.x);
         }
 
-        if scrollable_size.height > 0. && self.scroll_sensitivity.y.contains(context) {
-            self.offset.y = new_offset.y.clamp(0.0, scrollable_size.height);
+        if min_scroll_range.y != max_scroll_range.y && self.scroll_sensitivity.y.contains(context) {
+            self.offset.y = new_offset.y.clamp(min_scroll_range.y, max_scroll_range.y);
         }
 
         if self.offset != original_layer_scroll_offset {
@@ -293,38 +299,34 @@ impl ScrollableNodeInfo {
             return None;
         }
 
+        let (min_scroll_range, max_scroll_range) = self.scroll_range();
         let delta = match scroll_location {
             ScrollLocation::Delta(delta) => delta,
             ScrollLocation::Start => {
-                if self.offset.y.round() <= 0.0 {
+                let start = min_scroll_range.y;
+                if self.offset.y.round() <= start {
                     // Nothing to do on this layer.
                     return None;
                 }
 
-                self.offset.y = 0.0;
+                self.offset.y = start;
                 self.offset_changed.set(true);
                 return Some(self.offset);
             },
             ScrollLocation::End => {
-                let end_pos = self.scrollable_size().height;
-                if self.offset.y.round() >= end_pos {
+                let end = max_scroll_range.y;
+                if self.offset.y.round() >= end {
                     // Nothing to do on this layer.
                     return None;
                 }
 
-                self.offset.y = end_pos;
+                self.offset.y = end;
                 self.offset_changed.set(true);
                 return Some(self.offset);
             },
         };
 
         self.scroll_to_offset(self.offset + delta, context)
-    }
-}
-
-impl ScrollableNodeInfo {
-    fn scrollable_size(&self) -> LayoutSize {
-        self.content_rect.size() - self.clip_rect.size()
     }
 }
 
@@ -574,14 +576,14 @@ impl ScrollTree {
         external_id: ExternalScrollId,
     ) -> Option<(TouchAction, bool, bool)> {
         let node_id = self.node_with_external_scroll_node_id(external_id)?;
-        let SpatialTreeNodeInfo::Scroll(info) = &self.get_node(node_id).info else {
+        let SpatialTreeNodeInfo::Scroll(scroll_node_info) = &self.get_node(node_id).info else {
             return None;
         };
-        let scrollable_size = info.scrollable_size();
+        let (min_scroll_range, max_scroll_range) = scroll_node_info.scroll_range();
         Some((
-            info.touch_action,
-            scrollable_size.width > 0.,
-            scrollable_size.height > 0.,
+            scroll_node_info.touch_action,
+            min_scroll_range.x != max_scroll_range.x,
+            min_scroll_range.y != max_scroll_range.y,
         ))
     }
 
@@ -741,6 +743,44 @@ impl ScrollTree {
         transforms
     }
 
+    /// This is a replication of WebRender's code for determining the transform to use for
+    /// a reference frame which takes into account perspective frames that scroll relative
+    /// to different scroll frames.
+    fn reference_frame_transform(
+        &self,
+        node: &ScrollTreeNode,
+        info: &ReferenceFrameNodeInfo,
+        cumulative_sticky_offset: LayoutVector2D,
+    ) -> FastLayoutTransform {
+        let ReferenceFrameKind::Perspective {
+            scrolling_relative_to: Some(scrolling_relative_to),
+        } = &info.kind
+        else {
+            return info.transform;
+        };
+
+        let mut scroll_offset = LayoutVector2D::zero();
+        let mut current_node = node;
+        let mut ending_cumulative_sticky_offset = LayoutVector2D::zero();
+
+        while let Some(parent_id) = current_node.parent {
+            let parent_node = self.get_node(parent_id);
+            if let SpatialTreeNodeInfo::Scroll(parent_info) = &parent_node.info {
+                if parent_info.external_id == *scrolling_relative_to {
+                    ending_cumulative_sticky_offset = self.cumulative_sticky_offsets(parent_id);
+                    break;
+                }
+                scroll_offset += parent_info.offset;
+            }
+            current_node = parent_node;
+        }
+
+        scroll_offset -= cumulative_sticky_offset - ending_cumulative_sticky_offset;
+        info.transform
+            .pre_translate(-scroll_offset)
+            .then_translate(scroll_offset)
+    }
+
     /// Traverse a scroll node to its root to calculate the transform.
     #[servo_tracing::instrument(name = "ScrollTree::cumulative_node_transform_inner", skip_all)]
     fn cumulative_node_transform_inner(
@@ -768,9 +808,14 @@ impl ScrollTree {
                 // To apply a transformation we need to make sure the rectangle's
                 // coordinate space is the same as reference frame's coordinate space.
                 let offset = info.frame_origin_for_query.to_vector();
+                let transform = self.reference_frame_transform(
+                    node,
+                    info,
+                    parent_transforms.cumulative_sticky_offsets,
+                );
                 let node_to_parent_transform =
-                    info.transform.pre_translate(-offset).then_translate(offset);
-                let parent_to_node_transform = info.transform.inverse().map(|inverse_transform| {
+                    transform.pre_translate(-offset).then_translate(offset);
+                let parent_to_node_transform = transform.inverse().map(|inverse_transform| {
                     FastLayoutTransform::Offset(-info.origin.to_vector()).then(&inverse_transform)
                 });
                 ScrollTreeNodeTransformationCache {
@@ -973,6 +1018,11 @@ pub struct PaintDisplayListInfo {
     /// The WebRender [PipelineId] of this display list.
     pub pipeline_id: PipelineId,
 
+    /// A map of `<iframe>` [`PipelineId`]s to their rectangle and containing [`ScrollTreeNodeId`].
+    /// This can be used to translate from coordinates within an `<iframe>` to root WebView
+    /// coordinates.
+    pub iframes: FxHashMap<PipelineId, (ScrollTreeNodeId, LayoutRect)>,
+
     /// The [`ViewportDetails`] that describe the viewport in the script/layout thread at
     /// the time this display list was created.
     pub viewport_details: ViewportDetails,
@@ -1060,6 +1110,7 @@ impl PaintDisplayListInfo {
 
         PaintDisplayListInfo {
             pipeline_id,
+            iframes: Default::default(),
             viewport_details,
             content_size,
             epoch,
@@ -1075,6 +1126,9 @@ impl PaintDisplayListInfo {
         }
     }
 
+    /// Find the [`ExternalScrollId`] of the scroll node identified by the given
+    /// [`ScrollTreeNodeId`]. This will walk up the tree to find the first inclusive
+    /// ancestor scroll node.
     pub fn external_scroll_id_for_scroll_tree_node(
         &self,
         id: ScrollTreeNodeId,

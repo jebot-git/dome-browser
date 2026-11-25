@@ -10,6 +10,7 @@ use js::context::JSContext;
 use js::jsapi::Heap;
 use js::jsval::{JSVal, UndefinedValue};
 use js::rust::MutableHandleValue;
+use script_bindings::codegen::GenericBindings::GamepadBinding::GamepadMappingType;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 use webxr_api::{Handedness, InputFrame, InputId, InputSource, TargetRayMode};
 
@@ -68,9 +69,9 @@ impl XRInputSource {
             0,
             String::new(),
             if info.primary_action && layout.xr_standard && info.supports_grip && matches!(info.target_ray_mode, TargetRayMode::TrackedPointer) {
-                "xr-standard".into()
+                GamepadMappingType::Xr_standard
             } else {
-                String::new()
+                GamepadMappingType::_empty
             },
             (-1.0, 1.0),
             (0.0, 1.0),

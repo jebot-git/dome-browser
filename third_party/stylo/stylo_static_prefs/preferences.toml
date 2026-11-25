@@ -2,12 +2,14 @@
 "dom.viewTransitions.cross-document.enabled" = false
 "gfx.font_rendering.opentype_svg.enabled" = false
 "layout.css.alpha-color-function.enabled" = true
+"layout.css.always_underline_links" = false
 "layout.css.anchor-positioning.enabled" = false
 "layout.css.appearance-base.enabled" = false
 "layout.css.appearance.enabled" = false
 "layout.css.at-scope.enabled" = false
 "layout.css.backdrop-filter.enabled" = false
 "layout.css.background-clip.border-area.enabled" = false
+"layout.css.background-clip.text.enabled" = false
 "layout.css.basic-shape-shape.enabled" = false
 "layout.css.calc-typed-arithmetic.enabled" = true
 "layout.css.color-mix-multi-color.enabled" = true
@@ -23,6 +25,7 @@
 "layout.css.display-grid-lanes.enabled" = false
 "layout.css.dominant-baseline.enabled" = false
 "layout.css.ellipse-corners.enabled" = false
+"layout.css.filter-urls.enabled" = false
 "layout.css.first-line.enabled" = false
 "layout.css.fit-content-function.enabled" = true
 "layout.css.flexbox-balance.enabled" = false
@@ -52,7 +55,7 @@
 "layout.css.overscroll-behavior.enabled" = false
 "layout.css.progress-function.enabled" = true
 "layout.css.properties-and-values.enabled" = true
-"layout.css.random.enabled" = false
+"layout.css.random.enabled" = true
 "layout.css.revert-rule.enabled" = true
 "layout.css.ruby.enabled" = false
 "layout.css.scroll-behavior.enabled" = false
@@ -66,6 +69,7 @@
 "layout.css.stylo-local-work-queue.in-worker" = 0
 "layout.css.stylo-work-unit-size" = 16
 "layout.css.supports.at-rule.enabled" = true
+"layout.css.svg-properties.enabled" = false
 "layout.css.system-ui.enabled" = true
 "layout.css.text-autospace.enabled" = false
 "layout.css.text-box.enabled" = false
@@ -75,13 +79,16 @@
 "layout.css.text-emphasis.enabled" = false
 "layout.css.text-indent-keywords.enabled" = false
 "layout.css.text-overflow.enabled" = false
-"layout.css.text-underline.enabled" = false
+"layout.css.text-underline-position.enabled" = false
 "layout.css.text-wrap-style.balance.enabled" = false
 "layout.css.text-wrap-style.pretty.enabled" = false
+"layout.css.transform-box.enabled" = false
+"layout.css.transitions-override-ua" = false
 "layout.css.tree-counting-functions.enabled" = false
 "layout.css.view-transitions.enabled" = false
 "layout.css.webkit-fill-available.all-size-properties.enabled" = true
 "layout.css.webkit-fill-available.enabled" = true
+"layout.css.webkit-text-fill-color.enabled" = false
 "layout.css.white-space-collapse.preserve-spaces.enabled" = false
 "layout.css.word-break.break-word.enabled" = false
 "layout.css.writing-mode.enabled" = false

@@ -6,6 +6,7 @@ use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
+use script_bindings::root::DomSlice;
 use stylo_atoms::Atom;
 use webxr_api::{InputId, InputSource};
 
@@ -57,7 +58,7 @@ impl XRInputSourceArray {
         let window = global.as_window();
 
         if inputs.is_empty() { return; }
-        let mut added = vec![];
+        rooted_vec!(let mut added);
         for info in inputs {
             // This is quadratic, but won't be a problem for the only case
             // where we add multiple input sources (the initial input sources case)
@@ -73,7 +74,7 @@ impl XRInputSourceArray {
             self.input_sources
                 .safe_borrow_mut(cx.no_gc())
                 .push(Dom::from_ref(&input));
-            added.push(input);
+            added.push(input.as_traced());
         }
 
         let event = XRInputSourcesChangeEvent::new(
@@ -83,7 +84,7 @@ impl XRInputSourceArray {
             false,
             false,
             session,
-            &added,
+            added.as_ref_slice(),
             &[],
         );
         event.upcast::<Event>().fire(cx, session.upcast());
@@ -92,12 +93,14 @@ impl XRInputSourceArray {
     pub(crate) fn remove_input_source(&self, cx: &mut JSContext, session: &XRSession, id: InputId) {
         let global = self.global();
         let window = global.as_window();
-        let removed = if let Some(i) = self.input_sources.borrow().iter().find(|i| i.id() == id) {
+
+        rooted_vec!(let mut removed);
+        if let Some(i) = self.input_sources.borrow().iter().find(|i| i.id() == id) {
             i.disconnect();
-            [DomRoot::from_ref(&**i)]
+            removed.push(Dom::from_ref(&**i));
         } else {
             return;
-        };
+        }
 
         let event = XRInputSourcesChangeEvent::new(
             cx,
@@ -107,7 +110,7 @@ impl XRInputSourceArray {
             false,
             session,
             &[],
-            &removed,
+            removed.as_ref_slice(),
         );
         self.input_sources
             .safe_borrow_mut(cx.no_gc())
@@ -124,15 +127,15 @@ impl XRInputSourceArray {
     ) {
         let global = self.global();
         let window = global.as_window();
-        let root;
-        let removed = if let Some(i) = self.input_sources.borrow().iter().find(|i| i.id() == id) {
+
+        rooted_vec!(let mut removed);
+        if let Some(i) = self.input_sources.borrow().iter().find(|i| i.id() == id) {
             i.disconnect();
-            root = [DomRoot::from_ref(&**i)];
-            &root as &[_]
+            removed.push(Dom::from_ref(&**i));
         } else {
             warn!("Could not find removed input source with id {:?}", id);
-            &[]
-        };
+        }
+
         self.input_sources
             .safe_borrow_mut(cx.no_gc())
             .retain(|i| i.id() != id);
@@ -141,8 +144,6 @@ impl XRInputSourceArray {
             .safe_borrow_mut(cx.no_gc())
             .push(Dom::from_ref(&input));
 
-        let added = [input];
-
         let event = XRInputSourcesChangeEvent::new(
             cx,
             window,
@@ -150,8 +151,8 @@ impl XRInputSourceArray {
             false,
             false,
             session,
-            &added,
-            removed,
+            &[&*input],
+            removed.as_ref_slice(),
         );
         event.upcast::<Event>().fire(cx, session.upcast());
     }

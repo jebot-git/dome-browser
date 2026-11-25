@@ -204,6 +204,7 @@ class MachCommands(CommandBase):
             "servo-layout-api",
             "servo",
             "servo-metrics",
+            "servo-media-gstreamer",
             "servo-net",
             "servo-net-traits",
             "servo-paint",
@@ -221,6 +222,7 @@ class MachCommands(CommandBase):
             "servo-deny-public-fields",
             "servo-dom-struct",
             "servo-webvtt",
+            "servo-webgl",
         ]
         if not packages:
             packages = set(os.listdir(path.join(self.context.topdir, "tests", "unit"))) - set([".DS_Store"])
@@ -516,12 +518,12 @@ class MachCommands(CommandBase):
 
     @Command(
         "update-manifest",
-        description="Run test-wpt --manifest-update SKIP_TESTS to regenerate MANIFEST.json",
+        description="Update the cached MANIFEST.json files",
         category="testing",
         parser=wpt.manifestupdate.create_parser,
     )
     def update_manifest(self, **kwargs: Any) -> int:
-        return wpt.manifestupdate.update(check_clean=False)
+        return wpt.manifestupdate.update(**kwargs)
 
     @Command("fmt", description="Format Rust, Python, and TOML files", category="testing")
     def format_code(self) -> int:
@@ -633,11 +635,11 @@ class MachCommands(CommandBase):
                 l2 = cur_op.readline()
                 if not l1:
                     break
-                result["Test"].append(str(l1).split("|")[0].strip())
-                result["Prev_Time"].append(float(str(l1).split("|")[1].strip()))
-                result["Cur_Time"].append(float(str(l2).split("|")[1].strip()))
-                a = float(str(l1).split("|")[1].strip())
-                b = float(str(l2).split("|")[1].strip())
+                result["Test"].append(l1.split("|")[0].strip())
+                result["Prev_Time"].append(float(l1.split("|")[1].strip()))
+                result["Cur_Time"].append(float(l2.split("|")[1].strip()))
+                a = float(l1.split("|")[1].strip())
+                b = float(l2.split("|")[1].strip())
                 result["Difference(%)"].append(((b - a) / a) * 100)
 
             width_col1 = max([len(x) for x in result["Test"]])
@@ -919,7 +921,7 @@ class MachCommands(CommandBase):
         # We pass `-f` here so that any thread panic will cause Servo to exit,
         # preventing a panic from hanging execution. This means that these kind
         # of panics won't cause timeouts on CI.
-        args = ["-f", "tests/html/close-on-load.html"]
+        args = ["-f", "tests/manual/close-on-load.html"]
         if multiprocess:
             args.append("-M")
         return PostBuildCommands(self.context)._run(servo_binary, params + args)

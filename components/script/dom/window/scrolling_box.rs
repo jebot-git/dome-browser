@@ -6,11 +6,12 @@ use std::cell::Cell;
 
 use app_units::Au;
 use euclid::{Rect, Vector2D};
-use js::context::{JSContext, NoGC};
-use layout_api::{AxesOverflow, ScrollContainerQueryFlags};
+use js::context::JSContext;
+use layout_api::{AxesOverflow, ScrollContainerQueryFlags, WritingModeExt};
 use script_bindings::codegen::GenericBindings::WindowBinding::ScrollBehavior;
 use script_bindings::inheritance::Castable;
 use script_bindings::root::DomRoot;
+use style::logical_geometry::WritingMode;
 use style::values::computed::Overflow;
 use style_traits::CSSPixel;
 use webrender_api::units::{LayoutSize, LayoutVector2D};
@@ -22,6 +23,7 @@ use crate::dom::types::{Document, Element};
 pub(crate) struct ScrollingBox {
     target: ScrollingBoxSource,
     overflow: AxesOverflow,
+    writing_mode: WritingMode,
     cached_content_size: Cell<Option<LayoutSize>>,
     cached_size: Cell<Option<LayoutSize>>,
 }
@@ -80,10 +82,15 @@ impl ScrollAxisState {
 }
 
 impl ScrollingBox {
-    pub(crate) fn new(target: ScrollingBoxSource, overflow: AxesOverflow) -> Self {
+    pub(crate) fn new(
+        target: ScrollingBoxSource,
+        overflow: AxesOverflow,
+        writing_mode: WritingMode,
+    ) -> Self {
         Self {
             target,
             overflow,
+            writing_mode,
             cached_content_size: Default::default(),
             cached_size: Default::default(),
         }
@@ -97,16 +104,16 @@ impl ScrollingBox {
         matches!(self.target, ScrollingBoxSource::Viewport(..))
     }
 
-    pub(crate) fn scroll_position(&self) -> LayoutVector2D {
+    pub(crate) fn scroll_position(&self, cx: &mut JSContext) -> LayoutVector2D {
         match &self.target {
             ScrollingBoxSource::Element(element) => element
                 .owner_window()
-                .scroll_offset_query(element.upcast::<Node>()),
-            ScrollingBoxSource::Viewport(document) => document.window().scroll_offset(),
+                .scroll_offset_query(cx, element.upcast::<Node>()),
+            ScrollingBoxSource::Viewport(document) => document.window().scroll_offset(cx),
         }
     }
 
-    pub(crate) fn content_size(&self) -> LayoutSize {
+    pub(crate) fn content_size(&self, cx: &mut JSContext) -> LayoutSize {
         if let Some(content_size) = self.cached_content_size.get() {
             return content_size;
         }
@@ -120,7 +127,7 @@ impl ScrollingBox {
 
         let content_size = document
             .window()
-            .scrolling_area_query(node_to_query)
+            .scrolling_area_query(cx, node_to_query)
             .size
             .to_f32()
             .cast_unit();
@@ -128,14 +135,14 @@ impl ScrollingBox {
         content_size
     }
 
-    pub(crate) fn size(&self, no_gc: &NoGC) -> LayoutSize {
+    pub(crate) fn size(&self, cx: &mut JSContext) -> LayoutSize {
         if let Some(size) = self.cached_size.get() {
             return size;
         }
 
         let size = match &self.target {
             ScrollingBoxSource::Element(element) => {
-                element.client_rect(no_gc).size.to_f32().cast_unit()
+                element.client_rect(cx).size.to_f32().cast_unit()
             },
             ScrollingBoxSource::Viewport(document) => {
                 document.window().viewport_details().size.cast_unit()
@@ -181,7 +188,11 @@ impl ScrollingBox {
         }
     }
 
-    pub(crate) fn can_keyboard_scroll_in_axis(&self, no_gc: &NoGC, axis: ScrollingBoxAxis) -> bool {
+    pub(crate) fn can_keyboard_scroll_in_axis(
+        &self,
+        cx: &mut JSContext,
+        axis: ScrollingBoxAxis,
+    ) -> bool {
         let overflow = match axis {
             ScrollingBoxAxis::X => self.overflow.x,
             ScrollingBoxAxis::Y => self.overflow.y,
@@ -190,15 +201,15 @@ impl ScrollingBox {
             return false;
         }
         match axis {
-            ScrollingBoxAxis::X => self.content_size().width > self.size(no_gc).width,
-            ScrollingBoxAxis::Y => self.content_size().height > self.size(no_gc).height,
+            ScrollingBoxAxis::X => self.content_size(cx).width > self.size(cx).width,
+            ScrollingBoxAxis::Y => self.content_size(cx).height > self.size(cx).height,
         }
     }
 
     /// <https://drafts.csswg.org/cssom-view/#determine-the-scroll-into-view-position>
     pub(crate) fn determine_scroll_into_view_position(
         &self,
-        no_gc: &NoGC,
+        cx: &mut JSContext,
         block: ScrollAxisState,
         inline: ScrollAxisState,
         target_rect: Rect<Au, CSSPixel>,
@@ -215,14 +226,12 @@ impl ScrollingBox {
 
         // The rest of the steps diverge from the specification here, but essentially try
         // to follow it using our own geometry types.
-        //
-        // TODO: This makes the code below wrong for the purposes of writing modes.
         let (adjusted_element_top_left, adjusted_element_bottom_right) = match self.target() {
             ScrollingBoxSource::Viewport(_) => (target_top_left, target_bottom_right),
             ScrollingBoxSource::Element(scrolling_element) => {
                 let scrolling_padding_rect_top_left = scrolling_element
                     .upcast::<Node>()
-                    .padding_box()
+                    .padding_box(cx)
                     .unwrap_or_default()
                     .origin
                     .map(to_pixel);
@@ -233,34 +242,45 @@ impl ScrollingBox {
             },
         };
 
-        let size = self.size(no_gc);
-        let current_scroll_position = self.scroll_position();
+        let inline_flipped = self.writing_mode.is_inline_flipped();
+        let block_flipped = self.writing_mode.is_block_flipped();
+        let (x_scroll_axis_state, x_flipped, y_scroll_axis_state, y_flipped) =
+            if self.writing_mode.is_horizontal() {
+                (inline, inline_flipped, block, block_flipped)
+            } else {
+                (block, block_flipped, inline, inline_flipped)
+            };
+
+        let size = self.size(cx);
+        let current_scroll_position = self.scroll_position(cx);
         Vector2D::new(
             Self::calculate_scroll_position_one_axis(
-                inline,
+                x_scroll_axis_state,
                 adjusted_element_top_left.x,
                 adjusted_element_bottom_right.x,
                 size.width,
                 current_scroll_position.x,
+                x_flipped,
             ),
             Self::calculate_scroll_position_one_axis(
-                block,
+                y_scroll_axis_state,
                 adjusted_element_top_left.y,
                 adjusted_element_bottom_right.y,
                 size.height,
                 current_scroll_position.y,
+                y_flipped,
             ),
         )
     }
 
-    /// Step 10 from <https://drafts.csswg.org/cssom-view/#determine-the-scroll-into-view-position>:
-    // TODO: we are not considering the coordinate system of the element while deciding the scroll position.
+    /// Step 10 from <https://drafts.csswg.org/cssom-view/#determine-the-scroll-into-view-position>.
     fn calculate_scroll_position_one_axis(
         state: ScrollAxisState,
         element_start: f32,
         element_end: f32,
         container_size: f32,
         current_scroll_offset: f32,
+        flipped: bool,
     ) -> f32 {
         if !state
             .requirement
@@ -270,21 +290,24 @@ impl ScrollingBox {
         }
 
         let element_size = element_end - element_start;
-
         current_scroll_offset +
-            match state.position {
+            match (state.position, flipped) {
                 // Step 1 & 5: If inline is "start", then align element start edge with scrolling box start edge.
-                ScrollLogicalPosition::Start => element_start,
+                (ScrollLogicalPosition::Start, false) | (ScrollLogicalPosition::End, true) => {
+                    element_start
+                },
                 // Step 2 & 6: If inline is "end", then align element end edge with
                 // scrolling box end edge.
-                ScrollLogicalPosition::End => element_end - container_size,
+                (ScrollLogicalPosition::End, false) | (ScrollLogicalPosition::Start, true) => {
+                    element_end - container_size
+                },
                 // Step 3 & 7: If inline is "center", then align the center of target bounding
                 // border box with the center of scrolling box in scrolling box’s inline base direction.
-                ScrollLogicalPosition::Center => {
+                (ScrollLogicalPosition::Center, ..) => {
                     element_start + (element_size - container_size) / 2.0
                 },
                 // Step 4 & 8: If inline is "nearest",
-                ScrollLogicalPosition::Nearest => {
+                (ScrollLogicalPosition::Nearest, ..) => {
                     let scrollport_start = 0.;
                     let scrollport_end = container_size;
 

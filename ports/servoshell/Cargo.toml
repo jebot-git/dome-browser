@@ -42,6 +42,7 @@ default_base = [
     "default_web_features",
     "default_tooling",
     "jemalloc",
+    "harfrust",
     "max_log_level",
     "multiprocess",
     "js_jit",
@@ -62,6 +63,8 @@ crown = ["servo/crown"]
 debugmozjs = ["servo/debugmozjs"]
 devtools = ["servo/devtools"]
 gamepad = ["servo/gamepad"]
+harfrust = ["servo/harfrust"]
+harfbuzz = ["servo/harfbuzz"]
 jitspew = ["servo/jitspew"]
 js_backtrace = ["servo/js_backtrace"]
 js_jit = ["servo/js_jit"]
@@ -70,6 +73,7 @@ media-gstreamer = ["servo/media-gstreamer"]
 multiprocess = ["servo/multiprocess"]
 native-bluetooth = ["servo/native-bluetooth"]
 profilemozjs = ["servo/profilemozjs"]
+subtlecrypto = ["servo/subtlecrypto"]
 tracing = ["dep:tracing", "dep:tracing-subscriber", "servo/tracing"]
 tracing-hitrace = ["tracing", "dep:hitrace"]
 tracing-perfetto = ["tracing", "dep:tracing-perfetto"]
@@ -86,6 +90,7 @@ cfg-if = { workspace = true }
 crossbeam-channel = { workspace = true }
 dpi = { workspace = true }
 euclid = { workspace = true }
+flate2 = { workspace = true }
 hitrace = { workspace = true, optional = true }
 image = { workspace = true }
 keyboard-types = { workspace = true }
@@ -129,6 +134,7 @@ ohos-vsync = { workspace = true }
 ohos-window-sys = { workspace = true }
 ohos-sys-opaque-types = { workspace = true }
 ohos-window-manager-sys = { workspace = true, features = ["api-14"] }
+memmap2 = { workspace = true }
 xcomponent-sys = { workspace = true, features = ["api-20", "keyboard-types"] }
 
 [target.'cfg(any(target_os = "android", target_env = "ohos"))'.dependencies]
@@ -140,12 +146,13 @@ surfman = { workspace = true, features = ["sm-angle-default"] }
 [target.'cfg(not(any(target_os = "android", target_env = "ohos")))'.dependencies]
 dirs = { workspace = true }
 egui = { workspace = true }
-egui-file-dialog = { workspace = true }
 egui-winit = { workspace = true, features = ["accesskit", "clipboard", "wayland"] }
 egui_glow = { workspace = true, features = ["winit"] }
 gilrs = { workspace = true }
 glow = { workspace = true }
 headers = { workspace = true }
+itertools = { workspace = true }
+rfd = { workspace = true }
 serde_json = { workspace = true }
 # For optional feature servo-allocator/use-jemalloc and servo-allocator/allocation-tracking
 servo-allocator = { workspace = true }

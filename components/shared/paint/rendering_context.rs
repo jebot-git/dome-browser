@@ -111,6 +111,10 @@ pub trait RenderingContext {
     fn refresh_driver(&self) -> Option<Rc<dyn RefreshDriver>> {
         None
     }
+    /// The associated adapter to use for WebGL. Default to `None`.
+    fn adapter(&self) -> Option<Adapter> {
+        None
+    }
 }
 
 /// A rendering context that uses the Surfman library to create and manage
@@ -395,6 +399,10 @@ impl SurfmanRenderingContext {
     fn refresh_driver(&self) -> Option<Rc<dyn RefreshDriver>> {
         self.refresh_driver.clone()
     }
+
+    fn adapter(&self) -> Option<Adapter> {
+        Some(self.device.borrow().adapter())
+    }
 }
 
 /// A software rendering context that uses a software OpenGL implementation to render
@@ -540,6 +548,10 @@ impl RenderingContext for SoftwareRenderingContext {
 
     fn connection(&self) -> Option<Connection> {
         self.surfman_rendering_info.connection()
+    }
+
+    fn adapter(&self) -> Option<Adapter> {
+        self.surfman_rendering_info.adapter()
     }
 }
 
@@ -790,6 +802,10 @@ impl RenderingContext for WindowRenderingContext {
     fn refresh_driver(&self) -> Option<Rc<dyn RefreshDriver>> {
         self.surfman_context.refresh_driver()
     }
+
+    fn adapter(&self) -> Option<Adapter> {
+        self.surfman_context.adapter()
+    }
 }
 
 #[path = "offscreen_framebuffer.rs"]
@@ -1026,6 +1042,10 @@ impl RenderingContext for OffscreenRenderingContext {
 
     fn refresh_driver(&self) -> Option<Rc<dyn RefreshDriver>> {
         self.parent_context().refresh_driver()
+    }
+
+    fn adapter(&self) -> Option<Adapter> {
+        self.parent_context.adapter()
     }
 }
 

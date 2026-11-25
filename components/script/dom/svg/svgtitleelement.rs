@@ -89,7 +89,7 @@ impl VirtualMethods for SVGTitleElement {
         self.super_type().unwrap().moving_steps(cx, context);
         self.notify_title_changed();
         if self.upcast::<Node>().is_in_a_document_tree() && self.upcast::<Node>().owner_doc().is_fully_active() &&
-            context.old_parent.is_some_and(Self::is_document_svg_root) {
+            Self::is_document_svg_root(context.old_ancestor) {
             self.upcast::<Node>().owner_doc().title_changed();
         }
     }

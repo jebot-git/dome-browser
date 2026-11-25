@@ -8,6 +8,7 @@ use euclid::Point2D;
 use js::context::JSContext;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::MouseEventBinding::MouseEventMethods;
+use script_bindings::domstring::DOMString;
 use script_bindings::inheritance::Castable;
 use script_bindings::root::Dom;
 use script_bindings::traits::DomEventTrait;
@@ -67,14 +68,19 @@ impl SpecificInputType for ImageInputType {
 }
 
 impl ImageInputType {
-    pub(crate) fn set_selected_coordinate(&self, input: &HTMLInputElement, event: &Event) {
+    pub(crate) fn set_selected_coordinate(
+        &self,
+        cx: &mut JSContext,
+        input: &HTMLInputElement,
+        event: &Event,
+    ) {
         if !event.IsTrusted() {
             return;
         }
         let Some(mouse_event) = event.downcast::<MouseEvent>() else {
             return;
         };
-        let rect = input.upcast::<Node>().client_rect();
+        let rect = input.upcast::<Node>().client_rect(cx);
         self.selected_coordinate.set(Point2D::new(
             mouse_event.ClientX() - rect.origin.x,
             mouse_event.ClientY() - rect.origin.y,
@@ -86,7 +92,7 @@ impl ImageInputType {
     }
 
     /// Step 2 and later of <https://html.spec.whatwg.org/multipage/#input-img-dimensions>
-    pub(crate) fn dimensions(&self, input: &HTMLInputElement) -> (u32, u32) {
+    pub(crate) fn dimensions(&self, cx: &mut JSContext, input: &HTMLInputElement) -> (u32, u32) {
         // Step 2. Let naturalDimensions be null.
         // Step 3. If an image is available,
         // then set naturalDimensions to the result of applying the default sizing algorithm
@@ -102,7 +108,7 @@ impl ImageInputType {
                 })
             });
         // Step 4. Return the result of determining the dimensions of input given naturalDimensions.
-        HTMLImageElement::determine_dimensions(input.upcast(), natural_dimensions)
+        HTMLImageElement::determine_dimensions(cx, input.upcast(), natural_dimensions)
     }
 }
 
@@ -127,7 +133,7 @@ impl SpecificInputActivationType for ImageInputActivation {
             // Step 3: If the user activated the control while explicitly selecting a coordinate,
             // then set the element's selected coordinate to that coordinate.
             if let InputType::Image(ref image_input_type) = *input.input_type() {
-                image_input_type.set_selected_coordinate(input, event);
+                image_input_type.set_selected_coordinate(cx, input, event);
             }
 
             // Step 4: Submit the element's form owner from the element with userInvolvement
@@ -151,6 +157,12 @@ impl ImageInputShadowTree {
     pub(crate) fn new(cx: &mut JSContext, shadow_root: &Node) -> Self {
         let document = shadow_root.owner_document();
         let img = Self::create_element_in_ua_shadowroot(cx, &document, local_name!("img"));
+        // An inline image would sit on the baseline, making the input taller than the image.
+        img.set_string_attribute(
+            cx,
+            &local_name!("style"),
+            DOMString::from_static("display: block; width: 100%; height: 100%;"),
+        );
         Node::replace_all(cx, Some(img.upcast()), shadow_root);
         let img = img
             .downcast::<HTMLImageElement>()

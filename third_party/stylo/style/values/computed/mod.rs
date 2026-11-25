@@ -39,7 +39,6 @@ use crate::{ArcSlice, Atom, One};
 use euclid::{Point2D, Rect, Size2D, default};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
-use rustc_hash::FxHasher;
 use servo_arc::Arc;
 use std::cell::RefCell;
 use std::cmp;
@@ -142,8 +141,8 @@ pub use self::tree_counting::TreeCountingResult;
 #[cfg(feature = "gecko")]
 pub use self::ui::CursorImage;
 pub use self::ui::{
-    BoolInteger, Cursor, FieldSizing, ImeMode, Inert, MozTheme, PointerEvents, ScrollbarColor,
-    ScrollbarWidth, UserFocus, UserSelect, WindowDragging, WindowShadow,
+    BoolInteger, Cursor, FieldSizing, ImeMode, Inert, Interactivity, MozTheme, PointerEvents,
+    ScrollbarColor, ScrollbarWidth, UserFocus, UserSelect, WindowDragging, WindowShadow,
 };
 pub use super::specified::TextTransform;
 pub use super::specified::ViewportVariant;
@@ -535,20 +534,19 @@ impl<'a> Context<'a> {
     /// random cache name always results in the same random base value.
     /// https://drafts.csswg.org/css-values-5/#random-caching
     pub fn random_base_value(&self, key: &RandomCacheKey) -> f32 {
-        let mut hasher = FxHasher::default();
+        let mut hasher = self.device().document_random_hasher();
         key.name.hash(&mut hasher);
         key.ua_ident.hash(&mut hasher);
         if key.is_element_scoped {
             debug_assert!(
-                self.element_context.opaque_element().is_some(),
+                self.element_context.random_seed().is_some(),
                 "Element-scoped random without element context"
             );
             self.builder
                 .add_flags(ComputedValueFlags::USES_ELEMENT_SCOPED_RANDOM);
             self.rule_cache_conditions.borrow_mut().set_uncacheable();
-            self.element_context.opaque_element().hash(&mut hasher);
+            self.element_context.random_seed().hash(&mut hasher);
         }
-        self.device().document_random_seed().hash(&mut hasher);
 
         // Returns a float in the range [0, 1).
         SmallRng::seed_from_u64(hasher.finish()).r#gen()

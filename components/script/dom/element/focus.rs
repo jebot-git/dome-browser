@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use js::context::NoGC;
+use js::context::{JSContext, NoGC};
 use script_bindings::codegen::GenericBindings::ElementBinding::ElementMethods;
 use script_bindings::codegen::GenericBindings::ShadowRootBinding::ShadowRootMethods;
 use script_bindings::codegen::InheritTypes::{ElementTypeId, HTMLElementTypeId, NodeTypeId};
@@ -12,6 +12,7 @@ use style::values::computed::Overflow;
 use xml5ever::local_name;
 
 use crate::dom::Node;
+use crate::dom::bindings::root::UnrootedDom;
 use crate::dom::document::focus::FocusableAreaKind;
 use crate::dom::types::{Element, HTMLElement};
 
@@ -26,17 +27,21 @@ impl Element {
     /// different types of focusable areas ahead of time so that the logic is useful for answering
     /// both "Is this element a focusable area?" and "Is this element click (or sequentially)
     /// focusable."
-    pub(crate) fn focusable_area_kind(&self, no_gc: &NoGC) -> FocusableAreaKind {
-        // Do not allow unrendered, disconnected, or disabled nodes to be focusable areas ever.
+    pub(crate) fn focusable_area_kind(&self, cx: &mut JSContext) -> FocusableAreaKind {
+        // Do not allow unrendered, disconnected, disabled or inert nodes to be focusable areas ever.
         let node: &Node = self.upcast();
-        if !node.is_connected() || !self.has_css_layout_box() || self.is_actually_disabled() {
+        if !node.is_connected() ||
+            !self.has_css_layout_box_deprecated(cx) ||
+            self.is_actually_disabled() ||
+            node.is_inert(cx)
+        {
             return Default::default();
         }
 
         // <https://www.w3.org/TR/css-display-4/#visibility>
         // Invisible elements are removed from navigation.
         if self
-            .style()
+            .style(cx)
             .is_some_and(|style| style.get_inherited_box().visibility != Visibility::Visible)
         {
             return Default::default();
@@ -57,7 +62,7 @@ impl Element {
         // > the element is not actually disabled;
         // Note: Checked above
         // > the element is not inert;
-        // TODO: Handle this.
+        // Note: Checked above
         // > the element is either being rendered, delegating its rendering to its children, or
         // > being used as relevant canvas fallback content.
         // Note: Checked above
@@ -121,18 +126,16 @@ impl Element {
         // > The scrollable regions of elements that are being rendered and are not inert.
         //
         // Note that these kind of focusable areas are only focusable via the keyboard.
-        //
-        // TODO: Handle inert.
         if self
             .upcast::<Node>()
-            .effective_overflow()
+            .effective_overflow(cx)
             .is_some_and(|axes_overflow| {
                 // This is checking whether there is an input event scrollable overflow value in
                 // a given axis and also overflow in that same axis.
                 (matches!(axes_overflow.x, Overflow::Auto | Overflow::Scroll) &&
-                    self.ScrollWidth() > self.ClientWidth(no_gc)) ||
+                    self.ScrollWidth(cx) > self.ClientWidth(cx)) ||
                     (matches!(axes_overflow.y, Overflow::Auto | Overflow::Scroll) &&
-                        self.ScrollHeight() > self.ClientHeight(no_gc))
+                        self.ScrollHeight(cx) > self.ClientHeight(cx))
             })
         {
             return FocusableAreaKind::Sequential;
@@ -149,13 +152,46 @@ impl Element {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#sequentially-focusable>.
-    pub(crate) fn is_sequentially_focusable(&self, no_gc: &NoGC) -> bool {
-        self.focusable_area_kind(no_gc)
+    pub(crate) fn is_sequentially_focusable(&self, cx: &mut JSContext) -> bool {
+        self.focusable_area_kind(cx)
             .contains(FocusableAreaKind::Sequential)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#focusable-area>
-    pub(crate) fn is_focusable_area(&self, no_gc: &NoGC) -> bool {
-        !self.focusable_area_kind(no_gc).is_empty()
+    pub(crate) fn is_focusable_area(&self, cx: &mut JSContext) -> bool {
+        !self.focusable_area_kind(cx).is_empty()
+    }
+
+    pub(crate) fn set_focus_within_state_for_inclusive_ancestors(
+        &self,
+        no_gc: &NoGC,
+        maybe_common_ancestor: Option<&Node>,
+        focus_within_state: bool,
+    ) {
+        for ancestor in self
+            .upcast::<Node>()
+            .inclusive_ancestors_in_flat_tree_unrooted(no_gc)
+            .take_while(|ancestor| {
+                maybe_common_ancestor.is_none_or(|common_ancestor| **ancestor != common_ancestor)
+            })
+        {
+            if let Some(ancestor_element) = UnrootedDom::downcast::<Element>(ancestor) {
+                ancestor_element.set_focus_within_state(no_gc, focus_within_state);
+            }
+        }
+    }
+
+    pub(crate) fn maybe_reset_focus_within_state(
+        &self,
+        no_gc: &NoGC,
+        parent_element: Option<&Element>,
+    ) {
+        if !self.focus_within_state() {
+            return;
+        }
+        if let Some(parent_element) = parent_element {
+            parent_element.set_focus_within_state_for_inclusive_ancestors(no_gc, None, false);
+        }
+        self.set_focus_within_state(no_gc, false);
     }
 }

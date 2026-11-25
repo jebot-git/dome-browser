@@ -541,6 +541,22 @@ fn activate(tabs: &[Tab], index: usize) {
         }
     }
 }
+fn modifiers_from_native_state(state: i32) -> Modifiers {
+    let mut modifiers = Modifiers::empty();
+    if state & 0x10000 != 0 {
+        modifiers |= Modifiers::SHIFT;
+    }
+    if state & 0x40000 != 0 {
+        modifiers |= Modifiers::CONTROL;
+    }
+    if state & 0x80000 != 0 {
+        modifiers |= Modifiers::ALT;
+    }
+    if state & 0x400000 != 0 {
+        modifiers |= Modifiers::META;
+    }
+    modifiers
+}
 fn key(event: &ui::Event) -> InputEvent {
     let named = match event.b {
         0xffe1 | 0xffe2 => Some(NamedKey::Shift),
@@ -581,19 +597,7 @@ fn key(event: &ui::Event) -> InputEvent {
             text
         })
     });
-    let mut modifiers = Modifiers::empty();
-    if event.c & 0x10000 != 0 {
-        modifiers |= Modifiers::SHIFT;
-    }
-    if event.c & 0x40000 != 0 {
-        modifiers |= Modifiers::CONTROL;
-    }
-    if event.c & 0x80000 != 0 {
-        modifiers |= Modifiers::ALT;
-    }
-    if event.c & 0x400000 != 0 {
-        modifiers |= Modifiers::META;
-    }
+    let modifiers = modifiers_from_native_state(event.c);
     InputEvent::Keyboard(KeyboardEvent::new_without_event(
         if event.a != 0 {
             KeyState::Down
@@ -1114,6 +1118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 mode: WheelMode::DeltaPixel,
                             },
                             servo::DevicePoint::new(event.c as f32, event.d as f32).into(),
+                            modifiers_from_native_state(event.text().parse().unwrap_or_default()),
                         )));
                 },
                 14 => {

@@ -45,16 +45,15 @@ use webrender::{
     ShaderPrecacheFlags, Transaction, UploadMethod,
 };
 use webrender_api::units::{
-    DevicePixel, DevicePoint, LayoutPoint, LayoutRect, LayoutSize, LayoutTransform, LayoutVector2D,
-    WorldPoint,
+    DevicePixel, DevicePoint, LayoutPoint, LayoutRect, LayoutSize, LayoutVector2D, WorldPoint,
 };
 use webrender_api::{
     self, BuiltDisplayList, BuiltDisplayListDescriptor, ColorF, DirtyRect, DisplayListPayload,
     DocumentId, DynamicProperties, Epoch as WebRenderEpoch, ExternalScrollId, FontInstanceFlags,
     FontInstanceKey, FontInstanceOptions, FontInstancePlatformOptions, FontKey, FontVariation,
     ImageData, ImageKey, NativeFontHandle, PipelineId as WebRenderPipelineId, PropertyBinding,
-    ReferenceFrameKind, RenderReasons, SampledScrollOffset, SpaceAndClipInfo, SpatialId,
-    TransformStyle,
+    PropertyBindingKey, PropertyValue, ReferenceFrameKind, RenderReasons, SampledScrollOffset,
+    SpaceAndClipInfo, SpatialId, TransformStyle,
 };
 use wr_malloc_size_of::MallocSizeOfOps;
 
@@ -137,6 +136,9 @@ pub(crate) struct Painter {
     /// A [`WebContentAnimator`] used to manage web content-derived animations. Currently this only
     /// manages blinking caret animations.
     web_content_animator: WebContentAnimator,
+
+    /// A counter used to generate new property binding keys for [`WebView`]s.
+    property_binding_key_counter: Cell<u64>,
 }
 
 impl Drop for Painter {
@@ -334,6 +336,7 @@ impl Painter {
                 paint.event_loop_waker.clone_box(),
                 (*timer_refresh_driver).clone(),
             ),
+            property_binding_key_counter: Default::default(),
         };
         painter.assert_gl_framebuffer_complete();
         painter.clear_background();
@@ -387,6 +390,13 @@ impl Painter {
         Ok(())
     }
 
+    fn generate_property_binding_key<T>(&self) -> PropertyBindingKey<T> {
+        let value = self.property_binding_key_counter.get();
+        self.property_binding_key_counter
+            .update(|counter| counter + 1);
+        PropertyBindingKey::<T>::new(value)
+    }
+
     pub(crate) fn perform_updates(&mut self) {
         if self.rendering_context.native_context_is_lost() {
             if let Some(renderer) = self.webrender_renderer.as_mut() {
@@ -405,21 +415,14 @@ impl Painter {
             })
             .collect();
 
-        self.send_zoom_and_scroll_offset_updates(need_zoom, scroll_offset_updates);
+        let dynamic_properties_updated =
+            self.web_content_animator.update(&self.webview_renderers) || need_zoom;
+        self.maybe_send_scroll_and_dynamic_property_updates_transaction(
+            dynamic_properties_updated,
+            scroll_offset_updates,
+        );
         for renderer in self.webview_renderers.values() {
             renderer.notify_scroll_metrics();
-        }
-
-        if let Some(colors) = self.web_content_animator.update(&self.webview_renderers) {
-            let mut transaction = Transaction::new();
-            transaction.reset_dynamic_properties();
-            transaction.append_dynamic_properties(DynamicProperties {
-                transforms: Vec::new(),
-                floats: Vec::new(),
-                colors,
-            });
-            self.generate_frame(&mut transaction, RenderReasons::ANIMATED_PROPERTY);
-            self.send_transaction(transaction);
         }
     }
 
@@ -518,7 +521,7 @@ impl Painter {
         }
         self.render_context_error_reported = false;
         let refresh_driver = self.refresh_driver.clone();
-        refresh_driver.notify_will_paint(self);
+        let notified_refresh_driver_observers = refresh_driver.notify_will_paint(self);
 
         self.assert_no_gl_error();
 
@@ -546,6 +549,10 @@ impl Painter {
         // We've painted the default target, which means that from the embedder's perspective,
         // the scene no longer needs to be repainted.
         self.needs_repaint.set(RepaintReason::empty());
+
+        if !notified_refresh_driver_observers {
+            self.set_needs_repaint(RepaintReason::FrameStart);
+        }
 
         self.screenshot_taker.maybe_take_screenshots(self);
         self.send_pending_paint_metrics_messages_after_composite();
@@ -742,6 +749,32 @@ impl Painter {
             .send_transaction(self.webrender_document, transaction);
     }
 
+    /// Adds a reset operation that resets all dynamic properties in this WebRender instance,
+    /// and then adds all available dynamic properties (with their current values) to the
+    /// transaction. This resets the state of all dynamic WebRender properties.
+    fn add_dynamic_properties_to_transaction(&self, transaction: &mut Transaction) {
+        transaction.reset_dynamic_properties();
+        let colors = self.web_content_animator.values(&self.webview_renderers);
+        let transforms: Vec<_> = self
+            .webview_renderers
+            .values()
+            .filter_map(|webview_renderer| {
+                if webview_renderer.hidden() {
+                    return None;
+                }
+                Some(PropertyValue {
+                    key: webview_renderer.pinch_zoom_property_binding_key(),
+                    value: webview_renderer.root_transform(),
+                })
+            })
+            .collect();
+        transaction.append_dynamic_properties(DynamicProperties {
+            transforms,
+            floats: Vec::new(),
+            colors,
+        });
+    }
+
     /// Set the root pipeline for our WebRender scene to a display list that consists of an iframe
     /// for each visible top-level browsing context, applying a transformation on the root for
     /// pinch zoom, page zoom, and HiDPI scaling.
@@ -773,25 +806,17 @@ impl Painter {
                 continue;
             };
 
-            let pinch_zoom_transform = webview_renderer.pinch_zoom().transform().to_untyped();
-            let device_pixels_per_page_pixel_not_including_pinch_zoom = webview_renderer
-                .device_pixels_per_page_pixel_not_including_pinch_zoom()
-                .get();
-
-            let transform = LayoutTransform::scale(
-                device_pixels_per_page_pixel_not_including_pinch_zoom,
-                device_pixels_per_page_pixel_not_including_pinch_zoom,
-                1.0,
-            )
-            .then(&LayoutTransform::from_untyped(
-                &pinch_zoom_transform.to_3d(),
-            ));
+            let transform = webview_renderer.root_transform();
+            let property_binding = PropertyBinding::Binding(
+                webview_renderer.pinch_zoom_property_binding_key(),
+                transform,
+            );
 
             let webview_reference_frame = builder.push_reference_frame(
                 LayoutPoint::zero(),
                 root_reference_frame,
                 TransformStyle::Flat,
-                PropertyBinding::Value(transform),
+                property_binding,
                 ReferenceFrameKind::Transform {
                     is_2d_scale_translation: true,
                     should_snap: true,
@@ -820,6 +845,7 @@ impl Painter {
         // frame even though the epoch hasn't changed.
         transaction.set_display_list(WebRenderEpoch(0), built_display_list);
         self.update_transaction_with_all_scroll_offsets(transaction);
+        self.add_dynamic_properties_to_transaction(transaction);
     }
 
     /// Set the root pipeline for our WebRender scene to a display list that consists of an iframe
@@ -864,19 +890,20 @@ impl Painter {
         }
     }
 
-    fn send_zoom_and_scroll_offset_updates(
+    fn maybe_send_scroll_and_dynamic_property_updates_transaction(
         &mut self,
-        need_zoom: bool,
+        dynamic_properties_updated: bool,
         scroll_offset_updates: Vec<ScrollResult>,
     ) {
-        if !need_zoom && scroll_offset_updates.is_empty() {
+        if scroll_offset_updates.is_empty() && !dynamic_properties_updated {
             return;
         }
 
         let mut transaction = Transaction::new();
-        if need_zoom {
-            self.send_root_pipeline_display_list_in_transaction(&mut transaction);
+        if dynamic_properties_updated {
+            self.add_dynamic_properties_to_transaction(&mut transaction);
         }
+
         for update in scroll_offset_updates {
             transaction.set_scroll_offsets(
                 update.external_scroll_id,
@@ -887,7 +914,10 @@ impl Painter {
             );
         }
 
-        self.generate_frame(&mut transaction, RenderReasons::APZ);
+        self.generate_frame(
+            &mut transaction,
+            RenderReasons::ANIMATED_PROPERTY | RenderReasons::APZ,
+        );
         self.send_transaction(transaction);
     }
 
@@ -1080,8 +1110,9 @@ impl Painter {
             return;
         };
         let (pinch_zoom_result, scroll_results) = webview_renderer.scroll_viewport_by_delta(delta);
-        self.send_zoom_and_scroll_offset_updates(
-            pinch_zoom_result == PinchZoomResult::DidPinchZoom,
+        let did_pinch_zoom = pinch_zoom_result == PinchZoomResult::DidPinchZoom;
+        self.maybe_send_scroll_and_dynamic_property_updates_transaction(
+            did_pinch_zoom,
             scroll_results,
         );
     }
@@ -1134,7 +1165,10 @@ impl Painter {
         let pipeline_id = display_list_info.pipeline_id;
         let details = webview_renderer.ensure_pipeline_details(pipeline_id.into());
 
-        details.install_new_scroll_tree(display_list_info.scroll_tree);
+        details.install_new_scroll_tree_and_iframes(
+            display_list_info.scroll_tree,
+            display_list_info.iframes,
+        );
         details.viewport_scale = Some(display_list_info.viewport_details.hidpi_scale_factor);
 
         let epoch = display_list_info.epoch.into();
@@ -1388,6 +1422,7 @@ impl Painter {
         webview: Box<dyn WebViewTrait>,
         viewport_details: ViewportDetails,
     ) {
+        let property_binding_key = self.generate_property_binding_key();
         self.webview_renderers
             .entry(webview.id())
             .or_insert(WebViewRenderer::new(
@@ -1396,6 +1431,7 @@ impl Painter {
                 self.embedder_to_constellation_sender.clone(),
                 self.refresh_driver.clone(),
                 self.webrender_document,
+                property_binding_key,
             ));
     }
 

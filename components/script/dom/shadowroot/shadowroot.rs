@@ -9,7 +9,6 @@ use std::collections::hash_map::Entry;
 use dom_struct::dom_struct;
 use html5ever::serialize::TraversalScope;
 use js::context::{JSContext, NoGC};
-use js::rust::{HandleValue, MutableHandleValue};
 use script_bindings::cell::{DomRefCell, RefMut};
 use script_bindings::dom::UnrootedDom;
 use script_bindings::domstring::TracedDOMString;
@@ -37,7 +36,6 @@ use crate::dom::bindings::codegen::Bindings::ShadowRootBinding::{
 use crate::dom::bindings::codegen::UnionTypes::{
     TrustedHTMLOrNullIsEmptyString, TrustedHTMLOrString,
 };
-use crate::dom::bindings::frozenarray::CachedFrozenArray;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::root::{Dom, DomRoot, LayoutDom, MutNullableDom};
@@ -110,13 +108,9 @@ pub(crate) struct ShadowRoot {
     /// <https://dom.spec.whatwg.org/#shadowroot-delegates-focus>
     delegates_focus: Cell<bool>,
 
-    /// The constructed stylesheet that is adopted by this [ShadowRoot].
+    /// The DOM-side adopted stylesheet list for this [ShadowRoot], including duplicates.
     /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
     adopted_stylesheets: DomRefCell<Vec<Dom<CSSStyleSheet>>>,
-
-    /// Cached frozen array of [`Self::adopted_stylesheets`]
-    #[ignore_malloc_size_of = "mozjs"]
-    adopted_stylesheets_frozen_types: CachedFrozenArray,
 
     details_name_groups: DomRefCell<Option<DetailsNameGroups>>,
 }
@@ -157,7 +151,6 @@ impl ShadowRoot {
             serializable: Cell::new(false),
             delegates_focus: Cell::new(false),
             adopted_stylesheets: Default::default(),
-            adopted_stylesheets_frozen_types: CachedFrozenArray::new(),
             details_name_groups: Default::default(),
         }
     }
@@ -250,20 +243,17 @@ impl ShadowRoot {
     }
 
     /// Append a constructed stylesheet to the back of shadow root stylesheet set.
-    #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     pub(crate) fn append_constructed_stylesheet(&self, cssom_stylesheet: &CSSStyleSheet) {
         debug_assert!(cssom_stylesheet.is_constructed());
 
         let stylesheets = &mut self.author_styles.borrow_mut().stylesheets;
         let sheet = cssom_stylesheet.style_stylesheet().clone();
 
-        let insertion_point = stylesheets.iter().last().cloned();
-
         DocumentOrShadowRoot::add_stylesheet(
             StylesheetSource::Constructed(Dom::from_ref(cssom_stylesheet)),
             StylesheetSetRef::Author(stylesheets),
             sheet,
-            insertion_point,
+            None,
             self.document.style_shared_author_lock(),
         );
     }
@@ -408,10 +398,16 @@ impl ShadowRootMethods<crate::DomTypeHolder> for ShadowRoot {
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-document-elementfrompoint>
-    fn ElementFromPoint(&self, x: Finite<f64>, y: Finite<f64>) -> Option<DomRoot<Element>> {
+    fn ElementFromPoint(
+        &self,
+        cx: &mut JSContext,
+        x: Finite<f64>,
+        y: Finite<f64>,
+    ) -> Option<DomRoot<Element>> {
         // Return the result of running the retargeting algorithm with context object
         // and the original result as input.
         match self.document_or_shadow_root.element_from_point(
+            cx,
             self.upcast(),
             x,
             y,
@@ -427,13 +423,19 @@ impl ShadowRootMethods<crate::DomTypeHolder> for ShadowRoot {
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-document-elementsfrompoint>
-    fn ElementsFromPoint(&self, x: Finite<f64>, y: Finite<f64>) -> Vec<DomRoot<Element>> {
+    fn ElementsFromPoint(
+        &self,
+        cx: &mut JSContext,
+        x: Finite<f64>,
+        y: Finite<f64>,
+    ) -> Vec<DomRoot<Element>> {
         // Return the result of running the retargeting algorithm with context object
         // and the original result as input
         let mut elements = Vec::new();
         for e in self
             .document_or_shadow_root
             .elements_from_point(
+                cx,
                 self.upcast(),
                 x,
                 y,
@@ -490,13 +492,14 @@ impl ShadowRootMethods<crate::DomTypeHolder> for ShadowRoot {
 
     /// <https://html.spec.whatwg.org/multipage/#dom-shadowroot-gethtml>
     fn GetHTML(&self, cx: &mut JSContext, options: &GetHTMLOptions) -> DOMString {
+        let shadow_roots = options.shadowRoots.iter().map(Dom::as_rooted).collect();
         // > ShadowRoot's getHTML(options) method steps are to return the result of HTML fragment serialization
         // >  algorithm with this, options["serializableShadowRoots"], and options["shadowRoots"].
         self.upcast::<Node>().html_serialize(
             cx,
             TraversalScope::ChildrenOnly(None),
             options.serializableShadowRoots,
-            options.shadowRoots.clone(),
+            shadow_roots,
         )
     }
 
@@ -595,37 +598,41 @@ impl ShadowRootMethods<crate::DomTypeHolder> for ShadowRoot {
     event_handler!(slotchange, GetOnslotchange, SetOnslotchange);
 
     /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
-    fn AdoptedStyleSheets(&self, cx: &mut JSContext, retval: MutableHandleValue) {
-        self.adopted_stylesheets_frozen_types.get_or_init(
-            cx,
-            || {
-                self.adopted_stylesheets
-                    .borrow()
-                    .clone()
-                    .iter()
-                    .map(|sheet| sheet.as_rooted())
-                    .collect()
-            },
-            retval,
-        );
-    }
-
-    /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
-    fn SetAdoptedStyleSheets(&self, cx: &mut JSContext, val: HandleValue) -> ErrorResult {
-        let result = DocumentOrShadowRoot::set_adopted_stylesheet_from_jsval(
-            cx,
-            &self.adopted_stylesheets,
-            val,
+    fn OnSetAdoptedStyleSheets(
+        &self,
+        cx: &mut JSContext,
+        value: DomRoot<CSSStyleSheet>,
+        index: u32,
+    ) -> ErrorResult {
+        let result = DocumentOrShadowRoot::on_set_adopted_stylesheets(
+            self.adopted_stylesheets.safe_borrow_mut(cx).as_mut(),
+            &value,
+            index,
             &StyleSheetListOwner::ShadowRoot(Dom::from_ref(self)),
         );
 
-        if result.is_ok() {
-            if self.author_styles.borrow().stylesheets.dirty() {
-                self.invalidate_stylesheets(cx.no_gc());
-            }
+        if result.is_ok() && self.author_styles.borrow().stylesheets.dirty() {
+            self.invalidate_stylesheets(cx.no_gc());
+        }
 
-            // Clear the FrozenArray cache.
-            self.adopted_stylesheets_frozen_types.clear();
+        result
+    }
+
+    /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
+    fn OnDeleteAdoptedStyleSheets(
+        &self,
+        cx: &mut JSContext,
+        _value: DomRoot<CSSStyleSheet>,
+        index: u32,
+    ) -> ErrorResult {
+        let result = DocumentOrShadowRoot::on_delete_adopted_stylesheets(
+            self.adopted_stylesheets.safe_borrow_mut(cx).as_mut(),
+            index,
+            &StyleSheetListOwner::ShadowRoot(Dom::from_ref(self)),
+        );
+
+        if result.is_ok() && self.author_styles.borrow().stylesheets.dirty() {
+            self.invalidate_stylesheets(cx.no_gc());
         }
 
         result
@@ -635,7 +642,7 @@ impl ShadowRootMethods<crate::DomTypeHolder> for ShadowRoot {
     fn GetFullscreenElement(&self) -> Option<DomRoot<Element>> {
         DocumentOrShadowRoot::get_fullscreen_element(
             self.upcast::<Node>(),
-            self.document.fullscreen_element(),
+            self.document.overlay_handler().fullscreen_element(),
         )
     }
 }

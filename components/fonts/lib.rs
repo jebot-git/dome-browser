@@ -14,12 +14,11 @@ pub mod platform; // Public because integration tests need this
 mod shapers;
 mod system_font_service;
 
-pub(crate) use font::*;
 // These items are not meant to be part of the public API but are used for integration tests
-pub use font::{BitmapGlyph, Font, FontFamilyDescriptor, FontSearchScope, PlatformFontMethods, bitmap_font};
+pub use font::{BitmapGlyph, bitmap_font};
 pub use font::{
-    FontBaseline, FontGroup, FontMetrics, FontRef, LAST_RESORT_GLYPH_ADVANCE, ShapingFlags,
-    ShapingOptions,
+    Font, FontBaseline, FontFamilyDescriptor, FontGroup, FontMetrics, FontRef, FontSearchScope,
+    LAST_RESORT_GLYPH_ADVANCE, PlatformFontMethods, ShapingFlags, ShapingOptions,
 };
 pub use font_context::{
     CspViolationHandler, FontContext, FontContextWebFontMethods, NetworkTimingHandler,
@@ -98,10 +97,12 @@ impl FallbackFontSelectionOptions {
     }
 }
 
+#[cfg(any(feature = "harfbuzz", feature = "harfrust"))]
 pub(crate) fn float_to_fixed(before: usize, f: f64) -> i32 {
     ((1i32 << before) as f64 * f) as i32
 }
 
+#[cfg(any(feature = "harfbuzz", feature = "harfrust"))]
 pub(crate) fn fixed_to_float(before: usize, f: i32) -> f64 {
     f as f64 * 1.0f64 / ((1i32 << before) as f64)
 }

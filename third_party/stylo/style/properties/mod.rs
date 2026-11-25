@@ -23,16 +23,16 @@ pub mod generated {
 
 use crate::FxHashMap;
 use crate::applicable_declarations::RevertKind;
-use crate::custom_properties::{self, ComputedSubstitutionFunctions, SubstitutionResult};
+use crate::custom_properties::{self, ComputedSubstitutionFunctions};
 use crate::derives::*;
 use crate::dom::AttributeTracker;
 #[cfg(feature = "gecko")]
 use crate::gecko_bindings::structs::{CSSPropertyId, NonCustomCSSPropertyId, RefPtr};
 use crate::logical_geometry::WritingMode;
 use crate::parser::ParserContext;
-use crate::stylesheets::CssRuleType;
-use crate::stylesheets::Origin;
+use crate::stylesheets::{CssRuleType, CssRuleTypes, Origin};
 use crate::stylist::Stylist;
+use crate::substitution::{self, SubstitutionFunctionKind, SubstitutionResult};
 use crate::typed_om::{ToTyped, TypedValue};
 use crate::values::{computed, serialize_atom_name};
 use arrayvec::{ArrayVec, Drain as ArrayVecDrain};
@@ -43,6 +43,7 @@ use std::{
     fmt::{self, Write},
     mem,
 };
+use strum::VariantNames;
 use style_traits::{
     CssString, CssWriter, KeywordsCollectFn, ParseError, ParsingMode, SpecifiedValueInfo, ToCss,
 };
@@ -529,18 +530,17 @@ impl PropertyId {
         }
     }
 
-    fn allowed_in(&self, context: &ParserContext) -> bool {
-        let id = match self.non_custom_id() {
+    /// Returns this property id is allowed in this set of rules.
+    pub fn allowed_in_rule(&self, rule_types: CssRuleTypes) -> bool {
+        match self.non_custom_id() {
             // Custom properties are allowed everywhere, except `position-try`.
-            None => {
-                return !context
-                    .nesting_context
-                    .rule_types
-                    .contains(CssRuleType::PositionTry);
-            },
-            Some(id) => id,
-        };
-        id.allowed_in(context)
+            None => !rule_types.contains(CssRuleType::PositionTry),
+            Some(id) => id.allowed_in_rule(rule_types),
+        }
+    }
+
+    fn allowed_in(&self, context: &ParserContext) -> bool {
+        self.allowed_in_rule(context.rule_types()) && self.allowed_in_ignoring_rule_type(context)
     }
 
     #[inline]
@@ -787,7 +787,7 @@ impl ShorthandId {
 }
 
 /// The arbitrary substitution functions we support.
-pub const ARBITRARY_SUBSTITUTION_FUNCTIONS: &[&str] = &["var", "env", "attr"];
+pub const ARBITRARY_SUBSTITUTION_FUNCTIONS: &[&str] = SubstitutionFunctionKind::VARIANTS;
 
 fn parse_non_custom_property_declaration_value_into(
     declarations: &mut SourcePropertyDeclaration,
@@ -802,16 +802,16 @@ fn parse_non_custom_property_declaration_value_into(
     parsed_custom: impl FnOnce(&mut SourcePropertyDeclaration, custom_properties::VariableValue),
 ) -> Result<(), ParseError> {
     let mut starts_with_curly_block = false;
+    input.look_for_arbitrary_substitution_functions(ARBITRARY_SUBSTITUTION_FUNCTIONS);
     if let Ok(token) = input.next() {
         match token {
             cssparser::Token::Ident(ident) => {
                 if let Ok(wk) = CSSWideKeyword::from_ident(ident)
                     && input.expect_exhausted().is_ok()
                 {
-                    return {
-                        parsed_wide_keyword(declarations, wk);
-                        Ok(())
-                    };
+                    parsed_wide_keyword(declarations, wk);
+                    let _ = input.seen_arbitrary_substitution_functions();
+                    return Ok(());
                 }
             },
             cssparser::Token::CurlyBracketBlock => {
@@ -822,7 +822,6 @@ fn parse_non_custom_property_declaration_value_into(
     };
 
     input.reset(start);
-    input.look_for_arbitrary_substitution_functions(ARBITRARY_SUBSTITUTION_FUNCTIONS);
 
     let mut saw_arbitrary_substitution_functions = false;
     let err = match parse_entirely_into(declarations, input) {
@@ -858,11 +857,7 @@ fn parse_non_custom_property_declaration_value_into(
         return Err(err);
     }
     input.reset(start);
-    let value = custom_properties::VariableValue::parse(
-        input,
-        Some(&context.namespaces.prefixes),
-        context.url_data,
-    )?;
+    let value = custom_properties::VariableValue::parse(context, input)?;
     parsed_custom(declarations, value);
     Ok(())
 }
@@ -894,6 +889,12 @@ impl PropertyDeclaration {
             PropertyDeclaration::CSSWideKeyword(ref declaration) => Some(declaration.keyword),
             _ => None,
         }
+    }
+
+    /// Returns whether this declaration's value contains `var()` references
+    /// and is thus not parsed yet.
+    pub fn is_unparsed(&self) -> bool {
+        matches!(*self, PropertyDeclaration::WithVariables(..))
     }
 
     /// Returns whether the declaration may be serialized as part of a shorthand.
@@ -948,7 +949,11 @@ impl PropertyDeclaration {
         input: &mut Parser,
     ) -> Result<(), ParseError> {
         assert!(declarations.is_empty());
-        debug_assert!(id.allowed_in(context), "{:?}", id);
+        debug_assert!(
+            id.allowed_in(context),
+            "{id:?} is not allowed in this context {:?}",
+            context.rule_types()
+        );
         input.skip_whitespace();
 
         let start = input.state();
@@ -956,13 +961,12 @@ impl PropertyDeclaration {
             PropertyId::Custom(property_name) => {
                 let value = match input.try_parse(CSSWideKeyword::parse) {
                     Ok(keyword) => CustomDeclarationValue::CSSWideKeyword(keyword),
-                    Err(()) => CustomDeclarationValue::Unparsed(Arc::new(
-                        custom_properties::VariableValue::parse(
-                            input,
-                            Some(&context.namespaces.prefixes),
-                            context.url_data,
-                        )?,
-                    )),
+                    Err(()) => {
+                        CustomDeclarationValue::Unparsed(Arc::new(context.with_property_id(
+                            Some(PropertyIdRef::from(&property_name)),
+                            |context| custom_properties::VariableValue::parse(context, input),
+                        )?))
+                    },
                 };
                 declarations.push(PropertyDeclaration::Custom(CustomDeclaration {
                     name: property_name,
@@ -973,7 +977,7 @@ impl PropertyDeclaration {
             PropertyId::NonCustom(id) => id,
         };
 
-        context.with_property_declaration(PropertyIdRef::from(non_custom_id), |context| {
+        context.with_property_id(Some(PropertyIdRef::from(non_custom_id)), |context| {
             match non_custom_id.longhand_or_shorthand() {
                 Ok(longhand_id) => {
                     parse_non_custom_property_declaration_value_into(
@@ -1212,8 +1216,7 @@ impl<'a> PropertyDeclarationId<'a> {
     pub fn is_discrete_animatable(&self) -> bool {
         match self {
             Self::Longhand(longhand) => longhand.is_discrete_animatable(),
-            // TODO(bug 1885995): Refine this.
-            Self::Custom(_) => true,
+            Self::Custom(_) => false,
         }
     }
 
@@ -1658,7 +1661,7 @@ impl UnparsedValue {
             None => NonCustomPropertyId::from(longhand_id),
         });
 
-        let SubstitutionResult { css, attr_taint } = match custom_properties::substitute(
+        let SubstitutionResult { css, attr_taint } = match substitution::substitute(
             &self.variable_value,
             Some(property_id),
             substitution_functions,
@@ -1680,7 +1683,7 @@ impl UnparsedValue {
         // whether you want to do this!
         //
         // FIXME(emilio): ParsingMode is slightly fishy...
-        let mut context = ParserContext::new(
+        let context = ParserContext::new_with_property_id(
             Origin::Author,
             &self.variable_value.url_data,
             None,
@@ -1690,6 +1693,7 @@ impl UnparsedValue {
             None,
             None,
             attr_taint,
+            Some(property_id),
         );
 
         let mut input = Parser::new(&css);
@@ -1701,9 +1705,8 @@ impl UnparsedValue {
 
         let shorthand = match self.from_shorthand {
             None => {
-                return match context.with_property_declaration(property_id, |context| {
-                    input.parse_entirely(|input| longhand_id.parse_value(context, input))
-                }) {
+                return match input.parse_entirely(|input| longhand_id.parse_value(&context, input))
+                {
                     Ok(decl) => Cow::Owned(decl),
                     Err(..) => invalid_at_computed_value_time(),
                 };
@@ -1713,10 +1716,8 @@ impl UnparsedValue {
 
         let mut decls = SourcePropertyDeclaration::default();
         // parse_into takes care of doing `parse_entirely` for us.
-        if context
-            .with_property_declaration(property_id, |context| {
-                shorthand.parse_into(&mut decls, context, &mut input)
-            })
+        if shorthand
+            .parse_into(&mut decls, &context, &mut input)
             .is_err()
         {
             return invalid_at_computed_value_time();

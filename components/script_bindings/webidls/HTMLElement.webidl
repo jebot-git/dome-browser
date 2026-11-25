@@ -12,7 +12,6 @@ interface HTMLElement : Element {
   [CEReactions] attribute DOMString lang;
   [CEReactions] attribute boolean translate;
   [CEReactions] attribute DOMString dir;
-  readonly attribute DOMStringMap dataset;
 
   [Pref="dom_microdata_testing_enabled"]
   sequence<DOMString>? propertyNames();
@@ -21,7 +20,7 @@ interface HTMLElement : Element {
 
   // user interaction
   [CEReactions] attribute boolean hidden;
-  // [CEReactions, Reflect] attribute boolean inert;
+  [CEReactions] attribute boolean inert;
   undefined click();
   [CEReactions] attribute DOMString accessKey;
   readonly attribute DOMString accessKeyLabel;
@@ -37,22 +36,22 @@ interface HTMLElement : Element {
   [Throws] ElementInternals attachInternals();
 
   // The popover API
-  // undefined showPopover(optional ShowPopoverOptions options = {});
-  // undefined hidePopover();
-  // boolean togglePopover(optional (TogglePopoverOptions or boolean) options = {});
-  // [CEReactions] attribute DOMString? popover;
+  [Throws] undefined showPopover(optional ShowPopoverOptions options = {});
+  [Throws] undefined hidePopover();
+  [Throws] boolean togglePopover(optional (TogglePopoverOptions or boolean) options = {});
+  [CEReactions] attribute DOMString? popover;
 
   // [CEReactions, Reflect, ReflectRange=(0, 8)] attribute unsigned long headingOffset;
   // [CEReactions, Reflect] attribute boolean headingReset;
 };
 
-// dictionary ShowPopoverOptions {
-//   HTMLElement source;
-// };
-//
-// dictionary TogglePopoverOptions : ShowPopoverOptions {
-//   boolean force;
-// };
+dictionary ShowPopoverOptions {
+  HTMLElement source;
+};
+
+dictionary TogglePopoverOptions : ShowPopoverOptions {
+  boolean force;
+};
 
 // http://dev.w3.org/csswg/cssom-view/#extensions-to-the-htmlelement-interface
 partial interface HTMLElement {
@@ -68,4 +67,4 @@ partial interface HTMLElement {
 HTMLElement includes GlobalEventHandlers;
 HTMLElement includes ElementContentEditable;
 HTMLElement includes ElementCSSInlineStyle;
-HTMLElement includes HTMLOrSVGElement;
+HTMLElement includes HTMLOrSVGOrMathMLElement;

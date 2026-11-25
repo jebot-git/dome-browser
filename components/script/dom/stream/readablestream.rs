@@ -1270,10 +1270,14 @@ impl ReadableStream {
                     .Close(cx);
             },
             Some(ControllerType::Byte(controller)) => {
-                let _ = controller
-                    .get()
-                    .expect("Stream should have controller.")
-                    .close(cx);
+                let controller = controller.get().expect("Stream should have controller.");
+                // Step 1.1. Perform ! ReadableByteStreamControllerClose(stream.[[controller]]).
+                let _ = controller.close(cx);
+                // Step 1.2. If stream.[[controller]].[[pendingPullIntos]] is not empty, perform !
+                // ReadableByteStreamControllerRespond(stream.[[controller]], 0).
+                if self.is_closed() && controller.get_pending_pull_intos_size() > 0 {
+                    let _ = controller.respond(cx, 0);
+                }
             },
             _ => {
                 unreachable!("Native closing requires a stream controller.")
@@ -2336,7 +2340,7 @@ impl ReadableStreamMethods<crate::DomTypeHolder> for ReadableStream {
         promise.set_promise_is_handled(cx);
 
         // Return transform["readable"].
-        Ok(transform.readable.clone())
+        Ok(transform.readable.as_rooted())
     }
 }
 

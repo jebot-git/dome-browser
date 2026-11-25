@@ -141,14 +141,14 @@ int test_preferences_i64_roundtrip(void)
     if (preferences == NULL)
         return 1;
 
-    servo_preferences_set_i64(preferences, "layout_threads", 4);
-    if (servo_preferences_get_i64(preferences, "layout_threads") != 4) {
+    servo_preferences_set_i64(preferences, "js_mem_max", 4);
+    if (servo_preferences_get_i64(preferences, "js_mem_max") != 4) {
         servo_preferences_free(preferences);
         return 1;
     }
 
-    servo_preferences_set_i64(preferences, "layout_threads", -1);
-    if (servo_preferences_get_i64(preferences, "layout_threads") != -1) {
+    servo_preferences_set_i64(preferences, "js_mem_max", -1);
+    if (servo_preferences_get_i64(preferences, "js_mem_max") != -1) {
         servo_preferences_free(preferences);
         return 1;
     }
@@ -192,6 +192,48 @@ int test_preferences_string_roundtrip(void)
         return 1;
     }
     free(user_agent);
+    servo_preferences_free(preferences);
+    return 0;
+}
+
+int test_preferences_f64_roundtrip(void)
+{
+    ServoPreferences* preferences = servo_preferences_create();
+    if (preferences == NULL)
+        return 1;
+
+    servo_preferences_set_f64(preferences, "dom_geolocation_test_latitude", 52.5);
+    if (servo_preferences_get_f64(preferences, "dom_geolocation_test_latitude") != 52.5) {
+        servo_preferences_free(preferences);
+        return 1;
+    }
+
+    servo_preferences_free(preferences);
+    return 0;
+}
+
+int test_preferences_f64_array_roundtrip(void)
+{
+    ServoPreferences* preferences = servo_preferences_create();
+    if (preferences == NULL)
+        return 1;
+
+    size_t count = servo_preferences_get_f64_array(preferences, "shell_background_color_rgba", NULL, 0);
+    if (count != 4) {
+        servo_preferences_free(preferences);
+        return 1;
+    }
+
+    const double color[4] = { 0.0, 0.25, 0.5, 0.75 };
+    servo_preferences_set_f64_array(preferences, "shell_background_color_rgba", color, 4);
+
+    double read[4] = { 0 };
+    count = servo_preferences_get_f64_array(preferences, "shell_background_color_rgba", read, 4);
+    if (count != 4 || memcmp(read, color, sizeof(color)) != 0) {
+        servo_preferences_free(preferences);
+        return 1;
+    }
+
     servo_preferences_free(preferences);
     return 0;
 }
@@ -330,6 +372,37 @@ int test_webview_builder_build(void)
     return 0;
 }
 
+int test_webview_hidpi_scale_factor(void)
+{
+    struct Servo* servo = create_test_servo();
+    if (servo == NULL)
+        return 1;
+
+    RenderingContext* context = servo_rendering_context_create_software(100, 100);
+    if (context == NULL)
+        return 1;
+
+    ServoWebViewBuilder* webview_builder = servo_webview_builder_create(servo, context);
+    struct WebView* webview = servo_webview_builder_build(webview_builder);
+    if (webview == NULL)
+        return 1;
+
+    servo_webview_set_hidpi_scale_factor(webview, 2.0f);
+    if (servo_webview_get_hidpi_scale_factor(webview) != 2.0f) {
+        servo_webview_free(webview);
+        return 1;
+    }
+
+    servo_webview_set_hidpi_scale_factor(webview, 1.5f);
+    if (servo_webview_get_hidpi_scale_factor(webview) != 1.5f) {
+        servo_webview_free(webview);
+        return 1;
+    }
+
+    servo_webview_free(webview);
+    return 0;
+}
+
 int run_c_api_tests(void)
 {
     tests_run = 0;
@@ -346,12 +419,15 @@ int run_c_api_tests(void)
     RUN_TEST(test_preferences_i64_roundtrip);
     RUN_TEST(test_preferences_u64_roundtrip);
     RUN_TEST(test_preferences_string_roundtrip);
+    RUN_TEST(test_preferences_f64_roundtrip);
+    RUN_TEST(test_preferences_f64_array_roundtrip);
     RUN_TEST(test_rendering_context_create_and_free);
     RUN_TEST(test_rendering_context_zero_size_returns_null);
     RUN_TEST(test_webview_builder_create_and_free);
     RUN_TEST(test_webview_builder_set_url_valid);
     RUN_TEST(test_webview_builder_set_url_invalid);
     RUN_TEST(test_webview_builder_build);
+    RUN_TEST(test_webview_hidpi_scale_factor);
 
     free_test_servo();
 

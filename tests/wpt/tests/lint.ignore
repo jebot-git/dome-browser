@@ -255,7 +255,10 @@ SET TIMEOUT: intersection-observer/resources/*
 SET TIMEOUT: intersection-observer/target-in-different-window.html
 SET TIMEOUT: intersection-observer/v2/animated-opacity.html
 SET TIMEOUT: js-self-profiling/resources/profiling-script.js
+SET TIMEOUT: long-animation-frame/loaf-iframe-self.html
+SET TIMEOUT: long-animation-frame/loaf-user-callback.html
 SET TIMEOUT: long-animation-frame/resources/loaf-congested-moment-worker.js
+SET TIMEOUT: long-animation-frame/resources/utils.js
 SET TIMEOUT: measure-memory/*
 SET TIMEOUT: media-source/mediasource-util.js
 SET TIMEOUT: media-source/URL-createObjectURL-revoke.html
@@ -332,6 +335,8 @@ SET TIMEOUT: shadow-dom/scroll-to-the-fragment-in-shadow-tree.html
 SET TIMEOUT: shadow-dom/slotchange-event.html
 SET TIMEOUT: subresource-integrity/integrity-policy/script.https.html
 SET TIMEOUT: subresource-integrity/integrity-policy/style.https.html
+SET TIMEOUT: trusted-types/setTimeout-setInterval-csp-tt-default-policy.html
+SET TIMEOUT: trusted-types/setTimeout-setInterval-csp-tt-no-default-policy.html
 SET TIMEOUT: trusted-types/support/block-string-assignment-to-DOMWindowTimers-setTimeout-setInterval.js
 SET TIMEOUT: trusted-types/support/DOMWindowTimers-setTimeout-setInterval.js
 SET TIMEOUT: trusted-types/support/should-sink-type-mismatch-violation-be-blocked-by-csp-002-worker-multiple-violations.js
@@ -449,6 +454,7 @@ SET TIMEOUT: html/dom/documents/dom-tree-accessors/Document.currentScript.html
 SET TIMEOUT: html/webappapis/dynamic-markup-insertion/opening-the-input-stream/crbug-583445-regression.window.js
 SET TIMEOUT: html/webappapis/timers/*
 SET TIMEOUT: portals/history/resources/portal-harness.js
+SET TIMEOUT: requestidlecallback/callback-after-removed-frame-with-pending-timeout.html
 SET TIMEOUT: requestidlecallback/deadline-after-expired-timer.html
 SET TIMEOUT: resource-timing/tentative/initiator-url/dedicated-worker-script.html
 SET TIMEOUT: resource-timing/tentative/initiator-url/module-script-from-document.html
@@ -505,6 +511,36 @@ CONTENT-MANUAL: css/*
 INDENT TABS: css/compositing/*
 INDENT TABS: css/CSS2/*
 INDENT TABS: css/css-backgrounds/*
+INDENT TABS: css/css-borders/border-bottom-left-radius-001.xht
+INDENT TABS: css/css-borders/border-bottom-left-radius-002.xht
+INDENT TABS: css/css-borders/border-bottom-left-radius-010.xht
+INDENT TABS: css/css-borders/border-bottom-left-radius-011.xht
+INDENT TABS: css/css-borders/border-bottom-left-radius-012.xht
+INDENT TABS: css/css-borders/border-bottom-left-radius-013.xht
+INDENT TABS: css/css-borders/border-bottom-left-radius-014.xht
+INDENT TABS: css/css-borders/border-bottom-right-radius-001.xht
+INDENT TABS: css/css-borders/border-bottom-right-radius-002.xht
+INDENT TABS: css/css-borders/border-bottom-right-radius-010.xht
+INDENT TABS: css/css-borders/border-bottom-right-radius-011.xht
+INDENT TABS: css/css-borders/border-bottom-right-radius-012.xht
+INDENT TABS: css/css-borders/border-bottom-right-radius-013.xht
+INDENT TABS: css/css-borders/border-bottom-right-radius-014.xht
+INDENT TABS: css/css-borders/border-image-repeat_repeatnegx_none_50px.html
+INDENT TABS: css/css-borders/border-radius-horizontal-value-is-zero.html
+INDENT TABS: css/css-borders/border-radius-overflow-hidden.html
+INDENT TABS: css/css-borders/border-radius-shorthand-002-ref.html
+INDENT TABS: css/css-borders/border-radius-shorthand-002.html
+INDENT TABS: css/css-borders/border-top-left-radius-001.xht
+INDENT TABS: css/css-borders/border-top-left-radius-010.xht
+INDENT TABS: css/css-borders/border-top-left-radius-011.xht
+INDENT TABS: css/css-borders/border-top-left-radius-014.xht
+INDENT TABS: css/css-borders/border-top-right-radius-001.xht
+INDENT TABS: css/css-borders/border-top-right-radius-010.xht
+INDENT TABS: css/css-borders/border-top-right-radius-011.xht
+INDENT TABS: css/css-borders/border-top-right-radius-014.xht
+INDENT TABS: css/css-borders/css-border-radius-001.html
+INDENT TABS: css/css-borders/reference/border-radius-horizontal-value-is-zero-ref.html
+INDENT TABS: css/css-borders/reference/css-border-radius-001-ref.html
 INDENT TABS: css/css-color/*
 INDENT TABS: css/css-conditional/*
 INDENT TABS: css/css-flexbox/*
@@ -587,7 +623,7 @@ SET TIMEOUT: css/CSS2/selectors/dom-hover-002.xht
 SET TIMEOUT: css/CSS2/tables/tables-102.xht
 SET TIMEOUT: css/mediaqueries/min-width-tables-001.html
 SET TIMEOUT: css/css-text/crashtests/rendering-rtl-bidi-override-crash.html
-SET TIMEOUT: css/css-backgrounds/color-mix-currentcolor-border-repaint-parent.html
+SET TIMEOUT: css/css-borders/color-mix-currentcolor-border-repaint-parent.html
 SET TIMEOUT: svg/painting/currentcolor-fill-stroke-repaint.html
 SET TIMEOUT: resource-timing/resources/run-async-tasks-promise.js
 
@@ -669,9 +705,6 @@ WEB-PLATFORM.TEST:web-bundle/resources/nested/*.wbn
 WEB-PLATFORM.TEST:web-bundle/resources/wbn/*.wbn
 WEB-PLATFORM.TEST:web-bundle/subresource-loading/*.html
 WEB-PLATFORM.TEST:web-bundle/subresource-loading/resources/*.js
-
-# The /.well-known/shared-stored/trusted-origins file uses hard-coded hosts
-WEB-PLATFORM.TEST:shared-storage/resources/trusted-origins.py
 
 # Tests that depend on resources in /gen/ in Chromium:
 # https://github.com/web-platform-tests/wpt/issues/16455

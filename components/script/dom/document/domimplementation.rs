@@ -7,6 +7,7 @@ use html5ever::{QualName, local_name, ns};
 use js::context::JSContext;
 use script_bindings::error::Error;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
+use script_bindings::trace::RootedTraceableBox;
 use script_traits::DocumentActivity;
 
 use crate::dom::bindings::codegen::Bindings::DOMImplementationBinding::DOMImplementationMethods;
@@ -126,10 +127,10 @@ impl DOMImplementationMethods<crate::DomTypeHolder> for DOMImplementation {
             None
         } else {
             let options =
-                StringOrElementCreationOptions::ElementCreationOptions(ElementCreationOptions {
-                customElementRegistry: None,
+                StringOrElementCreationOptions::ElementCreationOptions(RootedTraceableBox::new(ElementCreationOptions {
+                    customElementRegistry: None,
                     is: None,
-                });
+                }));
             Some(
                 doc.upcast::<Document>()
                     .CreateElementNS(cx, maybe_namespace, qname, options)?,

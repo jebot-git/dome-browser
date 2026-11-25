@@ -28,8 +28,10 @@ data-url = { workspace = true }
 embedder_traits = { workspace = true }
 encoding_rs = { workspace = true }
 euclid = { workspace = true }
+font-types = { workspace = true }
 fonts = { workspace = true }
 fonts_traits = { workspace = true }
+icu_casemap = { workspace = true }
 icu_locale_core = { workspace = true }
 icu_properties = { workspace = true, features = ["compiled_data"] }
 icu_segmenter = { workspace = true }
@@ -75,6 +77,7 @@ url = { workspace = true }
 uuid = { workspace = true }
 web_atoms = { workspace = true }
 webrender_api = { workspace = true }
+writeable = { workspace = true }
 
 [dev-dependencies]
 quickcheck = { workspace = true }

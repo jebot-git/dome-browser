@@ -184,6 +184,7 @@ fn process_ws_response(
 
 #[derive(Debug)]
 enum DomMsg {
+    Abort,
     Send(Message),
     Close(Option<(u16, String)>),
 }
@@ -200,6 +201,10 @@ fn setup_dom_listener(
         let dom_action = message.expect("Ws dom_action message to deserialize");
         trace!("handling WS DOM action: {:?}", dom_action);
         match dom_action {
+            WebSocketDomAction::Abort => {
+                initiated_close.store(true, Ordering::SeqCst);
+                let _ = sender.send(DomMsg::Abort);
+            },
             WebSocketDomAction::SendMessage(MessageData::Text(data)) => {
                 if let Err(e) = sender.send(DomMsg::Send(Message::Text(data.into()))) {
                     warn!("Error sending websocket message: {:?}", e);
@@ -243,6 +248,7 @@ async fn run_ws_loop(
                     None => break,
                 };
                 match dom_msg {
+                    DomMsg::Abort => break,
                     DomMsg::Send(m) => {
                         if let Err(e) = stream.send(m).await {
                             warn!("error sending websocket message: {:?}", e);
@@ -334,7 +340,7 @@ pub(crate) async fn start_websocket(
     trace!("starting WS connection to {}", client.url());
 
     let initiated_close = Arc::new(AtomicBool::new(false));
-    let dom_receiver = setup_dom_listener(dom_action_receiver, initiated_close.clone());
+    let mut dom_receiver = setup_dom_listener(dom_action_receiver, initiated_close.clone());
 
     let url = client.url();
     let host = replace_host(url.host_str().expect("URL has no host"));
@@ -350,14 +356,22 @@ pub(crate) async fn start_websocket(
         .port_or_known_default()
         .ok_or_else(|| Error::Url(UrlError::UnableToConnect("Unknown port".into())))?;
 
-    let try_socket = TcpStream::connect((&*domain.to_string(), port)).await;
-    let socket = try_socket.map_err(Error::Io)?;
-    let connector = TlsConnector::from(Arc::new(tls_config));
+    // Race the entire connection attempt (including DNS, TCP and TLS) against
+    // cancellation, so a stalled handshake cannot retain the DOM callback.
+    let connection = async {
+        let try_socket = TcpStream::connect((&*domain.to_string(), port)).await;
+        let socket = try_socket.map_err(Error::Io)?;
+        let connector = TlsConnector::from(Arc::new(tls_config));
 
-    let handshake = websocket_transport_handshake(client)?;
-
-    let (stream, response) =
-        client_async_tls_with_connector_and_config(handshake, socket, Some(connector), None).await?;
+        let handshake = websocket_transport_handshake(client)?;
+        client_async_tls_with_connector_and_config(handshake, socket, Some(connector), None).await
+    };
+    let (stream, response) = select! {
+        biased;
+        // Closing the DOM object cancels DNS, TCP and TLS, including a stalled handshake.
+        _ = dom_receiver.recv() => return Err(Error::ConnectionClosed),
+        result = connection => result?,
+    };
 
     let protocol_in_use = process_ws_response(&http_state, &response, &url, protocols,
         !servo_config::pref!(network_cookie_block_third_party) || client.is_first_party_for_cookies(), client.cookie_context())?;

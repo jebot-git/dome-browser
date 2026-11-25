@@ -7,7 +7,9 @@ use std::cell::Cell;
 use dom_struct::dom_struct;
 use html5ever::{LocalName, QualName, local_name, namespace_url, ns};
 use js::context::{JSContext, NoGC};
+use malloc_size_of::MallocSizeOf;
 use script_bindings::dom::UnrootedDom;
+use script_bindings::domstring::TracedDOMString;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 use style::str::split_html_space_chars;
 use stylo_atoms::Atom;
@@ -23,7 +25,7 @@ use crate::dom::iterators::ShadowIncluding;
 use crate::dom::node::{Node, NodeTraits};
 use crate::dom::window::Window;
 
-pub(crate) trait CollectionFilter: JSTraceable {
+pub(crate) trait CollectionFilter: JSTraceable + MallocSizeOf {
     fn filter<'a>(&self, elem: &'a Element, root: &'a Node) -> bool;
 }
 
@@ -31,7 +33,7 @@ pub(crate) trait CollectionFilter: JSTraceable {
 /// a custom iterator, rather than filtering a tree traversal. This is more
 /// efficient when the collection's elements can be enumerated directly
 /// (e.g. `selectedOptions` iterating only the select's list of options).
-pub(crate) trait CollectionSource: JSTraceable {
+pub(crate) trait CollectionSource: JSTraceable + MallocSizeOf {
     fn iter<'b>(
         &'b self,
         no_gc: &'b NoGC,
@@ -40,7 +42,7 @@ pub(crate) trait CollectionSource: JSTraceable {
 }
 
 /// How a collection enumerates its elements.
-#[derive(JSTraceable)]
+#[derive(JSTraceable, MallocSizeOf)]
 enum CollectionKind {
     /// Filter elements from a subtree traversal of the root node.
     Filter(Box<dyn CollectionFilter>),
@@ -79,7 +81,6 @@ impl OptionU32 {
 pub(crate) struct HTMLCollection {
     reflector_: Reflector,
     root: Dom<Node>,
-    #[ignore_malloc_size_of = "Trait objects cannot be sized"]
     kind: CollectionKind,
     // We cache the version of the root node and all its decendents,
     // the length of the collection, and a cursor into the collection.
@@ -124,7 +125,7 @@ impl HTMLCollection {
         window: &Window,
         root: &Node,
     ) -> DomRoot<Self> {
-        #[derive(JSTraceable)]
+        #[derive(JSTraceable, MallocSizeOf)]
         struct NoFilter;
         impl CollectionFilter for NoFilter {
             fn filter<'a>(&self, _: &'a Element, _: &'a Node) -> bool {
@@ -517,7 +518,7 @@ impl HTMLCollectionMethods<crate::DomTypeHolder> for HTMLCollection {
         for elem in self.elements_iter(no_gc) {
             // Step 2.1
             if let Some(id_atom) = elem.get_id() {
-                let id_str = DOMString::from(&*id_atom);
+                let id_str = TracedDOMString::from(id_atom).root();
                 if !result.contains(&id_str) {
                     result.push(id_str);
                 }
@@ -526,7 +527,7 @@ impl HTMLCollectionMethods<crate::DomTypeHolder> for HTMLCollection {
             if *elem.namespace() == ns!(html) &&
                 let Some(name_atom) = elem.get_name()
             {
-                let name_str = DOMString::from(&*name_atom);
+                let name_str = TracedDOMString::from(name_atom).root();
                 if !result.contains(&name_str) {
                     result.push(name_str)
                 }

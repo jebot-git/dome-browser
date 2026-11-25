@@ -45,7 +45,6 @@ pub struct PolicyContainer {
     /// Referrers and the string "null" confer no authority.
     #[serde(default)]
     pub local_file_origin: Option<ImmutableOrigin>,
-    #[ignore_malloc_size_of = "Defined in rust-content-security-policy"]
     /// <https://html.spec.whatwg.org/multipage/#policy-container-csp-list>
     pub csp_list: Option<CspList>,
     /// <https://html.spec.whatwg.org/multipage/#policy-container-embedder-policy>

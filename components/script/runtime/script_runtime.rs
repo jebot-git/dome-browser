@@ -22,7 +22,6 @@ use std::{os, ptr};
 
 use background_hang_monitor_api::ScriptHangAnnotation;
 use js::context::JSContext;
-use js::conversions::jsstr_to_string;
 use js::gc::StackGCVector;
 use js::glue::{
     DispatchablePointer, RegisterScriptEnvironmentPreparer, RunScriptEnvironmentPreparerClosure,
@@ -332,10 +331,11 @@ unsafe extern "C" fn promise_rejection_tracker(
 
 #[expect(unsafe_code)]
 fn safely_convert_null_to_string(cx: &JSContext, str_: HandleString) -> DOMString {
-    DOMString::from(match std::ptr::NonNull::new(*str_) {
-        None => String::new(),
-        Some(str_) => unsafe { jsstr_to_string(cx, str_) },
-    })
+    unsafe {
+        // Non null string is a valid string.
+        DOMString::from_raw_js_string(cx, *str_)
+    }
+    .unwrap_or_default()
 }
 
 #[expect(unsafe_code)]
@@ -381,11 +381,9 @@ unsafe extern "C" fn content_security_policy_allows(
         // SpiderMonkey provides null pointer when executing webassembly.
         let mut realm = CurrentRealm::assert(cx);
         let global = GlobalScope::from_current_realm(&mut realm);
-        let csp_list = global.get_csp_list();
-
         // If we don't have any CSP checks to run, short-circuit all logic here
-        allowed = csp_list.is_none()
-            || match runtime_code {
+        allowed = global.call_on_csp_list(|csp_list| csp_list.is_none()) ||
+            match runtime_code {
                 RuntimeCode::JS => {
                     let parameter_strings = unsafe { Handle::from_raw(parameter_strings) };
                     let parameter_strings_length = parameter_strings.len();
@@ -445,8 +443,7 @@ unsafe extern "C" fn content_security_policy_allows(
                     )
                 },
                 RuntimeCode::WASM => global
-                    .get_csp_list()
-                    .is_wasm_evaluation_allowed(cx, &global),
+                    .call_on_csp_list(|csp_list| csp_list.is_wasm_evaluation_allowed(cx, &global)),
             };
     });
     unsafe { *can_compile_strings = allowed };
@@ -517,11 +514,17 @@ pub(crate) fn notify_about_rejected_promises(cx: &mut JSContext, global: &Global
                 // Step 4.1.3 If notCanceled is true, then the user agent may report
                 // p.[[PromiseResult]] to a developer console.
                 if not_canceled {
-                    let message = format!(
-                        "Unhandled promise rejection: {}",
-                        stringify_handle_value(cx, reason.handle())
+                    let global = target.global();
+                    let reason_string = run_a_script::<DomTypeHolder, _, _>(
+                        cx,
+                        &global,
+                        |cx: &mut JSContext| stringify_handle_value(cx, reason.handle()),
                     );
-                    Console::internal_error(cx, &target.global(), message);
+                    Console::internal_error(
+                        cx,
+                        &global,
+                        format!("Unhandled promise rejection: {reason_string}")
+                    );
                 }
 
                 // Step 4.1.4 If p.[[PromiseIsHandled]] is false, then append p to global's outstanding
@@ -1448,7 +1451,7 @@ unsafe extern "C" fn consume_stream(
     cx: *mut RawJSContext,
     obj: HandleObject,
     _mime_type: MimeType,
-    _consumer: *mut JSStreamConsumer,
+    consumer: *mut JSStreamConsumer,
 ) -> bool {
     let mut cx = unsafe {
         // SAFETY: We are in SM hook
@@ -1541,7 +1544,7 @@ unsafe extern "C" fn consume_stream(
             },
             None => None,
         };
-        let consumer = StreamConsumer(_consumer);
+        let consumer = StreamConsumer(consumer);
         let url = unwrapped_source.Url().0;
         consumer.note_response_urls((!url.is_empty()).then_some(url), None);
         let stream = WasmStream::new(global.clone(), consumer);

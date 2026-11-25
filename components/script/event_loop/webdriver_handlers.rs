@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::ptr::NonNull;
 
@@ -10,14 +10,14 @@ use cookie::Cookie;
 use embedder_traits::{
     CustomHandlersAutomationMode, JSValue, JavaScriptEvaluationError,
     JavaScriptEvaluationResultSerializationError, WebDriverFrameId, WebDriverJSResult,
-    WebDriverLoadStatus,
 };
 use euclid::default::{Point2D, Rect, Size2D};
 use hyper_serde::Serde;
-use js::context::{JSContext, NoGC};
+use js::context::JSContext;
 use js::conversions::{FromJSValConvertible, jsstr_to_string};
-use js::jsapi::{HandleValueArray, JSITER_OWNONLY, JSType, PropertyDescriptor};
-use js::jsval::UndefinedValue;
+use js::gc::RootedVec;
+use js::jsapi::{HandleValueArray, Heap, JSITER_OWNONLY, JSType, PropertyDescriptor};
+use js::jsval::{JSVal, UndefinedValue};
 use js::realm::CurrentRealm;
 use js::rust::wrappers2::{
     IsArgumentsObject, JS_CallFunctionName, JS_HasOwnProperty, JS_TypeOfValue,
@@ -56,7 +56,7 @@ use crate::dom::bindings::codegen::Bindings::ElementBinding::{
 use crate::dom::bindings::codegen::Bindings::HTMLElementBinding::HTMLElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLInputElementBinding::HTMLInputElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLOptionElementBinding::HTMLOptionElementMethods;
-use crate::dom::bindings::codegen::Bindings::HTMLOrSVGElementBinding::FocusOptions;
+use crate::dom::bindings::codegen::Bindings::HTMLOrSVGOrMathMLElementBinding::FocusOptions;
 use crate::dom::bindings::codegen::Bindings::HTMLSelectElementBinding::HTMLSelectElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLTextAreaElementBinding::HTMLTextAreaElementMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
@@ -298,18 +298,19 @@ pub(crate) fn find_node_by_unique_id_in_document(
 }
 
 /// <https://w3c.github.io/webdriver/#dfn-link-text-selector>
-fn matching_links<'a>(
-    cx: &'a NoGC,
-    links: &'a NodeList,
+fn matching_links(
+    cx: &mut JSContext,
+    links: &NodeList,
     link_text: String,
     partial: bool,
-) -> impl Iterator<Item = String> + 'a {
+) -> Vec<String> {
+    let links: Vec<_> = links.iter(cx).map(|node| node.as_rooted()).collect();
     links
-        .iter(cx)
-        .filter(move |node| {
+        .into_iter()
+        .filter(|node| {
             let content = node
                 .downcast::<HTMLElement>()
-                .map(|element| element.InnerText())
+                .map(|element| element.InnerText(cx))
                 .map_or(String::new(), String::from)
                 .trim()
                 .to_owned();
@@ -320,6 +321,7 @@ fn matching_links<'a>(
             }
         })
         .map(|node| node.unique_id(node.owner_doc().window().pipeline_id()))
+        .collect()
 }
 
 fn all_matching_links(
@@ -334,7 +336,7 @@ fn all_matching_links(
     root_node
         .query_selector_all(cx, DOMString::from_static("a"))
         .map_err(|_| ErrorStatus::InvalidSelector)
-        .map(|nodes| matching_links(cx, &nodes, link_text, partial).collect())
+        .map(|nodes| matching_links(cx, &nodes, link_text, partial))
 }
 
 #[expect(unsafe_code)]
@@ -368,15 +370,6 @@ fn is_arguments_object(object: HandleObject) -> bool {
     unsafe { IsArgumentsObject(object) }
 }
 
-#[derive(Clone, Eq, Hash, PartialEq)]
-struct HashableJSVal(u64);
-
-impl From<HandleValue<'_>> for HashableJSVal {
-    fn from(v: HandleValue<'_>) -> HashableJSVal {
-        HashableJSVal(v.get().asBits_)
-    }
-}
-
 /// <https://w3c.github.io/webdriver/#dfn-json-clone>
 pub(crate) fn jsval_to_webdriver(
     cx: &mut CurrentRealm,
@@ -384,7 +377,8 @@ pub(crate) fn jsval_to_webdriver(
     val: HandleValue,
 ) -> WebDriverJSResult {
     run_a_script::<DomTypeHolder, _, _>(cx, global_scope, |cx| {
-        let mut seen = HashSet::new();
+        // The values in `seen` are rooted, so they stay correct if a GC moves objects.
+        rooted_vec!(let mut seen);
         let result = jsval_to_webdriver_inner(cx, global_scope, val, &mut seen);
 
         if result.is_err() {
@@ -400,7 +394,7 @@ fn jsval_to_webdriver_inner(
     cx: &mut CurrentRealm,
     global_scope: &GlobalScope,
     val: HandleValue,
-    seen: &mut HashSet<HashableJSVal>,
+    seen: &mut RootedVec<'_, Box<Heap<JSVal>>>,
 ) -> WebDriverJSResult {
     if val.get().is_undefined() {
         Ok(JSValue::Undefined)
@@ -500,18 +494,20 @@ fn clone_an_object(
     cx: &mut CurrentRealm,
     global_scope: &GlobalScope,
     val: HandleValue,
-    seen: &mut HashSet<HashableJSVal>,
+    seen: &mut RootedVec<'_, Box<Heap<JSVal>>>,
     object_handle: HandleObject,
 ) -> WebDriverJSResult {
-    let hashable = val.into();
     // Step 1. If value is in `seen`, return error with error code javascript error.
-    if seen.contains(&hashable) {
+    if seen
+        .iter()
+        .any(|seen_value| seen_value.get().asBits_ == val.get().asBits_)
+    {
         return Err(JavaScriptEvaluationError::SerializationError(
             JavaScriptEvaluationResultSerializationError::OtherJavaScriptError,
         ));
     }
     // Step 2. Append value to `seen`.
-    seen.insert(hashable.clone());
+    seen.push(Heap::boxed(val.get()));
 
     let return_val = if is_array_like::<crate::DomTypeHolder>(cx, val) ||
         is_arguments_object(object_handle)
@@ -610,7 +606,7 @@ fn clone_an_object(
         Ok(JSValue::Object(result))
     };
     // Step 5. Remove the last element of `seen`.
-    seen.remove(&hashable);
+    seen.pop();
     // Step 6. Return success with data `result`.
     return_val
 }
@@ -1187,12 +1183,13 @@ pub(crate) fn handle_get_element_shadow_root(
 
 impl Element {
     /// <https://w3c.github.io/webdriver/#dfn-keyboard-interactable>
-    fn is_keyboard_interactable(&self, no_gc: &NoGC) -> bool {
-        self.is_focusable_area(no_gc) || self.is::<HTMLBodyElement>() || self.is_document_element()
+    fn is_keyboard_interactable(&self, cx: &mut JSContext) -> bool {
+        self.is_focusable_area(cx) || self.is::<HTMLBodyElement>() || self.is_document_element()
     }
 }
 
 fn handle_send_keys_file(
+    cx: &mut JSContext,
     file_input: &HTMLInputElement,
     text: &str,
     reply_sender: GenericSender<Result<bool, ErrorStatus>>,
@@ -1234,7 +1231,7 @@ fn handle_send_keys_file(
     //
     // Do not reply to the response yet, as we are waiting for the files to arrive
     // asynchronously.
-    file_input.select_files_for_webdriver(files, reply_sender);
+    file_input.select_files_for_webdriver(cx, files, reply_sender);
 }
 
 /// We have verify previously that input element is not textual.
@@ -1317,7 +1314,7 @@ pub(crate) fn handle_will_send_keys(
 
         // Step 7.6. If element is not keyboard-interactable,
         // return ErrorStatus::ElementNotInteractable.
-        if !element.is_keyboard_interactable(cx.no_gc()) {
+        if !element.is_keyboard_interactable(cx) {
             let _ = reply.send(Err(ErrorStatus::ElementNotInteractable));
             return;
         }
@@ -1344,7 +1341,7 @@ pub(crate) fn handle_will_send_keys(
     if let Some(input_element) = input_element {
         // Step 8 (Handle file upload)
         if is_file_input {
-            handle_send_keys_file(input_element, &text, reply);
+            handle_send_keys_file(cx, input_element, &text, reply);
             return;
         }
 
@@ -1391,6 +1388,7 @@ pub(crate) fn handle_get_active_element(
 }
 
 pub(crate) fn handle_get_computed_role(
+    cx: &mut JSContext,
     documents: &DocumentCollection,
     pipeline: PipelineId,
     node_id: String,
@@ -1407,7 +1405,7 @@ pub(crate) fn handle_get_computed_role(
                 window
                     .layout()
                     .set_accessibility_active(true, Epoch::default());
-                element.get_computed_role().map(String::from)
+                element.get_computed_role(cx).map(String::from)
             }),
         )
         .unwrap();
@@ -1612,6 +1610,7 @@ pub(crate) fn handle_get_title(
 
 /// <https://w3c.github.io/webdriver/#dfn-calculate-the-absolute-position>
 fn calculate_absolute_position(
+    cx: &mut JSContext,
     documents: &DocumentCollection,
     pipeline: &PipelineId,
     rect: &DOMRect,
@@ -1630,8 +1629,8 @@ fn calculate_absolute_position(
     };
 
     // Step 3 - 5
-    let x = win.ScrollX() as f64 + rect.X();
-    let y = win.ScrollY() as f64 + rect.Y();
+    let x = win.ScrollX(cx) as f64 + rect.X();
+    let y = win.ScrollY(cx) as f64 + rect.Y();
 
     Ok((x, y))
 }
@@ -1651,7 +1650,7 @@ pub(crate) fn handle_get_rect(
                 // We pass the rect instead of element so we don't have to
                 // call `GetBoundingClientRect` twice.
                 let rect = element.GetBoundingClientRect(cx);
-                let (x, y) = calculate_absolute_position(documents, &pipeline, &rect)?;
+                let (x, y) = calculate_absolute_position(cx, documents, &pipeline, &rect)?;
 
                 // Step 6-7
                 Ok(Rect::new(
@@ -1687,6 +1686,7 @@ pub(crate) fn handle_scroll_and_get_bounding_client_rect(
 
 /// <https://w3c.github.io/webdriver/#dfn-get-element-text>
 pub(crate) fn handle_get_text(
+    cx: &mut JSContext,
     documents: &DocumentCollection,
     pipeline: PipelineId,
     node_id: String,
@@ -1697,7 +1697,7 @@ pub(crate) fn handle_get_text(
             get_known_element(documents, pipeline, node_id).map(|element| {
                 element
                     .downcast::<HTMLElement>()
-                    .map(|htmlelement| String::from(htmlelement.InnerText()))
+                    .map(|htmlelement| String::from(htmlelement.InnerText(cx)))
                     .unwrap_or_else(|| {
                         element
                             .upcast::<Node>()
@@ -1932,12 +1932,12 @@ pub(crate) fn handle_element_clear(
 
                 // Step 10. If element is not keyboard-interactable or not pointer-interactable,
                 // return error with error code element not interactable.
-                if !element.is_keyboard_interactable(cx.no_gc()) {
+                if !element.is_keyboard_interactable(cx) {
                     return Err(ErrorStatus::ElementNotInteractable);
                 }
 
                 let paint_tree = get_element_pointer_interactable_paint_tree(cx, &element);
-                if !is_element_in_view(&element, &paint_tree) {
+                if !is_element_in_view(cx, &element, &paint_tree) {
                     return Err(ErrorStatus::ElementNotInteractable);
                 }
 
@@ -2013,7 +2013,7 @@ pub(crate) fn handle_element_click(
                 // return error with error code element not interactable.
                 let paint_tree = get_element_pointer_interactable_paint_tree(cx, &container);
 
-                if !is_element_in_view(&container, &paint_tree) {
+                if !is_element_in_view(cx, &container, &paint_tree) {
                     return Err(ErrorStatus::ElementNotInteractable);
                 }
 
@@ -2090,7 +2090,11 @@ pub(crate) fn handle_element_click(
 }
 
 /// <https://w3c.github.io/webdriver/#dfn-in-view>
-fn is_element_in_view(element: &Element, paint_tree: &[DomRoot<Element>]) -> bool {
+fn is_element_in_view(
+    cx: &mut JSContext,
+    element: &Element,
+    paint_tree: &[DomRoot<Element>],
+) -> bool {
     // An element is in view if it is a member of its own pointer-interactable paint tree,
     // given the pretense that its pointer events are not disabled.
     if !paint_tree.iter().any(|e| &**e == element) {
@@ -2101,7 +2105,7 @@ fn is_element_in_view(element: &Element, paint_tree: &[DomRoot<Element>]) -> boo
     // An element is said to have pointer events disabled
     // if the resolved value of its "pointer-events" style property is "none".
     element
-        .style()
+        .style(cx)
         .is_none_or(|style| style.get_inherited_ui().pointer_events != PointerEvents::None)
 }
 
@@ -2124,11 +2128,13 @@ fn get_element_pointer_interactable_paint_tree(
     get_element_in_view_center_point(cx, element).map_or(Vec::new(), |center_point| {
         if let Some(shadow_root) = element.containing_shadow_root() {
             shadow_root.ElementsFromPoint(
+                cx,
                 Finite::wrap(center_point.x as f64),
                 Finite::wrap(center_point.y as f64),
             )
         } else {
             element.owner_document().ElementsFromPoint(
+                cx,
                 Finite::wrap(center_point.x as f64),
                 Finite::wrap(center_point.y as f64),
             )
@@ -2188,32 +2194,11 @@ pub(crate) fn handle_is_selected(
         .unwrap();
 }
 
-pub(crate) fn handle_add_load_status_sender(
-    documents: &DocumentCollection,
-    pipeline: PipelineId,
-    reply: GenericSender<WebDriverLoadStatus>,
-) {
-    if let Some(document) = documents.find_document(pipeline) {
-        let window = document.window();
-        window.set_webdriver_load_status_sender(Some(reply));
-    }
-}
-
-pub(crate) fn handle_remove_load_status_sender(
-    documents: &DocumentCollection,
-    pipeline: PipelineId,
-) {
-    if let Some(document) = documents.find_document(pipeline) {
-        let window = document.window();
-        window.set_webdriver_load_status_sender(None);
-    }
-}
-
 /// <https://w3c.github.io/webdriver/#dfn-scrolls-into-view>
 fn scroll_into_view(cx: &mut JSContext, element: &Element) {
     // Check if element is already in view
     let paint_tree = get_element_pointer_interactable_paint_tree(cx, element);
-    if is_element_in_view(element, &paint_tree) {
+    if is_element_in_view(cx, element, &paint_tree) {
         return;
     }
 

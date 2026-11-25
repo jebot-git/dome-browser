@@ -19,6 +19,7 @@ use js::rust::{CustomAutoRooterGuard, HandleObject, HandleValue};
 use net_traits::request::Referrer;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object_with_proto;
+#[cfg(feature = "devtools")]
 use servo_base::generic_channel;
 use servo_base::id::WorkerId;
 use servo_constellation_traits::{StructuredSerializedData, WorkerScriptLoadOrigin};
@@ -249,7 +250,7 @@ impl WorkerMethods<crate::DomTypeHolder> for Worker {
         #[cfg(feature = "webgl")]
         let webgl_chan = global
             .downcast::<Window>()
-            .and_then(|window| window.webgl_chan_value());
+            .and_then(|window| window.webgl_chan());
         let init = prepare_workerscope_init(
             global,
             #[cfg(feature = "devtools")]
@@ -291,7 +292,7 @@ impl WorkerMethods<crate::DomTypeHolder> for Worker {
             context_sender,
             global.insecure_requests_policy(),
             global.policy_container(),
-            global.font_context(),
+            Arc::new(global.font_context().new_for_worker()),
         );
 
         let context = context_receiver

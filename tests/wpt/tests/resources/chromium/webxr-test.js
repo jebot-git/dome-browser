@@ -1303,7 +1303,12 @@ class MockRuntime {
               views: this._getDefaultViews(),
               // Typical OpenXR maxLayerCount is 16. We may also show
               // a base layer, and a layer can have 2 eyes.
-              maxRenderLayers: (16 - 1) / 2,
+              maxRenderLayers: enabled_features.includes(
+                                   xrSessionMojom.XRSessionFeature.LAYERS) ?
+                  (16 - 1) / 2 :
+                  1,
+              // The mock does not let the page change the frame rate.
+              supportedFrameRates: [],
             },
             enviromentBlendMode: this.enviromentBlendMode_,
             interactionMode: this.interactionMode_

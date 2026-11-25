@@ -25,7 +25,7 @@ use crate::dom::bindings::error::Error;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
 use crate::dom::bindings::reflector::DomGlobal;
-use crate::dom::bindings::root::{AsHandleValue, Dom, DomRoot, MutNullableDom};
+use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::gamepad::Gamepad;
 use crate::dom::promise::{Promise, RootedPromise};
@@ -216,6 +216,8 @@ impl XRSystemMethods<crate::DomTypeHolder> for XRSystem {
     fn IsSessionSupported(&self, cx: &mut CurrentRealm, mode: XRSessionMode) -> RootedPromise {
         // XXXManishearth this should select an XR device first
         let promise = Promise::new_in_realm(cx);
+
+        // > 2. If mode is "inline", resolve promise with true and return it.
         if mode == XRSessionMode::Inline {
             promise.resolve_native(cx, &true);
             return promise;
@@ -387,6 +389,7 @@ impl XRSystemMethods<crate::DomTypeHolder> for XRSystem {
             required_features,
             optional_features,
             first_person_observer_view: pref!(dom_webxr_first_person_observer_view),
+            painter_id: global.as_window().webview_id().into(),
         };
 
         let mut trusted = Some((Trusted::new(self), TrustedPromise::from(&promise)));

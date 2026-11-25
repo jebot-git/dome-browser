@@ -42,6 +42,7 @@ use profile_traits::time::{
 };
 use profile_traits::{path, time_profile};
 use rustc_hash::FxHashMap;
+use script::HTML_INPUT_TYPE_SUBMIT_DEFAULT_VALUE;
 use script::layout_dom::{
     ServoDangerousStyleDocument, ServoDangerousStyleElement, ServoLayoutElement, ServoLayoutNode,
 };
@@ -59,7 +60,7 @@ use style::context::{
     StyleContext, ThreadLocalStyleContext,
 };
 use style::device::Device;
-use style::device::servo::FontMetricsProvider;
+use style::device::servo::{FontMetricsProvider, MediaData};
 use style::dom::{OpaqueNode, ShowSubtreeDataAndPrimaryValues, TDocument, TElement, TNode};
 use style::font_metrics::FontMetrics;
 use style::global_style_data::GLOBAL_STYLE_DATA;
@@ -68,7 +69,9 @@ use style::invalidation::stylesheets::StylesheetInvalidationSet;
 use style::media_queries::{MediaList, MediaType};
 use style::properties::style_structs::Font;
 use style::properties::{ComputedValues, LonghandId, NonCustomPropertyId, PropertyId, ShorthandId};
-use style::queries::values::PrefersColorScheme;
+use style::queries::values::{
+    PrefersColorScheme, PrefersContrast, PrefersReducedMotion, PrefersReducedTransparency,
+};
 use style::selector_parser::{PseudoElement, SnapshotMap};
 use style::servo::media_features::PointerCapabilities;
 use style::shared_lock::{SharedRwLock, StylesheetGuards};
@@ -509,8 +512,14 @@ impl Layout for LayoutThread {
     ) -> Option<ScrollContainerResponse> {
         with_layout_state(|| {
             let node = unsafe { node.as_ref().map(|node| ServoLayoutNode::new(node)) };
-            let viewport_overflow = self.box_tree.borrow().as_ref()?.viewport_overflow;
-            process_scroll_container_query(node, flags, viewport_overflow)
+            let box_tree = self.box_tree.borrow();
+            let box_tree = box_tree.as_ref()?;
+            process_scroll_container_query(
+                node,
+                flags,
+                box_tree.viewport_overflow,
+                box_tree.writing_mode(),
+            )
         })
     }
 
@@ -931,16 +940,24 @@ impl LayoutThread {
         // The device pixel ratio is incorrect (it does not have the hidpi value),
         // but it will be set correctly when the initial reflow takes place.
         let device = Device::new(
-            MediaType::screen(),
-            QuirksMode::NoQuirks,
-            config.viewport_details.size,
-            config.viewport_details.device_size.cast_unit(),
-            Scale::new(config.viewport_details.hidpi_scale_factor.get()),
-            Box::new(LayoutFontMetricsProvider(config.font_context.clone())),
             ComputedValues::initial_values_with_font_override(font),
-            config.theme.into(),
-            PointerCapabilities::default(),
-            PointerCapabilities::default(),
+            Box::new(LayoutFontMetricsProvider(config.font_context.clone())),
+            Box::from(HTML_INPUT_TYPE_SUBMIT_DEFAULT_VALUE),
+            config.document_random_hasher_key,
+            MediaData {
+                media_type: MediaType::screen(),
+                quirks_mode: QuirksMode::NoQuirks,
+                viewport_size: config.viewport_details.size,
+                device_size: config.viewport_details.device_size.cast_unit(),
+                device_pixel_ratio: Scale::new(config.viewport_details.hidpi_scale_factor.get()),
+                prefers_color_scheme: config.theme.into(),
+                primary_pointer_capabilities: PointerCapabilities::default(),
+                all_pointer_capabilities: PointerCapabilities::default(),
+                // TODO: Obtain these from the embedder via a delegate or preferences.
+                prefers_contrast: PrefersContrast::NoPreference,
+                prefers_reduced_motion: PrefersReducedMotion::NoPreference,
+                prefers_reduced_transparency: PrefersReducedTransparency::NoPreference,
+            },
         );
 
         let locked_script_channel = Mutex::new(config.script_chan.clone());
@@ -1154,7 +1171,10 @@ impl LayoutThread {
     /// The high-level routine that performs layout.
     #[servo_tracing::instrument(
         skip_all,
-        fields(goal = tracing::field::debug(&reflow_request.reflow_goal))
+        fields(
+            goal = tracing::field::debug(&reflow_request.reflow_goal),
+            webview_id = tracing::field::display(self.webview_id),
+        )
     )]
     fn handle_reflow(&mut self, mut reflow_request: ReflowRequest) -> Option<ReflowResult> {
         self.maybe_print_reflow_event(&reflow_request);

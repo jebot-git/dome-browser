@@ -21,34 +21,32 @@ use servo_url::ServoUrl;
 use style::Zero;
 use style::attr::AttrValue;
 use style::computed_values::object_fit::T as ObjectFit;
-use style::context::TreeCountingCaches;
-use style::dom::DummyElementContext;
 use style::logical_geometry::{LogicalAxis, WritingMode};
-use style::properties::{ComputedValues, StyleBuilder};
-use style::rule_cache::RuleCacheConditions;
-use style::rule_tree::RuleCascadeFlags;
-use style::stylesheets::container_rule::ContainerSizeQuery;
+use style::properties::ComputedValues;
 use style::url::ComputedUrl;
 use style::values::CSSFloat;
+use style::values::computed::Content;
 use style::values::computed::image::Image as ComputedImage;
-use style::values::computed::{Content, Context, ToComputedValue};
 use style::values::generics::counters::{GenericContentItem, GenericContentItems};
+use style::values::specified::length::LengthPercentage;
 use url::Url;
 use web_atoms::local_name;
 use webrender_api::ImageKey;
 
+use crate::SharedStyle;
+use crate::containing_block::{ConstraintSpace, ContainingBlock};
 use crate::context::{LayoutContext, LayoutImageCacheResult};
 use crate::dom::NodeExt;
 use crate::fragment_tree::{
-    BaseFragment, BaseFragmentInfo, CollapsedBlockMargins, Fragment, IFrameFragment, ImageFragment,
+    BaseFragment, BaseFragmentInfo, CollapsedBlockMargins, Fragment, FragmentAndLogicalRect,
+    FragmentChildren, IFrameFragment, ImageFragment,
 };
-use crate::geom::{LogicalVec2, PhysicalPoint, PhysicalRect, PhysicalSize};
+use crate::geom::{LogicalRect, LogicalVec2, PhysicalPoint, PhysicalRect, PhysicalSize};
 use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBoxBase};
 use crate::sizing::{
     ComputeInlineContentSizes, InlineContentSizesResult, LazySize, SizeConstraint,
 };
 use crate::style_ext::{AspectRatio, Clamp, ComputedValuesExt, LayoutStyle};
-use crate::{ConstraintSpace, ContainingBlock, SharedStyle};
 
 #[derive(Debug, MallocSizeOf)]
 pub(crate) struct ReplacedContents {
@@ -169,6 +167,17 @@ pub(crate) enum ReplacedContentKind {
     Audio,
 }
 
+impl ReplacedContentKind {
+    pub(crate) fn paints_selection_highlight(&self) -> bool {
+        !matches!(
+            self,
+            ReplacedContentKind::Audio |
+                ReplacedContentKind::IFrame(..) |
+                ReplacedContentKind::Canvas(..)
+        )
+    }
+}
+
 impl ReplacedContents {
     pub(crate) fn from_alt_text(node: ServoLayoutNode<'_>, context: &LayoutContext, text: String) -> Self {
         Self {
@@ -244,11 +253,13 @@ impl ReplacedContents {
                 .handle_animated_image(node.opaque(), image.clone());
         }
 
+        let paint_selection_highlight =
+            kind.paints_selection_highlight() && node.replaced_is_selected();
         Some(Self {
             base_fragment_info: node.into(),
             kind,
             is_content_replacement: false,
-            selected: Arc::new(AtomicBool::new(node.replaced_is_selected())),
+            selected: Arc::new(AtomicBool::new(paint_selection_highlight)),
             selected_style: SharedStyle::new(node.selected_style(&context.style_context)),
             natural_size,
         })
@@ -259,41 +270,20 @@ impl ReplacedContents {
         context: &LayoutContext,
         node: ServoLayoutNode<'_>,
     ) -> (ReplacedContentKind, NaturalSizes) {
-        let rule_cache_conditions = &mut RuleCacheConditions::default();
-        let mut tree_counting_caches = TreeCountingCaches::default();
-
-        let parent_style = node.style(&context.style_context);
-        let style_builder = StyleBuilder::new(
-            context.style_context.stylist.device(),
-            Some(context.style_context.stylist),
-            Some(&parent_style),
-            None,
-            None,
-            false,
-        );
-
-        // TODO: use the correct element context in order to properly resolve
-        // `sibling-index()`, like Blink. Or maybe do it like Gecko, and only
-        // accept literals, see https://github.com/w3c/csswg-drafts/issues/14117
-        let element_context = &DummyElementContext;
-
-        let to_computed_context = Context::new(
-            style_builder,
-            context.style_context.quirks_mode(),
-            rule_cache_conditions,
-            ContainerSizeQuery::none(),
-            RuleCascadeFlags::empty(),
-            element_context,
-            &mut tree_counting_caches,
-        );
-
         let attr_to_computed = |attr_val: &AttrValue| {
-            if let AttrValue::LengthPercentage(_, length_percentage) = attr_val {
-                length_percentage
-                    .to_computed_value(&to_computed_context)?
-                    .to_length()
-            } else {
-                None
+            // See <https://github.com/w3c/csswg-drafts/issues/14117>:
+            // > width and height only affect natural size if they're literal number-tokens,
+            // > or dimension-tokens for an absolute length unit
+            //
+            // Note that numbers have already been converted into a length with px units.
+            // The logic below avoids percentages, calc(), and non-absolute units.
+            // Also requires a non-negative amount.
+            match attr_val {
+                AttrValue::LengthPercentage(_, Some(LengthPercentage::Length(length))) => length
+                    .to_computed_pixel_length_without_context()
+                    .ok()
+                    .filter(|size| *size >= 0.),
+                _ => None,
             }
         };
         let width = svg_data.width.and_then(attr_to_computed);
@@ -301,14 +291,14 @@ impl ReplacedContents {
 
         let ratio = match (width, height) {
             (Some(width), Some(height)) if !width.is_zero() && !height.is_zero() => {
-                Some(width.px() / height.px())
+                Some(width / height)
             },
-            _ => svg_data.ratio_from_view_box(),
+            _ => svg_data.view_box_ratio,
         };
 
         let natural_size = NaturalSizes {
-            width: width.map(|w| Au::from_f32_px(w.px())),
-            height: height.map(|h| Au::from_f32_px(h.px())),
+            width: width.map(Au::from_f32_px),
+            height: height.map(Au::from_f32_px),
             ratio,
         };
 
@@ -369,7 +359,7 @@ impl ReplacedContents {
                 vector_image,
                 completed_image,
                 snapshot_pending: svg_data.snapshot_pending,
-                has_viewbox: svg_data.view_box.is_some(),
+                has_viewbox: svg_data.view_box_ratio.is_some(),
                 foreign_objects: crate::svg_foreign_object::ForeignObjects::construct(
                     node, context,
                 ),
@@ -564,13 +554,30 @@ impl ReplacedContents {
         layout_context: &LayoutContext,
         style: &ServoArc<ComputedValues>,
         size: PhysicalSize<Au>,
-    ) -> Vec<Fragment> {
-        let (object_fit_size, rect) = self.calculate_fragment_rect(style, size);
+    ) -> Vec<FragmentAndLogicalRect> {
+        let (object_fit_size, mut rect) = self.calculate_fragment_rect(style, size);
         let clip = PhysicalRect::new(PhysicalPoint::origin(), size);
 
-        let base = BaseFragment::new(self.base_fragment_info, rect);
+        let base = BaseFragment::new(self.base_fragment_info, PhysicalRect::default());
+        let logical_rect = |rect| {
+            LogicalRect::from_physical(
+                rect,
+                style.writing_mode,
+                LogicalVec2::from_physical_size(&size, style.writing_mode),
+            )
+        };
+        // Native fallback and foreignObject helpers produce physical boxes.
+        // Preserve those rectangles when the parent defers logical placement.
+        let as_logical_fragment = |fragment: Fragment| {
+            let rect = fragment.base().expect("native replaced child has a box").rect();
+            FragmentAndLogicalRect::new(fragment, logical_rect(rect))
+        };
         match &self.kind {
-            ReplacedContentKind::ImageFallback(fallback) => fallback.fragments(layout_context, size),
+            ReplacedContentKind::ImageFallback(fallback) => fallback
+                .fragments(layout_context, size)
+                .into_iter()
+                .map(as_logical_fragment)
+                .collect(),
             ReplacedContentKind::Image(image_info) => image_info
                 .image
                 .as_ref()
@@ -587,36 +594,42 @@ impl ReplacedContents {
                     )
                 })
                 .map(|image_key| {
+                    FragmentAndLogicalRect::new(
+                        Fragment::Image(Arc::new(ImageFragment {
+                            base,
+                            style: style.clone().into(),
+                            selected_style: self.selected_style.clone(),
+                            clip,
+                            image_key: Some(image_key),
+                            showing_broken_image_icon: image_info.showing_broken_image_icon,
+                            url: image_info.url.clone(),
+                            load_time: image_info.load_time,
+                            natural_width: self.natural_size.width,
+                            natural_height: self.natural_size.height,
+                            selected: self.selected.clone(),
+                        })),
+                        logical_rect(rect),
+                    )
+                })
+                .into_iter()
+                .collect(),
+            ReplacedContentKind::Video(video_info) => {
+                vec![FragmentAndLogicalRect::new(
                     Fragment::Image(Arc::new(ImageFragment {
                         base,
                         style: style.clone().into(),
                         selected_style: self.selected_style.clone(),
                         clip,
-                        image_key: Some(image_key),
-                        showing_broken_image_icon: image_info.showing_broken_image_icon,
-                        url: image_info.url.clone(),
-                        load_time: image_info.load_time,
+                        image_key: video_info.image_key,
+                        showing_broken_image_icon: false,
+                        url: video_info.poster_or_src_url.clone(),
+                        load_time: None,
                         natural_width: self.natural_size.width,
                         natural_height: self.natural_size.height,
                         selected: self.selected.clone(),
-                    }))
-                })
-                .into_iter()
-                .collect(),
-            ReplacedContentKind::Video(video_info) => {
-                vec![Fragment::Image(Arc::new(ImageFragment {
-                    base,
-                    style: style.clone().into(),
-                    selected_style: self.selected_style.clone(),
-                    clip,
-                    image_key: video_info.image_key,
-                    showing_broken_image_icon: false,
-                    url: video_info.poster_or_src_url.clone(),
-                    load_time: None,
-                    natural_width: self.natural_size.width,
-                    natural_height: self.natural_size.height,
-                    selected: self.selected.clone(),
-                }))]
+                    })),
+                    logical_rect(rect),
+                )]
             },
             ReplacedContentKind::IFrame(iframe) => {
                 let size = Size2D::new(rect.size.width.to_f32_px(), rect.size.height.to_f32_px());
@@ -634,11 +647,14 @@ impl ReplacedContents {
                         },
                     },
                 );
-                vec![Fragment::IFrame(Arc::new(IFrameFragment {
-                    base,
-                    style: style.clone().into(),
-                    pipeline_id: iframe.pipeline_id,
-                }))]
+                vec![FragmentAndLogicalRect::new(
+                    Fragment::IFrame(Arc::new(IFrameFragment {
+                        base,
+                        style: style.clone().into(),
+                        pipeline_id: iframe.pipeline_id,
+                    })),
+                    logical_rect(rect),
+                )]
             },
             ReplacedContentKind::Canvas(canvas_info) => {
                 if self.natural_size.width == Some(Au::zero())
@@ -651,19 +667,22 @@ impl ReplacedContents {
                     return vec![];
                 };
 
-                vec![Fragment::Image(Arc::new(ImageFragment {
-                    base,
-                    style: style.clone().into(),
-                    selected_style: self.selected_style.clone(),
-                    clip,
-                    image_key: Some(image_key),
-                    showing_broken_image_icon: false,
-                    url: None,
-                    load_time: None,
-                    natural_width: self.natural_size.width,
-                    natural_height: self.natural_size.height,
-                    selected: self.selected.clone(),
-                }))]
+                vec![FragmentAndLogicalRect::new(
+                    Fragment::Image(Arc::new(ImageFragment {
+                        base,
+                        style: style.clone().into(),
+                        selected_style: self.selected_style.clone(),
+                        clip,
+                        image_key: Some(image_key),
+                        showing_broken_image_icon: false,
+                        url: None,
+                        load_time: None,
+                        natural_width: self.natural_size.width,
+                        natural_height: self.natural_size.height,
+                        selected: self.selected.clone(),
+                    })),
+                    logical_rect(rect),
+                )]
             },
             ReplacedContentKind::SVGElement {
                 vector_image,
@@ -673,32 +692,33 @@ impl ReplacedContents {
                 foreign_objects,
             } => {
                 let Some(size_image) = vector_image.as_ref().or(completed_image.as_ref()) else {
-                    return foreign_objects.fragments(layout_context, rect);
+                    return foreign_objects
+                        .fragments(layout_context, rect)
+                        .into_iter()
+                        .map(as_logical_fragment)
+                        .collect();
                 };
 
                 if !has_viewbox {
-                    base.set_rect(
-                        PhysicalSize::new(
-                            size_image
-                                .metadata
-                                .width
-                                .try_into()
-                                .map_or(MAX_AU, Au::from_px),
-                            size_image
-                                .metadata
-                                .height
-                                .try_into()
-                                .map_or(MAX_AU, Au::from_px),
-                        )
-                        .into(),
-                    );
-                }
+                    rect = PhysicalSize::new(
+                        size_image
+                            .metadata
+                            .width
+                            .try_into()
+                            .map_or(MAX_AU, Au::from_px),
+                        size_image
+                            .metadata
+                            .height
+                            .try_into()
+                            .map_or(MAX_AU, Au::from_px),
+                    )
+                    .into();
+                };
 
                 let scale = layout_context.style_context.device_pixel_ratio();
-                let content_size = base.rect().size;
                 let raster_size = Size2D::new(
-                    content_size.width.scale_by(scale.0).to_px(),
-                    content_size.height.scale_by(scale.0).to_px(),
+                    rect.width().scale_by(scale.0).to_px(),
+                    rect.height().scale_by(scale.0).to_px(),
                 );
 
                 let tag = self.base_fragment_info.tag.unwrap();
@@ -723,26 +743,34 @@ impl ReplacedContents {
                                 .completed_vector_raster(image.id)
                         })
                     });
-                let mut fragments: Vec<Fragment> = image
+                let mut fragments: Vec<FragmentAndLogicalRect> = image
                     .and_then(|image| image.id)
                     .map(|image_key| {
-                        Fragment::Image(Arc::new(ImageFragment {
-                            base,
-                            style: style.clone().into(),
-                            selected_style: self.selected_style.clone(),
-                            clip,
-                            image_key: Some(image_key),
-                            showing_broken_image_icon: false,
-                            url: None,
-                            load_time: None,
-                            natural_width: self.natural_size.width,
-                            natural_height: self.natural_size.height,
-                            selected: self.selected.clone(),
-                        }))
+                        FragmentAndLogicalRect::new(
+                            Fragment::Image(Arc::new(ImageFragment {
+                                base,
+                                style: style.clone().into(),
+                                selected_style: self.selected_style.clone(),
+                                clip,
+                                image_key: Some(image_key),
+                                showing_broken_image_icon: false,
+                                url: None,
+                                load_time: None,
+                                natural_width: self.natural_size.width,
+                                natural_height: self.natural_size.height,
+                                selected: self.selected.clone(),
+                            })),
+                            logical_rect(rect),
+                        )
                     })
                     .into_iter()
                     .collect();
-                fragments.extend(foreign_objects.fragments(layout_context, rect));
+                fragments.extend(
+                    foreign_objects
+                        .fragments(layout_context, rect)
+                        .into_iter()
+                        .map(as_logical_fragment),
+                );
                 fragments
             },
             ReplacedContentKind::Audio => vec![],
@@ -828,7 +856,7 @@ impl ReplacedContents {
         lazy_block_size: &LazySize,
     ) -> IndependentFormattingContextLayoutResult {
         let writing_mode = base.style.writing_mode;
-        let inline_size = containing_block_for_children.size.inline;
+        let inline_size = containing_block_for_children.inline_size();
         let content_block_size = self.content_size(
             LogicalAxis::Block,
             preferred_aspect_ratio,
@@ -851,7 +879,11 @@ impl ReplacedContents {
             // The result doesn't depend on `containing_block_for_children.size.block`,
             // but it depends on `lazy_block_size`, which is probably tied to that.
             depends_on_block_constraints: true,
-            fragments: self.make_fragments(layout_context, &base.style, size),
+            fragments: FragmentChildren::Logical(self.make_fragments(
+                layout_context,
+                &base.style,
+                size,
+            )),
             specific_layout_info: None,
         }
     }
@@ -882,13 +914,10 @@ impl ReplacedContents {
     /// Set whether or not this [`ReplacedContents`] is selected. Returns `true` if anything
     /// changed.
     pub(crate) fn set_selection(&self, selected: bool) -> bool {
-        // Only build a display list if the value changed and if this isn't an `<iframe>`
-        // or `<audio>` element as they do not paint a selection tint.
-        self.selected.swap(selected, Ordering::Relaxed) != selected
-            && !matches!(
-                self.kind,
-                ReplacedContentKind::Audio | ReplacedContentKind::IFrame(..)
-            )
+        // Only build a display list if the value changed and its content actually paints a
+        // selection highlight.
+        self.kind.paints_selection_highlight() &&
+            self.selected.swap(selected, Ordering::Relaxed) != selected
     }
 }
 
@@ -898,10 +927,11 @@ impl ComputeInlineContentSizes for ReplacedContents {
         context: &LayoutContext,
         constraint_space: &ConstraintSpace,
     ) -> InlineContentSizesResult {
+        debug_assert!(!constraint_space.has_quirky_block_size.0);
         if let ReplacedContentKind::ImageFallback(fallback) = &self.kind {
             let intrinsic = fallback.inline_sizes(context);
             if constraint_space.preferred_aspect_ratio.is_none() ||
-                !constraint_space.block_size.is_definite()
+                !constraint_space.maybe_quirky_block_size.is_definite()
             {
                 return intrinsic;
             }
@@ -909,7 +939,7 @@ impl ComputeInlineContentSizes for ReplacedContents {
                 sizes: self.content_size(
                     LogicalAxis::Inline,
                     constraint_space.preferred_aspect_ratio,
-                    &|| constraint_space.block_size,
+                    &|| constraint_space.maybe_quirky_block_size,
                     &|| intrinsic.sizes.max_content,
                 ).into(),
                 depends_on_block_constraints: true,
@@ -918,7 +948,7 @@ impl ComputeInlineContentSizes for ReplacedContents {
         let inline_content_size = self.content_size(
             LogicalAxis::Inline,
             constraint_space.preferred_aspect_ratio,
-            &|| constraint_space.block_size,
+            &|| constraint_space.maybe_quirky_block_size,
             &|| self.fallback_inline_size(constraint_space.style.writing_mode),
         );
         InlineContentSizesResult {

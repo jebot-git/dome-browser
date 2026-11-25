@@ -612,6 +612,13 @@ pub trait TElement:
     /// Flags this element as having handled already its snapshot.
     unsafe fn set_handled_snapshot(&self);
 
+    /// A unique value for the element to use in the generation of random base values
+    /// for element-scoped CSS `random()` functions.
+    fn random_seed(&self) -> u64 {
+        // By default, use the element's own address as the random-influencing value.
+        self.opaque().to_ptr().as_ptr() as u64
+    }
+
     /// Returns whether the element's styles are up-to-date after traversal
     /// (i.e. in post traversal).
     fn has_current_styles(&self, data: &ElementData) -> bool {
@@ -905,21 +912,28 @@ pub trait TElement:
     /// document it is on.
     fn is_html_document_body_element(&self) -> bool;
 
+    /// Whether this element's presentational hints prevent style sharing.
+    fn has_unique_presentational_hints(&self) -> bool {
+        false
+    }
+
     /// Generate the proper applicable declarations due to presentational hints,
     /// and insert them into `hints`.
-    fn synthesize_presentational_hints_for_legacy_attributes<V>(
+    fn synthesize_presentational_hints_for_legacy_attributes<'a, V>(
         &self,
         visited_handling: VisitedHandlingMode,
         hints: &mut V,
     ) where
-        V: Push<ApplicableDeclarationBlock>;
+        V: Push<ApplicableDeclarationBlock<'a>>,
+        Self: 'a;
 
     /// Generate the proper applicable declarations due to view transition dynamic rules, and
     /// insert them into `rules`.
     /// https://drafts.csswg.org/css-view-transitions-1/#document-dynamic-view-transition-style-sheet
-    fn synthesize_view_transition_dynamic_rules<V>(&self, _rules: &mut V)
+    fn synthesize_view_transition_dynamic_rules<'a, V>(&self, _rules: &mut V)
     where
-        V: Push<ApplicableDeclarationBlock>,
+        V: Push<ApplicableDeclarationBlock<'a>>,
+        Self: 'a,
     {
     }
 
@@ -995,6 +1009,10 @@ pub trait ElementContext {
     /// Opaque handle to the element's parent node.
     fn opaque_parent(&self) -> Option<OpaqueNode>;
 
+    /// A unique value for the element to use in the generation of random base values
+    /// for element-scoped `random()` functions.
+    fn random_seed(&self) -> Option<u64>;
+
     /// Return the value of the given custom attribute if it exists.
     fn get_attr(&self, attr: &LocalName, namespace: &Namespace) -> Option<String>;
 
@@ -1011,6 +1029,10 @@ impl<T: TElement> ElementContext for T {
 
     fn opaque_parent(&self) -> Option<OpaqueNode> {
         self.as_node().parent_node().map(|n| n.opaque())
+    }
+
+    fn random_seed(&self) -> Option<u64> {
+        Some(TElement::random_seed(self))
     }
 
     fn get_attr(&self, attr: &LocalName, namespace: &Namespace) -> Option<String> {
@@ -1085,6 +1107,10 @@ impl ElementContext for DummyElementContext {
     }
 
     fn opaque_parent(&self) -> Option<OpaqueNode> {
+        None
+    }
+
+    fn random_seed(&self) -> Option<u64> {
         None
     }
 

@@ -12,7 +12,6 @@ import android.view.Surface
 /** Maps /ports/servoshell API */
 internal class JNIServo {
     init {
-        System.loadLibrary("c++_shared")
         System.loadLibrary("servoshell")
     }
 
@@ -61,8 +60,6 @@ internal class JNIServo {
 
     external fun resumePainting(surface: Surface, size: Size)
 
-    external fun mediaSessionAction(action: Int)
-
     external fun setExperimentalMode(enable: Boolean)
 
     external fun doFrame()
@@ -85,11 +82,5 @@ internal class JNIServo {
         fun onImeShow()
 
         fun onImeHide()
-
-        fun onMediaSessionMetadata(title: String, artist: String, album: String)
-
-        fun onMediaSessionPlaybackStateChange(state: Int)
-
-        fun onMediaSessionSetPositionState(duration: Float, position: Float, playbackRate: Float)
     }
 }

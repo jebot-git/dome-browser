@@ -121,7 +121,9 @@ use unicode_bidi::{BidiInfo, Level};
 
 use super::float::{Clear, PlacementAmongFloats};
 use super::{IndependentFloatOrAtomicLayoutResult, IndependentFormattingContextLayoutResult};
+use crate::SharedStyle;
 use crate::cell::{ArcRefCell, WeakRefCell};
+use crate::containing_block::{ConstraintSpace, ContainingBlock, IndefiniteContainingBlock};
 use crate::context::LayoutContext;
 use crate::dom::WeakLayoutBox;
 use crate::dom_traversal::NodeAndStyleInfo;
@@ -133,15 +135,17 @@ use crate::flow::inline::text_run::{
 use crate::flow::{
     BlockLevelBox, CollapsibleWithParentStartMargin, FloatSide, PlacementState,
     compute_inline_content_sizes_for_block_level_boxes, layout_block_level_child,
+    skippable_for_block_percentage_quirk,
 };
 use crate::formatting_contexts::{Baselines, IndependentFormattingContext};
-use crate::fragment_tree::{CollapsedMargin, Fragment, FragmentFlags, PositioningFragment};
-use crate::geom::{LogicalRect, LogicalSides1D, LogicalVec2, ToLogical};
+use crate::fragment_tree::{
+    CollapsedMargin, Fragment, FragmentChildren, FragmentFlags, PositioningFragment,
+};
+use crate::geom::{LogicalRect, LogicalSides1D, LogicalVec2};
 use crate::layout_box_base::LayoutBoxBase;
 use crate::positioned::{AbsolutelyPositionedBox, PositioningContext};
 use crate::sizing::{ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult};
 use crate::style_ext::{ComputedValuesExt, PaddingBorderMargin};
-use crate::{ConstraintSpace, ContainingBlock, IndefiniteContainingBlock, SharedStyle};
 
 // From gfxFontConstants.h in Firefox.
 static FONT_SUBSCRIPT_OFFSET_RATIO: f32 = 0.20;
@@ -925,7 +929,7 @@ impl UnbreakableSegmentUnderConstruction {
 }
 
 bitflags! {
-    struct InlineContainerStateFlags: u8 {
+    pub(super) struct InlineContainerStateFlags: u8 {
         const CREATE_STRUT = 0b0001;
         const IS_SINGLE_LINE_TEXT_INPUT = 0b0010;
     }
@@ -1382,33 +1386,32 @@ impl InlineFormattingContextLayout<'_> {
         // The inline part of this start offset was taken into account when determining
         // the inline start of the line in `calculate_inline_start_for_current_line` so
         // we do not need to include it in the `start_corner` of the line's main Fragment.
-        let start_corner = LogicalVec2 {
-            inline: Au::zero(),
-            block: block_start_position,
+        let containing_block = self.containing_block();
+        let containing_block_writing_mode = containing_block.style.writing_mode;
+        let logical_line_rect = LogicalRect {
+            start_corner: LogicalVec2 {
+                inline: Au::zero(),
+                block: block_start_position,
+            },
+            size: LogicalVec2 {
+                inline: containing_block.inline_size(),
+                block: effective_block_advance.resolve(),
+            },
         };
+        let physical_line_rect = logical_line_rect.as_physical_deprecated(containing_block);
 
-        let logical_origin_in_physical_coordinates =
-            start_corner.to_physical_vector(self.containing_block().style.writing_mode);
         self.positioning_context
-            .adjust_static_position_of_hoisted_fragments_with_offset(
-                &logical_origin_in_physical_coordinates,
+            .adjust_static_position_of_hoisted_fragments(
+                &logical_line_rect,
+                containing_block_writing_mode,
                 start_positioning_context_length,
             );
 
-        let containing_block = self.containing_block();
-        let physical_line_rect = LogicalRect {
-            start_corner,
-            size: LogicalVec2 {
-                inline: containing_block.size.inline,
-                block: effective_block_advance.resolve(),
-            },
-        }
-        .as_physical(Some(containing_block));
         self.fragments
             .push(Fragment::Positioning(PositioningFragment::new_anonymous(
                 self.root_nesting_level.style.clone(),
                 physical_line_rect,
-                fragments,
+                FragmentChildren::PhysicalDeprecated(fragments),
                 true, /* is_line_box */
             )));
     }
@@ -1416,7 +1419,7 @@ impl InlineFormattingContextLayout<'_> {
     fn available_line_space(&self) -> Au {
         match self.current_line.placement_among_floats.get() {
             Some(placement_among_floats) => placement_among_floats.size.inline,
-            None => self.containing_block().size.inline,
+            None => self.containing_block().inline_size(),
         }
     }
 
@@ -1533,7 +1536,7 @@ impl InlineFormattingContextLayout<'_> {
         let block_offset_from_containining_block_top = state
             .current_block_position_including_margins() -
             state.current_containing_block_offset();
-        state.place_float_fragment(
+        let float_content_rect = state.place_float_fragment(
             &float.fragment,
             self.placement_state.containing_block,
             CollapsedMargin::zero(),
@@ -1541,7 +1544,8 @@ impl InlineFormattingContextLayout<'_> {
         );
         self.positioning_context
             .adjust_static_position_of_hoisted_fragments_in_range(
-                &float.fragment.base.rect().origin.to_vector(),
+                &float_content_rect,
+                self.placement_state.containing_block.style.writing_mode,
                 &float.range,
             )
     }
@@ -1561,15 +1565,15 @@ impl InlineFormattingContextLayout<'_> {
     ) {
         let containing_block = self.containing_block();
         let float_fragment = &float_item.fragment;
-        let logical_margin_rect_size = float_fragment
-            .margin_rect()
-            .size
-            .to_logical(containing_block.style.writing_mode);
+        let logical_margin_rect_size = LogicalVec2::from_physical_size(
+            &float_fragment.margin_rect().size,
+            containing_block.style.writing_mode,
+        );
         let inline_size = logical_margin_rect_size.inline.max(Au::zero());
 
         let available_inline_size = match self.current_line.placement_among_floats.get() {
             Some(placement_among_floats) => placement_among_floats.size.inline,
-            None => containing_block.size.inline,
+            None => containing_block.inline_size(),
         } - potential_line_length;
 
         // If this float doesn't fit on the current line or a previous float didn't fit on
@@ -1653,7 +1657,7 @@ impl InlineFormattingContextLayout<'_> {
                 .size
         } else {
             LogicalVec2 {
-                inline: containing_block.size.inline,
+                inline: containing_block.inline_size(),
                 block: MAX_AU,
             }
         };
@@ -1686,7 +1690,7 @@ impl InlineFormattingContextLayout<'_> {
 
         // If the potential line is larger than the containing block we do not even need to consider
         // floats. We definitely have to do a linebreak.
-        if potential_line_size.inline > containing_block.size.inline {
+        if potential_line_size.inline > containing_block.inline_size() {
             return true;
         }
 
@@ -1994,6 +1998,10 @@ impl InlineFormattingContextLayout<'_> {
 
             removal_start -= 1;
 
+            if !state.writing_direction_reversed {
+                state.leading_edge_on_current_line.set(false);
+            }
+
             let inline_start = state.pbm_inline_start();
             self.current_line.inline_position -= inline_start;
             self.current_line_segment.inline_size += inline_start;
@@ -2083,6 +2091,16 @@ impl InlineFormattingContextLayout<'_> {
         for item in segment_items.iter_mut() {
             if let LineItem::Float(_, float_item) = item {
                 self.place_float_line_item_for_commit_to_line(float_item, potential_line_length);
+            }
+            if let LineItem::InlineStartBoxPaddingBorderMargin(state) = item &&
+                !state.writing_direction_reversed
+            {
+                state.leading_edge_on_current_line.set(true);
+            }
+            if let LineItem::InlineEndBoxPaddingBorderMargin(state) = item &&
+                state.writing_direction_reversed
+            {
+                state.leading_edge_on_current_line.set(true);
             }
         }
 
@@ -2178,7 +2196,7 @@ impl InlineFormattingContext {
 
         // Enable Chinese/Japanese line breaking behavior when this inline formatting context
         // has a Japanese or Chinese language set.
-        let content_locale = lang.0.parse::<LanguageIdentifier>().ok();
+        let content_locale = LanguageIdentifier::try_from_locale_bytes(lang.0.as_bytes()).ok();
         options.content_locale = content_locale.as_ref();
 
         let mut shaping_queue = ShapingQueue::new(&text_content, options);
@@ -2273,7 +2291,7 @@ impl InlineFormattingContext {
             .get_inherited_text()
             .text_indent
             .length
-            .to_used_value(containing_block.size.inline.unwrap_or_default())
+            .to_used_value(containing_block.size.inline_size.unwrap_or_default())
     }
 
     pub(super) fn layout(
@@ -2380,7 +2398,7 @@ impl InlineFormattingContext {
             layout.placement_state.finish();
 
         IndependentFormattingContextLayoutResult {
-            fragments: layout.fragments,
+            fragments: FragmentChildren::PhysicalDeprecated(layout.fragments),
             content_block_size,
             collapsible_margins_in_children,
             baselines,
@@ -2817,18 +2835,13 @@ impl IndependentFormattingContext {
 
         // Lay out absolutely positioned children if this new atomic establishes a containing block
         // for absolutes.
-        let positioning_context = if self.is_replaced() {
-            None
-        } else {
-            if fragment
-                .style()
-                .establishes_containing_block_for_absolute_descendants(fragment.base.flags)
-            {
-                child_positioning_context
-                    .layout_collected_children(layout.layout_context, &mut fragment);
-            }
-            Some(child_positioning_context)
-        };
+        if fragment
+            .style()
+            .establishes_containing_block_for_absolute_descendants(fragment.base.flags)
+        {
+            child_positioning_context
+                .layout_collected_children(layout.layout_context, &mut fragment);
+        }
 
         if layout.text_wrap_mode == TextWrapMode::Wrap &&
             !layout
@@ -2838,7 +2851,8 @@ impl IndependentFormattingContext {
             layout.process_soft_wrap_opportunity();
         }
 
-        let size = pbm_sums.sum() + fragment.base.rect().size.to_logical(container_writing_mode);
+        let size = pbm_sums.sum() +
+            LogicalVec2::from_physical_size(&fragment.base.rect().size, container_writing_mode);
         let baseline_offset = self
             .pick_baseline(&fragment.baselines(container_writing_mode))
             .map(|baseline| pbm_sums.block_start + baseline)
@@ -2863,7 +2877,7 @@ impl IndependentFormattingContext {
             AtomicLineItem {
                 fragment,
                 size,
-                positioning_context,
+                positioning_context: child_positioning_context,
                 baseline_offset_in_parent,
                 baseline_offset_in_item: baseline_offset,
                 bidi_level,
@@ -2964,7 +2978,7 @@ fn place_pending_floats(ifc: &mut InlineFormattingContextLayout, line_items: &[L
     }
 }
 
-fn line_height(
+pub(super) fn line_height(
     parent_style: &ComputedValues,
     font_metrics: &FontMetrics,
     flags: &InlineContainerStateFlags,
@@ -3377,6 +3391,7 @@ impl<'layout_data> ContentSizesComputation<'layout_data> {
             &self.constraint_space.into(),
             &LogicalVec2::zero(),
             false, /* auto_block_size_stretches_to_containing_block */
+            skippable_for_block_percentage_quirk(self.layout_context, &context.base, Some(context)),
         );
         self.depends_on_block_constraints |= result.depends_on_block_constraints;
         result.sizes

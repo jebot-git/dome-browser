@@ -21,6 +21,7 @@ use crate::dom::html::htmlformelement::HTMLFormElement;
 use crate::dom::html::htmllinkelement::HTMLLinkElement;
 use crate::dom::node::NodeTraits;
 use crate::dom::types::Element;
+use crate::dom::window::windowproxy::WindowOpenType;
 use crate::navigation::navigate;
 
 bitflags::bitflags! {
@@ -182,11 +183,12 @@ impl LinkRelations {
     /// [`<area>`]: https://html.spec.whatwg.org/multipage/#the-area-element
     /// [`<form>`]: https://html.spec.whatwg.org/multipage/#the-form-element
     pub(crate) fn for_element(element: &Element) -> Self {
-        let rel = element.get_attribute_string_value(&local_name!("rel"));
+        let rel = element.get_attribute_string_ref(&local_name!("rel"));
 
         let mut relations = rel
             .map(|attribute| {
                 attribute
+                    .value()
                     .split(HTML_SPACE_CHARACTERS)
                     .map(Self::from_single_keyword)
                     .collect()
@@ -438,8 +440,8 @@ pub(crate) fn follow_hyperlink(
     };
     let (maybe_chosen, history_handling) = match target_attribute_value {
         Some(name) => {
-            let (maybe_chosen, new) = source.choose_a_navigable(cx, name, noopener);
-            let history_handling = if new {
+            let (maybe_chosen, window_open_type) = source.choose_a_navigable(cx, &name, noopener);
+            let history_handling = if window_open_type != WindowOpenType::ExistingOrNone {
                 NavigationHistoryBehavior::Replace
             } else {
                 NavigationHistoryBehavior::Push
@@ -487,6 +489,10 @@ pub(crate) fn follow_hyperlink(
         //          with referrerPolicy set to referrerPolicy, userInvolvement set to
         //          userInvolvement, and sourceElement set to subject.
         let secure = target_window.as_global_scope().is_secure_context();
+        let upgrade_insecure_navigations_set = window
+            .as_global_scope()
+            .upgrade_insecure_navigations_set()
+            .clone();
         let load_data = LoadData::new(
             LoadOrigin::Script(document.origin().snapshot()),
             url,
@@ -496,6 +502,7 @@ pub(crate) fn follow_hyperlink(
             referrer_policy,
             Some(secure),
             Some(document.insecure_requests_policy()),
+            upgrade_insecure_navigations_set,
             document.has_trustworthy_ancestor_origin(),
             document.creation_sandboxing_flag_set_considering_parent_iframe(),
         ).with_cookie_site(document.cookie_site());

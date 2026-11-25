@@ -5,6 +5,7 @@
 use html5ever::{LocalName, Prefix, QualName, local_name, ns};
 use js::context::JSContext;
 use js::rust::HandleObject;
+use servo_config::pref;
 
 use crate::dom::bindings::error::{report_pending_exception, throw_dom_exception};
 use crate::dom::bindings::inheritance::Castable;
@@ -85,6 +86,7 @@ use crate::dom::html::htmlulistelement::HTMLUListElement;
 use crate::dom::html::htmlunknownelement::HTMLUnknownElement;
 use crate::dom::html::htmlvideoelement::HTMLVideoElement;
 use crate::dom::htmlmarqueeelement::HTMLMarqueeElement;
+use crate::dom::mathmlelement::MathMLElement;
 use crate::dom::svg::svgaelement::SVGAElement;
 use crate::dom::svg::svgcircleelement::SVGCircleElement;
 use crate::dom::svg::svgdefselement::SVGDefsElement;
@@ -150,6 +152,23 @@ fn create_svg_element(
         local_name!("tspan") => make!(SVGTSpanElement),
         local_name!("use") => make!(SVGUseElement),
         _ => make!(SVGElement),
+    }
+}
+
+fn create_mathml_element(
+    cx: &mut JSContext,
+    name: QualName,
+    prefix: Option<Prefix>,
+    document: &Document,
+    proto: Option<HandleObject>,
+) -> DomRoot<Element> {
+    assert_eq!(name.ns, ns!(mathml));
+
+    if pref!(mathml_core_enabled) {
+        let obj = MathMLElement::new(cx, name.local, prefix, document, proto);
+        DomRoot::upcast(obj)
+    } else {
+        Element::new(cx, name.local, name.ns, prefix, document, proto)
     }
 }
 
@@ -508,6 +527,8 @@ pub(crate) fn create_element_with_registry(
     }
     let element = if name.ns == ns!(svg) {
         create_svg_element(cx, name, prefix, document, proto, creator)
+    } else if name.ns == ns!(mathml) {
+        create_mathml_element(cx, name, prefix, document, proto)
     } else {
         Element::new(cx, name.local, name.ns, prefix, document, proto)
     };

@@ -51,11 +51,11 @@ use std::fmt::{self, Write};
 ///       flag that shares a bit with itself. For example, if you have three
 ///       bitflags like:
 ///
-///       ```
-///       let FOO = 1 << 0;
-///       let BAR = 1 << 1;
-///       let BAZ = 1 << 2;
-///       let BAZZ = BAR | BAZ;
+///       ```ignore
+///       FOO = 1 << 0;
+///       BAR = 1 << 1;
+///       BAZ = 1 << 2;
+///       BAZZ = BAR | BAZ;
 ///       ```
 ///
 ///       Then the following combinations won't be valid:

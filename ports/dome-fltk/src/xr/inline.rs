@@ -120,6 +120,7 @@ mod tests {
             required_features: vec!["viewer".into()],
             optional_features: vec!["local-floor".into()],
             first_person_observer_view: false,
+            painter_id: servo_base::id::PainterId::next(),
         };
         assert_eq!(init.validate(SessionMode::Inline, &[]).unwrap(), ["viewer"]);
         init.required_features.push("local".into());

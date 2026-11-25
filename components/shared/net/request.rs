@@ -1,7 +1,7 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
-
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use content_security_policy::{self as csp};
@@ -25,9 +25,13 @@ use uuid::Uuid;
 use crate::ReferrerPolicy;
 use crate::blob_url_store::UrlWithBlobClaim;
 use crate::policy_container::{PolicyContainer, RequestPolicyContainer};
-use crate::pub_domains::is_same_site;
+use crate::pub_domains::{Site, is_same_site};
 use crate::resource_fetch_timing::ResourceTimingType;
 use crate::response::{RedirectTaint, Response};
+
+/// A [network partition key](https://fetch.spec.whatwg.org/#network-partition-keys).
+/// Currently consists of a top-level site, or null if unpartitioned.
+pub type NetworkPartitionKey = Option<Site>;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, MallocSizeOf, PartialEq, Serialize)]
 /// An id to differentiate one network request from another.
@@ -228,8 +232,12 @@ pub struct RequestClient {
     pub is_nested_browsing_context: bool,
     /// <https://w3c.github.io/webappsec-upgrade-insecure-requests/#insecure-requests-policy>
     pub insecure_requests_policy: InsecureRequestsPolicy,
+    /// <https://w3c.github.io/webappsec-upgrade-insecure-requests/#upgrade-insecure-navigations-set>
+    pub upgrade_insecure_navigations_set: HashSet<UpgradeInsecureNavigations>,
     /// <https://w3c.github.io/webappsec-secure-contexts/#potentially-trustworthy-origin>
     pub has_trustworthy_ancestor_origin: bool,
+    /// <https://fetch.spec.whatwg.org/#determining-the-network-partition-key>
+    pub network_partition_key: NetworkPartitionKey,
 }
 
 /// <https://html.spec.whatwg.org/multipage/#system-visibility-state>
@@ -417,6 +425,12 @@ pub enum InsecureRequestsPolicy {
     Upgrade,
 }
 
+#[derive(Clone, Debug, Deserialize, MallocSizeOf, PartialEq, Eq, Hash, Serialize)]
+pub struct UpgradeInsecureNavigations {
+    pub host: String,
+    pub port: u16,
+}
+
 pub trait RequestHeadersSize {
     fn total_size(&self) -> usize;
 }
@@ -499,6 +513,9 @@ pub struct RequestBuilder {
     /// <https://fetch.spec.whatwg.org/#concept-request-policy-container>
     pub policy_container: RequestPolicyContainer,
 
+    /// <https://fetch.spec.whatwg.org/#request-user-activation>
+    pub user_activation: bool,
+
     /// <https://fetch.spec.whatwg.org/#concept-request-referrer>
     pub referrer: Referrer,
 
@@ -577,6 +594,7 @@ impl RequestBuilder {
             is_beacon: false,
             credentials_mode: CredentialsMode::CredentialsSameOrigin,
             use_url_credentials: false,
+            user_activation: false,
             origin: Origin::Client,
             client: None,
             reporting_cookie_client: None,
@@ -663,6 +681,12 @@ impl RequestBuilder {
     /// <https://fetch.spec.whatwg.org/#request-keepalive-flag>
     pub fn keep_alive(mut self, keep_alive: bool) -> RequestBuilder {
         self.keep_alive = keep_alive;
+        self
+    }
+
+    /// <https://fetch.spec.whatwg.org/#request-user-activation>
+    pub fn user_activation(mut self, user_activation: bool) -> RequestBuilder {
+        self.user_activation = user_activation;
         self
     }
 
@@ -818,6 +842,7 @@ impl RequestBuilder {
         if request.destination == Destination::Report && request.client.is_none() {
             request.traversable_for_user_prompts = TraversableForUserPrompts::NoTraversable;
         }
+        request.user_activation = self.user_activation;
         request.policy_container = self.policy_container;
         request.is_internal_request = self.is_internal_request;
         request
@@ -909,6 +934,8 @@ pub struct Request {
     pub parser_metadata: ParserMetadata,
     /// <https://fetch.spec.whatwg.org/#concept-request-policy-container>
     pub policy_container: RequestPolicyContainer,
+    /// <https://fetch.spec.whatwg.org/#request-user-activation>
+    pub user_activation: bool,
     /// Servo internal: if crash details are present, trigger a crash error page with these details.
     pub crash: Option<String>,
     /// Servo internal: whether this request originates from Servo internal implementation
@@ -995,6 +1022,7 @@ impl Request {
             use_cors_preflight: false,
             credentials_mode: CredentialsMode::CredentialsSameOrigin,
             use_url_credentials: false,
+            user_activation: false,
             cache_mode: CacheMode::Default,
             redirect_mode: RedirectMode::Follow,
             integrity_metadata: String::new(),
@@ -1410,14 +1438,13 @@ pub fn get_cors_unsafe_header_names(headers: &HeaderMap) -> Vec<HeaderName> {
 
 /// <https://fetch.spec.whatwg.org/#ref-for-convert-header-names-to-a-sorted-lowercase-set>
 pub fn convert_header_names_to_sorted_lowercase_set(
-    header_names: Vec<&HeaderName>,
+    mut header_names: Vec<&HeaderName>,
 ) -> Vec<HeaderName> {
     // HeaderName does not implement the needed traits to use a BTreeSet
-    // So create a new Vec, sort, then dedup
-    let mut ordered_set = header_names.to_vec();
-    ordered_set.sort_by(|a, b| a.as_str().partial_cmp(b.as_str()).unwrap());
-    ordered_set.dedup();
-    ordered_set.into_iter().cloned().collect()
+    // So sort the Vec, then dedup
+    header_names.sort_by(|a, b| a.as_str().partial_cmp(b.as_str()).unwrap());
+    header_names.dedup();
+    header_names.into_iter().cloned().collect()
 }
 
 pub fn create_request_body_with_content(content: String) -> RequestBody {

@@ -25,8 +25,8 @@ use net_traits::policy_container::PolicyContainer;
 use net_traits::request::{
     BodyChunkRequest, BodyChunkResponse, CredentialsMode, Destination, Initiator,
     InsecureRequestsPolicy, InternalRequest, Origin, ParserMetadata, RedirectMode, Referrer,
-    Request, RequestBody, RequestId, RequestMode, ResponseTainting, is_cors_safelisted_method,
-    is_cors_safelisted_request_header,
+    Request, RequestBody, RequestId, RequestMode, ResponseTainting, UpgradeInsecureNavigations,
+    is_cors_safelisted_method, is_cors_safelisted_request_header,
 };
 use net_traits::response::{Response, ResponseBody, ResponseType, TerminationReason};
 use net_traits::{
@@ -41,15 +41,16 @@ use rustls_pki_types::CertificateDer;
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::{CallbackSetter, GenericCallback};
 use servo_base::id::PipelineId;
-use servo_url::{Host, ServoUrl};
+use servo_url::{Host, ImmutableOrigin, ServoUrl};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::mpsc::{UnboundedReceiver as TokioReceiver, UnboundedSender as TokioSender};
 
 use crate::connector::CACertificates;
+#[cfg(feature = "devtools")]
+use crate::devtools::{DevtoolsBodyBuffer, body_for_devtools};
 use crate::devtools::{
     send_early_httprequest_to_devtools, send_response_to_devtools, send_security_info_to_devtools,
 };
-use crate::fetch::cors_cache::CorsCache;
 use crate::fetch::fetch_params::{
     ConsumePreloadedResources, FetchParams, SharedPreloadedResources,
 };
@@ -196,24 +197,13 @@ pub type DoneChannel = Option<(TokioSender<Data>, TokioReceiver<Data>)>;
 
 /// [Fetch](https://fetch.spec.whatwg.org#concept-fetch)
 pub async fn fetch(request: Request, target: Target<'_>, context: &FetchContext) -> Response {
-    fetch_with_cors_cache(request, &mut CorsCache::default(), target, context).await
-}
-
-/// Continuation of fetch from step 8.
-///
-/// <https://fetch.spec.whatwg.org#concept-fetch>
-pub async fn fetch_with_cors_cache(
-    request: Request,
-    cache: &mut CorsCache,
-    target: Target<'_>,
-    context: &FetchContext,
-) -> Response {
     // Step 7. Let timingInfo be a new fetch timing info whose start time
     // and post-redirect start time are the coarsened shared current time
     // given crossOriginIsolatedCapability,
     // and render-blocking is set to request’s render-blocking.
     let timing_info: ResourceFetchTimingContainer =
         ResourceFetchTiming::new(request.timing_type()).into();
+
     timing_info.set_attributes(&[
         ResourceAttribute::FetchStart,
         ResourceAttribute::StartTime(ResourceTimeValue::FetchStart),
@@ -312,7 +302,7 @@ pub async fn fetch_with_cors_cache(
     let request_id = request.id;
 
     // Step 17: Run main fetch given fetchParams.
-    let response = main_fetch(&mut fetch_params, cache, false, target, &mut None, context).await;
+    let response = main_fetch(&mut fetch_params, false, target, &mut None, context).await;
 
     if transfers_request_body_stream_to_later_manual_redirect(&fetch_params.request, &response) {
         request_body_stream_closer.disarm();
@@ -432,7 +422,6 @@ fn should_response_be_blocked_by_csp(
 /// [Main fetch](https://fetch.spec.whatwg.org/#concept-main-fetch)
 pub async fn main_fetch(
     fetch_params: &mut FetchParams,
-    cache: &mut CorsCache,
     recursive_flag: bool,
     target: Target<'_>,
     done_chan: &mut DoneChannel,
@@ -633,7 +622,7 @@ pub async fn main_fetch(
                 request.response_tainting = ResponseTainting::Basic;
 
                 // Substep 2. Return the result of running scheme fetch given fetchParams.
-                scheme_fetch(fetch_params, cache, target, done_chan, context).await
+                scheme_fetch(fetch_params, target, done_chan, context).await
             } else if request.mode == RequestMode::SameOrigin {
                 Response::network_error(NetworkError::CrossOriginResponse)
             } else if request.mode == RequestMode::NoCors {
@@ -645,7 +634,7 @@ pub async fn main_fetch(
                     request.response_tainting = ResponseTainting::Opaque;
 
                     // Substep 3. Return the result of running scheme fetch given fetchParams.
-                    scheme_fetch(fetch_params, cache, target, done_chan, context).await
+                    scheme_fetch(fetch_params, target, done_chan, context).await
                 }
             } else if !matches!(current_scheme, "http" | "https") {
                 Response::network_error(NetworkError::UnsupportedScheme)
@@ -659,41 +648,29 @@ pub async fn main_fetch(
                 // Substep 1. Set request’s response tainting to "cors".
                 request.response_tainting = ResponseTainting::CorsTainting;
 
+                let origin = request.origin.clone();
+                let url = request.current_url();
+
                 // Substep 2. Let corsWithPreflightResponse be the result of running override fetch
                 // given "http-fetch", fetchParams, and true.
-                let response = http_fetch(
-                    fetch_params,
-                    cache,
-                    true,
-                    true,
-                    false,
-                    target,
-                    done_chan,
-                    context,
-                )
-                .await;
-                // Substep 3.
-                if response.is_network_error() {
-                    // TODO clear cache entries using request
+                let cors_with_preflight_response =
+                    http_fetch(fetch_params, true, true, false, target, done_chan, context).await;
+                // Substep 3. If corsWithPreflightResponse is a network error, then clear cache entries using request.
+                if cors_with_preflight_response.is_network_error() {
+                    context
+                        .state
+                        .cors_cache
+                        .write()
+                        .clear_entries_for_origin_and_url(&origin, &url);
                 }
-                // Substep 4.
-                response
+                // Substep 4. Return corsWithPreflightResponse.
+                cors_with_preflight_response
             } else {
                 // Substep 1. Set request’s response tainting to "cors".
                 request.response_tainting = ResponseTainting::CorsTainting;
 
                 // Substep 2. Return the result of running override fetch given "http-fetch" and fetchParams.
-                http_fetch(
-                    fetch_params,
-                    cache,
-                    true,
-                    false,
-                    false,
-                    target,
-                    done_chan,
-                    context,
-                )
-                .await
+                http_fetch(fetch_params, true, false, false, target, done_chan, context).await
             }
         },
     };
@@ -709,7 +686,14 @@ pub async fn main_fetch(
         } else if let Ok(claim) = net_traits::blob_url_store::UrlWithBlobClaim::for_url(continuation.url) {
             if continuation.count_redirect { request.redirect_count += 1; }
             request.url_list.push(claim);
-            return Box::pin(main_fetch(fetch_params, cache, recursive_flag, target, done_chan, context)).await;
+            return Box::pin(main_fetch(
+                fetch_params,
+                recursive_flag,
+                target,
+                done_chan,
+                context,
+            ))
+            .await;
         } else {
             response = Response::network_error(NetworkError::UnsupportedScheme);
         }
@@ -971,9 +955,10 @@ async fn wait_for_response(
 ) {
     if let Some(ref mut ch) = *done_chan {
         #[cfg(feature = "devtools")]
-        let mut devtools_body = context.devtools_chan.as_ref().map(|_| Vec::new());
-        #[cfg(not(feature = "devtools"))]
-        let devtools_body = None;
+        let mut devtools_body = context
+            .devtools_chan
+            .as_ref()
+            .map(|_| DevtoolsBodyBuffer::default());
         loop {
             match ch.1.recv().await {
                 Some(Data::ContentLength(length)) => {
@@ -982,7 +967,7 @@ async fn wait_for_response(
                 Some(Data::Payload(bytes)) => {
                     #[cfg(feature = "devtools")]
                     if let Some(body) = devtools_body.as_mut() {
-                        body.extend(&bytes);
+                        body.append_chunk(&bytes);
                     }
                     target.process_response_chunk(request, bytes);
                 },
@@ -999,7 +984,11 @@ async fn wait_for_response(
                     break;
                 },
                 Some(Data::Done) => {
-                    send_response_to_devtools(request, context, response, devtools_body);
+                    #[cfg(feature = "devtools")]
+                    let devtools_response_body =
+                        devtools_body.map(DevtoolsBodyBuffer::into_response_body);
+                    #[cfg(feature = "devtools")]
+                    send_response_to_devtools(request, context, response, devtools_response_body);
                     break;
                 },
                 Some(Data::Cancelled) => {
@@ -1023,7 +1012,17 @@ async fn wait_for_response(
                 if context.devtools_chan.is_some() {
                     // Now that we've replayed the entire cached body,
                     // notify the DevTools server with the full Response.
-                    send_response_to_devtools(request, context, response, Some(vec.clone()));
+                    let (data, truncated, content_size) = body_for_devtools(vec);
+                    send_response_to_devtools(
+                        request,
+                        context,
+                        response,
+                        Some(devtools_traits::HttpResponseBody {
+                            data: Bytes::from(data),
+                            truncated,
+                            content_size,
+                        }),
+                    );
                 }
             },
             ResponseBody::Done(_) | ResponseBody::Empty => {},
@@ -1079,7 +1078,8 @@ fn create_about_memory(url: ServoUrl, timing_type: ResourceTimingType) -> Respon
     response
         .headers
         .typed_insert(ContentType::from(mime::TEXT_HTML_UTF_8));
-    *response.body.lock() = ResponseBody::Done(resources::read_bytes(Resource::AboutMemoryHTML));
+    *response.body.lock() =
+        ResponseBody::Done(resources::read_bytes(Resource::AboutMemoryHTML).into_vec());
     response.status = HttpStatus::default();
     response
 }
@@ -1149,7 +1149,6 @@ fn handle_allowcert_request(request: &mut Request, context: &FetchContext) -> io
 /// [Scheme fetch](https://fetch.spec.whatwg.org#scheme-fetch)
 async fn scheme_fetch(
     fetch_params: &mut FetchParams,
-    cache: &mut CorsCache,
     target: Target<'_>,
     done_chan: &mut DoneChannel,
     context: &FetchContext,
@@ -1179,7 +1178,6 @@ async fn scheme_fetch(
         "http" | "https" => {
             http_fetch(
                 fetch_params,
-                cache,
                 false,
                 false,
                 false,
@@ -1422,8 +1420,25 @@ fn should_upgrade_request_to_potentially_trustworthy(
             return true;
         }
 
-        // Step 2.4
-        // TODO : check for insecure navigation set after its implemention
+        // Step 2.3  Let tuple be a tuple of request’s URL's host and port.
+        let tuple = match request.url().origin() {
+            ImmutableOrigin::Opaque(_) => None,
+            ImmutableOrigin::Tuple(_, host, port) => Some(UpgradeInsecureNavigations {
+                host: host.to_string(),
+                port,
+            }),
+        };
+
+        // Step 2.4 If tuple is contained in client's upgrade insecure navigations set,
+        // then skip the remaining substeps, and continue upgrading request.
+        if let Some(tuple) = tuple &&
+            request
+                .client
+                .as_ref()
+                .is_some_and(|client| client.upgrade_insecure_navigations_set.contains(&tuple))
+        {
+            return true;
+        }
 
         // Step 2.5 Return without further modifying request
         false

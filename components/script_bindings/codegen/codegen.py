@@ -57,6 +57,7 @@ from WebIDL import (
     IDLNullValue,
     IDLObject,
     IDLObjectWithIdentifier,
+    IDLObservableArrayType,
     IDLPromiseType,
     IDLRecordType,
     IDLSequenceType,
@@ -246,6 +247,40 @@ def toBindingModuleFileFromDescriptor(desc: Descriptor) -> str:
         return toBindingModuleFile(desc.name)
 
 
+def getSlotIndex(member: IDLAttribute, descriptor: Descriptor) -> int:
+    assert member.slotIndices is not None
+    slotIndex = member.slotIndices[descriptor.interface.identifier.name]
+    return slotIndex[0] if isinstance(slotIndex, tuple) else slotIndex
+
+
+def instanceReservedSlotBase(descriptor: Descriptor) -> str:
+    if descriptor.isGlobal():
+        return "JSCLASS_GLOBAL_SLOT_COUNT + 1"
+    if descriptor.weakReferenceable:
+        return "2"
+    return "1"
+
+
+def memberReservedSlot(member: IDLAttribute, descriptor: Descriptor) -> str:
+    base = instanceReservedSlotBase(descriptor)
+    offset = getSlotIndex(member, descriptor)
+    if offset == 0:
+        return base
+    return f"{base} + {offset}"
+
+
+def getReservedSlotFunc(descriptor: Descriptor) -> str:
+    return "GetProxyReservedSlot" if descriptor.proxy else "JS_GetReservedSlot"
+
+
+def setReservedSlotFunc(descriptor: Descriptor) -> str:
+    return "SetProxyReservedSlot" if descriptor.proxy else "JS_SetReservedSlot"
+
+
+def python_bool_to_rust(b: bool) -> str:
+    return "true" if b else "false"
+
+
 def stripTrailingWhitespace(text: str) -> str:
     tail = '\n' if text.endswith('\n') else ''
     lines = text.splitlines()
@@ -256,13 +291,13 @@ def stripTrailingWhitespace(text: str) -> str:
 
 
 def innerContainerType(type: IDLType) -> IDLType:
-    assert type.isSequence() or type.isRecord()
-    assert isinstance(type, (IDLSequenceType, IDLRecordType, IDLNullableType))
+    assert type.isSequence() or type.isRecord() or type.isObservableArray()
+    assert isinstance(type, (IDLSequenceType, IDLRecordType, IDLNullableType, IDLObservableArrayType))
     return type.inner.inner if type.nullable() else type.inner
 
 
 def wrapInNativeContainerType(type: IDLType, inner: CGThing) -> CGThing:
-    if type.isSequence():
+    if type.isSequence() or type.isObservableArray():
         return CGWrapper(inner, pre="Vec<", post=">")
     elif type.isRecord():
         if type.nullable():
@@ -690,35 +725,6 @@ class CGMethodCall(CGThing):
         return self.cgRoot.define()
 
 
-def dictionaryHasSequenceMember(dictionary: IDLDictionary) -> bool:
-    for member in dictionary.members:
-        if typeIsSequenceOrHasSequenceMember(member.type):
-            return True
-
-    if dictionary.parent:
-        # pyrefly: ignore  # bad-argument-type
-        return dictionaryHasSequenceMember(dictionary.parent)
-
-    return False
-
-
-def typeIsSequenceOrHasSequenceMember(type: IDLType) -> bool:
-    if type.nullable():
-        assert isinstance(type, IDLNullableType)
-        type = type.inner
-    if type.isSequence():
-        return True
-    if type.isDictionary():
-        # pyrefly: ignore  # missing-attribute
-        return dictionaryHasSequenceMember(type.inner)
-    if type.isUnion():
-        assert isinstance(type, IDLUnionType)
-        assert type.flatMemberTypes is not None
-        return any(typeIsSequenceOrHasSequenceMember(m.type) for m in
-                   type.flatMemberTypes)
-    return False
-
-
 def union_native_type(t: IDLType) -> str:
     name = t.unroll().name
     generic = "::<D>" if containsDomInterface(t) else ""
@@ -887,12 +893,9 @@ def getJSToNativeConversionInfo(type: IDLType, descriptorProvider: DescriptorPro
         return templateBody
 
     # A helper function for types that implement FromJSValConvertible trait
-    def fromJSValTemplate(config: str, errorHandler: str, exceptionCode: str, type_name: str = "FromJSValConvertible",
-                          needsToBeTraced: bool = False) -> str:
-        returnValue = "value.to_traced()" if needsToBeTraced else "value"
-
-        return f"""match {type_name}::from_jsval(cx, ${{val}}, {config}) {{
-    Ok(ConversionResult::Success(value)) => {returnValue},
+    def fromJSValTemplate(config: str, errorHandler: str, exceptionCode: str) -> str:
+        return f"""match FromJSValConvertible::from_jsval(cx, ${{val}}, {config}) {{
+    Ok(ConversionResult::Success(value)) => value,
     Ok(ConversionResult::Failure(error)) => {{
         {errorHandler}
     }}
@@ -904,7 +907,7 @@ def getJSToNativeConversionInfo(type: IDLType, descriptorProvider: DescriptorPro
 
     assert not (isEnforceRange and isClamp)  # These are mutually exclusive
 
-    if type.isSequence() or type.isRecord():
+    if type.isSequence() or type.isRecord() or type.isObservableArray():
         innerInfo = getJSToNativeConversionInfo(innerContainerType(type),
                                                 descriptorProvider,
                                                 isMember=isMember,
@@ -996,14 +999,10 @@ def getJSToNativeConversionInfo(type: IDLType, descriptorProvider: DescriptorPro
         #    once again be providing a Promise to signal completion of an
         #    operation, which would then not be exposed to anyone other than
         #    our own implementation code.
-
-        needsToBeTraced = isMember == "Dictionary"
-        templateBody = fromJSValTemplate("()", failOrPropagate, exceptionCode, "<<D::Promise as PromiseHelpers<D>>::StackRoot>", needsToBeTraced)
+        templateBody = fromJSValTemplate("()", failOrPropagate, exceptionCode)
 
         if isArgument:
             declType = CGGeneric("&D::Promise")
-        elif needsToBeTraced:
-            declType = CGGeneric("<D::Promise as PromiseHelpers<D>>::HeapTraced")
         else:
             declType = CGGeneric("<D::Promise as PromiseHelpers<D>>::StackRoot")
         return handleOptional(templateBody, declType, handleDefault("None"))
@@ -1082,7 +1081,7 @@ def getJSToNativeConversionInfo(type: IDLType, descriptorProvider: DescriptorPro
 
         # For safety, we want to return types that are already rooted so callers
         # don't have to think about it.
-        require_heap_root = (isMember in ["Union", "Dictionary"] or sourceDescription == "return value")
+        require_heap_root = (isMember == "Union" or sourceDescription == "return value")
 
         if require_heap_root:
             typeName = f"Heap{typeName}"
@@ -1225,14 +1224,9 @@ def getJSToNativeConversionInfo(type: IDLType, descriptorProvider: DescriptorPro
         # pyrefly: ignore  # missing-attribute
         callback = type.unroll().callback
         declType = CGGeneric(f"{callback.identifier.name}<D>")
-        needTraced = isMember == "Dictionary"
-        if needTraced:
-            typeName = "TracedCallback"
-        else:
-            typeName = "RootedCallback"
-        finalDeclType = CGTemplatedType(typeName, declType)
+        finalDeclType = CGTemplatedType("RootedCallback", declType)
 
-        conversion = CGCallbackTempRoot(declType.define(), needTraced)
+        conversion = CGCallbackTempRoot(declType.define())
 
         if type.nullable():
             declType = CGTemplatedType("Option", declType)
@@ -1555,8 +1549,8 @@ def typeNeedsCx(type: IDLType | None, retVal: bool = False) -> Context:
     if type.nullable():
         assert isinstance(type, IDLNullableType)
         type = type.inner
-    if type.isSequence():
-        assert isinstance(type, IDLSequenceType)
+    if type.isSequence() or type.isObservableArray():
+        assert isinstance(type, (IDLSequenceType, IDLObservableArrayType))
         type = type.inner
     if type.isUnion():
         assert isinstance(type, IDLUnionType)
@@ -1575,8 +1569,8 @@ def returnTypeNeedsOutparam(type: IDLType | None) -> bool:
         type = type.inner
     if type.isObject():
         return True
-    if type.isSequence():
-        assert isinstance(type, IDLSequenceType)
+    if type.isSequence() or type.isObservableArray():
+        assert isinstance(type, (IDLSequenceType, IDLObservableArrayType))
         return returnTypeNeedsOutparam(type.inner)
     return type.isAny()
 
@@ -1586,8 +1580,8 @@ def outparamTypeFromReturnType(type: IDLType, isInnerType: bool = False) -> str:
         typename = "Value"
     elif type.isObject():
         typename = "*mut JSObject"
-    elif type.isSequence():
-        assert isinstance(type, IDLSequenceType)
+    elif type.isSequence() or type.isObservableArray():
+        assert isinstance(type, (IDLSequenceType, IDLObservableArrayType))
         inner_typename = outparamTypeFromReturnType(type.inner, isInnerType=True)
         return f"&mut RootedVec<Box<Heap<{inner_typename}>>>"
     else:
@@ -1601,7 +1595,7 @@ def outparamTypeFromReturnType(type: IDLType, isInnerType: bool = False) -> str:
 
 # Returns a conversion behavior suitable for a type
 def getConversionConfigForType(type: IDLType, isEnforceRange: bool, isClamp: bool, treatNullAs: str) -> str:
-    if type.isSequence() or type.isRecord():
+    if type.isSequence() or type.isRecord() or type.isObservableArray():
         return getConversionConfigForType(innerContainerType(type), isEnforceRange, isClamp, treatNullAs)
     if type.isDOMString():
         assert not isEnforceRange and not isClamp
@@ -1867,29 +1861,20 @@ class PropertyDefiner(Generic[PropertyDefinerElementType]):
             if specTerminator:
                 currentSpecs.append(specTerminator)
             joinedCurrentSpecs = ',\n'.join(currentSpecs)
-            specs.append(f"&Box::leak(Box::new([\n{joinedCurrentSpecs}]))[..]\n")
+            specs.append(f"&[\n{joinedCurrentSpecs}]\n")
             conds = ','.join(cond) if isinstance(cond, list) else cond
             prefableSpecs.append(
-                prefableTemplate % (f"&[{conds}]", f"unsafe {{ {name}_specs.get() }}", len(specs) - 1)
+                prefableTemplate % (f"&[{conds}]", f"Self::{name}_specs", len(specs) - 1)
             )
 
         joinedSpecs = ',\n'.join(specs)
-        specsArray = f"static {name}_specs: ThreadUnsafeOnceLock<&[&[{specType}]]> = ThreadUnsafeOnceLock::new();\n"
-
-        initSpecs = f"""
-pub(crate) fn init_{name}_specs<D: DomTypes>() {{
-    {name}_specs.set(Box::leak(Box::new([{joinedSpecs}])));
-}}"""
-
         joinedPrefableSpecs = ',\n'.join(prefableSpecs)
-        prefArray = f"static {name}: ThreadUnsafeOnceLock<&[Guard<&[{specType}]>]> = ThreadUnsafeOnceLock::new();\n"
-
-        initPrefs = f"""
-pub(crate) fn init_{name}_prefs<D: DomTypes>() {{
-    {name}.set(Box::leak(Box::new([{joinedPrefableSpecs}])));
-}}"""
-
-        return f"{specsArray}{initSpecs}{prefArray}{initPrefs}"
+        return f"""
+impl<D: DomTypes> BindingTables<D> {{
+    const {name}_specs: &'static [&'static [{specType}]] = &[{joinedSpecs}];
+    const {name}: &'static [Guard<&'static [{specType}]>] = &[{joinedPrefableSpecs}];
+}}
+"""
 
     def generateUnguardedArray(
             self,
@@ -1920,12 +1905,11 @@ pub(crate) fn init_{name}_prefs<D: DomTypes>() {{
         specsArray.append(specTerminator)
 
         joinedSpecs = ',\n'.join(specsArray)
-        initialSpecs = f"static {name}: ThreadUnsafeOnceLock<&[{specType}]> = ThreadUnsafeOnceLock::new();\n"
-        initSpecs = f"""
-pub(crate) fn init_{name}<D: DomTypes>() {{
-    {name}.set(Box::leak(Box::new([{joinedSpecs}])));
-}}"""
-        return dedent(f"{initialSpecs}{initSpecs}")
+        return f"""
+impl<D: DomTypes> BindingTables<D> {{
+    const {name}: &'static [{specType}] = &[{joinedSpecs}];
+}}
+"""
 
 
 # The length of a method is the minimum of the lengths of the
@@ -2110,12 +2094,11 @@ class MethodDefiner(PropertyDefiner):
                     # easy to tell whether the methodinfo is a JSJitInfo or
                     # a JSTypedMethodJitInfo here.  The compiler knows, though,
                     # so let it do the work.
-                    jitinfo = (f"unsafe {{ {identifier}_methodinfo.get() }}"
-                               " as *const _ as *const JSJitInfo")
+                    jitinfo = f"Self::{identifier}_methodinfo as *const _ as *const JSJitInfo"
                     accessor = f"Some(generic_method::<D, call_policies::{callPolicy}, {exceptionToRejection}>)"
                 else:
                     if m.get("returnsPromise", False):
-                        jitinfo = f"unsafe {{ {m.get('nativeName', m['name'])}_methodinfo.get() }}"
+                        jitinfo = f"Self::{m.get('nativeName', m['name'])}_methodinfo"
                         accessor = "Some(generic_static_promise_method)"
                     else:
                         jitinfo = "ptr::null()"
@@ -2234,7 +2217,7 @@ class AttrDefiner(PropertyDefiner):
 
                 accessor = f"generic_getter::<D, call_policies::{callPolicy}, {exceptionToRejection}>"
                 internalName = self.descriptor.internalNameFor(attr.identifier.name)
-                jitinfo = f"unsafe {{ {internalName}_getterinfo.get() }}"
+                jitinfo = f"Self::{internalName}_getterinfo"
 
             return f"JSNativeWrapper {{ op: Some({accessor}), info: {jitinfo} }}"
 
@@ -2267,7 +2250,7 @@ class AttrDefiner(PropertyDefiner):
 
                 accessor = f"generic_setter::<D, call_policies::{callPolicy}>"
                 internalName = self.descriptor.internalNameFor(attr.identifier.name)
-                jitinfo = f"unsafe {{ {internalName}_setterinfo.get() }}"
+                jitinfo = f"Self::{internalName}_setterinfo"
 
             return f"JSNativeWrapper {{ op: Some({accessor}), info: {jitinfo} }}"
 
@@ -2464,6 +2447,9 @@ class CGImports(CGWrapper):
                 return [type] + getTypesFromDictionary(type)
             if isinstance(type, IDLType) and type.isSequence():
                 assert isinstance(type, IDLSequenceType)
+                return componentTypes(type.inner)
+            if isinstance(type, IDLType) and type.isObservableArray():
+                assert isinstance(type, (IDLObservableArrayType))
                 return componentTypes(type.inner)
             return [type]
 
@@ -2671,6 +2657,10 @@ class CGDOMJSClass(CGThing):
         if not parentName:
             parentName = "Reflector"
 
+        slot_base = instanceReservedSlotBase(self.descriptor)
+        member_slots = self.descriptor.interface.totalMembersInSlots
+        slots = slot_base if member_slots == 0 else f"{slot_base} + {member_slots}"
+
         args = {
             "domClass": DOMClass(self.descriptor),
             "enumerateHook": "None",
@@ -2679,13 +2669,12 @@ class CGDOMJSClass(CGThing):
             "name": str_to_cstr_ptr(self.descriptor.interface.identifier.name),
             "resolveHook": "None",
             "mayResolveHook": "None",
-            "slots": "1",
+            "slots": slots,
             "traceHook": f"{TRACE_HOOK_NAME}::<D>",
         }
         if self.descriptor.isGlobal():
             assert not self.descriptor.weakReferenceable
             args["flags"] = "JSCLASS_IS_GLOBAL | JSCLASS_DOM_GLOBAL | JSCLASS_FOREGROUND_FINALIZE"
-            args["slots"] = "JSCLASS_GLOBAL_SLOT_COUNT + 1"
             if self.descriptor.interface.getExtendedAttribute("NeedResolve"):
                 args["enumerateHook"] = "Some(enumerate_window::<D>)"
                 args["resolveHook"] = "Some(resolve_window::<D>)"
@@ -2893,9 +2882,8 @@ class CGGeneric(CGThing):
 
 
 class CGCallbackTempRoot(CGGeneric):
-    def __init__(self, name: str, needTraced: bool) -> None:
-        extra = ".to_traced()" if needTraced else ""
-        inner = f"unsafe {{ {name.replace('<D>', '::<D>')}::new(cx, ${{val}}.get().to_object()) }}{extra}"
+    def __init__(self, name: str) -> None:
+        inner = f"unsafe {{ {name.replace('<D>', '::<D>')}::new(cx, ${{val}}.get().to_object()) }}"
         CGGeneric.__init__(self, inner)
 
 
@@ -3059,6 +3047,8 @@ def DomTypes(descriptors: list[Descriptor],
                 "crate::reflector::MutDomObject",
                 "crate::reflector::DomObject",
                 "crate::reflector::DomGlobalGeneric<Self>",
+                "crate::reflector::PrototypeInitializer",
+                "crate::reflector::HasPrototype",
                 "malloc_size_of::MallocSizeOf",
             ]
 
@@ -3342,7 +3332,7 @@ def InitLegacyUnforgeablePropertiesOnHolder(descriptor: Descriptor, properties: 
     ]
     for template, array in unforgeableMembers:
         if array.length() > 0:
-            unforgeables.append(CGGeneric(template % f"unsafe {{ {array.variableName()}.get() }}"))
+            unforgeables.append(CGGeneric(template % f"BindingTables::<D>::{array.variableName()}"))
     return CGList(unforgeables, "\n")
 
 
@@ -3412,7 +3402,6 @@ class CGWrapMethod(CGAbstractMethod):
             proxy_handler = f"Some(RegisterBindings::proxy_handlers::{self.descriptor.interface.identifier.name}.load(std::sync::atomic::Ordering::Acquire))"
         else:
             proxy_handler = "None"
-        prototype_id = f"PrototypeList::ID::{self.descriptor.name}"
         proto_object_fn = "GetProtoObject::<D>"
         if self.descriptor.proxy:
             c = "None"
@@ -3424,7 +3413,6 @@ class CGWrapMethod(CGAbstractMethod):
                     is_maybe_cross_origin_object: {cross_origin},
                     is_proxy: {is_proxy},
                     proxy_handler: {proxy_handler},
-                    prototype_id: {prototype_id},
                     class: {c},
                     proto_object_fn: {proto_object_fn},
                     has_legacy_unforgeable_members: {python_bool_to_rust(self.descriptor.hasLegacyUnforgeableMembers)},
@@ -3457,10 +3445,9 @@ class CGWrapGlobalMethod(CGAbstractMethod):
             ("define_guarded_methods", self.properties.methods),
             ("define_guarded_constants", self.properties.consts)
         ]
-        members = [f"{function}::<D>(cx, obj.handle(), unsafe {{ {array.variableName()}.get() }}, obj.handle());"
+        members = [f"{function}::<D>(cx, obj.handle(), BindingTables::<D>::{array.variableName()}, obj.handle());"
                    for (function, array) in pairs if array.length() > 0]
         membersStr = "\n".join(members)
-        name = self.descriptor.name
 
         return CGGeneric(f"""
     let raw = unsafe {{ Root::new(MaybeUnreflectedDom::from_box(object)) }};
@@ -3479,7 +3466,6 @@ class CGWrapGlobalMethod(CGAbstractMethod):
     assert!(!obj.is_null());
 
     let root = unsafe {{ raw.reflect_with(obj.get()) }};
-    root.reflector().set_proto_id(PrototypeList::ID::{name} as u16);
 
     let mut cx = AutoRealm::new_from_handle(cx, obj.handle());
     let cx = &mut cx;
@@ -3736,12 +3722,7 @@ class PropertyArrays():
         return names
 
     def __str__(self) -> str:
-        define = ""
-        for array in self.arrayNames():
-            val = str(getattr(self, array))
-            if val:
-                define += "pub(crate) " + str(getattr(self, array))
-        return define
+        return "".join(str(getattr(self, array)) for array in self.arrayNames())
 
 
 class CGCrossOriginProperties(CGThing):
@@ -3758,8 +3739,8 @@ class CGCrossOriginProperties(CGThing):
 
             pub(crate) fn init_cross_origin_properties<D: DomTypes>() {
                 CROSS_ORIGIN_PROPERTIES.set(CrossOriginProperties {
-                    attributes: unsafe { sCrossOriginAttributes.get() },
-                    methods: unsafe { sCrossOriginMethods.get() },
+                    attributes: BindingTables::<D>::sCrossOriginAttributes,
+                    methods: BindingTables::<D>::sCrossOriginMethods,
                 });
             }
             """
@@ -3780,8 +3761,11 @@ class CGCollectJSONAttributesMethod(CGAbstractMethod):
         self.toJSONMethod = toJSONMethod
 
     def definition_body(self) -> CGThing:
-        ret = """let incumbent_global = D::GlobalScope::incumbent().expect("no incumbent global");
-let global = incumbent_global.reflector().get_jsobject();\n"""
+        ret = """
+              let unwrapped = CheckedUnwrapStatic(obj.get());
+              assert!(!unwrapped.is_null());
+              rooted!(&in(cx) let global = GetNonCCWObjectGlobal(unwrapped));
+              """
         interface = self.descriptor.interface
         for m in interface.members:
             if m.isAttr() and not m.isStatic() and m.type.isJSONType():
@@ -3795,7 +3779,7 @@ let global = incumbent_global.reflector().get_jsobject();\n"""
                          c.is_satisfied::<D>(
                            cx,
                            HandleObject::from_raw(obj),
-                           global));
+                           global.handle()));
                     if is_satisfied {
                       rooted!(&in(cx) let mut temp = UndefinedValue());
                       if !get_${name}::<D>(cx.raw_cx(), obj, this, JSJitGetterCallArgs { _base: temp.handle_mut().into() }) {
@@ -3835,19 +3819,19 @@ class CGCreateInterfaceObjectsMethod(CGAbstractMethod):
 
 
         if self.properties.static_methods.length():
-            methods = f"{self.properties.static_methods.variableName()}.get()"
+            methods = f"BindingTables::<D>::{self.properties.static_methods.variableName()}"
         else:
             methods = "&[]"
 
         if self.descriptor.interface.hasConstants():
-            constants = "sConstants.get()"
+            constants = "BindingTables::<D>::sConstants"
         else:
             constants = "&[]"
 
 
         if self.descriptor.interface.isNamespace():
             if self.properties.static_attrs.length():
-                attrs = f"{self.properties.static_attrs.variableName()}.get()"
+                attrs = f"BindingTables::<D>::{self.properties.static_attrs.variableName()}"
             else:
                 attrs = "&[]"
 
@@ -3906,7 +3890,7 @@ class CGCreateInterfaceObjectsMethod(CGAbstractMethod):
         for arrayName in self.properties.arrayNames():
             array = getattr(self.properties, arrayName)
             if array.length():
-                properties[arrayName] = f"{array.variableName()}.get()"
+                properties[arrayName] = f"BindingTables::<D>::{array.variableName()}"
             else:
                 properties[arrayName] = "&[]"
 
@@ -4301,9 +4285,6 @@ class CGCallGenerator(CGThing):
 
         args = CGList([CGGeneric(arg) for arg in argsPre], ", ")
         for (a, name) in arguments:
-            # XXXjdm Perhaps we should pass all nontrivial types by borrowed pointer
-            if a.type.isDictionary():
-                name = f"&{name}"
             args.append(CGGeneric(name))
 
         match max([needCx(returnType, (a for (a, _) in arguments), True), Context.Cx if is_implicit_cx_attribute else Context.No]):
@@ -4454,6 +4435,8 @@ class CGPerSignatureCall(CGThing):
                 cgThings.append(CGIterableMethodGenerator(descriptor,
                                                           idlNode.maplikeOrSetlikeOrIterable,
                                                           idlNode.identifier.name))
+        elif isinstance(idlNode, IDLAttribute) and setter and idlNode.type.isObservableArray():
+            cgThings.append(CGObservableArraySetterGenerator(descriptor, idlNode))
         else:
             hasCEReactions = idlNode.getExtendedAttribute("CEReactions") or False
             is_event_listener = isinstance(idlNode, IDLAttribute) and isEventHandlerCallback(idlNode)
@@ -4807,6 +4790,230 @@ class CGStaticMethod(CGAbstractStaticBindingMethod):
         return CGList([safeContext, setupArgs, call])
 
 
+def observableArrayBindingNamespace(attr: IDLAttribute) -> str:
+    return f"ObservableArray{MakeNativeName(attr.identifier.name)}"
+
+
+class CGObservableArrayProxyHandler_callback(CGThing):
+    def __init__(self, descriptor: Descriptor, name: str, args: list[Argument], attr: IDLAttribute, callbackType: str, invalidTypeFatal: bool = False) -> None:
+        CGThing.__init__(self)
+        self.descriptor = descriptor
+        self.name = name
+        self.args = args
+        self.attr = attr
+        self.callbackType = callbackType
+        self.invalidTypeFatal = invalidTypeFatal
+
+    def preConversion(self) -> str:
+        return ""
+
+    def preCallback(self) -> str:
+        return ""
+
+    def postCallback(self) -> str:
+        raise NotImplementedError
+
+    def define(self) -> str:
+        exceptionCode = (
+            fill(
+                """
+                debug_assert!(false, "ObservableArray backing list element had the wrong type");
+                return false;
+                """
+            )
+            if self.invalidTypeFatal
+            else None
+        )
+        containerType = innerContainerType(self.attr.type)
+        conversionInfo = getJSToNativeConversionInfo(
+            containerType,
+            self.descriptor,
+            sourceDescription="Element in ObservableArray backing list",
+            exceptionCode=exceptionCode,
+        )
+        convertType = instantiateJSToNativeConversionTemplate(
+            conversionInfo.template,
+            {"val": "value"},
+            conversionInfo.declType,
+            "decl",
+            needsAutoRoot=type_needs_auto_root(containerType),
+        ).define()
+        callbackArgs = ["cx", "decl", "index"]
+        traitName = f"{self.descriptor.interface.identifier.name}Methods"
+        nativeType = self.descriptor.concreteType
+        methodName = f"On{self.callbackType}{MakeNativeName(self.attr.identifier.name)}"
+        return fill(
+            """
+            unsafe fn ${functionName}<D: DomTypes>(${args}) -> bool {
+                ${preConversion}
+                ${convertType}
+                ${preCallback}
+                let mut owner = UndefinedValue();
+                GetProxyReservedSlot(proxy.get(), crate::observablearray::OBSERVABLE_ARRAY_OWNER_SLOT, &mut owner);
+                if !owner.is_undefined() {
+                    let interface = &*(owner.to_private() as *const ${nativeType});
+                    if let Err(e) = <${nativeType} as ${traitName}<D>>::${methodName}(interface, ${callbackArgs}) {
+                        let global = D::GlobalScope::from_object(proxy.get());
+                        <D as DomHelpers<D>>::throw_dom_exception(cx, &global, e);
+                        return false;
+                    }
+                }
+                ${postCallback}
+            }
+            """,
+            functionName=self.name,
+            args=', '.join([a.declare() for a in self.args]),
+            preConversion=self.preConversion(),
+            convertType=convertType,
+            preCallback=self.preCallback(),
+            nativeType=nativeType,
+            traitName=traitName,
+            methodName=methodName,
+            callbackArgs=", ".join(callbackArgs),
+            postCallback=self.postCallback(),
+        )
+
+
+class CGObservableArrayProxyHandler_OnDeleteItem(CGObservableArrayProxyHandler_callback):
+    def __init__(self, descriptor: Descriptor, name: str, args: list[Argument], attr: IDLAttribute) -> None:
+        CGObservableArrayProxyHandler_callback.__init__(self, descriptor, name, args, attr, "Delete", True)
+
+    def postCallback(self) -> str:
+        return "return true;"
+
+
+class CGObservableArrayProxyHandler_SetIndexedValue(CGObservableArrayProxyHandler_callback):
+    def __init__(self, descriptor: Descriptor, name: str, args: list[Argument], attr: IDLAttribute) -> None:
+        CGObservableArrayProxyHandler_callback.__init__(self, descriptor, name, args, attr, "Set")
+
+    def preConversion(self) -> str:
+        return dedent(
+            """
+            let mut old_len = 0;
+            if !GetArrayLength(cx, backing_list, &mut old_len) {
+                return false;
+            }
+            if index > old_len {
+                return unsafe { (*result).fail_bad_index() };
+            }
+            """
+        )
+
+    def preCallback(self) -> str:
+        return dedent(
+            """
+            if index < old_len {
+                rooted!(&in(cx) let mut old_value = UndefinedValue());
+                if !JS_GetElement(cx, backing_list, index, old_value.handle_mut()) {
+                    return false;
+                }
+                if !on_delete_item::<D>(cx, proxy, old_value.handle(), index) {
+                    return false;
+                }
+            }
+            """
+        )
+
+    def postCallback(self) -> str:
+        return dedent(
+            """
+            if !JS_SetElement(cx, backing_list, index, value) {
+                return false;
+            }
+            unsafe { (*result).succeed() }
+            """
+        )
+
+
+class CGObservableArrayProxyHandlerGenerator(CGThing):
+    def __init__(self, descriptor: Descriptor, attr: IDLAttribute) -> None:
+        CGThing.__init__(self)
+        self.descriptor = descriptor
+        self.attr = attr
+
+    def define(self) -> str:
+        namespace = observableArrayBindingNamespace(self.attr)
+        onDeleteArgs = [
+            Argument("&mut JSContext", "cx"),
+            Argument("HandleObject", "proxy"),
+            Argument("HandleValue", "value"),
+            Argument("u32", "index")
+        ]
+        setIndexedArgs = [
+            Argument("&mut JSContext", "cx"),
+            Argument("HandleObject", "proxy"),
+            Argument("HandleObject", "backing_list"),
+            Argument("u32", "index"),
+            Argument("HandleValue", "value"),
+            Argument("*mut ObjectOpResult", "result")
+        ]
+        on_delete = CGObservableArrayProxyHandler_OnDeleteItem(self.descriptor, "on_delete_item", onDeleteArgs, self.attr,).define()
+        set_indexed = CGObservableArrayProxyHandler_SetIndexedValue(self.descriptor, "set_indexed_value", setIndexedArgs, self.attr).define()
+        return f"""
+mod {namespace} {{
+    use super::*;
+
+    pub(crate) static HANDLER: ThreadUnsafeOnceLock<*const libc::c_void> = ThreadUnsafeOnceLock::new();
+
+    pub(crate) fn init_proxy_handler<D: DomTypes>() {{
+        let config = const {{ &crate::observablearray::ObservableArrayProxyHandlerConfig {{
+            on_delete_item: on_delete_item::<D>,
+            set_indexed_value: set_indexed_value::<D>,
+        }} }};
+        HANDLER.set( unsafe {{ crate::observablearray::create_proxy_handler(config) }} );
+    }}
+
+    {on_delete}
+
+    {set_indexed}
+}} // mod {namespace}
+"""
+
+
+class CGObservableArraySetterGenerator(CGGeneric):
+    def __init__(self, descriptor: Descriptor, attr: IDLAttribute) -> None:
+        namespace = observableArrayBindingNamespace(attr)
+        slot = memberReservedSlot(attr, descriptor)
+        conversion = wrapForType(
+            "val.handle_mut()",
+            result="(&arg0)[i]",
+            successCode="""
+if !JS_SetElement(cx, proxy.handle(), i as u32, val.handle()) {
+    return false;
+}
+""",
+        )
+        CGGeneric.__init__(self, fill(
+            """
+            let obj = HandleObject::from_raw(obj);
+            rooted!(&in(cx) let mut proxy = ptr::null_mut::<JSObject>());
+            if !crate::observablearray::get_or_create_proxy_object(
+                cx,
+                obj,
+                ${isProxy},
+                ${slot},
+                unsafe { *${namespace}::HANDLER.get() },
+                this as *const ${nativeType} as *const libc::c_void,
+                proxy.handle_mut(),
+            ) {
+                return false;
+            }
+            if !crate::observablearray::set_length(cx, proxy.handle(), 0) {
+                return false;
+            }
+            rooted!(&in(cx) let mut val = UndefinedValue());
+            for i in 0..arg0.len() {
+                ${conversion}
+            }
+            """,
+            isProxy=python_bool_to_rust(descriptor.proxy),
+            slot=slot,
+            namespace=namespace,
+            nativeType=descriptor.concreteType,
+            conversion=conversion,
+        ))
+
+
 class CGSpecializedGetter(CGAbstractExternMethod):
     """
     A class for generating the code for a specialized attribute getter
@@ -4822,6 +5029,36 @@ class CGSpecializedGetter(CGAbstractExternMethod):
         CGAbstractExternMethod.__init__(self, descriptor, name, "bool", args, templateArgs=["D: DomTypes"])
 
     def definition_body(self) -> CGThing:
+        if self.attr.type.isObservableArray():
+            namespace = observableArrayBindingNamespace(self.attr)
+            slot = memberReservedSlot(self.attr, self.descriptor)
+            return CGGeneric(fill(
+                """
+let mut cx = JSContext::from_ptr(ptr::NonNull::new(cx).unwrap());
+let cx = &mut cx;
+let this = &*(this as *const ${nativeType});
+let obj = HandleObject::from_raw(_obj);
+rooted!(&in(cx) let mut proxy = ptr::null_mut::<JSObject>());
+if !crate::observablearray::get_or_create_proxy_object(
+    cx,
+    obj,
+    ${isProxy},
+    ${slot},
+    unsafe { *${namespace}::HANDLER.get() },
+    this as *const ${nativeType} as *const libc::c_void,
+    proxy.handle_mut(),
+) {
+    return false;
+}
+args.rval().set(ObjectValue(proxy.get()));
+true
+                """,
+                nativeType=self.descriptor.concreteType,
+                isProxy=python_bool_to_rust(self.descriptor.proxy),
+                slot=slot,
+                namespace=namespace,
+            ))
+
         nativeName = CGSpecializedGetter.makeNativeName(self.descriptor,
                                                         self.attr)
 
@@ -5049,13 +5286,11 @@ class CGMemberJITInfo(CGThing):
             return fill(
                 """
                 $*{argTypesDecl}
-                static ${infoName}: ThreadUnsafeOnceLock<JSTypedMethodJitInfo> = ThreadUnsafeOnceLock::new();
-
-                pub(crate) fn init_${infoName}<D: DomTypes>() {
-                    ${infoName}.set(JSTypedMethodJitInfo {
+                impl<D: DomTypes> BindingTables<D> {
+                    const ${infoName}: &'static JSTypedMethodJitInfo = &JSTypedMethodJitInfo {
                         base: ${jitInfoInit},
                         argTypes: &${argTypes} as *const _ as *const JSJitInfo_ArgType,
-                    });
+                    };
                 }
                 """,
                 argTypesDecl=argTypesDecl,
@@ -5064,10 +5299,8 @@ class CGMemberJITInfo(CGThing):
                 argTypes=argTypesArray)
 
         return f"""
-static {infoName}: ThreadUnsafeOnceLock<JSJitInfo> = ThreadUnsafeOnceLock::new();
-
-pub(crate) fn init_{infoName}<D: DomTypes>() {{
-    {infoName}.set({jitInfoInitializer(False)});
+impl<D: DomTypes> BindingTables<D> {{
+    const {infoName}: &'static JSJitInfo = &{jitInfoInitializer(False)};
 }}"""
 
     def define(self) -> str:
@@ -5085,10 +5318,13 @@ pub(crate) fn init_{infoName}<D: DomTypes>() {{
 
             isAlwaysInSlot = self.member.getExtendedAttribute("StoreInSlot") or False
             if self.member.slotIndices is not None:
-                assert isAlwaysInSlot or self.member.getExtendedAttribute("Cached")
+                assert (
+                    isAlwaysInSlot or
+                    self.member.getExtendedAttribute("Cached") or
+                    self.member.type.isObservableArray()
+                )
                 isLazilyCachedInSlot = not isAlwaysInSlot
-                # pyrefly: ignore  # unknown-name
-                slotIndex = memberReservedSlot(self.member)  # noqa: F821 FIXME: memberReservedSlot is not defined
+                slotIndex = memberReservedSlot(self.member, self.descriptor)
                 # We'll statically assert that this is not too big in
                 # CGUpdateMemberSlotsMethod, in the case when
                 # isAlwaysInSlot is true.
@@ -5205,6 +5441,8 @@ pub(crate) fn init_{infoName}<D: DomTypes>() {{
             # No return, every time
             return "JSVAL_TYPE_UNDEFINED"
         if t.isSequence():
+            return "JSVAL_TYPE_OBJECT"
+        if t.isObservableArray():
             return "JSVAL_TYPE_OBJECT"
         if t.isRecord():
             return "JSVAL_TYPE_OBJECT"
@@ -5350,10 +5588,8 @@ class CGStaticMethodJitinfo(CGGeneric):
         CGGeneric.__init__(
             self,
             f"""
-            static {method.identifier.name}_methodinfo: ThreadUnsafeOnceLock<JSJitInfo> = ThreadUnsafeOnceLock::new();
-
-            pub(crate) fn init_{method.identifier.name}_methodinfo<D: DomTypes>() {{
-                {method.identifier.name}_methodinfo.set(JSJitInfo {{
+            impl<D: DomTypes> BindingTables<D> {{
+                const {method.identifier.name}_methodinfo: &'static JSJitInfo = &JSJitInfo {{
                     __bindgen_anon_1: JSJitInfo__bindgen_ty_1 {{
                         staticMethod: Some({CGDictionary.makeMemberName(method.identifier.name)}::<D>)
                     }},
@@ -5376,7 +5612,7 @@ class CGStaticMethodJitinfo(CGGeneric):
                             0,
                         ).to_ne_bytes()
                     ),
-                }});
+                }};
             }}
             """
         )
@@ -6975,13 +7211,30 @@ let this = native_from_object_static::<{self.descriptor.concreteType}>(obj).unwr
 
 
 def finalizeHook(descriptor: Descriptor, hookName: str, context: str) -> str:
+    cleanup = []
+    for m in descriptor.interface.members:
+        if m.isAttr() and m.type.isObservableArray():
+            cleanup.append(fill(
+                """
+                {
+                    let mut slot = UndefinedValue();
+                    ${getReservedSlot}(obj, ${slotIndex}, &mut slot);
+                    if !slot.is_undefined() {
+                        unsafe { crate::observablearray::clear_owner_slot(slot.to_object()) };
+                    }
+                }
+                """,
+                getReservedSlot=getReservedSlotFunc(descriptor),
+                slotIndex=memberReservedSlot(m, descriptor),
+            ))
+
     if descriptor.isGlobal():
         release = "finalize_global(obj, this);"
     elif descriptor.weakReferenceable:
         release = "finalize_weak_referenceable(this);"
     else:
         release = "finalize_common(this);"
-    return release
+    return "\n".join(cleanup + [release])
 
 
 class CGClassTraceHook(CGAbstractClassHook):
@@ -7149,6 +7402,22 @@ class CGInterfaceTrait(CGThing):
                         rettype = return_type(descriptor, rettype, infallible)
                         yield f"{name}{'_' * idx}", arguments, rettype, m.isStatic()
                 elif m.isAttr():
+                    if m.type.isObservableArray():
+                        nativeName = MakeNativeName(m.identifier.name)
+                        callback_args = [("cx", "&mut JSContext")]
+                        callback_value_type = getJSToNativeConversionInfo(
+                            m.type.inner,
+                            descriptor,
+                        ).declType
+                        assert callback_value_type is not None
+                        callback_args.extend([
+                            ("value", callback_value_type.define()),
+                            ("index", "u32"),
+                        ])
+                        yield (f"OnSet{nativeName}", callback_args, "ErrorResult", m.isStatic())
+                        yield (f"OnDelete{nativeName}", callback_args, "ErrorResult", m.isStatic())
+                        continue
+
                     name = CGSpecializedGetter.makeNativeName(descriptor, m)
 
                     # If this attribute is a repetition due to capitalization differences in the JavaScript
@@ -7331,60 +7600,15 @@ class CGInitStatics(CGThing):
     def __init__(self, descriptor: Descriptor) -> None:
         CGThing.__init__(self)
 
-        def internal(method: IDLMethod) -> str:
-            return descriptor.internalNameFor(method.identifier.name)
-
-        properties = PropertyArrays(descriptor)
-        all_names = PropertyArrays.arrayNames()
-        arrays = [getattr(properties, name) for name in all_names]
-        nonempty = map(lambda x: x.variableName(), filter(lambda x: x.length() != 0, arrays))
-        specs = [[
-            f'init_{name}_specs::<D>();',
-            f'init_{name}_prefs::<D>();',
-        ] for name in nonempty]
-        flat_specs = [x for xs in specs for x in xs]
-        specs = '\n'.join(flat_specs)
-        module = f"crate::codegen::GenericBindings::{toBindingPath(descriptor)}"
-        relevantMethods = [
-            m for m in descriptor.interface.members if m.isMethod()
-        ] if not descriptor.interface.isCallback() else []
-        allOperations = descriptor.operations.keys()
-        relevantOperations = list(map(lambda x: f"__{x.lower()}", filter(lambda o: o != "Stringifier", allOperations)))
-        relevantMethods = filter(
-            lambda m: internal(m) not in relevantOperations,
-            relevantMethods,
-        )
-        relevantMethods = filter(
-            lambda x: (
-                not x.isStatic()
-                or any([r.isPromise() for r, _ in x.signatures()])
-            ),
-            relevantMethods
-        )
-
-        methods = [f'{module}::init_{internal(m)}_methodinfo::<D>();' for m in relevantMethods]
-        getters = [
-            f'init_{internal(m)}_getterinfo::<D>();'
-            for m in descriptor.interface.members if m.isAttr() and not m.isStatic()
-        ]
-        setters = [
-            f'init_{internal(m)}_setterinfo::<D>();'
-            for m in descriptor.interface.members
-            if m.isAttr() and (
-                not m.readonly
-                or m.getExtendedAttribute("PutForwards")
-                or m.getExtendedAttribute("Replaceable")
-            ) and not m.isStatic()
-        ]
-        methods = '\n'.join(methods)
-        getters = '\n'.join(getters)
-        setters = '\n'.join(setters)
-        crossorigin = [
-            "init_sCrossOriginMethods::<D>();",
-            "init_sCrossOriginAttributes::<D>();",
+        crossorigin = (
             "init_cross_origin_properties::<D>();"
-        ] if descriptor.emitsCrossOriginPropertyTable() else []
-        crossorigin_joined = '\n'.join(crossorigin)
+            if descriptor.emitsCrossOriginPropertyTable()
+            else ""
+        )
+        observable_arrays = '\n'.join(
+                    f'ObservableArray{MakeNativeName(m.identifier.name)}::init_proxy_handler::<D>();'
+                    for m in descriptor.interface.members if m.isAttr() and m.type.isObservableArray()
+                )
         interface = (
             "init_interface_object::<D>();"
             if descriptor.interface.hasInterfaceObject()
@@ -7404,11 +7628,8 @@ class CGInitStatics(CGThing):
         pub(crate) fn init_statics<D: DomTypes>() {{
             {interface}
             {nonproxy}
-            {methods}
-            {getters}
-            {setters}
-            {crossorigin_joined}
-            {specs}
+            {crossorigin}
+            {observable_arrays}
         }}
         """
 
@@ -7456,6 +7677,8 @@ class CGDescriptor(CGThing):
                         )
                     cgThings.append(CGMemberJITInfo(descriptor, m))
             elif m.isAttr():
+                if m.type.isObservableArray():
+                    cgThings.append(CGObservableArrayProxyHandlerGenerator(descriptor, m))
                 if m.getExtendedAttribute("Unscopable"):
                     assert not m.isStatic()
                     unscopableNames.append(m.identifier.name)
@@ -7575,7 +7798,8 @@ class CGDescriptor(CGThing):
                                            name in legacyWindowAliases], ",\n")),
                         CGGeneric("];\n")], "\n"))
 
-        cgThings.append(CGGeneric(str(properties)))
+        propertyArrays = "" if descriptor.interface.getExtendedAttribute("Inline") else str(properties)
+        cgThings.append(CGGeneric(propertyArrays))
 
         if not descriptor.interface.getExtendedAttribute("Inline"):
             if not descriptor.interface.isCallback() and not descriptor.interface.isNamespace():
@@ -7600,6 +7824,13 @@ class CGDescriptor(CGThing):
                                                            haveLegacyWindowAliases))
 
         cgThings.append(CGInitStatics(descriptor))
+
+        cgThings.insert(0, CGGeneric(
+            # This only silences the warning on the struct being unused, unused associated constants
+            # will still be warned on. BindingTables itself has no size, so it being unused in some
+            # cases is fine and avoids needing to check here if we need to add it or not.
+            "#[allow(dead_code)]\n"
+            "pub(crate) struct BindingTables<D: DomTypes>(std::marker::PhantomData<D>);\n"))
 
         cgRoot: CGThing = CGList(cgThings, '\n')
 
@@ -7687,6 +7918,8 @@ class CGDictionary(CGThing):
                                          exceptionCode="return Err(());\n"))
             for member in dictionary.members]
 
+        self.parentNeedsToBeTraced = self.dictionary.parent and type_needs_tracing(self.dictionary.parent)
+
     def define(self) -> str:
         if not self.generatable:
             return ""
@@ -7723,8 +7956,6 @@ impl{self.generic} Clone for {self.makeClassName(self.dictionary)}{self.genericS
             typeName = f"{self.makeModuleName(d.parent)}::{self.makeClassName(d.parent)}"
             _, parentSuffix = genericsForType(d.parent)
             typeName += parentSuffix
-            if type_needs_tracing(d.parent):
-                typeName = f"RootedTraceableBox<{typeName}>"
             inheritance = f"    pub parent: {typeName},\n"
         else:
             inheritance = ""
@@ -7737,33 +7968,32 @@ impl{self.generic} Clone for {self.makeClassName(self.dictionary)}{self.genericS
         if self.membersNeedTracing():
             mustRoot = "#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]\n"
 
-        # We can't unconditionally derive Default here, because union types can have unique
-        # default values provided for each usage. Instead, whenever possible we re-use the empty()
-        # method that is generated.
         if not self.hasRequiredFields(self.dictionary):
-            if d.parent:
-                inheritanceDefault = "        parent: Default::default(),\n"
-            else:
-                inheritanceDefault = ""
-            if not self.membersNeedTracing():
-                impl = "        Self::empty()\n"
-            else:
-                memberDefaults = [f"        {self.makeMemberName(m[0].identifier.name)}: Default::default(),"
-                                  for m in self.memberInfo]
-                joinedDefaults = '\n'.join(memberDefaults)
-                impl = (
-                    "        Self {\n"
-                    f"            {inheritanceDefault}{joinedDefaults}"
-                    "        }\n"
-                )
+            # If a dictionary has only trivial defaut values we can avoid `Default` manual implementation
+            TRIVIAL_DEFAULT_VALUES = {None, "None", "false", "0", "0.0", "Vec::new()"}
+            hasDefaultValues = any(info.default not in TRIVIAL_DEFAULT_VALUES for _, info in self.memberInfo)
 
-            default = (
-                f"impl{self.generic} Default for {self.makeClassName(d)}{self.genericSuffix} {{\n"
-                "    fn default() -> Self {\n"
-                f"{impl}"
-                "    }\n"
-                "}\n"
-            )
+            if hasDefaultValues or self.generic:
+                defaultFields = [f"{self.makeMemberName(member.identifier.name)}: {info.default or 'None'},"
+                               for member, info in self.memberInfo]
+
+                if d.parent:
+                    defaultFields.insert(0, "parent: Default::default(),")
+
+                joinedDefaultFields = '\n'.join(defaultFields)
+                joinedDefaultFields = CGIndenter(CGGeneric(joinedDefaultFields), 12).define()
+
+                default = f"""
+impl{self.generic} Default for {self.makeClassName(d)}{self.genericSuffix} {{
+    fn default() -> Self {{
+        Self {{
+{joinedDefaultFields}
+        }}
+    }}
+}}
+"""
+            else:
+                derive.append("Default")
 
         manualImpls = "\n".join(map(lambda t: self.manualImpl(t), self.manualImpls))
         joinedMemberDecls = '\n'.join(memberDecls)
@@ -7782,10 +8012,11 @@ impl{self.generic} Clone for {self.makeClassName(self.dictionary)}{self.genericS
         d = self.dictionary
         if d.parent:
             assert isinstance(d.parent, IDLDictionary)
+            modifier = ".into_inner()" if self.parentNeedsToBeTraced else ""
             initParent = (
                 "{\n"
                 f"    match {self.makeModuleName(d.parent)}::{self.makeClassName(d.parent)}::new(cx, val)? {{\n"
-                "        ConversionResult::Success(v) => v,\n"
+                f"        ConversionResult::Success(v) => v{modifier},\n"
                 "        ConversionResult::Failure(error) => {\n"
                 "            throw_type_error(cx, error.as_ref());\n"
                 "            return Err(());\n"
@@ -7799,7 +8030,7 @@ impl{self.generic} Clone for {self.makeClassName(self.dictionary)}{self.genericS
         def memberInit(memberInfo: tuple[IDLArgument, JSToNativeConversionInfo]) -> CGThing:
             member, _ = memberInfo
             name = self.makeMemberName(member.identifier.name)
-            conversion = self.getMemberConversion(memberInfo, member.type)
+            conversion = self.getMemberConversion(memberInfo)
             return CGGeneric(f"{name}: {conversion.define()},\n")
 
         def varInsert(varName: str, dictionaryName: str) -> CGThing:
@@ -7905,9 +8136,11 @@ impl{self.generic} Clone for {self.makeClassName(self.dictionary)}{self.genericS
         declType = info.declType
         if member.optional and not member.defaultValue:
             declType = CGWrapper(info.declType, pre="Option<", post=">")
-        return declType.define()
 
-    def getMemberConversion(self, memberInfo: tuple[IDLArgument, JSToNativeConversionInfo], memberType: IDLType) -> CGThing:
+        memberType, _ = getTracingConversion(member.type, declType.define())
+        return memberType
+
+    def getMemberConversion(self, memberInfo: tuple[IDLArgument, JSToNativeConversionInfo]) -> CGThing:
         def indent(s: str) -> str:
             return CGIndenter(CGGeneric(s), 12).define()
 
@@ -7916,6 +8149,23 @@ impl{self.generic} Clone for {self.makeClassName(self.dictionary)}{self.genericS
         default = info.default
         replacements = {"val": "rval.handle()"}
         conversion = string.Template(templateBody).substitute(replacements)
+
+        memberIsOptional = member.optional and not member.defaultValue
+        memberIsNullable = member.type.nullable()
+
+        assert info.declType is not None
+        declType = CGTemplatedType("Option", info.declType) if memberIsOptional else info.declType
+
+        _, modifier = getTracingConversion(member.type, declType.define())
+
+        memberTypeConversion = ""
+        if modifier is not None:
+            if memberIsOptional and memberIsNullable:
+                memberTypeConversion = f".map(|val| val.map(|val| val{modifier}))"
+            elif memberIsOptional or memberIsNullable:
+                memberTypeConversion = f".map(|val| val{modifier})"
+            else:
+                memberTypeConversion = modifier
 
         assert (member.defaultValue is None) == (default is None)
         if not member.optional:
@@ -7929,12 +8179,13 @@ impl{self.generic} Clone for {self.makeClassName(self.dictionary)}{self.genericS
         conversion = (
             "{\n"
             "    rooted!(&in(cx) let mut rval = UndefinedValue());\n"
-            f'    if get_dictionary_property(cx, object.handle(), c"{member.identifier.name}", '
+            f'    let value: {declType.define()} = if get_dictionary_property(cx, object.handle(), c"{member.identifier.name}", '
             "rval.handle_mut())? && !rval.is_undefined() {\n"
             f"{indent(conversion)}\n"
             "    } else {\n"
             f"{indent(default)}\n"
-            "    }\n"
+            "    };\n"
+            f"    value{memberTypeConversion}\n"
             "}")
 
         return CGGeneric(conversion)
@@ -7942,38 +8193,17 @@ impl{self.generic} Clone for {self.makeClassName(self.dictionary)}{self.genericS
     def makeEmpty(self) -> str:
         if self.hasRequiredFields(self.dictionary):
             return ""
-        parentTemplate = "parent: %s::%s::empty(),\n"
-        fieldTemplate = "%s: %s,\n"
-        functionTemplate = (
-            "pub fn empty() -> Self {\n"
-            "    Self {\n"
-            "%s"
-            "    }\n"
-            "}"
-        )
+
         if self.membersNeedTracing():
-            parentTemplate = "dictionary.parent = %s::%s::empty();\n"
-            fieldTemplate = "dictionary.%s = %s;\n"
-            functionTemplate = (
-                "pub fn empty() -> RootedTraceableBox<Self> {\n"
-                "    let mut dictionary = RootedTraceableBox::new(Self::default());\n"
-                "%s"
-                "    dictionary\n"
-                "}"
-            )
-        s = ""
-        if self.dictionary.parent:
-            assert isinstance(self.dictionary.parent, IDLDictionary)
-            s += parentTemplate % (self.makeModuleName(self.dictionary.parent),
-                                   self.makeClassName(self.dictionary.parent))
-        for member, info in self.memberInfo:
-            if not member.optional:
-                return ""
-            default = info.default
-            if not default:
-                default = "None"
-            s += fieldTemplate % (self.makeMemberName(member.identifier.name), default)
-        return functionTemplate % CGIndenter(CGGeneric(s), 12).define()
+            return """pub fn empty() -> RootedTraceableBox<Self> {
+    RootedTraceableBox::new(Self::default())
+}
+"""
+        else:
+            return """pub fn empty() -> Self {
+    Self::default()
+}
+"""
 
     def hasRequiredFields(self, dictionary: IDLDictionary) -> bool:
         if dictionary.parent:
@@ -8002,6 +8232,28 @@ impl{self.generic} Clone for {self.makeClassName(self.dictionary)}{self.genericS
             if member.type.isDictionary():
                 deps.add(member.type.unroll().inner)
         return deps
+
+
+def getTracingConversion(type: IDLType, resolvedType: str) -> tuple[str, str | None]:
+    if type.isPromise():
+        return (resolvedType.replace("StackRoot", "HeapTraced"), ".to_traced()")
+
+    elif type.isCallback():
+        return (resolvedType.replace("RootedCallback", "TracedCallback"), ".to_traced()")
+
+    elif type.isDictionary() and type_needs_tracing(type):
+        unwrapped = resolvedType.replace("RootedTraceableBox<", "").removesuffix(">")
+        return (unwrapped, ".into_inner()")
+
+    elif type.isSequence():
+        tracedType, conversionCode = getTracingConversion(innerContainerType(type), resolvedType)
+        if conversionCode is not None:
+            return (tracedType, f".into_iter().map(|val| val{conversionCode}).collect()")
+
+    elif type.isGeckoInterface():
+        return (resolvedType.replace("DomRoot", "Dom"), ".as_traced()")
+
+    return (resolvedType, None)
 
 
 class CGInitAllStatics(CGAbstractMethod):
@@ -8387,7 +8639,12 @@ def type_needs_tracing(t: IDLObject, isMember: Optional[str] = None) -> bool:
 
         if t.isUnion():
             assert isinstance(t, IDLUnionType) and t.flatMemberTypes is not None
-            return any(type_needs_tracing(member, isMember) for member in t.flatMemberTypes)
+            # TODO: Union types can contain rooted types, so they should be ignored when checking
+            # if a dictionary should be traced.
+            if isMember == "Dictionary":
+                return any(type_needs_tracing(member, "Union") for member in t.flatMemberTypes)
+            else:
+                return any(type_needs_tracing(member, isMember) for member in t.flatMemberTypes)
 
         if is_typed_array(t):
             return True
@@ -8408,7 +8665,7 @@ def type_needs_tracing(t: IDLObject, isMember: Optional[str] = None) -> bool:
         return False
 
     if t.isInterface():
-        return False
+        return isMember == "Dictionary"
 
     if t.isEnum():
         return False
@@ -8454,6 +8711,10 @@ def argument_type(descriptorProvider: DescriptorProvider,
         isAutoRooted=type_needs_auto_root(ty))
     declType = info.declType
     assert declType is not None
+
+    if ty.isDictionary():
+        declType = CGWrapper(declType, pre="&")
+
     if variadic:
         if ty.isGeckoInterface():
             declType = CGWrapper(declType, pre="&[", post="]")
@@ -8461,9 +8722,6 @@ def argument_type(descriptorProvider: DescriptorProvider,
             declType = CGWrapper(declType, pre="Vec<", post=">")
     elif optional and not defaultValue:
         declType = CGWrapper(declType, pre="Option<", post=">")
-
-    if ty.isDictionary():
-        declType = CGWrapper(declType, pre="&")
 
     if type_needs_auto_root(ty):
         declType = CGTemplatedType("CustomAutoRooterGuard", declType)
@@ -9182,7 +9440,7 @@ def camel_to_upper_snake(s: str) -> str:
 def process_arg(expr: str, arg: IDLArgument | FakeArgument) -> str:
     if arg.type.isGeckoInterface() and not arg.type.unroll().inner.isCallback():
         if arg.variadic or arg.type.isSequence():
-            expr += ".r()"
+            expr += ".as_ref_slice()"
         elif arg.type.nullable() and arg.optional and not arg.defaultValue:
             expr += ".as_ref().map(Option::as_deref)"
         elif arg.type.nullable() or arg.optional and not arg.defaultValue:
@@ -9191,6 +9449,14 @@ def process_arg(expr: str, arg: IDLArgument | FakeArgument) -> str:
             expr = f"&{expr}"
     elif isinstance(arg.type, IDLPromiseType):
         expr = f"&{expr}"
+    elif arg.type.isDictionary():
+        if arg.optional and not arg.defaultValue:
+            if type_needs_tracing(arg.type):
+                expr += ".as_deref()"
+            else:
+                expr += ".as_ref()"
+        else:
+            expr = f"&{expr}"
     return expr
 
 class GlobalGenRoots():
@@ -9368,7 +9634,6 @@ class GlobalGenRoots():
                        | set(leafModule(d) for d in config.callbacks)
                        | set(leafModule(d) for d in config.getDictionaries()))
         curr = CGList([CGGeneric(
-            "#[allow(clippy::derivable_impls)]\n"
             f"pub mod {name};\n"
         ) for name in sorted(descriptors)])
         curr = CGWrapper(curr, pre=AUTOGENERATED_WARNING_COMMENT)
@@ -9620,16 +9885,15 @@ impl Clone for TopTypeId {
     def ContentEventHandlerNames(config: Configuration) -> CGThing:
         """Generate the sorted list of content event handler attribute names
         by inspecting WebIDL definitions for interfaces that inherit from
-        HTMLElement or SVGElement."""
+        Element."""
 
         handler_names: set[str] = set()
 
         for descriptor in config.getDescriptors(isCallback=False, isIteratorInterface=False):
-            # Only include interfaces that inherit from HTMLElement or
-            # SVGElement, to avoid non-content event handlers like
-            # Document.onreadystatechange or XMLHttpRequest handlers.
-            chain = descriptor.prototypeChain
-            if "HTMLElement" not in chain and "SVGElement" not in chain:
+            # Only include Element and interfaces that inherit from it, to avoid
+            # non-content event handlers like Document.onreadystatechange or
+            # XMLHttpRequest handlers.
+            if "Element" not in descriptor.prototypeChain:
                 continue
 
             for member in descriptor.interface.members:

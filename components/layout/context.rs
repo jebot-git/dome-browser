@@ -14,6 +14,7 @@ use layout_api::{
 };
 use net_traits::image_cache::{
     Image as CachedImage, ImageCache, ImageCacheResult, ImageOrMetadataAvailable, PendingImageId,
+    RasterizationResult,
 };
 use net_traits::request::InternalRequest;
 use parking_lot::{Mutex, RwLock};
@@ -260,21 +261,20 @@ impl ImageResolver {
         node: OpaqueNode,
         svg_id: Option<Uuid>,
     ) -> Option<RasterImage> {
-        let result = self
-            .image_cache
-            .rasterize_vector_image(image_id, size, svg_id);
-        if result.is_none() || svg_id.is_some() {
-            // A coalesced inline snapshot also needs completion acknowledgement
-            // when its exact URL/raster was already cached.
-            self.pending_rasterization_images
-                .lock()
-                .push(PendingRasterizationImage {
-                    id: image_id,
-                    node: node.into(),
-                    size,
-                });
+        let result = self.image_cache.rasterize_vector_image(image_id, size, svg_id);
+        if matches!(result, RasterizationResult::PendingRasterization) ||
+            (svg_id.is_some() && matches!(result, RasterizationResult::Image(_)))
+        {
+            self.pending_rasterization_images.lock().push(PendingRasterizationImage {
+                id: image_id,
+                node: node.into(),
+                size,
+            });
         }
-        result
+        match result {
+            RasterizationResult::Image(image) => Some(image),
+            RasterizationResult::PendingRasterization | RasterizationResult::InvalidSvgParameters => None,
+        }
     }
 
     pub(crate) fn completed_vector_raster(&self, image_id: PendingImageId) -> Option<RasterImage> {

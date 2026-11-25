@@ -66,13 +66,13 @@ impl RangeInputType {
         if !event.IsPrimary() ||
             event.upcast::<MouseEvent>().button() != MouseButton::Primary ||
             self.dragging_pointer_id.get().is_some() ||
-            input.upcast::<Element>().disabled_state()
+            input.is_form_element_disabled()
         {
             return ValueChangeEvents::empty();
         }
 
         // Don't capture the pointer for a widget that has no box to drag a thumb along.
-        let Some(axis) = SliderAxis::new(input) else {
+        let Some(axis) = SliderAxis::new(cx, input) else {
             return ValueChangeEvents::empty();
         };
 
@@ -355,8 +355,8 @@ struct SliderAxis {
 
 impl SliderAxis {
     /// The axis at the start of a drag, flushing layout so the geometry is current.
-    fn new(input: &HTMLInputElement) -> Option<Self> {
-        Self::from_padding_box(input, input.upcast::<Node>().padding_box()?)
+    fn new(cx: &mut JSContext, input: &HTMLInputElement) -> Option<Self> {
+        Self::from_padding_box(input, input.upcast::<Node>().padding_box(cx)?)
     }
 
     /// The axis for the moves that follow, without forcing a layout.

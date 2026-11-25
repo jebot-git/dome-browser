@@ -288,6 +288,7 @@ impl TextRunTemplate {
         transform: &LayoutToWorldTransform,
         allow_subpixel: bool,
         raster_space: RasterSpace,
+        has_bitmap_strikes: bool,
     ) -> (FontInstance, f32) {
         // If local raster space is specified, include that in the scale
         // of the glyphs that get rasterized.
@@ -295,7 +296,22 @@ impl TextRunTemplate {
         //           will implicitly be part of the device pixel ratio for
         //           the (cached) local space surface, and so this code
         //           will no longer be required.
-        let raster_scale_input = raster_space.local_scale().unwrap_or(1.0).max(0.001);
+        // A bitmap-strike run rasterizes with an identity glyph shape (see below),
+        // so the only way the transform's scale can reach the rasterizer is through
+        // the raster scale. Without it the glyph is rendered at its untransformed
+        // size and the shader scales that, which on the backends that resample at
+        // rasterization time (Core Text, DirectWrite) is visibly soft when scaling
+        // up (bug 2064316). Only screen raster space needs this: a requested - or
+        // zoom/animation derived - local raster space carries its own scale, which
+        // is deliberately decoupled from the current transform.
+        let raster_scale_input = if has_bitmap_strikes && raster_space == RasterSpace::Screen {
+            transform
+                .coplanar_scale_factors()
+                .map_or(1.0, |(sx, sy)| sx.max(sy))
+        } else {
+            raster_space.local_scale().unwrap_or(1.0)
+        }
+        .max(0.001);
 
         let dps = surface.device_pixel_scale.0;
         let font_size = specified_font.size.to_f32_px();
@@ -312,8 +328,32 @@ impl TextRunTemplate {
         // Only support transforms that can be coerced to simple 2D transforms.
         // Add texture padding to the rasterized glyph buffer when one anticipates
         // the glyph will need to be scaled when rendered.
+        // Color bitmap glyphs (Apple Color Emoji and any CBDT/sbix font with
+        // embedded bitmap strikes) can't have any part of the transform baked into
+        // their rasterization: the platform backends force an identity glyph shape
+        // for bitmap fonts, so a rotation or skew is dropped outright and the scale
+        // survives only as the scalar `RasterizedGlyph::scale`, which the device
+        // path multiplies into the atlas footprint. That scalar cannot express a
+        // transform scale at all, so on the device path a scaled emoji is painted
+        // at its untransformed size (too small when scaling up, too big and clipped
+        // when scaling down - bugs 2061411, 2062234), and a rotated one is drawn
+        // axis-aligned at its transformed pen (bug 2055177). Before bug 2044211 the
+        // GPU routed these by glyph format - `GlyphFormat::Bitmap`/`ColorBitmap`
+        // have no `Transformed` variant, so bitmap glyphs never reached the
+        // transform shader and always had the transform applied in local space.
+        // `has_bitmap_strikes` restores that: the caller computes it from the real
+        // font face (the EMBEDDED_BITMAPS instance flag alone is unreliable - on
+        // unix it only reflects a fontconfig preference and is set even for
+        // ordinary outline fonts) and it is true only for a genuine bitmap font
+        // under a transform that isn't a pure translation. Route those through the
+        // local-raster fallback so the shader applies the full transform to the
+        // emoji image, the same way vector glyphs and the manual
+        // filter/isolated-surface workaround do. A pure translation is fine on the
+        // device path, where the scalar scale already lands the glyph at the right
+        // size, so that - the common case - is left untouched.
         let (use_subpixel_aa, transform_glyphs, texture_padding, oversized) = if raster_space != RasterSpace::Screen ||
-            transform.has_perspective_component() || !transform.has_2d_inverse()
+            transform.has_perspective_component() || !transform.has_2d_inverse() ||
+            has_bitmap_strikes
         {
             (false, false, true, device_font_size > FONT_SIZE_LIMIT)
         } else if transform.exceeds_2d_scale((FONT_SIZE_LIMIT / device_font_size) as f64) {
@@ -447,12 +487,23 @@ impl TextRunTemplate {
             spatial_tree,
         );
 
+        // Bitmap fonts need the local-raster fallback under any transform that
+        // isn't a pure translation - a scale as much as a rotation or skew
+        // (bugs 2055177, 2061411). Gate on the cheap transform and instance-flag
+        // checks first so that untransformed text - the common case - does no
+        // extra work, and only then consult the cached per-font bitmap-strike
+        // info (a lock-free lookup populated when the font was added).
+        let has_bitmap_strikes = !transform.is_simple_2d_translation()
+            && self.font.flags.contains(FontInstanceFlags::EMBEDDED_BITMAPS)
+            && resource_cache.font_has_bitmap_strikes(self.font.font_key);
+
         let (used_font, raster_scale) = Self::compute_font_instance(
             &self.font,
             surface,
             transform,
             allow_subpixel,
             raster_space,
+            has_bitmap_strikes,
         );
 
         let subpx_dir = used_font.get_subpx_dir();

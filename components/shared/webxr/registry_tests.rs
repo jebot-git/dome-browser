@@ -168,6 +168,7 @@ fn init() -> SessionInit {
         required_features: vec!["viewer".into()],
         optional_features: vec![],
         first_person_observer_view: false,
+        painter_id: servo_base::id::PainterId::next(),
     }
 }
 fn pipeline(index: u32) -> PipelineId {

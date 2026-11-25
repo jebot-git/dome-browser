@@ -7,7 +7,7 @@ use std::str::FromStr;
 
 use embedder_traits::{EmbedderControlRequest, FilePickerRequest, FilterPattern, SelectedFile};
 use html5ever::local_name;
-use js::context::JSContext;
+use js::context::{JSContext, NoGC};
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::FileListBinding::FileListMethods;
 use script_bindings::codegen::GenericBindings::HTMLButtonElementBinding::HTMLButtonElementMethods;
@@ -83,6 +83,10 @@ impl FileInputType {
             return;
         };
 
+        let from_directory = response_files
+            .iter()
+            .any(|file| file.relative_path.is_some());
+
         let window = input.owner_window();
         files.extend(
             response_files
@@ -90,9 +94,9 @@ impl FileInputType {
                 .map(|file| File::new_from_selected(cx, &window, file)),
         );
 
-        // Only use the last file if this isn't a multi-select file input. This could
+        // Only use the last file if this isn't a multi-select or webkitdirectory file input. This could
         // happen if the attribute changed after the file dialog was initiated.
-        if !input.Multiple() {
+        if !input.Multiple() && !from_directory {
             files = files
                 .pop()
                 .map(|last_file| vec![last_file])
@@ -110,7 +114,12 @@ impl SpecificInputType for FileInputType {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#file-upload-state-(type=file):suffering-from-being-missing>
-    fn suffers_from_being_missing(&self, input: &HTMLInputElement, _value: &DOMString) -> bool {
+    fn suffers_from_being_missing(
+        &self,
+        _no_gc: &NoGC,
+        input: &HTMLInputElement,
+        _value: &DOMString,
+    ) -> bool {
         input.Required() && self.filelist.get().is_none_or(|files| files.Length() == 0)
     }
 
@@ -135,14 +144,19 @@ impl SpecificInputType for FileInputType {
         first_item.name().clone().root()
     }
 
-    fn show_the_picker_if_applicable(&self, input: &HTMLInputElement) {
-        self.select_files(input, None)
+    fn show_the_picker_if_applicable(&self, cx: &mut JSContext, input: &HTMLInputElement) {
+        self.select_files(cx, input, None)
     }
 
     /// Select files by invoking UI or by passed in argument.
     ///
     /// <https://html.spec.whatwg.org/multipage/#file-upload-state-(type=file)>
-    fn select_files(&self, input: &HTMLInputElement, test_paths: Option<Vec<DOMString>>) {
+    fn select_files(
+        &self,
+        cx: &mut JSContext,
+        input: &HTMLInputElement,
+        test_paths: Option<Vec<DOMString>>,
+    ) {
         let current_paths = match &test_paths {
             Some(test_paths) => test_paths
                 .iter()
@@ -158,6 +172,7 @@ impl SpecificInputType for FileInputType {
             .owner_document()
             .embedder_controls()
             .show_embedder_control(
+                cx,
                 ControlElement::FileInput(Dom::from_ref(input)),
                 EmbedderControlRequest::FilePicker(FilePickerRequest {
                     origin: input.owner_window().origin().immutable().clone(),
@@ -165,6 +180,7 @@ impl SpecificInputType for FileInputType {
                     filter_patterns: filter_from_accept(&input.Accept()),
                     allow_select_multiple: input.Multiple(),
                     accept_current_paths_for_testing,
+                    select_directory: input.Webkitdirectory(),
                 }),
                 None,
             );
@@ -188,12 +204,12 @@ impl SpecificInputActivationType for FileInputActivation {
     /// <https://html.spec.whatwg.org/multipage/#file-upload-state-(type=file):input-activation-behavior>
     fn activation_behavior(
         &self,
-        _cx: &mut js::context::JSContext,
+        cx: &mut js::context::JSContext,
         input: &HTMLInputElement,
         _event: &Event,
         _target: &EventTarget,
     ) {
-        input.show_the_picker_if_applicable();
+        input.show_the_picker_if_applicable(cx);
     }
 }
 
@@ -280,6 +296,11 @@ impl SpecificShadowTree<HTMLInputElement, FileInputType> for FileInputShadowTree
                     Some(DOMString::from_static(SELECTOR_BUTTON_TEXT)),
                 );
         }
+
+        self.selector_button
+            .downcast::<HTMLButtonElement>()
+            .expect("The selector button should be a button")
+            .SetDisabled(cx, input_element.is_form_element_disabled());
 
         self.value_container
             .upcast::<Node>()

@@ -37,7 +37,7 @@ struct PenButtonPress {
 // Native tool IDs are local to this process; this bounded map is per Document.
 #[derive(Default, JSTraceable, MallocSizeOf)]
 pub(super) struct PenClickState {
-    info: ClickCountingInfo,
+    info: MouseClickTracker,
     target: String,
 }
 struct Snapshot {
@@ -123,14 +123,15 @@ impl DocumentEventHandler {
 
     pub(super) fn hit_test_for_capture(
         &self,
+        cx: &mut JSContext,
         input: &ConstellationInputEvent,
         target: &Element,
     ) -> Option<HitTestResult> {
         let client = input.hit_test_result.as_ref()?.point_in_viewport;
-        let page = client + self.window.scroll_offset().cast_unit();
+        let page = client + self.window.scroll_offset(cx).cast_unit();
         let origin = target
             .upcast::<Node>()
-            .border_box()
+            .border_box(cx)
             .unwrap_or_default()
             .origin;
         Some(HitTestResult {
@@ -199,7 +200,7 @@ impl DocumentEventHandler {
         }
     }
 
-    pub(super) fn retarget_pen_mouse_hit(hit: &mut HitTestResult, target: Option<&Element>) {
+    pub(super) fn retarget_pen_mouse_hit(cx: &mut JSContext, hit: &mut HitTestResult, target: Option<&Element>) {
         let Some(target) = target else {
             return;
         };
@@ -212,7 +213,7 @@ impl DocumentEventHandler {
         }
         let origin = target
             .upcast::<Node>()
-            .border_box()
+            .border_box(cx)
             .unwrap_or_default()
             .origin;
         hit.point_in_node = hit.point_relative_to_initial_containing_block
@@ -363,7 +364,7 @@ impl DocumentEventHandler {
         if !clicks.contains_key(&native) && clicks.len() >= 64 {
             let oldest = clicks
                 .iter()
-                .min_by_key(|(_, click)| click.info.time)
+                .min_by_key(|(_, click)| click.info.state.values().filter_map(|state| state.last_click_time).max())
                 .map(|(id, _)| *id);
             if let Some(oldest) = oldest {
                 clicks.remove(&oldest);
@@ -371,11 +372,11 @@ impl DocumentEventHandler {
         }
         let state = clicks.entry(native).or_default();
         if state.target != target_id {
-            state.info.reset_click_count();
+            state.info.reset_all();
             state.target = target_id;
         }
-        state.info.reset_click_count_if_necessary(button, client);
-        state.info.increment_click_count(button, client)
+        state.info.on_mouse_down(button, client);
+        state.info.on_mouse_up(button, client)
     }
     pub(super) fn pen_event_for_pointer(
         &self,
@@ -465,7 +466,7 @@ impl DocumentEventHandler {
                         self.pen_clicks
                             .borrow()
                             .get(&native)
-                            .map(|click| click.info.count)
+                            .map(|click| click.info.click_count_for(button))
                     })
                     .unwrap_or(1)
                     .max(1) as i32
@@ -492,8 +493,8 @@ impl DocumentEventHandler {
             azimuth,
             "pen".into(),
             primary,
-            vec![],
-            vec![],
+            &[],
+            &[],
         );
         event.upcast::<Event>().set_composed(!boundaries);
         event
@@ -673,7 +674,7 @@ impl DocumentEventHandler {
                 self.handle_mouse_left_viewport_event(cx, &compat, &leave);
             }
             self.unset_active_element(cx.no_gc());
-            self.last_mouse_button_down_point.take();
+            self.button_click_state.safe_borrow_mut(cx.no_gc()).take_last_mouse_button_down_point(MouseButton::Primary);
         }
         self.pen_pointers
             .safe_borrow_mut(cx.no_gc())
@@ -692,7 +693,7 @@ impl DocumentEventHandler {
         }
         let actual_hit = self
             .window
-            .hit_test_from_input_event(HitTestFlags::IncludeDomPosition, input);
+            .hit_test_from_input_event(cx, HitTestFlags::IncludeDomPosition, input);
         let Some(client) = input
             .hit_test_result
             .as_ref()
@@ -701,7 +702,7 @@ impl DocumentEventHandler {
             self.retire_pen(cx, sample, input);
             return InputEventResult::default();
         };
-        let page = client + self.window.scroll_offset().cast_unit();
+        let page = client + self.window.scroll_offset(cx).cast_unit();
         let in_pipeline = input
             .pointer_context
             .is_none_or(|context| context.hit_in_pipeline);
@@ -765,7 +766,7 @@ impl DocumentEventHandler {
         let element = capture.as_ref().or(actual_element.as_ref()).unwrap();
         let target = capture.as_deref().unwrap_or(element);
         let hit = actual_hit
-            .or_else(|| self.hit_test_for_capture(input, target))
+            .or_else(|| self.hit_test_for_capture(cx, input, target))
             .unwrap();
         let hover = self.pen_snapshot(sample.id).unwrap().hover;
         self.pen_boundaries(
@@ -877,7 +878,7 @@ impl DocumentEventHandler {
         }
         #[cfg(feature = "webxr")]
         {
-            let screen = ScreenPointerSample::from_hit(&hit).filter(|s| s.targets(target.upcast()));
+            let screen = ScreenPointerSample::from_hit(cx, &hit).filter(|s| s.targets(target.upcast()));
             if tip_start {
                 self.window.inline_xr_pointer_event(
                     cx,
@@ -909,8 +910,7 @@ impl DocumentEventHandler {
         if compatibility {
             // Compatibility editing uses the same click detail as this pen,
             // while preserving the independent physical mouse click sequence.
-            let mouse_clicks = self.click_counting_info.borrow().clone();
-            let mouse_down = self.last_mouse_button_down_point.get();
+            let mouse_clicks = self.button_click_state.borrow().clone();
             let target_id = element
                 .upcast::<Node>()
                 .unique_id(self.window.pipeline_id());
@@ -921,7 +921,7 @@ impl DocumentEventHandler {
                 .filter(|click| click.target == target_id)
                 .map(|click| click.info.clone())
                 .unwrap_or_default();
-            *self.click_counting_info.safe_borrow_mut(cx.no_gc()) = pen_clicks;
+            *self.button_click_state.safe_borrow_mut(cx.no_gc()) = pen_clicks;
             let make = |event: InputEvent, buttons: u16| ConstellationInputEvent {
                 pointer_context: None,
                 hit_test_result: input.hit_test_result.clone(),
@@ -969,8 +969,7 @@ impl DocumentEventHandler {
                     capture.as_deref(),
                 );
             }
-            *self.click_counting_info.safe_borrow_mut(cx.no_gc()) = mouse_clicks;
-            self.last_mouse_button_down_point.set(mouse_down);
+            *self.button_click_state.safe_borrow_mut(cx.no_gc()) = mouse_clicks;
         }
         // click remains independent of preventDefault on pointerdown. It is a
         // PointerEvent carrying this pen's identity and final properties.
@@ -1099,7 +1098,7 @@ impl DocumentEventHandler {
                 self.window
                     .Document()
                     .embedder_controls()
-                    .show_context_menu(cx.no_gc(), &hit);
+                    .show_context_menu(cx, &hit);
             }
         }
         #[cfg(feature = "webxr")]

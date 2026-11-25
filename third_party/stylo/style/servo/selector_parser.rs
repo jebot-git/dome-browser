@@ -390,9 +390,11 @@ pub enum NonTSPseudoClass {
     Lang(Lang),
     Link,
     Modal,
+    MozInert,
     MozMeterOptimum,
     MozMeterSubOptimum,
     MozMeterSubSubOptimum,
+    MozTopmostModal,
     Open,
     Optional,
     OutOfRange,
@@ -464,9 +466,11 @@ impl ToCss for NonTSPseudoClass {
             Self::Invalid => ":invalid",
             Self::Link => ":link",
             Self::Modal => ":modal",
+            Self::MozInert => ":-moz-inert",
             Self::MozMeterOptimum => ":-moz-meter-optimum",
             Self::MozMeterSubOptimum => ":-moz-meter-sub-optimum",
             Self::MozMeterSubSubOptimum => ":-moz-meter-sub-sub-optimum",
+            Self::MozTopmostModal => ":-moz-topmost-modal",
             Self::Open => ":open",
             Self::Optional => ":optional",
             Self::OutOfRange => ":out-of-range",
@@ -509,9 +513,11 @@ impl NonTSPseudoClass {
             Self::Invalid => ElementState::INVALID,
             Self::Link => ElementState::UNVISITED,
             Self::Modal => ElementState::MODAL,
+            Self::MozInert => ElementState::INERT,
             Self::MozMeterOptimum => ElementState::OPTIMUM,
             Self::MozMeterSubOptimum => ElementState::SUB_OPTIMUM,
             Self::MozMeterSubSubOptimum => ElementState::SUB_SUB_OPTIMUM,
+            Self::MozTopmostModal => ElementState::TOPMOST_MODAL,
             Self::Open => ElementState::OPEN,
             Self::Optional => ElementState::OPTIONAL_,
             Self::OutOfRange => ElementState::OUTOFRANGE,
@@ -626,6 +632,7 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
             "focus-within" => NonTSPseudoClass::FocusWithin,
             "fullscreen" => NonTSPseudoClass::Fullscreen,
             "hover" => NonTSPseudoClass::Hover,
+            "in-range" => NonTSPseudoClass::InRange,
             "indeterminate" => NonTSPseudoClass::Indeterminate,
             "invalid" => NonTSPseudoClass::Invalid,
             "link" => NonTSPseudoClass::Link,
@@ -643,9 +650,25 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
             "user-valid" => NonTSPseudoClass::UserValid,
             "valid" => NonTSPseudoClass::Valid,
             "visited" => NonTSPseudoClass::Visited,
+            "-moz-inert" => {
+                if !self.in_user_agent_stylesheet() {
+                    return Err(ParseError::custom(
+                        SelectorParseErrorKind::UnexpectedIdent
+                    ))
+                }
+                NonTSPseudoClass::MozInert
+            },
             "-moz-meter-optimum" => NonTSPseudoClass::MozMeterOptimum,
             "-moz-meter-sub-optimum" => NonTSPseudoClass::MozMeterSubOptimum,
             "-moz-meter-sub-sub-optimum" => NonTSPseudoClass::MozMeterSubSubOptimum,
+            "-moz-topmost-modal" => {
+                if !self.in_user_agent_stylesheet() {
+                    return Err(ParseError::custom(
+                        SelectorParseErrorKind::UnexpectedIdent
+                    ))
+                }
+                NonTSPseudoClass::MozTopmostModal
+            },
             "-servo-nonzero-border" => {
                 if !self.in_user_agent_stylesheet() {
                     return Err(ParseError::custom(

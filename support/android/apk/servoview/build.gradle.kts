@@ -6,16 +6,13 @@ plugins {
 }
 
 android {
-    compileSdk = 37
-    buildToolsVersion = "36.0.0"
+    compileSdk { version = release(37) { minorApiLevel = 2 } }
 
     namespace = "org.servo.servoview"
 
     ndkPath = getNdkDir()
 
     defaultConfig { minSdk = libs.versions.android.sdk.min.get().toInt() }
-
-    lint { targetSdk = 33 }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
@@ -25,13 +22,6 @@ android {
     buildTypes {
         // Default debug and release build types are used as templates
         debug { isJniDebuggable = true }
-
-        release {
-            signingConfig =
-                signingConfigs.getByName("debug") // Change this to sign with a production key
-            isMinifyEnabled = false
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
-        }
 
         val debug = getByName("debug")
         val release = getByName("release")
@@ -49,14 +39,14 @@ android {
 
     sourceSets {
         named("main") {}
-        named("armv7Debug") { jniLibs.srcDirs(getJniLibsPath(true, "armv7")) }
-        named("armv7Release") { jniLibs.srcDirs(getJniLibsPath(false, "armv7")) }
-        named("arm64Debug") { jniLibs.srcDirs(getJniLibsPath(true, "arm64")) }
-        named("arm64Release") { jniLibs.srcDirs(getJniLibsPath(false, "arm64")) }
-        named("x86Debug") { jniLibs.srcDirs(getJniLibsPath(true, "x86")) }
-        named("x86Release") { jniLibs.srcDirs(getJniLibsPath(false, "x86")) }
-        named("x64Debug") { jniLibs.srcDirs(getJniLibsPath(true, "x64")) }
-        named("x64Release") { jniLibs.srcDirs(getJniLibsPath(false, "x64")) }
+        named("armv7Debug") { jniLibs.directories += getJniLibsPath(true, "armv7") }
+        named("armv7Release") { jniLibs.directories += getJniLibsPath(false, "armv7") }
+        named("arm64Debug") { jniLibs.directories += getJniLibsPath(true, "arm64") }
+        named("arm64Release") { jniLibs.directories += getJniLibsPath(false, "arm64") }
+        named("x86Debug") { jniLibs.directories += getJniLibsPath(true, "x86") }
+        named("x86Release") { jniLibs.directories += getJniLibsPath(false, "x86") }
+        named("x64Debug") { jniLibs.directories += getJniLibsPath(true, "x64") }
+        named("x64Release") { jniLibs.directories += getJniLibsPath(false, "x64") }
     }
 }
 
@@ -116,28 +106,9 @@ project.afterEvaluate {
 
             compileTask.dependsOn(ndkBuildTask)
         }
-
-    android.libraryVariants.forEach { variant ->
-        val pattern = Pattern.compile("^([\\w\\d]+)(Debug|Release)")
-        val matcher = pattern.matcher(variant.name)
-        if (!matcher.find()) {
-            throw GradleException("Invalid variant name for output: " + variant.name)
-        }
-        val arch = matcher.group(1)
-        val debug = variant.name.contains("Debug")
-        val finalFolder = getTargetDir(debug, arch)
-        val finalFile = File(finalFolder, "servoview.aar")
-        variant.outputs.forEach { output ->
-            val copyAndRenameAARTask =
-                project.task<Copy>("copyAndRename${variant.name.capitalize()}AAR") {
-                    from(output.outputFile.parent)
-                    into(finalFolder)
-                    include(output.outputFile.name)
-                    rename(output.outputFile.name, finalFile.name)
-                }
-            variant.assembleProvider.get().finalizedBy(copyAndRenameAARTask)
-        }
-    }
 }
 
-dependencies { implementation(libs.androidx.compose.foundation) }
+dependencies {
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.compose.foundation)
+}

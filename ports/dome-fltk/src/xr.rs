@@ -1017,6 +1017,7 @@ mod tests {
             required_features: vec!["viewer".into(), "local".into(), "tracked-sources".into()],
             optional_features: vec!["local-floor".into(), "unsupported-local-test".into()],
             first_person_observer_view: false,
+            painter_id: servo_base::id::PainterId::next(),
         };
         let granted = validate_features(SessionMode::ImmersiveVR, &init).unwrap();
         assert!(granted.iter().any(|feature| feature == "tracked-sources"));

@@ -16,10 +16,11 @@ use style::values::computed::{
     LengthPercentage, MaxSize as StyleMaxSize, Percentage, Size as StyleSize,
 };
 
+use crate::containing_block::{ConstraintSpace, IndefiniteContainingBlock};
 use crate::context::LayoutContext;
+use crate::geom::LogicalVec2;
 use crate::layout_box_base::LayoutBoxBase;
 use crate::style_ext::{AspectRatio, Clamp, ComputedValuesExt, ContentBoxSizesAndPBM, LayoutStyle};
-use crate::{ConstraintSpace, IndefiniteContainingBlock, LogicalVec2};
 
 #[derive(PartialEq)]
 pub(crate) enum IntrinsicSizingMode {
@@ -134,6 +135,7 @@ pub(crate) fn outer_inline(
     auto_block_size_stretches_to_containing_block: bool,
     is_replaced: bool,
     establishes_containing_block: bool,
+    skippable_for_block_percentage_quirk: bool,
     get_preferred_aspect_ratio: impl FnOnce(&LogicalVec2<Au>) -> Option<AspectRatio>,
     get_inline_content_size: impl FnOnce(&ConstraintSpace) -> InlineContentSizesResult,
     get_tentative_block_content_size: impl FnOnce(Option<AspectRatio>) -> Option<ContentSizes>,
@@ -157,10 +159,7 @@ pub(crate) fn outer_inline(
     let content_size = LazyCell::new(|| {
         depends_on_contents.set(true);
         let constraint_space = if establishes_containing_block {
-            let available_block_size = containing_block
-                .size
-                .block
-                .map(|v| Au::zero().max(v - pbm_sums.block));
+            let block_stretch_size = containing_block.block_stretch_size(pbm_sums.block);
             let automatic_size = if preferred_size_computes_to_auto.block &&
                 auto_block_size_stretches_to_containing_block
             {
@@ -170,13 +169,13 @@ pub(crate) fn outer_inline(
                 Size::FitContent
             };
             let aspect_ratio = get_preferred_aspect_ratio(&pbm.padding_border_sums);
-            let block_size =
+            let mut block_size =
                 if let Some(block_content_size) = get_tentative_block_content_size(aspect_ratio) {
                     SizeConstraint::Definite(content_box_sizes.block.resolve(
                         LogicalAxis::Block,
                         automatic_size,
                         || auto_minimum.block,
-                        available_block_size,
+                        block_stretch_size,
                         || block_content_size,
                         is_table,
                     ))
@@ -184,23 +183,34 @@ pub(crate) fn outer_inline(
                     content_box_sizes.block.resolve_extrinsic(
                         automatic_size,
                         auto_minimum.block,
-                        available_block_size,
+                        block_stretch_size,
                     )
                 };
-            ConstraintSpace::new(block_size, style, aspect_ratio)
+            let mut has_quirky_block_size = false;
+            if skippable_for_block_percentage_quirk {
+                has_quirky_block_size = !block_size.is_definite();
+                block_size
+                    .replace_if_indefinite_with(containing_block.maybe_quirky_block_size().into())
+            }
+            if has_quirky_block_size {
+                ConstraintSpace::new_quirky(block_size, style, aspect_ratio)
+            } else {
+                ConstraintSpace::new(block_size, style, aspect_ratio)
+            }
         } else {
             // Even if the size doesn't directly depend on block constraints, since this box
             // doesn't establish a containing block, its contents can depend on its block
             // constraints. And thus have a dependency via the intrinsic size.
             depends_on_block_constraints = true;
+            let block_size = containing_block.maybe_quirky_block_size().into();
             // This assumes that there is no preferred aspect ratio, or that there is no
             // block size constraint to be transferred so the ratio is irrelevant.
             // We only get into here for anonymous blocks, for which the assumption holds.
-            ConstraintSpace::new(
-                containing_block.size.block.into(),
-                containing_block.style,
-                None,
-            )
+            if containing_block.has_quirky_block_size() {
+                ConstraintSpace::new_quirky(block_size, containing_block.style, None)
+            } else {
+                ConstraintSpace::new(block_size, containing_block.style, None)
+            }
         };
         get_inline_content_size(&constraint_space)
     });
@@ -646,6 +656,13 @@ impl SizeConstraint {
         match self {
             Self::Definite(size) => size,
             Self::MinMax(min, _) => min,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn replace_if_indefinite_with(&mut self, replacement: Self) {
+        if !self.is_definite() {
+            *self = replacement
         }
     }
 }

@@ -17,7 +17,6 @@ use crate::custom_properties::{SpecifiedValue, parse_name};
 use crate::derives::*;
 use crate::device::Device;
 use crate::dom::TElement;
-#[cfg(feature = "gecko")]
 use crate::dom::TShadowRoot;
 #[cfg(feature = "gecko")]
 use crate::gecko_bindings::structs::{ServoStyleSetSizes, StyleRuleInclusion};
@@ -29,7 +28,7 @@ use crate::invalidation::media_queries::{
     EffectiveMediaQueryResults, MediaListKey, ToMediaListKey,
 };
 use crate::invalidation::stylesheets::{RuleChangeKind, StylesheetInvalidationSet};
-#[cfg(feature = "gecko")]
+use crate::parser::ParserContext;
 use crate::properties::StyleBuilder;
 use crate::properties::{
     self, AnimationDeclarations, CascadeMode, ComputedValues, FirstLineReparenting,
@@ -46,6 +45,7 @@ use crate::rule_cache::{RuleCache, RuleCacheConditions};
 use crate::rule_collector::RuleCollector;
 use crate::rule_tree::{
     CascadeLevel, CascadeOrigin, RuleCascadeFlags, RuleTree, StrongRuleNode, StyleSource,
+    StyleSourceBorrow,
 };
 use crate::selector_map::{
     BucketMatches, PrecomputedHashMap, PrecomputedHashSet, SelectorMap, SelectorMapEntry,
@@ -71,7 +71,7 @@ use crate::stylesheets::{
     ViewTransitionRule,
 };
 use crate::stylesheets::{CustomMediaEvaluator, CustomMediaMap};
-#[cfg(feature = "gecko")]
+use crate::substitution::AttrTaint;
 use crate::values::specified::position::PositionTryFallbacksItem;
 use crate::values::specified::position::PositionTryFallbacksTryTactic;
 use crate::values::{AtomIdent, Parser, SourceLocation, computed};
@@ -98,6 +98,7 @@ use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 use std::mem;
 use std::sync::{LazyLock, Mutex};
+use style_traits::ParsingMode;
 
 /// The type of the stylesheets that the stylist contains.
 #[cfg(feature = "servo")]
@@ -131,6 +132,9 @@ type StyleSheetContentList = Vec<StylesheetContentsPtr>;
 /// The @position-try rules that have changed.
 #[derive(Default, Debug, MallocSizeOf)]
 pub struct CascadeDataDifference {
+    /// Whether layer order has changed. Note that this only concerns itself with reordering, not
+    /// addition or removal.
+    pub layer_order_changed: bool,
     /// The set of changed @position-try rule names.
     pub changed_position_try_names: PrecomputedHashSet<Atom>,
 }
@@ -138,16 +142,46 @@ pub struct CascadeDataDifference {
 impl CascadeDataDifference {
     /// Merges another difference into `self`.
     pub fn merge_with(&mut self, other: Self) {
+        self.layer_order_changed |= other.layer_order_changed;
         self.changed_position_try_names
             .extend(other.changed_position_try_names)
     }
 
     /// Returns whether we're empty.
     pub fn is_empty(&self) -> bool {
-        self.changed_position_try_names.is_empty()
+        !self.layer_order_changed && self.changed_position_try_names.is_empty()
     }
 
-    fn update(&mut self, old_data: &PositionTryMap, new_data: &PositionTryMap) {
+    fn update(&mut self, old_data: &CascadeData, new_data: &CascadeData) {
+        self.update_layers(&old_data.layers, &new_data.layers);
+        self.update_position_try(
+            &old_data.extra_data.position_try_rules,
+            &new_data.extra_data.position_try_rules,
+        );
+    }
+
+    fn update_layers(&mut self, old: &CascadeLayers, new: &CascadeLayers) {
+        if self.layer_order_changed {
+            return;
+        }
+        for (name, new_id) in &new.layer_id_by_name {
+            let Some(old_id) = old.layer_id_by_name.get(name) else {
+                // This is a new layer, as long as the old orders match it just means we've been
+                // added to the end, no layer order has actually changed.
+                // Similarly, if there's an old layer that doesn't exist in the new data, it means
+                // it's been removed, which also doesn't change the order of the remaining layers.
+                continue;
+            };
+            let new_order = new.layer_by_id[new_id.0 as usize].order;
+            let old_order = old.layer_by_id[old_id.0 as usize].order;
+            if new_order != old_order {
+                self.layer_order_changed = true;
+                return;
+            }
+        }
+    }
+
+    fn update_position_try(&mut self, old_data: &PositionTryMap, new_data: &PositionTryMap) {
         let mut any_different_key = false;
         let different_len = old_data.len() != new_data.len();
         for (name, rules) in old_data.iter() {
@@ -373,6 +407,7 @@ impl CascadeDataCacheEntry for UserAgentCascadeData {
             precomputed_pseudo_element_decls: PrecomputedPseudoElementDeclarations::default(),
         });
 
+        let mut prev_sheet = None;
         for (index, sheet) in collection.sheets().enumerate() {
             let new_data = &mut *new_data;
             new_data.cascade_data.add_stylesheet(
@@ -384,14 +419,12 @@ impl CascadeDataCacheEntry for UserAgentCascadeData {
                 SheetRebuildKind::Full,
                 Some(&mut new_data.precomputed_pseudo_element_decls),
                 None,
+                &mut prev_sheet,
             )?;
         }
 
         new_data.cascade_data.did_finish_rebuild();
-        difference.update(
-            &old.cascade_data.extra_data.position_try_rules,
-            &new_data.cascade_data.extra_data.position_try_rules,
-        );
+        difference.update(&old.cascade_data, &new_data.cascade_data);
 
         Ok(new_data.shareable())
     }
@@ -405,7 +438,12 @@ impl CascadeDataCacheEntry for UserAgentCascadeData {
 
 type UserAgentCascadeDataCache = CascadeDataCache<UserAgentCascadeData>;
 
-type PrecomputedPseudoElementDeclarations = PerPseudoElementMap<Vec<ApplicableDeclarationBlock>>;
+/// The declarations for the precomputed pseudo-elements.
+///
+/// We don't need the rest of the fields of `ApplicableDeclarationBlock`: These are never sorted
+/// (they're in document order, and their selectors are all universal), and they're all UA rules in
+/// the root layer.
+type PrecomputedPseudoElementDeclarations = PerPseudoElementMap<Vec<StyleSource>>;
 
 #[derive(Default)]
 struct UserAgentCascadeData {
@@ -779,6 +817,10 @@ struct ContainingRuleState {
     containing_scope_rule_state: ContainingScopeRuleState,
     ancestor_selector_lists: SmallVec<[SelectorList<SelectorImpl>; 2]>,
     nested_declarations_context: NestedDeclarationsContext,
+    /// Set by an `@scope` rule with no start selector, whose root belongs to the
+    /// sheet rather than to its shared contents. Latches for the whole sheet, so
+    /// it is deliberately not part of the saved/restored state.
+    saw_implicit_scope_root: bool,
 }
 
 impl Default for ContainingRuleState {
@@ -791,6 +833,7 @@ impl Default for ContainingRuleState {
             ancestor_selector_lists: Default::default(),
             containing_scope_rule_state: Default::default(),
             nested_declarations_context: NestedDeclarationsContext::Style,
+            saw_implicit_scope_root: false,
         }
     }
 }
@@ -1203,7 +1246,7 @@ impl Stylist {
     {
         debug_assert!(pseudo.is_precomputed());
 
-        let rule_node = self.rule_node_for_precomputed_pseudo(guards, pseudo, vec![]);
+        let rule_node = self.rule_node_for_precomputed_pseudo(guards, pseudo, &[]);
 
         self.precomputed_values_for_pseudo_with_rule_node::<E>(guards, pseudo, parent, rule_node)
     }
@@ -1246,29 +1289,28 @@ impl Stylist {
         &self,
         guards: &StylesheetGuards,
         pseudo: &PseudoElement,
-        mut extra_declarations: Vec<ApplicableDeclarationBlock>,
+        extra_declarations: &[ApplicableDeclarationBlock],
     ) -> StrongRuleNode {
-        let mut declarations_with_extra;
         let declarations = match self
             .cascade_data
             .user_agent
             .precomputed_pseudo_element_decls
             .get(pseudo)
         {
-            Some(declarations) => {
-                if !extra_declarations.is_empty() {
-                    declarations_with_extra = declarations.clone();
-                    declarations_with_extra.append(&mut extra_declarations);
-                    &*declarations_with_extra
-                } else {
-                    &**declarations
-                }
-            },
+            Some(declarations) => &**declarations,
             None => &[],
         };
 
+        let cascade_priority = CascadePriority::new(
+            CascadeLevel::new(CascadeOrigin::UA),
+            LayerOrder::root(),
+            RuleCascadeFlags::empty(),
+        );
         self.rule_tree.insert_ordered_rules_with_important(
-            declarations.iter().map(|a| a.clone().for_rule_tree()),
+            declarations
+                .iter()
+                .map(|source| (source.borrow(), cascade_priority))
+                .chain(extra_declarations.iter().map(|d| d.for_rule_tree())),
             guards,
         )
     }
@@ -1372,7 +1414,6 @@ impl Stylist {
     }
 
     /// Computes a fallback style lazily given the current and parent styles, and name.
-    #[cfg(feature = "gecko")]
     pub fn resolve_position_try<E>(
         &self,
         style: &ComputedValues,
@@ -1557,6 +1598,7 @@ impl Stylist {
             NeedsSelectorFlags::Yes
         };
 
+        let animation_declarations = AnimationDeclarations::default();
         let mut declarations = ApplicableDeclarationList::new();
         let mut matching_context = MatchingContext::<'_, E::Impl>::new(
             MatchingMode::ForStatelessPseudoElement,
@@ -1575,7 +1617,7 @@ impl Stylist {
             Some(pseudo),
             None,
             None,
-            /* animation_declarations = */ Default::default(),
+            &animation_declarations,
             rule_inclusion,
             &mut declarations,
             &mut matching_context,
@@ -1609,7 +1651,7 @@ impl Stylist {
                 Some(pseudo),
                 None,
                 None,
-                /* animation_declarations = */ Default::default(),
+                &animation_declarations,
                 rule_inclusion,
                 &mut declarations,
                 &mut matching_context,
@@ -1699,18 +1741,18 @@ impl Stylist {
     }
 
     /// Returns the applicable CSS declarations for the given element.
-    pub fn push_applicable_declarations<E>(
-        &self,
+    pub fn push_applicable_declarations<'a, E>(
+        &'a self,
         element: E,
         pseudo_element: Option<&PseudoElement>,
-        style_attribute: Option<ArcBorrow<Locked<PropertyDeclarationBlock>>>,
-        smil_override: Option<ArcBorrow<Locked<PropertyDeclarationBlock>>>,
-        animation_declarations: AnimationDeclarations,
+        style_attribute: Option<ArcBorrow<'a, Locked<PropertyDeclarationBlock>>>,
+        smil_override: Option<ArcBorrow<'a, Locked<PropertyDeclarationBlock>>>,
+        animation_declarations: &'a AnimationDeclarations,
         rule_inclusion: RuleInclusion,
-        applicable_declarations: &mut ApplicableDeclarationList,
+        applicable_declarations: &mut ApplicableDeclarationList<'a>,
         context: &mut MatchingContext<E::Impl>,
     ) where
-        E: TElement,
+        E: TElement + 'a,
     {
         let mut cur = element;
         let mut pseudos = SmallVec::<[_; 2]>::new();
@@ -1828,7 +1870,6 @@ impl Stylist {
 
     /// Returns the registered `@position-try-rule` animation for the specified name.
     #[inline]
-    #[cfg(feature = "gecko")]
     fn lookup_position_try<'a, E>(
         &'a self,
         name: &Atom,
@@ -2112,10 +2153,21 @@ impl Stylist {
 
         let initial_value = match initial_value {
             Some(value) => {
+                let parser_context = ParserContext::new(
+                    Origin::Author,
+                    url_data,
+                    None,
+                    ParsingMode::DISALLOW_COMPUTATIONALLY_DEPENDENT,
+                    self.quirks_mode,
+                    /* namespaces = */ Default::default(),
+                    None,
+                    None,
+                    AttrTaint::default(),
+                );
                 let parsed = Parser::new(value)
                     .parse_entirely(|input| {
                         input.skip_whitespace();
-                        SpecifiedValue::parse(input, None, url_data).map(Arc::new)
+                        SpecifiedValue::parse(&parser_context, input).map(Arc::new)
                     })
                     .ok();
                 if parsed.is_none() {
@@ -2269,12 +2321,12 @@ impl PageRuleMap {
     /// Uses page-name and pseudo-classes to match all applicable
     /// page-rules and append them to the matched_rules vec.
     /// This will ensure correct rule order for cascading.
-    pub fn match_and_append_rules(
-        &self,
-        matched_rules: &mut Vec<ApplicableDeclarationBlock>,
+    pub fn match_and_append_rules<'a>(
+        &'a self,
+        matched_rules: &mut Vec<ApplicableDeclarationBlock<'a>>,
         origin: Origin,
-        guards: &StylesheetGuards,
-        cascade_data: &DocumentCascadeData,
+        guards: &'a StylesheetGuards,
+        cascade_data: &'a DocumentCascadeData,
         name: &Option<Atom>,
         pseudos: PagePseudoClassFlags,
     ) {
@@ -2303,12 +2355,12 @@ impl PageRuleMap {
         matched_rules[start..].sort_by_key(|block| block.sort_key());
     }
 
-    fn match_and_add_rules(
-        &self,
-        extra_declarations: &mut Vec<ApplicableDeclarationBlock>,
+    fn match_and_add_rules<'a>(
+        &'a self,
+        extra_declarations: &mut Vec<ApplicableDeclarationBlock<'a>>,
         level: CascadeLevel,
-        guards: &StylesheetGuards,
-        cascade_data: &CascadeData,
+        guards: &'a StylesheetGuards,
+        cascade_data: &'a CascadeData,
         name: &Atom,
         pseudos: PagePseudoClassFlags,
     ) {
@@ -2322,9 +2374,8 @@ impl PageRuleMap {
                 Some(specificity) => specificity,
                 None => continue,
             };
-            let block = rule.block.clone();
             extra_declarations.push(ApplicableDeclarationBlock::new(
-                StyleSource::from_declarations(block),
+                StyleSourceBorrow::from_declarations(rule.block.borrow_arc()),
                 0,
                 level,
                 specificity,
@@ -2452,6 +2503,7 @@ impl ExtraStyleData {
         self.counter_styles.clear();
         self.position_try_rules.clear();
         self.pages.clear();
+        self.view_transitions.clear();
     }
 }
 
@@ -3227,6 +3279,77 @@ impl Default for StylistImplicitScopeRoot {
     }
 }
 
+/// Cascade layer data.
+#[derive(Debug, Clone, MallocSizeOf)]
+struct CascadeLayers {
+    /// A map from cascade layer name to layer order.
+    layer_id_by_name: FxHashMap<LayerName, LayerId>,
+
+    /// The list of cascade layers, indexed by their layer id.
+    layer_by_id: SmallVec<[CascadeLayer; 1]>,
+}
+
+impl Default for CascadeLayers {
+    fn default() -> Self {
+        Self {
+            layer_id_by_name: FxHashMap::default(),
+            layer_by_id: smallvec::smallvec![CascadeLayer::root()],
+        }
+    }
+}
+
+impl CascadeLayers {
+    fn clear(&mut self) {
+        self.layer_id_by_name.clear();
+        self.layer_by_id.clear();
+        self.layer_by_id.push(CascadeLayer::root());
+    }
+
+    fn shrink_if_needed(&mut self) {
+        self.layer_id_by_name.shrink_if_needed();
+    }
+
+    fn has_layers(&self) -> bool {
+        debug_assert_ne!(
+            self.layer_by_id.len(),
+            0,
+            "Should have at least the root layer"
+        );
+        self.layer_by_id.len() > 1
+    }
+
+    // NOTE(emilio): This is a bit trickier than it should to avoid having to clone() around layer
+    // indices.
+    fn compute_layer_order_for_subtree(
+        parent: &mut CascadeLayer,
+        remaining_layers: &mut [CascadeLayer],
+        order: &mut LayerOrder,
+    ) {
+        for child in &parent.children {
+            debug_assert!(
+                parent.id < *child,
+                "Children are always registered after parents"
+            );
+            let child_index = (child.0 - parent.id.0 - 1) as usize;
+            let (first, remaining) = remaining_layers.split_at_mut(child_index + 1);
+            let child = &mut first[child_index];
+            Self::compute_layer_order_for_subtree(child, remaining, order);
+        }
+
+        if parent.id != LayerId::root() {
+            parent.order = *order;
+            order.inc();
+        }
+    }
+
+    fn compute_layer_order(&mut self) {
+        let (first, remaining) = self.layer_by_id.split_at_mut(1);
+        let root = &mut first[0];
+        let mut order = LayerOrder::first();
+        Self::compute_layer_order_for_subtree(root, remaining, &mut order);
+    }
+}
+
 /// Data resulting from performing the CSS cascade that is specific to a given
 /// origin.
 ///
@@ -3334,11 +3457,7 @@ pub struct CascadeData {
     /// Custom media query registrations.
     custom_media: CustomMediaMap,
 
-    /// A map from cascade layer name to layer order.
-    layer_id: FxHashMap<LayerName, LayerId>,
-
-    /// The list of cascade layers, indexed by their layer id.
-    layers: SmallVec<[CascadeLayer; 1]>,
+    layers: CascadeLayers,
 
     /// The list of container conditions, indexed by their id.
     container_conditions: SmallVec<[ContainerConditionReference; 1]>,
@@ -3346,7 +3465,13 @@ pub struct CascadeData {
     /// A map of attributes that are referenced by `attr()` functions in container queries.
     /// The attribute exists as a key if it is referenced inside a style container query.
     /// The enum value tells us whether or not the container query condition is named.
-    attr_function_dependencies: PrecomputedHashMap<LocalName, ContainerAttributeDependencyKind>,
+    container_attr_function_dependencies:
+        PrecomputedHashMap<LocalName, ContainerAttributeDependencyKind>,
+
+    /// Indicates whether a container query contains `attr()` functions with attribute names
+    /// that are not known at parse time (due to nested substitution functions). The enum
+    /// value tells us whether or not the container query condition is named.
+    container_unparsed_attr_function_dependency: ContainerAttributeDependencyKind,
 
     /// The list of scope conditions, indexed by their id.
     scope_conditions: SmallVec<[ScopeConditionReference; 1]>,
@@ -3422,10 +3547,10 @@ impl CascadeData {
             animations: Default::default(),
             custom_property_registrations: Default::default(),
             custom_media: Default::default(),
-            layer_id: Default::default(),
-            layers: smallvec::smallvec![CascadeLayer::root()],
+            layers: CascadeLayers::default(),
             container_conditions: smallvec::smallvec![ContainerConditionReference::none()],
-            attr_function_dependencies: PrecomputedHashMap::default(),
+            container_attr_function_dependencies: PrecomputedHashMap::default(),
+            container_unparsed_attr_function_dependency: ContainerAttributeDependencyKind::None,
             scope_conditions: smallvec::smallvec![ScopeConditionReference::none()],
             scope_subject_map: Default::default(),
             extra_data: ExtraStyleData::default(),
@@ -3455,8 +3580,10 @@ impl CascadeData {
         let validity = collection.data_validity();
 
         let mut old_position_try_data = LayerOrderedMap::default();
+        let mut old_layers = CascadeLayers::default();
         if validity != DataValidity::Valid {
             old_position_try_data = std::mem::take(&mut self.extra_data.position_try_rules);
+            old_layers = std::mem::take(&mut self.layers);
             self.clear_cascade_data();
             if validity == DataValidity::FullyInvalid {
                 self.clear_invalidation_data();
@@ -3465,6 +3592,7 @@ impl CascadeData {
 
         let mut result = Ok(());
 
+        let mut prev_sheet = None;
         collection.each(|index, stylesheet, rebuild_kind| {
             result = self.add_stylesheet(
                 device,
@@ -3479,6 +3607,7 @@ impl CascadeData {
                 } else {
                     None
                 },
+                &mut prev_sheet,
             );
             result.is_ok()
         });
@@ -3488,7 +3617,9 @@ impl CascadeData {
         // For DataValidity::Valid, we pass the difference down to `add_stylesheet` so that we
         // populate it with new data. Otherwise we need to diff with the old data.
         if validity != DataValidity::Valid {
-            difference.update(&old_position_try_data, &self.extra_data.position_try_rules);
+            difference.update_layers(&old_layers, &self.layers);
+            difference
+                .update_position_try(&old_position_try_data, &self.extra_data.position_try_rules);
         }
 
         result
@@ -3537,11 +3668,17 @@ impl CascadeData {
         self.nth_of_state_dependencies.intersects(state)
     }
 
-    /// Returns whether the given attribute might appear in an attribute
-    /// selector of some rule.
+    /// Returns whether the given attribute might appear in an attribute selector
+    /// of some rule or a container query with `attr()` functions.
     #[inline]
     pub fn might_have_attribute_dependency(&self, local_name: &LocalName) -> bool {
-        self.attribute_dependencies.contains(local_name)
+        // If a container query has an `attr()` function whose target attribute can't
+        // be known at parse time (due to nested substitution functions), then _any_
+        // attribute modification could require style invalidation.
+        //
+        // TODO(Bug 2087544) - Optimize invalidation for these `attr()` cases.
+        self.container_unparsed_attr_function_dependency != ContainerAttributeDependencyKind::None
+            || self.attribute_dependencies.contains(local_name)
     }
 
     /// Whether matching an element that isn't itself a link can depend on
@@ -3561,10 +3698,11 @@ impl CascadeData {
         &self,
         local_name: &LocalName,
     ) -> ContainerAttributeDependencyKind {
-        self.attr_function_dependencies
+        self.container_attr_function_dependencies
             .get(local_name)
             .copied()
             .unwrap_or(ContainerAttributeDependencyKind::None)
+            .max(self.container_unparsed_attr_function_dependency)
     }
 
     /// Returns whether the given ID might appear in an ID selector in the
@@ -3638,7 +3776,7 @@ impl CascadeData {
 
     #[inline]
     fn layer_order_for(&self, id: LayerId) -> LayerOrder {
-        self.layers[id.0 as usize].order
+        self.layers.layer_by_id[id.0 as usize].order
     }
 
     pub(crate) fn container_condition_matches<E>(
@@ -3730,52 +3868,21 @@ impl CascadeData {
         self.nth_of_class_dependencies.shrink_if_needed();
         self.nth_of_mapped_ids.shrink_if_needed();
         self.mapped_ids.shrink_if_needed();
-        self.layer_id.shrink_if_needed();
+        self.layers.shrink_if_needed();
         self.selectors_for_cache_revalidation.shrink_if_needed();
         self.scope_subject_map.shrink_if_needed();
     }
 
     fn compute_layer_order(&mut self) {
-        debug_assert_ne!(
-            self.layers.len(),
-            0,
-            "There should be at least the root layer!"
-        );
-        if self.layers.len() == 1 {
-            return; // Nothing to do
+        if !self.layers.has_layers() {
+            return;
         }
-        let (first, remaining) = self.layers.split_at_mut(1);
-        let root = &mut first[0];
-        let mut order = LayerOrder::first();
-        compute_layer_order_for_subtree(root, remaining, &mut order);
-
-        // NOTE(emilio): This is a bit trickier than it should to avoid having
-        // to clone() around layer indices.
-        fn compute_layer_order_for_subtree(
-            parent: &mut CascadeLayer,
-            remaining_layers: &mut [CascadeLayer],
-            order: &mut LayerOrder,
-        ) {
-            for child in parent.children.iter() {
-                debug_assert!(
-                    parent.id < *child,
-                    "Children are always registered after parents"
-                );
-                let child_index = (child.0 - parent.id.0 - 1) as usize;
-                let (first, remaining) = remaining_layers.split_at_mut(child_index + 1);
-                let child = &mut first[child_index];
-                compute_layer_order_for_subtree(child, remaining, order);
-            }
-
-            if parent.id != LayerId::root() {
-                parent.order = *order;
-                order.inc();
-            }
-        }
-        self.extra_data.sort_by_layer(&self.layers);
+        self.layers.compute_layer_order();
+        self.extra_data.sort_by_layer(&self.layers.layer_by_id);
         self.animations
-            .sort_with(&self.layers, compare_keyframes_in_same_layer);
-        self.custom_property_registrations.sort(&self.layers)
+            .sort_with(&self.layers.layer_by_id, compare_keyframes_in_same_layer);
+        self.custom_property_registrations
+            .sort(&self.layers.layer_by_id);
     }
 
     /// Collects all the applicable media query results into `results`.
@@ -3865,15 +3972,7 @@ impl CascadeData {
                         .as_mut()
                         .expect("Expected precomputed declarations for the UA level")
                         .get_or_insert_with(pseudo, Vec::new)
-                        .push(ApplicableDeclarationBlock::new(
-                            StyleSource::from_declarations(declarations.clone()),
-                            self.rules_source_order,
-                            CascadeLevel::new(CascadeOrigin::UA),
-                            selector.specificity(),
-                            LayerOrder::root(),
-                            ScopeProximity::infinity(),
-                            RuleCascadeFlags::empty(),
-                        ));
+                        .push(StyleSource::from_declarations(declarations.clone()));
                     continue;
                 }
                 if pseudo_elements
@@ -4226,33 +4325,34 @@ impl CascadeData {
                 // TODO: Measure what's more common / expensive, if
                 // layer.clone() or the double hash lookup in the insert
                 // case.
-                if let Some(id) = data.layer_id.get(layer) {
+                if let Some(id) = data.layers.layer_id_by_name.get(layer) {
                     return *id;
                 }
-                let id = LayerId(data.layers.len() as u16);
+                let id = LayerId(data.layers.layer_by_id.len() as u16);
 
                 let parent_layer_id = if layer.layer_names().len() > 1 {
                     let mut parent = layer.clone();
                     parent.0.pop();
 
                     *data
-                        .layer_id
-                        .get_mut(&parent)
+                        .layers
+                        .layer_id_by_name
+                        .get(&parent)
                         .expect("Parent layers should be registered before child layers")
                 } else {
                     LayerId::root()
                 };
 
-                data.layers[parent_layer_id.0 as usize].children.push(id);
-                data.layers.push(CascadeLayer {
+                data.layers.layer_by_id[parent_layer_id.0 as usize]
+                    .children
+                    .push(id);
+                data.layers.layer_by_id.push(CascadeLayer {
                     id,
-                    // NOTE(emilio): Order is evaluated after rebuild in
-                    // compute_layer_order.
+                    // NOTE(emilio): Order is evaluated after rebuild in compute_layer_order.
                     order: LayerOrder::first(),
                     children: vec![],
                 });
-
-                data.layer_id.insert(layer.clone(), id);
+                data.layers.layer_id_by_name.insert(layer.clone(), id);
 
                 id
             }
@@ -4334,10 +4434,14 @@ impl CascadeData {
 
                     if rebuild_kind.should_rebuild_invalidation() {
                         for condition in rule.conditions.0.iter() {
-                            condition.insert_attribute_references_in_dependency_map(
-                                &mut self.attr_function_dependencies,
-                                &mut self.attribute_dependencies,
-                            );
+                            let unparsed_dependency_kind = condition
+                                .insert_attribute_references_in_dependency_map(
+                                    &mut self.container_attr_function_dependencies,
+                                    &mut self.attribute_dependencies,
+                                );
+                            self.container_unparsed_attr_function_dependency = self
+                                .container_unparsed_attr_function_dependency
+                                .max(unparsed_dependency_kind);
                         }
                     }
                 },
@@ -4361,6 +4465,7 @@ impl CascadeData {
                         // Would be unused, but use the default as fallback.
                         StylistImplicitScopeRoot::default()
                     } else {
+                        containing_rule_state.saw_implicit_scope_root = true;
                         // (Re)Moving stylesheets trigger a complete flush, so saving the implicit
                         // root here should be safe.
                         if let Some(root) = stylesheet.implicit_scope_root() {
@@ -4504,6 +4609,7 @@ impl CascadeData {
         rebuild_kind: SheetRebuildKind,
         precomputed_pseudo_element_decls: Option<&mut PrecomputedPseudoElementDeclarations>,
         difference: Option<&mut CascadeDataDifference>,
+        prev_sheet: &mut Option<*const StylesheetContents>,
     ) -> Result<(), AllocErr>
     where
         S: StylesheetInDocument + 'static,
@@ -4521,6 +4627,12 @@ impl CascadeData {
             self.effective_media_query_results.saw_effective(contents);
         }
 
+        // Identical sheets share their parsed contents, so one that repeats its
+        // predecessor adds the same rules to the selector maps a second time.
+        if prev_sheet.is_some_and(|p| std::ptr::eq(p, contents)) {
+            return Ok(());
+        }
+
         let mut state = ContainingRuleState::default();
         self.add_rule_list(
             contents.rules(guard).iter(),
@@ -4534,6 +4646,10 @@ impl CascadeData {
             precomputed_pseudo_element_decls,
             difference,
         )?;
+
+        // Only a sheet whose rules don't depend on which sheet they came from can
+        // stand in for a later copy; an implicitly scoped rule's root does.
+        *prev_sheet = (!state.saw_implicit_scope_root).then_some(std::ptr::from_ref(contents));
 
         Ok(())
     }
@@ -4712,9 +4828,7 @@ impl CascadeData {
         }
         self.animations.clear();
         self.custom_property_registrations.clear();
-        self.layer_id.clear();
         self.layers.clear();
-        self.layers.push(CascadeLayer::root());
         self.custom_media.clear();
         self.container_conditions.clear();
         self.container_conditions
@@ -4732,7 +4846,8 @@ impl CascadeData {
         self.relative_selector_invalidation_map.clear();
         self.additional_relative_selector_invalidation_map.clear();
         self.attribute_dependencies.clear();
-        self.attr_function_dependencies.clear();
+        self.container_attr_function_dependencies.clear();
+        self.container_unparsed_attr_function_dependency = ContainerAttributeDependencyKind::None;
         self.nth_of_attribute_dependencies.clear();
         self.nth_of_custom_state_dependencies.clear();
         self.nth_of_class_dependencies.clear();
@@ -4942,9 +5057,9 @@ impl Rule {
         level: CascadeLevel,
         cascade_data: &CascadeData,
         scope_proximity: ScopeProximity,
-    ) -> ApplicableDeclarationBlock {
+    ) -> ApplicableDeclarationBlock<'_> {
         ApplicableDeclarationBlock::new(
-            self.style_source.clone(),
+            self.style_source.borrow(),
             self.source_order,
             level,
             self.specificity(),

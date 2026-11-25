@@ -14,15 +14,17 @@ pub(crate) mod base {
     pub(crate) use js::error::throw_type_error;
     pub(crate) use js::gc::RootedVec;
     pub(crate) use js::jsapi::{
-        HandleValue as RawHandleValue, HandleValueArray, Heap, IsCallable, JSObject, Value,
+        CheckedUnwrapStatic, GetNonCCWObjectGlobal, HandleValue as RawHandleValue,
+        HandleValueArray, Heap, IsCallable, JSObject, Value,
     };
     pub(crate) use js::jsval::{JSVal, NullValue, ObjectOrNullValue, ObjectValue, UndefinedValue};
     pub(crate) use js::panic::maybe_resume_unwind;
     #[allow(unused_imports)]
     pub(crate) use js::realm::{AutoRealm, CurrentRealm};
-    pub(crate) use js::rust::wrappers2::Call;
+    pub(crate) use js::rust::wrappers2::{Call, GetArrayLength, JS_GetElement, JS_SetElement};
     pub(crate) use js::rust::{
-        HandleObject, HandleValue, MutableHandle, MutableHandleObject, MutableHandleValue,
+        CustomTrace, HandleObject, HandleValue, MutableHandle, MutableHandleObject,
+        MutableHandleValue,
     };
     pub(crate) use js::typedarray;
     pub(crate) use js::typedarray::{
@@ -45,8 +47,7 @@ pub(crate) mod base {
     pub(crate) use crate::lock::ThreadUnsafeOnceLock;
     pub(crate) use crate::num::Finite;
     pub(crate) use crate::proxyhandler::{CrossOriginProperties, is_platform_object_same_origin};
-    pub(crate) use crate::reflector::DomObject;
-    pub(crate) use crate::root::DomRoot;
+    pub(crate) use crate::root::{Dom, DomRoot};
     pub(crate) use crate::str::{ByteString, DOMString, USVString};
     pub(crate) use crate::trace::RootedTraceableBox;
     pub(crate) use crate::utils::{get_dictionary_property, set_dictionary_property};
@@ -62,12 +63,13 @@ pub(crate) mod module {
     };
     pub(crate) use js::jsapi::{
         __BindgenBitfieldUnit, CallArgs, GCContext, Handle as RawHandle, HandleId as RawHandleId,
-        HandleObject as RawHandleObject, JS_SetReservedSlot, JSCLASS_FOREGROUND_FINALIZE,
-        JSCLASS_RESERVED_SLOTS_SHIFT, JSClass, JSClassOps, JSFunctionSpec, JSJitGetterCallArgs,
-        JSJitInfo, JSJitInfo__bindgen_ty_1, JSJitInfo__bindgen_ty_2, JSJitInfo__bindgen_ty_3,
-        JSJitInfo_AliasSet, JSJitInfo_ArgType, JSJitInfo_OpType, JSJitMethodCallArgs,
-        JSJitSetterCallArgs, JSNativeWrapper, JSPROP_ENUMERATE, JSPROP_PERMANENT, JSPROP_READONLY,
-        JSPropertySpec, JSPropertySpec_Accessor, JSPropertySpec_AccessorsOrValue,
+        HandleObject as RawHandleObject, HandleValueArray, JS_SetReservedSlot,
+        JSCLASS_FOREGROUND_FINALIZE, JSCLASS_RESERVED_SLOTS_SHIFT, JSClass, JSClassOps,
+        JSFunctionSpec, JSJitGetterCallArgs, JSJitInfo, JSJitInfo__bindgen_ty_1,
+        JSJitInfo__bindgen_ty_2, JSJitInfo__bindgen_ty_3, JSJitInfo_AliasSet, JSJitInfo_ArgType,
+        JSJitInfo_OpType, JSJitMethodCallArgs, JSJitSetterCallArgs, JSNativeWrapper,
+        JSPROP_ENUMERATE, JSPROP_PERMANENT, JSPROP_READONLY, JSPropertySpec,
+        JSPropertySpec_Accessor, JSPropertySpec_AccessorsOrValue,
         JSPropertySpec_AccessorsOrValue_Accessors, JSPropertySpec_Kind, JSPropertySpec_Name,
         JSPropertySpec_ValueWrapper, JSPropertySpec_ValueWrapper__bindgen_ty_1,
         JSPropertySpec_ValueWrapper_Type, JSTracer, JSTypedMethodJitInfo, JSValueType,

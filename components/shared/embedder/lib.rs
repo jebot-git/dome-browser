@@ -25,7 +25,7 @@ use std::sync::Arc;
 use accesskit::TreeUpdate;
 use content_security_policy::Destination;
 use crossbeam_channel::Sender;
-use euclid::{Box2D, Point2D, Scale, Size2D, Vector2D};
+use euclid::{Box2D, Point2D, Rect, Scale, Size2D, Vector2D};
 use http::{HeaderMap, Method, StatusCode};
 use log::warn;
 use malloc_size_of::malloc_size_of_is_0;
@@ -46,7 +46,7 @@ use url::Url;
 use uuid::Uuid;
 use webrender_api::ExternalScrollId;
 use webrender_api::units::{
-    DeviceIntPoint, DeviceIntRect, DeviceIntSize, DevicePixel, DevicePoint, DeviceRect,
+    Au, DeviceIntPoint, DeviceIntRect, DeviceIntSize, DevicePixel, DevicePoint, DeviceRect,
     DeviceVector2D, LayoutPoint, LayoutRect, LayoutSize, LayoutVector2D,
 };
 
@@ -456,7 +456,7 @@ pub enum ExternalDocumentEvent {
 }
 
 /// The severity level of a message logged by page content.
-#[derive(Clone, Debug, Deserialize, Serialize, MallocSizeOf)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, MallocSizeOf)]
 #[serde(rename_all = "lowercase")]
 pub enum ConsoleLogLevel {
     Log,
@@ -466,6 +466,7 @@ pub enum ConsoleLogLevel {
     Error,
     Trace,
     Dir,
+    Table,
 }
 
 impl From<ConsoleLogLevel> for log::Level {
@@ -478,6 +479,7 @@ impl From<ConsoleLogLevel> for log::Level {
             ConsoleLogLevel::Error => log::Level::Error,
             ConsoleLogLevel::Trace => log::Level::Trace,
             ConsoleLogLevel::Dir => log::Level::Info,
+            ConsoleLogLevel::Table => log::Level::Info,
         }
     }
 }
@@ -489,6 +491,14 @@ pub struct BluetoothDeviceDescription {
     pub address: String,
     /// A human-readable name for this device.
     pub name: String,
+}
+
+/// A rectangle in a pipeline in CSS pixels. This is in the viewport coordinates of the pipeline,
+/// which means that it does not take into account nested frames or the transforms applied to them.
+#[derive(Deserialize, Serialize)]
+pub struct PipelineRect {
+    pub rect: Rect<Au, CSSPixel>,
+    pub pipeline_id: PipelineId,
 }
 
 /// Messages towards the embedder.
@@ -527,8 +537,9 @@ pub enum EmbedderMsg {
     SetClipboardText(WebViewId, String),
     /// Changes the cursor.
     SetCursor(WebViewId, Cursor),
-    /// A favicon was detected
-    NewFavicon(WebViewId, Image),
+    /// Inform the embedder that a new favicon was set for the current top-level frame. In the case
+    /// that there is no favicon, `None` is sent.
+    SetFavicon(WebViewId, Option<Image>),
     /// Get the device independent window rectangle.
     GetWindowRect(WebViewId, GenericSender<DeviceIndependentIntRect>),
     /// Get the device independent screen size and available size.
@@ -585,7 +596,7 @@ pub enum EmbedderMsg {
     /// <https://developer.mozilla.org/en-US/docs/Web/API/Console_API>
     ShowConsoleApiMessage(Option<WebViewId>, ConsoleLogLevel, String),
     /// Request to the embedder to display a user interace control.
-    ShowEmbedderControl(EmbedderControlId, DeviceIntRect, EmbedderControlRequest),
+    ShowEmbedderControl(EmbedderControlId, PipelineRect, EmbedderControlRequest),
     /// Request to the embedder to hide a user interface control.
     HideEmbedderControl(EmbedderControlId),
     /// Inform the embedding layer that a particular `InputEvent` was handled by Servo
@@ -879,6 +890,9 @@ pub enum LoadStatus {
     /// `document.readyState` == `complete`.
     /// See <https://developer.mozilla.org/en-US/docs/Web/API/Document/readyState>
     Complete,
+    /// The current load was stopped, either by the embedder or by script on the page
+    /// (for instance, by calling `window.stop()`).
+    Stopped,
 }
 
 /// Data that could be used to display a desktop notification to the end user

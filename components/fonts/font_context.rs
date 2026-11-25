@@ -14,8 +14,8 @@ use app_units::Au;
 use content_security_policy::Violation;
 use fonts_traits::{
     CSSFontFaceDescriptors, FontDescriptor, FontFaceRuleInfo, FontIdentifier, FontTemplate,
-    FontTemplateRef, FontTemplateRefMethods, StylesheetWebFontLoadFinishedCallback,
-    WebFontLoadEvent, WebFontSetDifference,
+    FontTemplateDescriptor, FontTemplateRef, FontTemplateRefMethods,
+    StylesheetWebFontLoadFinishedCallback, WebFontLoadEvent, WebFontSetDifference,
 };
 use log::{debug, trace};
 use malloc_size_of::MallocSizeOf;
@@ -36,6 +36,8 @@ use servo_arc::Arc as ServoArc;
 use servo_base::id::{PainterId, WebViewId};
 use servo_config::pref;
 use servo_url::ServoUrl;
+use skrifa::Font as SkrifaFont;
+use skrifa::font::Blob;
 use style::Atom;
 use style::computed_values::font_variant_caps::T as FontVariantCaps;
 use style::font_face::{
@@ -61,8 +63,7 @@ use crate::font_feature_values::{
     ResolvedFontVariantAlternates,
 };
 use crate::font_store::{CrossThreadFontStore, FontStore};
-use crate::platform::font::PlatformFont;
-use crate::{FontData, LowercaseFontFamilyName, PlatformFontMethods, SystemFontServiceProxy};
+use crate::{FontData, LowercaseFontFamilyName, SystemFontServiceProxy};
 
 static SMALL_CAPS_SCALE_FACTOR: f32 = 0.8; // Matches FireFox (see gfxFont.h)
 
@@ -76,6 +77,39 @@ pub(crate) struct FontParameters {
 }
 
 pub type FontGroupRef = Arc<FontGroup>;
+
+/// A cache of [`SkrifaFont`] so that all fonts that share an identifier in a [`FontContext`]
+/// can share table data. This explicitly caches [`None`] when font creation fails to avoid
+/// trying to create a font over and over again in failure cases.
+#[derive(Default, MallocSizeOf)]
+pub struct SkrifaFontCache(RwLock<HashMap<FontIdentifier, Option<SkrifaFont>>>);
+
+impl SkrifaFontCache {
+    pub fn get(
+        &self,
+        font_identifier: &FontIdentifier,
+        create_function: impl FnOnce() -> Option<SkrifaFont>,
+    ) -> Option<SkrifaFont> {
+        // Web and script faces are owned by live templates and Font instances.
+        // Retaining their bytes here would outlive canceled loads and deleted
+        // FontFace entries, bypassing their explicit lifecycle cleanup.
+        if !matches!(font_identifier, FontIdentifier::Local(_)) {
+            return create_function();
+        }
+        if let Some(font) = self.0.read().get(font_identifier) {
+            return font.clone();
+        }
+
+        let mut fonts = self.0.write();
+        if let Some(font) = fonts.get(font_identifier) {
+            return font.clone();
+        }
+
+        let skrifa_font = create_function();
+        fonts.insert(font_identifier.clone(), skrifa_font.clone());
+        skrifa_font
+    }
+}
 
 /// The FontContext represents the per-thread/thread state necessary for
 /// working with fonts. It is the public API used by the layout and
@@ -114,6 +148,9 @@ pub struct FontContext {
     /// The data for each web font [`FontIdentifier`]. This data might be used by more than one
     /// [`FontTemplate`] as each identifier refers to a URL.
     font_data: RwLock<HashMap<FontIdentifier, FontData>>,
+
+    /// A cache of `skrifa` `Font`s used to share table data between font instances.
+    skrifa_font_cache: SkrifaFontCache,
 
     have_removed_web_fonts: AtomicBool,
 
@@ -177,9 +214,31 @@ impl FontContext {
         paint_api: CrossProcessPaintApi,
         resource_threads: ResourceThreads,
     ) -> Self {
+        Self::new_with_core_resource_thread(
+            system_font_service_proxy,
+            paint_api,
+            resource_threads.core_thread,
+        )
+    }
+
+    /// Creates an empty `FontContext` that uses the same services as this one. Workers use this
+    /// so that the fonts they load are kept separate from the fonts of the page that created them.
+    pub fn new_for_worker(&self) -> Self {
+        Self::new_with_core_resource_thread(
+            self.system_font_service_proxy.clone(),
+            self.paint_api.lock().clone(),
+            self.resource_threads.lock().clone(),
+        )
+    }
+
+    fn new_with_core_resource_thread(
+        system_font_service_proxy: Arc<SystemFontServiceProxy>,
+        paint_api: CrossProcessPaintApi,
+        core_resource_thread: CoreResourceThread,
+    ) -> Self {
         Self {
             system_font_service_proxy,
-            resource_threads: Mutex::new(resource_threads.core_thread),
+            resource_threads: Mutex::new(core_resource_thread),
             paint_api: Mutex::new(paint_api),
             fonts: Default::default(),
             resolved_font_groups: Default::default(),
@@ -188,6 +247,7 @@ impl FontContext {
             webrender_font_instance_keys: RwLock::default(),
             have_removed_web_fonts: AtomicBool::new(false),
             font_data: RwLock::default(),
+            skrifa_font_cache: Default::default(),
             currently_downloading_fonts: Default::default(),
             known_font_face_rules: Default::default(),
             font_feature_value_map: Default::default(),
@@ -372,6 +432,7 @@ impl FontContext {
             font_descriptor,
             self.get_font_data(&font_template.identifier()),
             synthesized_small_caps,
+            &self.skrifa_font_cache,
         )?)))
     }
 
@@ -499,6 +560,35 @@ impl FontContext {
         false
     }
 
+    fn is_local_or_unknown_url_font(
+        &self,
+        family_name: &LowercaseFontFamilyName,
+        source: &Source,
+    ) -> bool {
+        match source {
+            Source::Url(url) => !url
+                .url
+                .url()
+                .cloned()
+                .map(ServoUrl::from)
+                .map(FontIdentifier::Web)
+                .filter(|font_identifier| self.font_data.read().contains_key(font_identifier))
+                .is_some_and(|font_identifier| {
+                    self.web_fonts
+                        .read()
+                        .families
+                        .get(family_name)
+                        .is_some_and(|templates| {
+                            templates
+                                .templates
+                                .iter()
+                                .any(|template| template.borrow().identifier == font_identifier)
+                        })
+                }),
+            Source::Local(_) => true,
+        }
+    }
+
     /// Adds the provided new web font request to the list of pending downloads.
     ///
     /// Returns a boolean indicating whether a new download should be started. If there is
@@ -539,12 +629,13 @@ impl FontContext {
         );
 
         let identifier = FontIdentifier::Web(url);
-        let Ok(handle) = PlatformFont::new_from_data(identifier.clone(), &font_data, None, false)
-        else {
+        let Some(skrifa_font) = self.skrifa_font_cache().get(&identifier, || {
+            SkrifaFont::new(Blob::Shared(Arc::new(font_data.clone())), 0)
+        }) else {
             return false;
         };
 
-        let descriptor = handle.descriptor();
+        let descriptor = FontTemplateDescriptor::from_skrifa_font(&skrifa_font);
         for download_state in download_states {
             let mut descriptor = descriptor.clone();
             descriptor.override_values_with_css_font_template_descriptors(
@@ -583,6 +674,10 @@ impl FontContext {
             .values()
             .flat_map(|bucket| bucket.iter())
             .any(|known_web_font| ServoArc::ptr_eq(&known_web_font.font_face_rule_entry, web_font))
+    }
+
+    pub(crate) fn skrifa_font_cache(&self) -> &SkrifaFontCache {
+        &self.skrifa_font_cache
     }
 }
 
@@ -834,6 +929,15 @@ impl FontContextWebFontMethods for Arc<FontContext> {
 }
 
 impl FontContext {
+    /// Removes all of the WebRender font resources that this `FontContext` created. This is for
+    /// owners that don't have a layout thread to do it when they go away, such as workers.
+    pub fn remove_all_webrender_resources(&self, painter_id: PainterId) {
+        let (keys, instance_keys) = self.collect_unused_webrender_resources(true /* all */);
+        self.paint_api
+            .lock()
+            .remove_unused_font_resources(painter_id, keys, instance_keys);
+    }
+
     pub fn collect_unused_webrender_resources(
         &self,
         all: bool,
@@ -860,6 +964,7 @@ impl FontContext {
         let mut font_data = self.font_data.write();
         let _fonts = self.fonts.write();
         let _font_groups = self.resolved_font_groups.write();
+        let mut skrifa_font_cache = self.skrifa_font_cache.0.write();
         let mut webrender_font_keys = self.webrender_font_keys.write();
         let mut webrender_font_instance_keys = self.webrender_font_instance_keys.write();
 
@@ -876,6 +981,8 @@ impl FontContext {
         }
 
         font_data.retain(|font_identifier, _| !unused_identifiers.contains(font_identifier));
+        skrifa_font_cache
+            .retain(|font_identifier, _| !unused_identifiers.contains(font_identifier));
 
         self.have_removed_web_fonts.store(false, Ordering::Relaxed);
 
@@ -1002,10 +1109,11 @@ impl FontContext {
         let font_data = FontData::from_vec(bytes);
 
         let identifier = FontIdentifier::ArrayBuffer(Uuid::new_v4());
-        let handle =
-            PlatformFont::new_from_data(identifier.clone(), &font_data, None, false).ok()?;
-
-        let mut new_template = FontTemplate::new(identifier.clone(), handle.descriptor(), None);
+        let skrifa_font = self.skrifa_font_cache().get(&identifier, || {
+            SkrifaFont::new(Blob::Shared(Arc::new(font_data.clone())), 0)
+        })?;
+        let descriptor = FontTemplateDescriptor::from_skrifa_font(&skrifa_font);
+        let mut new_template = FontTemplate::new(identifier.clone(), descriptor, None);
         new_template.script_font_data = Some(font_data);
 
         Some((descriptors.family_name, new_template))
@@ -1031,6 +1139,15 @@ impl FontContext {
             .iter()
             .rev()
             .filter(Self::is_supported_web_font_source)
+            // A script `FontFace` must load even if the same URL was already loaded for this
+            // family, otherwise the load would fail with no sources left.
+            .filter(|source| {
+                matches!(completion_handler, WebFontLoadInitiator::Script(_)) ||
+                    self.is_local_or_unknown_url_font(
+                        &css_font_face_descriptors.family_name,
+                        source,
+                    )
+            })
             .cloned()
             .collect();
 

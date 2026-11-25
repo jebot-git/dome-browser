@@ -11,6 +11,7 @@
 -moz-gtk-menu-radius
 -moz-mac-titlebar-height
 -moz-overlay-scrollbar-fade-duration
+-moz-submit-string
 DOMContentLoaded
 a
 abort
@@ -55,6 +56,7 @@ dark
 datachannel
 date
 datetime-local
+device-aspect-ratio
 device-height
 device-pixel-ratio
 device-width
@@ -137,6 +139,9 @@ pointer
 popstate
 postershown
 prefers-color-scheme
+prefers-contrast
+prefers-reduced-motion
+prefers-reduced-transparency
 print
 progress
 radio

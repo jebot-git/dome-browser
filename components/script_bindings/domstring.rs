@@ -89,6 +89,49 @@ impl EncodedBytes<'_> {
     }
 }
 
+#[derive(Clone, Debug)]
+enum AtomTypes {
+    LocalName(LocalName),
+    Stylo(stylo_atoms::Atom),
+    Namespace(web_atoms::Namespace),
+    Prefix(web_atoms::Prefix),
+}
+
+impl From<LocalName> for AtomTypes {
+    fn from(value: LocalName) -> Self {
+        AtomTypes::LocalName(value)
+    }
+}
+
+impl From<stylo_atoms::Atom> for AtomTypes {
+    fn from(value: stylo_atoms::Atom) -> Self {
+        AtomTypes::Stylo(value)
+    }
+}
+
+impl From<web_atoms::Namespace> for AtomTypes {
+    fn from(value: web_atoms::Namespace) -> Self {
+        AtomTypes::Namespace(value)
+    }
+}
+
+impl From<web_atoms::Prefix> for AtomTypes {
+    fn from(value: web_atoms::Prefix) -> Self {
+        AtomTypes::Prefix(value)
+    }
+}
+
+impl AsRef<str> for AtomTypes {
+    fn as_ref(&self) -> &str {
+        match self {
+            AtomTypes::LocalName(atom) => atom.as_str(),
+            AtomTypes::Stylo(atom) => atom.as_str(),
+            AtomTypes::Namespace(atom) => atom.as_str(),
+            AtomTypes::Prefix(atom) => atom.as_str(),
+        }
+    }
+}
+
 #[derive(Zeroize)]
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 enum DOMStringType {
@@ -105,6 +148,8 @@ enum DOMStringType {
     Latin1Vec(Vec<u8>),
     #[zeroize(skip)] // static strings will never have secrets.
     RustStatic(&'static str),
+    #[zeroize(skip)]
+    Atom(AtomTypes),
 }
 
 impl Clone for DOMStringType {
@@ -116,6 +161,7 @@ impl Clone for DOMStringType {
             #[cfg(test)]
             Self::Latin1Vec(arg0) => Self::Latin1Vec(arg0.clone()),
             Self::RustStatic(arg0) => Self::RustStatic(arg0),
+            Self::Atom(atom) => Self::Atom(atom.clone()),
         }
     }
 }
@@ -146,6 +192,7 @@ impl DOMStringType {
             #[cfg(test)]
             DOMStringType::Latin1Vec(items) => items,
             DOMStringType::RustStatic(s) => s.as_bytes(),
+            DOMStringType::Atom(s) => s.as_ref().as_bytes(),
         }
     }
 
@@ -171,6 +218,7 @@ impl DOMStringType {
             },
             // Currently because we return a `&mut String` we need to own the string.
             DOMStringType::RustStatic(s) => s.to_owned(),
+            DOMStringType::Atom(s) => s.as_ref().to_owned(),
         };
         *self = DOMStringType::Rust(new_string);
         self.ensure_rust_string()
@@ -248,6 +296,7 @@ unsafe impl Trace for DOMStringType {
                 #[cfg(test)]
                 DOMStringType::Latin1Vec(_s) => {},
                 DOMStringType::RustStatic(_) => {},
+                DOMStringType::Atom(_) => {},
             }
         }
     }
@@ -265,6 +314,7 @@ impl malloc_size_of::MallocSizeOf for DOMStringType {
             #[cfg(test)]
             DOMStringType::Latin1Vec(s) => s.size_of(ops),
             DOMStringType::RustStatic(_s) => 0,
+            DOMStringType::Atom(_) => 0,
         }
     }
 }
@@ -284,6 +334,7 @@ impl std::fmt::Debug for DOMStringType {
                 .debug_struct("DOMString")
                 .field("static_string", s)
                 .finish(),
+            DOMStringType::Atom(s) => f.debug_struct("DOMString").field("atom", s).finish(),
         }
     }
 }
@@ -356,7 +407,8 @@ impl DOMString {
         TracedDOMString::default().root()
     }
 
-    /// Creates the string from js. If the string can be encoded in latin1, just take the reference
+    /// Converts a value to a string and put it into a [`DOMString`].
+    /// If the string can be encoded in latin1, just take the reference
     /// to the JSString. Otherwise do the conversion to utf8 now.
     /// <https://webidl.spec.whatwg.org/#js-DOMString>
     pub fn from_js_string(
@@ -480,6 +532,7 @@ impl TracedDOMString {
             #[cfg(test)]
             DOMStringType::Latin1Vec(ref items) => info!("Latin1 string"),
             DOMStringType::RustStatic(s) => info!("Static Rust String ({})", s),
+            DOMStringType::Atom(ref s) => info!("Atom String ({:?})", s),
         }
     }
 
@@ -522,6 +575,10 @@ impl TracedDOMString {
                 no_gc,
                 Ref::map(inner, |inner| unsafe { inner.as_raw_bytes() }),
             )),
+            DOMStringType::Atom(_) => EncodedBytes::Utf8((
+                no_gc,
+                Ref::map(inner, |inner| unsafe { inner.as_raw_bytes() }),
+            )),
         }
     }
 
@@ -532,6 +589,7 @@ impl TracedDOMString {
             DOMStringType::Utf16(units) => units.clone(),
             DOMStringType::Rust(string) => string.encode_utf16().collect(),
             DOMStringType::RustStatic(string) => string.encode_utf16().collect(),
+            DOMStringType::Atom(atom) => atom.as_ref().encode_utf16().collect(),
             DOMStringType::JSString(string) => unsafe {
                 get_latin1_string_bytes(string)
                     .iter()
@@ -1029,6 +1087,7 @@ impl ToJSValConvertible for TracedDOMString {
                     .to_jsval(cx, rval);
             },
             DOMStringType::RustStatic(s) => s.to_jsval(cx, rval),
+            DOMStringType::Atom(ref atom) => atom.as_ref().to_jsval(cx, rval),
         };
     }
 }
@@ -1207,6 +1266,30 @@ impl From<DOMString> for Atom {
     }
 }
 
+impl From<LocalName> for TracedDOMString {
+    fn from(value: LocalName) -> Self {
+        TracedDOMString(RefCell::new(DOMStringType::Atom(value.into())))
+    }
+}
+
+impl From<stylo_atoms::Atom> for TracedDOMString {
+    fn from(value: stylo_atoms::Atom) -> Self {
+        TracedDOMString(RefCell::new(DOMStringType::Atom(value.into())))
+    }
+}
+
+impl From<web_atoms::Namespace> for TracedDOMString {
+    fn from(value: web_atoms::Namespace) -> Self {
+        TracedDOMString(RefCell::new(DOMStringType::Atom(value.into())))
+    }
+}
+
+impl From<web_atoms::Prefix> for TracedDOMString {
+    fn from(value: web_atoms::Prefix) -> Self {
+        TracedDOMString(RefCell::new(DOMStringType::Atom(value.into())))
+    }
+}
+
 #[cfg_attr(crown, expect(crown::unrooted_must_root))]
 impl From<TracedDOMString> for String {
     fn from(val: TracedDOMString) -> Self {
@@ -1218,6 +1301,7 @@ impl From<TracedDOMString> for String {
             #[cfg(test)]
             DOMStringType::Latin1Vec(items) => String::from_utf8(items).expect("Not valid latin1"),
             DOMStringType::RustStatic(s) => s.to_owned(),
+            DOMStringType::Atom(s) => s.as_ref().to_owned(),
         }
     }
 }
@@ -1239,6 +1323,7 @@ impl From<TracedDOMString> for Vec<u8> {
             #[cfg(test)]
             DOMStringType::Latin1Vec(items) => items,
             DOMStringType::RustStatic(_) => unreachable!(),
+            DOMStringType::Atom(_) => unreachable!(),
         }
     }
 }
@@ -1862,5 +1947,40 @@ mod tests {
             assert_eq!(string.to_code_units(), units);
             assert_eq!(&*string.str(), String::from_utf16_lossy(&units));
         }
+    }
+
+
+    #[test]
+    fn atom_code_units_preserve_utf16_without_converting_storage() {
+        let text = "Aé𝄞";
+        for string in [
+            TracedDOMString::from(LocalName::from(text)),
+            TracedDOMString::from(stylo_atoms::Atom::from(text)),
+            TracedDOMString::from(web_atoms::Namespace::from(text)),
+            TracedDOMString::from(web_atoms::Prefix::from(text)),
+        ] {
+            assert_eq!(string.to_code_units(), [0x0041, 0x00e9, 0xd834, 0xdd1e]);
+            assert_eq!(string.len_utf16(), Utf16CodeUnits(4));
+            assert!(matches!(&*string.0.borrow(), DOMStringType::Atom(_)));
+        }
+    }
+
+    #[test]
+    fn test_atom_restore() {
+        let local_name = LocalName::from("test_name");
+        let local_name_domstring = TracedDOMString::from(local_name.clone());
+        assert_eq!(local_name_domstring.str(), local_name.as_str());
+
+        let stylo = stylo_atoms::Atom::from("test-atom-stylo");
+        let stylo_domstring = TracedDOMString::from(stylo.clone());
+        assert_eq!(stylo_domstring.str(), stylo.as_str());
+
+        let namespace = web_atoms::Namespace::from("test-atom-namespace");
+        let namespace_domstring = TracedDOMString::from(namespace.clone());
+        assert_eq!(namespace_domstring.str(), namespace.as_str());
+
+        let prefix = web_atoms::Prefix::from("prefix");
+        let prefix_domstring = TracedDOMString::from(prefix.clone());
+        assert_eq!(prefix_domstring.str(), prefix.as_str());
     }
 }

@@ -25,6 +25,7 @@ use script_bindings::reflector::{Reflector, reflect_dom_object_with_wrap};
 use script_bindings::root::DomRoot;
 use script_bindings::serializable::Serializable;
 use script_bindings::structuredclone::StructuredData;
+use script_bindings::trace::RootedTraceableBox;
 use servo_base::id::{CryptoKeyId, CryptoKeyIndex};
 use servo_constellation_traits::{SerializableCryptoKey, SerializableCryptoKeyHandle};
 use strum::VariantArray;
@@ -35,7 +36,7 @@ use crate::traits::Equivalence;
 
 pub(crate) enum CryptoKeyOrCryptoKeyPair<D: DomTypes> {
     CryptoKey(DomRoot<CryptoKey<D>>),
-    CryptoKeyPair(CryptoKeyPair<D>),
+    CryptoKeyPair(RootedTraceableBox<CryptoKeyPair<D>>),
 }
 
 /// The underlying cryptographic data this key represents.
@@ -44,8 +45,8 @@ pub(crate) enum CryptoKeyOrCryptoKeyPair<D: DomTypes> {
 /// trait, which signifies that the type will call `Zeroize::zeroize` on `Drop` to securely erase
 /// the secret from memory.
 pub(crate) enum Handle {
-    RsaPrivateKey(rsa::RsaPrivateKey),
-    RsaPublicKey(rsa::RsaPublicKey),
+    RsaPrivateKey(rsa::PrivateKey),
+    RsaPublicKey(rsa::PublicKey),
     P256PrivateKey(p256::SecretKey),
     P384PrivateKey(p384::SecretKey),
     P521PrivateKey(p521::SecretKey),
@@ -64,7 +65,7 @@ pub(crate) enum Handle {
     Aes192Key(aes::cipher::common::Key<aes::Aes192>),
     Aes256Key(aes::cipher::common::Key<aes::Aes256>),
     HkdfSecret(Zeroizing<Vec<u8>>),
-    Pbkdf2(Zeroizing<Vec<u8>>),
+    Pbkdf2Password(Zeroizing<Vec<u8>>),
     Hmac(Zeroizing<Vec<u8>>),
     MlKem512PrivateKey(ml_kem::DecapsulationKey<ml_kem::MlKem512>),
     MlKem768PrivateKey(ml_kem::DecapsulationKey<ml_kem::MlKem768>),
@@ -317,7 +318,6 @@ where
 impl Handle {
     pub(crate) fn as_bytes(&self) -> &[u8] {
         match self {
-            Self::Pbkdf2(bytes) => bytes,
             Self::Hmac(bytes) => bytes,
             _ => unreachable!(),
         }
@@ -347,7 +347,7 @@ impl MallocSizeOf for Handle {
             Handle::Aes192Key(key) => key.size_of(ops),
             Handle::Aes256Key(key) => key.size_of(ops),
             Handle::HkdfSecret(secret) => secret.size_of(ops),
-            Handle::Pbkdf2(bytes) => bytes.size_of(ops),
+            Handle::Pbkdf2Password(password) => password.size_of(ops),
             Handle::Hmac(bytes) => bytes.size_of(ops),
             Handle::MlKem512PrivateKey(private_key) => private_key.size_of(ops),
             Handle::MlKem768PrivateKey(private_key) => private_key.size_of(ops),
@@ -446,7 +446,9 @@ impl TryFrom<SerializableCryptoKeyHandle> for Handle {
             SerializableCryptoKeyHandle::HkdfSecret(bytes) => {
                 Ok(Handle::HkdfSecret(bytes.clone().into()))
             },
-            SerializableCryptoKeyHandle::Pbkdf2(bytes) => Ok(Handle::Pbkdf2(bytes.clone().into())),
+            SerializableCryptoKeyHandle::Pbkdf2Password(password) => {
+                Ok(Handle::Pbkdf2Password(password.clone().into()))
+            },
             SerializableCryptoKeyHandle::MlKem512PrivateKey(private_key) => {
                 Ok(Handle::MlKem512PrivateKey(
                     ml_kem::KeyInit::new_from_slice(private_key).map_err(|_| ())?,
@@ -598,7 +600,9 @@ impl TryFrom<&Handle> for SerializableCryptoKeyHandle {
             Handle::HkdfSecret(bytes) => {
                 Ok(SerializableCryptoKeyHandle::HkdfSecret(bytes.to_vec()))
             },
-            Handle::Pbkdf2(bytes) => Ok(SerializableCryptoKeyHandle::Pbkdf2(bytes.to_vec())),
+            Handle::Pbkdf2Password(password) => Ok(SerializableCryptoKeyHandle::Pbkdf2Password(
+                password.to_vec(),
+            )),
             Handle::MlKem512PrivateKey(private_key) => {
                 Ok(SerializableCryptoKeyHandle::MlKem512PrivateKey(
                     private_key

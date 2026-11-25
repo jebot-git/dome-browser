@@ -81,6 +81,9 @@ impl DissimilarOriginWindow {
                 #[cfg(feature = "webgpu")]
                 global_to_clone_from.wgpu_id_hub(),
                 Some(global_to_clone_from.is_secure_context()),
+                global_to_clone_from
+                    .upgrade_insecure_navigations_set()
+                    .clone(),
                 false,
             ),
             window_proxy: Dom::from_ref(window_proxy),
@@ -276,7 +279,7 @@ impl DissimilarOriginWindow {
             "/" => Some(source_origin.clone()),
             url => match ServoUrl::parse(url) {
                 Ok(url) => Some(url.origin()),
-                Err(_) => return Err(Error::Syntax(None)),
+                Err(_) => return Err(Error::Syntax(Some("Invalid target origin".into()))),
             },
         };
         let msg = ScriptToConstellationMessage::PostMessage {
